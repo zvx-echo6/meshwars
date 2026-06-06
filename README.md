@@ -2,13 +2,13 @@
 
 A territory control game for the [Meshtastic](https://meshtastic.org/) mesh network.
 
-<img width="231" height="256" alt="image" src="https://github.com/user-attachments/assets/73cffd13-3258-477f-872f-80c19b267789" />
+![Scorecard](docs/img/scorecard.png)
 
 
 MeshWars attaches to any [meshview](https://github.com/armooo/meshview) instance and turns its position-packet stream into a 30-day team game. Active nodes are snake-drafted into Team Red and Team Blue. As nodes broadcast their positions, they paint the geohash tile they're in their team color. Tiles accumulate fortress scores (effort, unique contributors, time-decay) that defend them against capture. Whichever team holds more tiles when the season ends, wins.
 
-<img width="872" height="1236" alt="image" src="https://github.com/user-attachments/assets/c40ff338-f1ab-4d31-8755-9a797db820a0" />
-<img width="294" height="293" alt="image" src="https://github.com/user-attachments/assets/e824b2dd-890a-414b-875a-97795dd55391" /> <img width="286" height="291" alt="image" src="https://github.com/user-attachments/assets/5aa399df-5e2b-4fdf-ac1e-cd6d5ed3f06c" />
+![MeshWars map](docs/img/map.png)
+![Red Team popup](docs/img/redteamtile.png) ![Blue Team popup](docs/img/blueteamtile.png)
 
 
 
