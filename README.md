@@ -2,7 +2,16 @@
 
 A territory control game for the [Meshtastic](https://meshtastic.org/) mesh network.
 
+<img width="231" height="256" alt="image" src="https://github.com/user-attachments/assets/73cffd13-3258-477f-872f-80c19b267789" />
+
+
 MeshWars attaches to any [meshview](https://github.com/armooo/meshview) instance and turns its position-packet stream into a 30-day team game. Active nodes are snake-drafted into Team Red and Team Blue. As nodes broadcast their positions, they paint the geohash tile they're in their team color. Tiles accumulate fortress scores (effort, unique contributors, time-decay) that defend them against capture. Whichever team holds more tiles when the season ends, wins.
+
+<img width="872" height="1236" alt="image" src="https://github.com/user-attachments/assets/c40ff338-f1ab-4d31-8755-9a797db820a0" />
+<img width="294" height="293" alt="image" src="https://github.com/user-attachments/assets/e824b2dd-890a-414b-875a-97795dd55391" /> <img width="286" height="291" alt="image" src="https://github.com/user-attachments/assets/5aa399df-5e2b-4fdf-ac1e-cd6d5ed3f06c" />
+
+
+
 
 ## Features
 
@@ -69,4 +78,24 @@ Tile fortress scores decay over time, so abandoned territory becomes easier to t
 
 ## License
 
-MIT
+MIT License
+
+Copyright (c) 2026 zvx-echo6
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
