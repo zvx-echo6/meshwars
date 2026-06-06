@@ -1,0 +1,22 @@
+services:
+  meshwars:
+    build: .
+    image: meshwars:latest
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      # Required: point this at any meshview instance
+      MESHVIEW_BASE_URL: "${MESHVIEW_BASE_URL}"
+      # Optional overrides
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-45}"
+      SEASON_DAYS: "${SEASON_DAYS:-30}"
+      WINNER_BANNER_HOURS: "${WINNER_BANNER_HOURS:-72}"
+      HISTORY_MAX: "${HISTORY_MAX:-12}"
+      MAX_HOPS: "${MAX_HOPS:-1}"
+      BACKFILL_HOURS: "${BACKFILL_HOURS:-24}"
+    volumes:
+      - meshwars-data:/data
+
+volumes:
+  meshwars-data:

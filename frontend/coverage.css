@@ -1,0 +1,651 @@
+/* =========================================================================
+   MeshWars: full stylesheet.
+   Reconstructed to match every class and id that code.js references,
+   plus the territory-specific scoreboard, banner, and history modal.
+   ========================================================================= */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #0a0a0a;
+  color: #ddd;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, sans-serif;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+  background: #0a0a0a;
+}
+
+/* -------------------------------------------------------------------------
+   Loading overlay (faded out by code.js after initial /get-nodes finishes)
+   ------------------------------------------------------------------------- */
+#loading-overlay {
+  position: fixed;
+  inset: 0;
+  background: #0a0a0a;
+  z-index: 5000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.5s ease;
+}
+#loading-overlay.fade-out { opacity: 0; pointer-events: none; }
+.loading-inner { text-align: center; }
+.loading-text  { margin-top: 14px; color: #888; font-size: 13px; }
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #2a2a2a;
+  border-top-color: #e8a735;
+  border-radius: 50%;
+  margin: 0 auto;
+  animation: mt-spin 0.9s linear infinite;
+}
+@keyframes mt-spin { to { transform: rotate(360deg); } }
+
+/* -------------------------------------------------------------------------
+   Leaflet control overrides (dark theme)
+   ------------------------------------------------------------------------- */
+.leaflet-bar a,
+.leaflet-bar a:hover {
+  background-color: #1a1a1a;
+  color: #ddd;
+  border-bottom: 1px solid #333;
+}
+.leaflet-control-attribution {
+  background: rgba(20, 20, 20, 0.7) !important;
+  color: #888 !important;
+}
+.leaflet-control-attribution a { color: #aaa !important; }
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+  background: #1a1a1a;
+  color: #ddd;
+  border: 1px solid #333;
+}
+.leaflet-popup-content { margin: 12px 14px; font-size: 13px; line-height: 1.45; }
+.leaflet-popup-close-button { color: #aaa !important; }
+
+/* -------------------------------------------------------------------------
+   Main settings control (top-right)
+   ------------------------------------------------------------------------- */
+.mesh-control {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #ddd;
+  padding: 8px 10px;
+  min-width: 200px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+}
+.mesh-control-row {
+  margin: 4px 0;
+}
+.mesh-control label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #ccc;
+}
+.mesh-control select,
+.mesh-control input[type="text"] {
+  background: #0a0a0a;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 12px;
+  min-width: 100px;
+}
+.mesh-control input[type="checkbox"] {
+  accent-color: #e8a735;
+  margin: 0;
+}
+.mesh-control button {
+  background: #2a2a2a;
+  color: #e8a735;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  width: 100%;
+}
+.mesh-control button:hover { background: #333; }
+
+.mobile-toggle {
+  display: none;
+  background: #1a1a1a !important;
+  color: #e8a735 !important;
+  font-size: 16px !important;
+  width: 36px !important;
+  height: 36px !important;
+  padding: 0 !important;
+}
+
+.control-body { display: block; }
+.control-body.collapsed { display: none; }
+
+@media (max-width: 600px) {
+  .mesh-control { min-width: 0; padding: 4px; }
+  .mobile-toggle { display: block !important; }
+}
+
+/* -------------------------------------------------------------------------
+   Feeders panel (Top MQTT Feeders button + dropdown list)
+   ------------------------------------------------------------------------- */
+.feeders-panel {
+  width: 220px;
+}
+#repeaters-button {
+  background: #1a1a1a;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  white-space: nowrap;
+  width: 100%;
+  box-sizing: border-box;
+}
+#repeaters-button:hover { background: #222; }
+#repeaters-list {
+  display: none;
+  margin-top: 4px;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 4px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+  width: 100%;
+  max-height: 500px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+.repeaters-list-header {
+  padding: 10px 12px;
+  background: #0a0a0a;
+  border-bottom: 1px solid #333;
+  font-weight: 600;
+  color: #ddd;
+  font-size: 13px;
+  position: sticky;
+  top: 0;
+}
+.repeaters-list-body { padding: 4px 0; }
+.repeaters-list-item {
+  padding: 7px 12px;
+  color: #ccc;
+  border-bottom: 1px solid #232323;
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.repeaters-list-count {
+  color: #e8a735;
+  font-weight: 600;
+  font-size: 13px;
+}
+.repeaters-list-empty {
+  padding: 18px;
+  color: #888;
+  text-align: center;
+  font-size: 13px;
+}
+.repeaters-list-stats {
+  font-size: 11px;
+  color: #666;
+  margin-top: 10px;
+}
+
+/* -------------------------------------------------------------------------
+   Coverage rectangle highlight (when connected via popup hover)
+   ------------------------------------------------------------------------- */
+.leaflet-interactive.highlighted-path {
+  stroke: #e8c860;
+  stroke-width: 2;
+}
+
+/* -------------------------------------------------------------------------
+   Repeater (node) dot markers
+   ------------------------------------------------------------------------- */
+.repeater-dot {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #50c050;
+  border: 1.5px solid #1a1a1a;
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+.repeater-dot span {
+  position: absolute;
+  left: 14px;
+  top: -3px;
+  white-space: nowrap;
+  font-size: 10px;
+  color: #ddd;
+  background: rgba(20, 20, 20, 0.65);
+  padding: 1px 4px;
+  border-radius: 2px;
+  pointer-events: none;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.repeater-dot.stale { background: #b8860b; opacity: 0.85; }
+.repeater-dot.dead  { background: #555;    opacity: 0.5; }
+.repeater-dot.highlighted {
+  box-shadow: 0 0 0 3px #e8c860, 0 0 12px rgba(232, 200, 96, 0.6);
+  z-index: 1000;
+}
+.repeater-dot.team-red  { background: #d33636; }
+.repeater-dot.team-blue { background: #3673d3; }
+.repeater-dot.hidden,
+.hidden {
+  visibility: hidden;
+}
+
+/* -------------------------------------------------------------------------
+   Live track tooltip
+   ------------------------------------------------------------------------- */
+.track-tooltip {
+  background: #1a1a1a !important;
+  color: #ddd !important;
+  border: 1px solid #444 !important;
+  font-size: 12px !important;
+}
+
+/* =========================================================================
+   MESH-TERRITORY UI
+   ========================================================================= */
+
+.meshwars-scoreboard {
+  background: #1a1a1a;
+  color: #ddd;
+  padding: 10px 14px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  font-size: 13px;
+  min-width: 140px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.meshwars-scoreboard .mt-title {
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #e8a735;
+  margin-bottom: 4px;
+}
+.meshwars-scoreboard .mt-row {
+  margin: 3px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.meshwars-scoreboard .mt-countdown {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #2a2a2a;
+  font-size: 11px;
+  color: #aaa;
+}
+.meshwars-scoreboard a {
+  color: #e8a735;
+  text-decoration: none;
+}
+.meshwars-scoreboard a:hover { text-decoration: underline; }
+
+.mt-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.mt-red    { background: #d33636; }
+.mt-blue   { background: #3673d3; }
+.mt-green  { background: #2d8a2d; }
+
+.mt-winner-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: #1a1a1a;
+  border: 1px solid #555;
+  border-radius: 8px;
+  padding: 10px 18px;
+  color: #eee;
+  font-size: 14px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  display: none;
+}
+.mt-winner-tag {
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 4px;
+  margin-right: 10px;
+  letter-spacing: 0.05em;
+}
+.mt-winner-tag.red  { background: #d33636; color: white; }
+.mt-winner-tag.blue { background: #3673d3; color: white; }
+.mt-winner-tag.tie  { background: #888;    color: white; }
+.mt-winner-counts { margin-right: 12px; color: #ccc; }
+.mt-winner-dates  { color: #888; font-size: 12px; }
+
+.mt-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.7);
+  align-items: center;
+  justify-content: center;
+}
+.mt-modal-inner {
+  background: #1a1a1a;
+  color: #ddd;
+  border: 1px solid #444;
+  border-radius: 8px;
+  width: min(700px, 92vw);
+  max-height: 80vh;
+  overflow: auto;
+}
+.mt-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 18px;
+  border-bottom: 1px solid #333;
+  font-weight: 700;
+  font-size: 14px;
+  color: #e8a735;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.mt-modal-close {
+  cursor: pointer;
+  color: #aaa;
+  font-size: 22px;
+  background: none;
+  border: none;
+  line-height: 1;
+}
+.mt-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.mt-history-table th,
+.mt-history-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid #2a2a2a;
+}
+.mt-history-table th {
+  color: #888;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.mt-winner-cell.red   { color: #ff6b6b; font-weight: 700; }
+.mt-winner-cell.blue  { color: #6ba6ff; font-weight: 700; }
+.mt-winner-cell.tie   { color: #aaa;    font-weight: 700; }
+.mt-red-cell   { color: #ff8080; }
+.mt-blue-cell  { color: #80a8ff; }
+.mt-green-cell { color: #80c080; }
+
+/* Team lookup and roster */
+.mt-lookup-row {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid #2a2a2a;
+  gap: 4px !important;
+}
+#mt-lookup-input {
+  flex: 1;
+  background: #0a0a0a;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 11px;
+  min-width: 0;
+}
+#mt-lookup-btn {
+  background: #2a2a2a;
+  color: #e8a735;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+#mt-lookup-btn:hover { background: #333; }
+.mt-lookup-result { font-size: 11px; margin-top: 4px; }
+.mt-lookup-card {
+  background: #0e0e0e;
+  padding: 6px 8px;
+  border-radius: 3px;
+  margin-top: 4px;
+}
+.mt-lookup-name {
+  font-weight: 600;
+  color: #ddd;
+  margin-bottom: 3px;
+}
+.mt-lookup-meta {
+  color: #aaa;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+.mt-team-pill {
+  color: white;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+/* Roster modal */
+.mt-roster-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 12px 16px;
+}
+.mt-roster-team h3 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.mt-roster-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.mt-roster-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #232323;
+}
+.mt-roster-id {
+  font-family: ui-monospace, Menlo, monospace;
+  color: #888;
+  text-align: right;
+  font-size: 10px;
+}
+.mt-roster-empty {
+  padding: 8px;
+  color: #666;
+  font-style: italic;
+  font-size: 12px;
+}
+
+@media (max-width: 600px) {
+  .mt-roster-grid { grid-template-columns: 1fr; }
+}
+
+/* Unified scoreboard buttons (replaces the old settings card) */
+.meshwars-scoreboard .mt-actions {
+  margin-top: 4px;
+}
+.meshwars-scoreboard #mt-refresh-btn,
+.meshwars-scoreboard #mt-feeders-btn {
+  background: #2a2a2a;
+  color: #e8a735;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  width: 100%;
+}
+.meshwars-scoreboard #mt-refresh-btn:hover,
+.meshwars-scoreboard #mt-feeders-btn:hover {
+  background: #333;
+}
+
+.mt-feeders-list {
+  display: none;
+  margin-top: 4px;
+  background: #0a0a0a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  max-height: 350px;
+  overflow-y: auto;
+}
+
+/* Tile popup - rich layout */
+.mt-tile-popup .leaflet-popup-content {
+  margin: 0;
+  font-size: 12px;
+}
+.mt-pop {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-width: 280px;
+  max-width: 360px;
+}
+.mt-pop-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #0a0a0a;
+  border-bottom: 1px solid #2a2a2a;
+}
+.mt-pop-badge {
+  color: white;
+  padding: 2px 10px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+.mt-pop-coord {
+  color: #aaa;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+}
+.mt-pop-loading {
+  padding: 14px;
+  color: #888;
+  text-align: center;
+  font-style: italic;
+}
+.mt-pop-defense {
+  background: #2a1c00;
+  color: #e8a735;
+  padding: 6px 12px;
+  font-size: 11px;
+  border-bottom: 1px solid #3a2c10;
+}
+.mt-pop-scorebar {
+  display: flex;
+  height: 6px;
+  background: #0a0a0a;
+  margin: 0;
+}
+.mt-pop-scorebar-fill { height: 100%; }
+.mt-pop-scorebar-red { background: #d33636; }
+.mt-pop-scorebar-blue { background: #3673d3; }
+.mt-pop-scorenums {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 12px 0;
+  font-size: 11px;
+  font-weight: 600;
+}
+.mt-pop-section {
+  padding: 8px 12px;
+  border-top: 1px solid #232323;
+}
+.mt-pop-section-title {
+  color: #888;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+.mt-pop a {
+  color: #6ba6ff;
+  text-decoration: none;
+}
+.mt-pop a:hover { text-decoration: underline; }
+.mt-pop-contrib-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+.mt-pop-contrib-count {
+  color: #e8a735;
+  font-weight: 600;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.mt-pop-cap-row {
+  padding: 4px 0;
+  border-bottom: 1px dotted #2a2a2a;
+  font-size: 11px;
+}
+.mt-pop-cap-row:last-child { border-bottom: 0; }
+.mt-pop-cap-when {
+  color: #666;
+  font-size: 10px;
+  font-style: italic;
+}
+.mt-pop-mesh-details {
+  border-top: 1px solid #232323;
+  padding: 6px 12px;
+}
+.mt-pop-mesh-details summary {
+  cursor: pointer;
+  color: #888;
+  font-size: 11px;
+  outline: none;
+}
+.mt-pop-mesh-body {
+  padding: 6px 0 2px;
+  color: #aaa;
+  font-size: 11px;
+}
+.mt-pop-feeders {
+  word-break: break-all;
+  margin-top: 4px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  color: #888;
+}
