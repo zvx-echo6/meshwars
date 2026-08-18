@@ -117,6 +117,14 @@ class Settings(BaseSettings):
     join_rate_limit_window_seconds: int = 600
     public_host: str = "meshwars.com"   # used to build the config link
 
+    # Admin door (/admin, /api/admin/*): lists players and keys, and can
+    # revoke a key or disable a player. There is no other authentication
+    # anywhere in this application -- this token is the whole of it, so
+    # an empty value disables the admin interface entirely rather than
+    # leaving it open. Empty must mean off, never open, same reasoning
+    # as join_invite_code above.
+    admin_token: str = ""
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

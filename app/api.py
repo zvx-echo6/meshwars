@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
+from .admin_api import router as admin_router
 from .config import settings
 from .db import connect
 from .join_api import router as join_router
@@ -712,6 +713,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(mc_router)
     app.include_router(join_router)
+    app.include_router(admin_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"

@@ -199,6 +199,33 @@ class McIngestor:
             return AuthResult("disabled", row["player_id"])
         return AuthResult("ok", row["player_id"])
 
+    def invalidate_key(self, key_hash: str) -> None:
+        """Drop `key_hash` from the auth cache, if present.
+
+        Called by the admin door on revocation. Without this, a
+        just-revoked key could keep authenticating at the ingest
+        endpoint until its cached entry expires (`mc_key_cache_seconds`)
+        -- this makes revocation take effect on the very next request.
+        """
+        self._key_cache.pop(key_hash, None)
+
+    def invalidate_player(self, player_id: int) -> None:
+        """Drop every cached auth entry belonging to `player_id`.
+
+        Same reasoning as invalidate_key, for the admin door's
+        disable/enable: a player can hold more than one key, and the
+        cache is keyed by key hash, not player, so this has to scan.
+        The cache is bounded to _KEY_CACHE_MAX entries and this is an
+        infrequent admin action, not a request-path operation, so the
+        scan cost is not a concern here.
+        """
+        stale = [
+            key_hash for key_hash, (_, result) in self._key_cache.items()
+            if result.player_id == player_id
+        ]
+        for key_hash in stale:
+            del self._key_cache[key_hash]
+
     # ---- rate limiting ---------------------------------------------------
 
     def rate_limit_ok(self, key_hash: str) -> bool:

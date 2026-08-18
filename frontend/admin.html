@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>MeshWars &mdash; Admin</title>
+  <style>
+    /* Matches the existing dark theme (see frontend/join.css) --
+       self-contained, no external fonts, libraries, or CDN assets. */
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: #0a0a0a;
+      color: #ddd;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    .admin-wrap {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 24px 16px 64px;
+    }
+
+    .admin-header h1 {
+      margin: 0 0 4px;
+      font-size: 24px;
+      letter-spacing: 0.02em;
+      color: #e8a735;
+    }
+
+    .admin-tagline {
+      margin: 0 0 20px;
+      color: #aaa;
+      font-size: 13px;
+    }
+
+    .admin-panel {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 16px 18px;
+      margin-bottom: 16px;
+    }
+
+    .admin-panel-title {
+      font-weight: 700;
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #e8a735;
+      margin-bottom: 10px;
+    }
+
+    .admin-token-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .admin-token-row input {
+      flex: 1;
+      min-width: 0;
+      background: #0a0a0a;
+      color: #ddd;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .admin-token-row input:focus {
+      outline: none;
+      border-color: #e8a735;
+    }
+
+    .admin-btn {
+      background: #2a2a2a;
+      color: #e8a735;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 8px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .admin-btn:hover { background: #333; }
+    .admin-btn:disabled { opacity: 0.5; cursor: default; }
+
+    .admin-btn-danger {
+      color: #f08080;
+      border-color: #663333;
+    }
+
+    .admin-status {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #888;
+    }
+    .admin-status-error {
+      color: #f08080;
+    }
+
+    .admin-hint {
+      font-size: 11px;
+      color: #888;
+      margin: 6px 0 0;
+    }
+
+    .admin-player-card {
+      background: #141414;
+      border: 1px solid #2a2a2a;
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+
+    .admin-player-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+
+    .admin-player-name {
+      font-size: 14px;
+      font-weight: 700;
+      color: #eee;
+    }
+
+    .admin-team-tag {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #888;
+      border: 1px solid #333;
+      border-radius: 3px;
+      padding: 2px 6px;
+    }
+
+    .admin-badge {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      border-radius: 3px;
+      padding: 2px 6px;
+    }
+    .admin-badge-ok {
+      color: #7fdc7f;
+      border: 1px solid #2e5e2e;
+    }
+    .admin-badge-bad {
+      color: #f08080;
+      border: 1px solid #663333;
+    }
+
+    .admin-player-meta {
+      font-size: 12px;
+      color: #999;
+      margin-bottom: 4px;
+    }
+
+    .admin-key-hash {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #0a0a0a;
+      border: 1px solid #333;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 11px;
+      color: #ccc;
+    }
+
+    .admin-keys {
+      margin: 8px 0;
+    }
+
+    .admin-key-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: #aaa;
+      padding: 4px 0;
+      border-top: 1px solid #222;
+    }
+    .admin-key-row:first-child {
+      border-top: none;
+    }
+    .admin-key-row .admin-btn {
+      margin-left: auto;
+      padding: 4px 10px;
+    }
+
+    .admin-empty {
+      font-size: 13px;
+      color: #888;
+      padding: 8px 0;
+    }
+  </style>
+</head>
+<body>
+
+  <main class="admin-wrap">
+
+    <header class="admin-header">
+      <h1>MeshWars Admin</h1>
+      <p class="admin-tagline">Revoke keys and disable players.</p>
+    </header>
+
+    <section class="admin-panel">
+      <div class="admin-panel-title">Admin token</div>
+      <div class="admin-token-row">
+        <input type="password" id="token-input" autocomplete="off" placeholder="paste admin token" />
+        <button type="button" id="load-btn" class="admin-btn">Load</button>
+      </div>
+      <p class="admin-hint">Kept in this page's memory only for this session &mdash; never stored, never sent anywhere but this page's own requests.</p>
+      <div id="status" class="admin-status"></div>
+    </section>
+
+    <section class="admin-panel">
+      <div class="admin-panel-title">Players</div>
+      <div id="players"></div>
+    </section>
+
+  </main>
+
+  <script>
+'use strict';
+
+// Admin token lives only in this variable, for this page load. Never
+// written to localStorage/sessionStorage/cookies, never logged.
+let adminToken = '';
+
+var els = {
+  tokenInput: document.getElementById('token-input'),
+  loadBtn: document.getElementById('load-btn'),
+  status: document.getElementById('status'),
+  players: document.getElementById('players'),
+};
+
+function setStatus(msg, isError) {
+  els.status.textContent = msg;
+  els.status.className = isError ? 'admin-status admin-status-error' : 'admin-status';
+}
+
+function fmtTs(ts) {
+  if (ts === null || ts === undefined) return '—';
+  try {
+    return new Date(ts * 1000).toLocaleString();
+  } catch (e) {
+    return String(ts);
+  }
+}
+
+// Small DOM-builder helper. Every dynamic value below goes through
+// .textContent (or is a literal className we wrote ourselves) --
+// nothing attacker-controlled (player names, key prefixes, radio ids)
+// is ever assigned via innerHTML.
+function el(tag, opts) {
+  var node = document.createElement(tag);
+  opts = opts || {};
+  if (opts.text !== undefined) node.textContent = opts.text;
+  if (opts.className) node.className = opts.className;
+  return node;
+}
+
+async function apiCall(path, options) {
+  var opts = options || {};
+  var headers = Object.assign({}, opts.headers || {}, { 'X-Admin-Token': adminToken });
+  var resp = await fetch(path, Object.assign({}, opts, { headers: headers }));
+  var body = null;
+  try { body = await resp.json(); } catch (e) { /* no body */ }
+  if (!resp.ok) {
+    var msg = (body && body.error) ? body.error : ('HTTP ' + resp.status);
+    throw new Error(msg);
+  }
+  return body;
+}
+
+function renderKey(key) {
+  var row = el('div', { className: 'admin-key-row' });
+  row.appendChild(el('span', { className: 'admin-key-hash', text: key.key_hash_prefix }));
+  row.appendChild(el('span', { text: 'issued ' + fmtTs(key.issued_at) }));
+  row.appendChild(el('span', { text: 'last used ' + fmtTs(key.last_seen_at) }));
+  row.appendChild(el('span', {
+    className: key.revoked ? 'admin-badge admin-badge-bad' : 'admin-badge admin-badge-ok',
+    text: key.revoked ? 'revoked' : 'active',
+  }));
+  if (!key.revoked) {
+    var btn = el('button', { className: 'admin-btn admin-btn-danger', text: 'Revoke' });
+    btn.type = 'button';
+    btn.addEventListener('click', function () { revokeKey(key.key_hash_prefix, btn); });
+    row.appendChild(btn);
+  }
+  return row;
+}
+
+async function revokeKey(prefix, btn) {
+  btn.disabled = true;
+  try {
+    await apiCall('/api/admin/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_hash_prefix: prefix }),
+    });
+    setStatus('Revoked key ' + prefix, false);
+    await loadPlayers();
+  } catch (e) {
+    setStatus('Revoke failed: ' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
+async function togglePlayer(player, btn) {
+  btn.disabled = true;
+  var path = player.disabled ? '/api/admin/player/enable' : '/api/admin/player/disable';
+  try {
+    await apiCall(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_id: player.player_id }),
+    });
+    setStatus((player.disabled ? 'Enabled ' : 'Disabled ') + player.display_name, false);
+    await loadPlayers();
+  } catch (e) {
+    setStatus('Update failed: ' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
+function renderPlayer(player) {
+  var card = el('div', { className: 'admin-player-card' });
+
+  var header = el('div', { className: 'admin-player-header' });
+  header.appendChild(el('span', { className: 'admin-player-name', text: player.display_name }));
+  header.appendChild(el('span', { className: 'admin-team-tag', text: player.team }));
+  if (player.disabled) {
+    header.appendChild(el('span', { className: 'admin-badge admin-badge-bad', text: 'disabled' }));
+  }
+  card.appendChild(header);
+
+  card.appendChild(el('div', { className: 'admin-player-meta', text: 'joined ' + fmtTs(player.created_at) }));
+
+  if (player.radios && player.radios.length) {
+    var radios = el('div', { className: 'admin-player-meta' });
+    radios.appendChild(document.createTextNode('radios: '));
+    player.radios.forEach(function (r, i) {
+      if (i > 0) radios.appendChild(document.createTextNode(', '));
+      radios.appendChild(el('span', { className: 'admin-key-hash', text: r.protocol + ':' + r.node_ref }));
+    });
+    card.appendChild(radios);
+  }
+
+  var keysWrap = el('div', { className: 'admin-keys' });
+  if (!player.keys || player.keys.length === 0) {
+    keysWrap.appendChild(el('div', { className: 'admin-player-meta', text: 'no keys' }));
+  } else {
+    player.keys.forEach(function (k) { keysWrap.appendChild(renderKey(k)); });
+  }
+  card.appendChild(keysWrap);
+
+  var toggleBtn = el('button', {
+    className: 'admin-btn',
+    text: player.disabled ? 'Enable player' : 'Disable player',
+  });
+  toggleBtn.type = 'button';
+  toggleBtn.addEventListener('click', function () { togglePlayer(player, toggleBtn); });
+  card.appendChild(toggleBtn);
+
+  return card;
+}
+
+async function loadPlayers() {
+  setStatus('Loading...', false);
+  try {
+    var players = await apiCall('/api/admin/players');
+    els.players.replaceChildren();
+    if (!players.length) {
+      els.players.appendChild(el('div', { className: 'admin-empty', text: 'no players registered' }));
+    } else {
+      players.forEach(function (p) { els.players.appendChild(renderPlayer(p)); });
+    }
+    setStatus('Loaded ' + players.length + ' player(s)', false);
+  } catch (e) {
+    setStatus('Load failed: ' + e.message, true);
+  }
+}
+
+els.loadBtn.addEventListener('click', function () {
+  adminToken = els.tokenInput.value;
+  loadPlayers();
+});
+els.tokenInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') {
+    adminToken = els.tokenInput.value;
+    loadPlayers();
+  }
+});
+  </script>
+</body>
+</html>
