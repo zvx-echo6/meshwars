@@ -5,6 +5,14 @@
  * what the browser provides. Talks to POST /api/join, POST /api/mc/status,
  * and GET /config.
  *
+ * The page is one continuous numbered flow (#join-flow-panel): each
+ * instruction sits directly above the control it describes, from
+ * entering an invite code through starting a wardriving session. The
+ * steps after "Click Join" are visible before registering, showing a
+ * placeholder in place of the key, and get filled in with the real key
+ * in place once /api/join succeeds -- nothing is hidden or navigated
+ * away.
+ *
  * SECURITY: display names and every message the server returns are
  * untrusted. Every dynamic value rendered on this page is set via
  * textContent, an element's .value, or a CSS custom property with a
@@ -152,148 +160,47 @@ function buildCopyRow(value) {
   return row;
 }
 
-function buildLabel(text) {
-  const label = document.createElement('div');
-  label.className = 'join-panel-subtitle';
-  label.textContent = text;
-  return label;
+// The endpoint URL step (step "Paste this as the URL") is the same for
+// everybody and known before registering, so its copy row is plain
+// markup in join.html rather than built here -- this just wires the
+// existing input's value into the same copyToClipboard() helper every
+// other copy button on this page uses.
+function setupEndpointCopy() {
+  const btn = document.getElementById('endpoint-copy-btn');
+  const input = document.getElementById('f-endpoint-url');
+  if (!btn || !input) return;
+  btn.addEventListener('click', () => copyToClipboard(input.value, btn));
 }
 
-// A numbered step whose content is one or more DOM nodes (plain text,
-// a copy row, whatever) rather than a single string -- used to embed
-// the live endpoint/key copy rows directly inside steps 5 and 6 of the
-// MeshMapper setup list below.
-function buildStepLi(nodes, { critical = false } = {}) {
-  const li = document.createElement('li');
-  if (critical) li.className = 'join-step-critical';
-  nodes.forEach((n) => li.appendChild(typeof n === 'string' ? document.createTextNode(n) : n));
-  return li;
+// Fills the "copy your key" and "paste your key" steps in place with
+// the real key, replacing the "your key will appear here once you
+// join" placeholder -- both slots show the same key, since both steps
+// need the player to act on it (copy it once, paste it once).
+function fillKeySlots(key) {
+  ['key-slot', 'key-slot-2'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.replaceChildren(buildCopyRow(key));
+  });
 }
 
-function buildWarningBox() {
-  const box = document.createElement('div');
-  box.className = 'join-warning-box';
-
-  const strong = document.createElement('strong');
-  strong.textContent = 'Do not paste the meshmapper:// link into the URL field.';
-  box.appendChild(strong);
-  box.appendChild(document.createTextNode(
-    ' It is not a web address. It is only for Import from Clipboard.'
-  ));
-  return box;
-}
-
-// config_link (built server-side by app/join_api.py's _config_link) is
-// always "meshmapper://custom-api?url=<host>/api/mc/ingest&key=<key>".
-// The manual-entry steps below need just the "<host>/api/mc/ingest"
-// part, pulled out of that known, server-generated shape rather than
-// hardcoded here -- this stays correct if PUBLIC_HOST ever changes.
-function extractEndpointFromConfigLink(configLink) {
-  const match = /^meshmapper:\/\/custom-api\?url=([^&]+)&key=/.exec(configLink);
-  return match ? match[1] : null;
-}
-
-function renderResult(data) {
-  document.getElementById('status-check-panel').hidden = true;
-  document.getElementById('join-form-panel').hidden = true;
-
-  const panel = document.getElementById('join-result-panel');
-  panel.replaceChildren();
-  panel.hidden = false;
-
-  const title = document.createElement('div');
-  title.className = 'join-panel-title';
-  title.textContent = 'Registered';
-  panel.appendChild(title);
-
-  const nameLine = document.createElement('p');
-  nameLine.appendChild(document.createTextNode('Name: '));
+function showJoinSuccess(data) {
+  const el = document.getElementById('join-success');
+  el.replaceChildren();
+  el.appendChild(document.createTextNode('Registered as '));
   const nameStrong = document.createElement('strong');
   nameStrong.textContent = data.display_name;
-  nameLine.appendChild(nameStrong);
-  panel.appendChild(nameLine);
-
-  const teamLine = document.createElement('p');
-  teamLine.appendChild(document.createTextNode('Team: '));
+  el.appendChild(nameStrong);
+  el.appendChild(document.createTextNode(' on '));
   const dot = document.createElement('span');
   dot.className = 'mc-dot-inline';
   dot.style.background = TEAM_COLORS[data.team] || '#888';
-  teamLine.appendChild(dot);
-  teamLine.appendChild(document.createTextNode(data.team));
-  panel.appendChild(teamLine);
-
-  const warn = document.createElement('p');
-  warn.className = 'join-key-warning';
-  warn.textContent = 'This key is shown once. It cannot be recovered -- store it somewhere safe.';
-  panel.appendChild(warn);
-
-  panel.appendChild(buildCopyRow(data.key));
-
-  if (data.config_link) {
-    const methodsTitle = document.createElement('div');
-    methodsTitle.className = 'join-panel-title';
-    methodsTitle.textContent = 'Set up MeshMapper';
-    panel.appendChild(methodsTitle);
-
-    const endpoint = extractEndpointFromConfigLink(data.config_link);
-    const endpointUrl = endpoint ? `https://${endpoint}` : null;
-
-    // ---- Recommended: explicit step-by-step, entered by hand --------
-    // Step 4 (the Custom API Endpoint toggle) is the one people miss --
-    // everything else can be perfect and nothing is sent while it's
-    // off -- so it gets its own visual emphasis (join-step-critical).
-    panel.appendChild(buildLabel('Follow these steps'));
-
-    const steps = document.createElement('ol');
-    steps.className = 'join-steps';
-    steps.appendChild(buildStepLi(['Open MeshMapper']));
-    steps.appendChild(buildStepLi(['Open Settings']));
-    steps.appendChild(buildStepLi(['Scroll down to API Endpoints']));
-    steps.appendChild(buildStepLi([(() => {
-      const strong = document.createElement('strong');
-      strong.textContent = 'Toggle Custom API Endpoint on';
-      return strong;
-    })()], { critical: true }));
-    if (endpointUrl) {
-      steps.appendChild(buildStepLi(['URL: ', buildCopyRow(endpointUrl)]));
-    }
-    steps.appendChild(buildStepLi(['API Key: ', buildCopyRow(data.key)]));
-    steps.appendChild(buildStepLi(['Save']));
-    steps.appendChild(buildStepLi([(() => {
-      const frag = document.createDocumentFragment();
-      const strong = document.createElement('strong');
-      strong.textContent = 'Include Contact Key';
-      frag.appendChild(document.createTextNode('Make sure '));
-      frag.appendChild(strong);
-      frag.appendChild(document.createTextNode(' is on'));
-      return frag;
-    })()]));
-    steps.appendChild(buildStepLi(['Start a wardriving session — nothing is sent without one']));
-    panel.appendChild(steps);
-
-    panel.appendChild(buildWarningBox());
-
-    // ---- Alternative: import the link ---------------------------------
-    panel.appendChild(buildLabel('Alternative: import the link'));
-    panel.appendChild(buildCopyRow(data.config_link));
-
-    const altSteps = document.createElement('ol');
-    altSteps.className = 'join-steps';
-    [
-      'Copy the link above.',
-      'In MeshMapper, go to Settings, then API Endpoints.',
-      'Choose Import from Clipboard.',
-    ].forEach((text) => {
-      const li = document.createElement('li');
-      li.textContent = text;
-      altSteps.appendChild(li);
-    });
-    panel.appendChild(altSteps);
-  }
+  el.appendChild(dot);
+  el.appendChild(document.createTextNode(data.team + '.'));
+  el.hidden = false;
 }
 
-async function handleSubmit(e) {
-  e.preventDefault();
+async function handleJoinClick() {
   clearError();
 
   const invite = document.getElementById('f-invite').value;
@@ -332,12 +239,15 @@ async function handleSubmit(e) {
         ? data.error
         : `Registration failed (status ${res.status}).`;
       showError(message);
+      submitBtn.disabled = false;
       return;
     }
-    renderResult(data);
+    showJoinSuccess(data);
+    fillKeySlots(data.key);
+    // Registration is one-time -- leave the button disabled rather than
+    // re-enabling it, so a second click can't try to join again.
   } catch (err) {
     showError('Could not reach the server. Check your connection and try again.');
-  } finally {
     submitBtn.disabled = false;
   }
 }
@@ -401,6 +311,13 @@ function buildCountersTable(today, week) {
   });
   table.appendChild(tbody);
   return table;
+}
+
+function buildLabel(text) {
+  const label = document.createElement('div');
+  label.className = 'join-panel-subtitle';
+  label.textContent = text;
+  return label;
 }
 
 function renderStatusResult(data) {
@@ -509,7 +426,8 @@ function boot() {
   setupProtocolToggle();
   applyMeshtasticAvailability();
   setupStatusKeyToggle();
-  document.getElementById('join-form').addEventListener('submit', handleSubmit);
+  setupEndpointCopy();
+  document.getElementById('join-submit').addEventListener('click', handleJoinClick);
   document.getElementById('status-form').addEventListener('submit', handleStatusSubmit);
 }
 

@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/join.css?v=20260818-3" />
+  <link rel="stylesheet" href="/static/join.css?v=20260818-5" />
 </head>
 <body>
 
@@ -46,9 +46,122 @@
 
   <main class="join-wrap">
 
-    <section class="join-panel join-play-area">
-      <div class="join-panel-title">Where it's played</div>
-      <p>MeshWars is currently scoped for Southern Idaho and Northern Utah. If you'd like to join the fun or need help, please reach out to malice in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a>.</p>
+    <p class="join-check-teaser">Already registered? <a href="#status-check-panel">Check your setup</a>.</p>
+
+    <section id="join-flow-panel" class="join-panel">
+      <div class="join-panel-title">Join MeshWars</div>
+
+      <ol class="join-flow">
+
+        <li>
+          <p class="join-flow-label">Enter your invite code in the box below.</p>
+          <label class="join-field">
+            <span>Invite code</span>
+            <input type="text" id="f-invite" autocomplete="off" required />
+          </label>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Enter a display name in the box below.</p>
+          <label class="join-field">
+            <span>Display name</span>
+            <input type="text" id="f-name" maxlength="32" autocomplete="off" required />
+          </label>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Pick your team.</p>
+          <div id="team-picker" class="team-picker"></div>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Choose your protocol.</p>
+          <div class="protocol-picker">
+            <label class="protocol-choice">
+              <input type="radio" name="protocol" value="mc" checked />
+              <span>MeshCore</span>
+            </label>
+            <label class="protocol-choice protocol-choice-disabled" id="mt-protocol-choice">
+              <input type="radio" name="protocol" value="mt" id="f-protocol-mt" disabled />
+              <span>Meshtastic <span class="protocol-badge" id="mt-badge">Coming soon</span></span>
+            </label>
+          </div>
+          <p class="hint" id="mt-coming-soon-hint">The Meshtastic board still picks nodes up automatically today. Registration opens once it moves onto the player model.</p>
+
+          <div id="mc-instructions" class="protocol-block">
+            <p>This does NOT replace MeshMapper. Your coverage data, points and leaderboard standing there are unaffected. MeshWars receives a copy.</p>
+          </div>
+
+          <div id="mt-instructions" class="protocol-block" hidden>
+            <label class="join-field">
+              <span>Node ID</span>
+              <input type="text" id="f-node-ref" placeholder="!a1b2c3d4" autocomplete="off" />
+            </label>
+            <p class="hint">Looks like <code>!a1b2c3d4</code>.</p>
+            <p>Meshtastic scoring still runs on the older system today. Registering now binds your node ready for when it changes over, but does not yet affect the Meshtastic board.</p>
+          </div>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Click Join.</p>
+          <div id="join-error" class="join-error" role="alert" hidden></div>
+          <button type="button" id="join-submit">Join</button>
+          <p id="join-success" class="join-success" hidden></p>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Copy your API key &mdash; it is shown once and cannot be recovered.</p>
+          <div id="key-slot" class="key-slot">
+            <p class="key-slot-placeholder">Your key will appear here once you join.</p>
+          </div>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Open MeshMapper, then Settings, then scroll to API Endpoints.</p>
+        </li>
+
+        <li class="join-step-critical">
+          <p><strong>Toggle Custom API Endpoint on.</strong></p>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Paste this as the URL.</p>
+          <div class="copy-row">
+            <input type="text" id="f-endpoint-url" readonly value="https://meshwars.com/api/mc/ingest" />
+            <button type="button" id="endpoint-copy-btn">Copy</button>
+          </div>
+          <div class="join-warning-box">
+            <strong>Do not paste the meshmapper:// link into the URL field.</strong> It is not a web address. It is only for Import from Clipboard.
+          </div>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Paste your API key into the API Key field.</p>
+          <div id="key-slot-2" class="key-slot">
+            <p class="key-slot-placeholder">Your key will appear here once you join.</p>
+          </div>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Save.</p>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Make sure <strong>Include Contact Key</strong> is on.</p>
+        </li>
+
+        <li>
+          <p class="join-flow-label">Start a wardriving session &mdash; nothing is sent without one.</p>
+        </li>
+
+      </ol>
+    </section>
+
+    <section id="working-check-panel" class="join-panel">
+      <div class="join-panel-title">How do I know it's working?</div>
+      <p>MeshMapper sends a batch every fifteen to thirty seconds while a wardriving session is running. Nothing is sent between sessions.</p>
+      <p>Squares are only claimed where your radio hears a repeater. Driving through an area with no mesh coverage logs your position and claims nothing — that is normal, not a fault.</p>
+      <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last heard from you and what is wrong if anything is.</p>
     </section>
 
     <section id="status-check-panel" class="join-panel status-check-panel">
@@ -72,62 +185,13 @@
       <div id="status-result" class="status-result" hidden></div>
     </section>
 
-    <section id="join-form-panel" class="join-panel">
-      <form id="join-form" novalidate autocomplete="off">
-        <div id="join-error" class="join-error" role="alert" hidden></div>
-
-        <label class="join-field">
-          <span>Invite code</span>
-          <input type="text" id="f-invite" autocomplete="off" required />
-        </label>
-
-        <label class="join-field">
-          <span>Display name</span>
-          <input type="text" id="f-name" maxlength="32" autocomplete="off" required />
-        </label>
-
-        <div class="join-field">
-          <span>Team</span>
-          <div id="team-picker" class="team-picker"></div>
-        </div>
-
-        <div class="join-field">
-          <span>Protocol</span>
-          <div class="protocol-picker">
-            <label class="protocol-choice">
-              <input type="radio" name="protocol" value="mc" checked />
-              <span>MeshCore</span>
-            </label>
-            <label class="protocol-choice protocol-choice-disabled" id="mt-protocol-choice">
-              <input type="radio" name="protocol" value="mt" id="f-protocol-mt" disabled />
-              <span>Meshtastic <span class="protocol-badge" id="mt-badge">Coming soon</span></span>
-            </label>
-          </div>
-          <p class="hint" id="mt-coming-soon-hint">The Meshtastic board still picks nodes up automatically today. Registration opens once it moves onto the player model.</p>
-        </div>
-
-        <div id="mc-instructions" class="protocol-block">
-          <p>This does NOT replace MeshMapper. Your coverage data, points and leaderboard standing there are unaffected. MeshWars receives a copy.</p>
-          <p>You must have an ACTIVE wardriving session running for MeshWars to see anything.</p>
-          <p>&quot;Include Contact Key&quot; must stay ON, otherwise your pings cannot be attributed to you and will be discarded.</p>
-        </div>
-
-        <div id="mt-instructions" class="protocol-block" hidden>
-          <label class="join-field">
-            <span>Node ID</span>
-            <input type="text" id="f-node-ref" placeholder="!a1b2c3d4" autocomplete="off" />
-          </label>
-          <p class="hint">Looks like <code>!a1b2c3d4</code>.</p>
-          <p>Meshtastic scoring still runs on the older system today. Registering now binds your node ready for when it changes over, but does not yet affect the Meshtastic board.</p>
-        </div>
-
-        <button type="submit" id="join-submit">Join</button>
-      </form>
+    <section class="join-panel join-play-area">
+      <div class="join-panel-title">Where it's played</div>
+      <p>MeshWars is currently scoped for Southern Idaho and Northern Utah. If you'd like to join the fun or need help, please reach out to malice in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a>.</p>
     </section>
 
-    <section id="join-result-panel" class="join-panel" hidden></section>
   </main>
 
-  <script src="/static/join.js?v=20260818-4" type="module"></script>
+  <script src="/static/join.js?v=20260818-6" type="module"></script>
 </body>
 </html>
