@@ -2,8 +2,7 @@
  * MeshWars: join page (/join).
  *
  * Self-contained -- no external libraries, no framework, nothing beyond
- * what the browser provides. Talks only to /config (to show the play
- * area) and POST /api/join.
+ * what the browser provides. Talks only to POST /api/join.
  *
  * SECURITY: display names and every message the server returns are
  * untrusted. Every dynamic value rendered on this page is set via
@@ -71,22 +70,6 @@ function setupProtocolToggle() {
   }
   radios.forEach((r) => r.addEventListener('change', apply));
   apply();
-}
-
-async function loadPlayArea() {
-  const el = document.getElementById('play-area-text');
-  try {
-    const res = await fetch('/config');
-    if (!res.ok) throw new Error('bad response');
-    const cfg = await res.json();
-    const pa = cfg && cfg.play_area;
-    if (!pa) { el.textContent = 'Play area unavailable.'; return; }
-    el.textContent =
-      `Ontario, Oregon to Provo, Utah (${pa.north}°N, ${pa.west}°W ` +
-      `to ${pa.south}°N, ${pa.east}°W)`;
-  } catch (err) {
-    el.textContent = 'Play area unavailable.';
-  }
 }
 
 function copyToClipboard(text, button) {
@@ -284,7 +267,6 @@ async function handleSubmit(e) {
 function boot() {
   buildTeamPicker();
   setupProtocolToggle();
-  loadPlayArea();
   document.getElementById('join-form').addEventListener('submit', handleSubmit);
 }
 

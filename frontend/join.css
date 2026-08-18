@@ -56,10 +56,18 @@ body {
   margin: 14px 0 6px;
 }
 
-.join-play-area #play-area-text {
+.join-play-area p {
   font-size: 13px;
   color: #ccc;
+  margin: 0;
 }
+
+.join-play-area p a {
+  color: #e8a735;
+  font-weight: 700;
+  text-decoration: none;
+}
+.join-play-area p a:hover { text-decoration: underline; }
 
 .join-field {
   display: block;
