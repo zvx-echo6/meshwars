@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     # a blank configured one. See the check at the top of join() in
     # app/join_api.py.
     join_invite_code: str = ""          # empty disables registration entirely
+    # When true, the invite code above is shown on the join page so a
+    # person can read it and type it in themselves, instead of being
+    # told it separately. Defaults to false so a fresh install never
+    # reveals its own code by accident -- this is a deliberate
+    # per-deployment choice, not a code change.
+    join_invite_code_public: bool = False
     join_rate_limit_attempts: int = 5
     join_rate_limit_window_seconds: int = 600
     public_host: str = "meshwars.com"   # used to build the config link

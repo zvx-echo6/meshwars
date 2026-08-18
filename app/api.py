@@ -76,7 +76,7 @@ async def config() -> dict:
         conn.close()
 
     from .config import settings as _settings
-    return {
+    resp = {
         "centerPos": center,
         "initialZoom": zoom,
         "maxDistanceMiles": 0,
@@ -102,6 +102,14 @@ async def config() -> dict:
         },
         "now": now_s(),
     }
+
+    # Only surfaced when the owner has explicitly opted in AND a code is
+    # actually configured -- omitted entirely (not empty, not null) in
+    # every other case, per join_invite_code_public's contract.
+    if _settings.join_invite_code_public and _settings.join_invite_code:
+        resp["join_invite_code"] = _settings.join_invite_code
+
+    return resp
 
 
 def _derive_map_center(conn, season_id: int | None) -> tuple[list[float], int]:

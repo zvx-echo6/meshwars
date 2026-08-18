@@ -129,6 +129,29 @@ async function applyMeshtasticAvailability() {
   document.getElementById('mt-coming-soon-hint').hidden = true;
 }
 
+// GET /config includes join_invite_code only when the owner has turned
+// join_invite_code_public on AND a code is actually configured -- absent
+// (not empty, not null) in every other case. When present, step 1 is
+// extended to name the code so a person can read and type it in; the
+// input itself is never prefilled and there is no copy button here, on
+// purpose, so typing it stays a human action. Rendered with textContent,
+// never innerHTML, same rule as the rest of this file.
+async function applyInviteCodeHint() {
+  const label = document.getElementById('invite-step-label');
+  if (!label) return;
+  try {
+    const res = await fetch('/config');
+    if (!res.ok) return;
+    const cfg = await res.json();
+    const code = cfg && typeof cfg.join_invite_code === 'string' ? cfg.join_invite_code : null;
+    if (code) {
+      label.textContent = `Enter ${code} as the invite code in the box below.`;
+    }
+  } catch (err) {
+    // Leave the default label text in place.
+  }
+}
+
 function copyToClipboard(text, button) {
   const original = button.textContent;
   const revert = () => { button.textContent = original; };
@@ -425,6 +448,7 @@ function boot() {
   buildTeamPicker();
   setupProtocolToggle();
   applyMeshtasticAvailability();
+  applyInviteCodeHint();
   setupStatusKeyToggle();
   setupEndpointCopy();
   document.getElementById('join-submit').addEventListener('click', handleJoinClick);
