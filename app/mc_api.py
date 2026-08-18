@@ -171,7 +171,8 @@ def _diagnose(alltime: dict, squares_held: int, last_batch_at: int | None, now_t
         )
 
     when = _relative_time(now_ts, last_batch_at) if last_batch_at else "never"
-    return "ok", f"Working. Last heard {when}. You hold {squares_held} squares."
+    square_word = "square" if squares_held == 1 else "squares"
+    return "ok", f"Working. Last heard {when}. You hold {squares_held} {square_word}."
 
 
 def _safe_query(fn):

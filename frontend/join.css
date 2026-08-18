@@ -340,6 +340,14 @@ body {
   margin-top: 24px;
 }
 
+/* Separates the "API key" label from the descriptive .hint paragraph
+   above it -- same 14px rhythm used for .join-field spacing and
+   .join-panel-subtitle elsewhere on this page. Scoped to this form
+   only; no other panel has a paragraph directly preceding a field. */
+#status-form {
+  margin-top: 14px;
+}
+
 .key-input-row {
   display: flex;
   gap: 6px;
