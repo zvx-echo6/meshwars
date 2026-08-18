@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     mc_ping_retention_hours: int = 48
     mc_stat_retention_days: int = 30
 
+    # Per-key rate limit on the ingest endpoint. The endpoint is public
+    # and keys are handed out to players, so nothing else stops a key
+    # from being replayed as fast as the caller likes. A wardriving
+    # session sends a batch every 15-30 seconds, so this default ceiling
+    # is far above legitimate use while still stopping a key from being
+    # used to hammer the service.
+    mc_ingest_rate_limit_batches: int = 20        # max batches per key per window
+    mc_ingest_rate_limit_window_seconds: int = 60  # window length, seconds
+
     # MeshCore raw batch diagnostic log: writes each received batch
     # verbatim (including real GPS positions) so real MeshMapper payloads
     # can be inspected before the ingest thresholds above are tuned, and

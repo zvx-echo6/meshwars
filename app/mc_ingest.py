@@ -42,6 +42,11 @@ _HOUSEKEEPING_INTERVAL_S = 3600  # at most once per hour
 # dict without bound and can exhaust process memory. This caps it.
 _KEY_CACHE_MAX = 10000
 
+# Every distinct key that posts a batch gets a rate-limit tracking entry,
+# same exposure as the key cache above: the endpoint is public, so this
+# needs the same bound for the same reason.
+_RATE_LIMIT_MAX_TRACKED = 10000
+
 # Cap on how many comma-separated repeater entries count_repeaters() will
 # look at in a "heard_repeats" string. This field is attacker-controlled
 # input from the public internet; without a cap, a single crafted batch
@@ -129,6 +134,7 @@ class McIngestor:
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=settings.mc_queue_max)
         self._worker_task: asyncio.Task | None = None
         self._key_cache: dict[str, tuple[float, AuthResult]] = {}
+        self._rate_limit_hits: dict[str, list[float]] = {}
         self._last_housekeeping = 0.0
 
     async def start(self) -> None:
@@ -192,6 +198,44 @@ class McIngestor:
         if row["disabled_at"] is not None:
             return AuthResult("disabled", row["player_id"])
         return AuthResult("ok", row["player_id"])
+
+    # ---- rate limiting ---------------------------------------------------
+
+    def rate_limit_ok(self, key_hash: str) -> bool:
+        """True if this key is still within its per-window batch budget;
+        False if it must be rejected with 429. Purely in-process and
+        synchronous -- no database read -- so this stays fast on the
+        request path. Records this call as a hit when it allows it.
+
+        Bounded the same way `_key_cache` is above: every key hash that
+        posts a batch gets an entry here, including keys later found to
+        be invalid (this runs after authentication, so that particular
+        case doesn't apply, but the endpoint is still public and the
+        growth risk is the same) -- sweep expired entries first, and
+        only clear the whole dict if that alone doesn't bring it back
+        under the cap.
+        """
+        now = time.monotonic()
+        window = settings.mc_ingest_rate_limit_window_seconds
+        limit = settings.mc_ingest_rate_limit_batches
+
+        if len(self._rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
+            stale = [
+                k for k, hits in self._rate_limit_hits.items()
+                if not hits or now - hits[-1] >= window
+            ]
+            for k in stale:
+                del self._rate_limit_hits[k]
+            if len(self._rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
+                self._rate_limit_hits.clear()
+
+        hits = [t for t in self._rate_limit_hits.get(key_hash, []) if now - t < window]
+        if len(hits) >= limit:
+            self._rate_limit_hits[key_hash] = hits
+            return False
+        hits.append(now)
+        self._rate_limit_hits[key_hash] = hits
+        return True
 
     # ---- submission ---------------------------------------------------
 

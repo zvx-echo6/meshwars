@@ -621,6 +621,12 @@ async def mc_ingest(request: Request) -> JSONResponse:
 
     key_hash = hash_secret(raw_key)
 
+    # Per-key rate limit, checked as early as possible on the request
+    # path (no database read -- see McIngestor.rate_limit_ok) so a key
+    # over budget costs us as little as possible before being rejected.
+    if not ingestor.rate_limit_ok(key_hash):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
     # Diagnostic only, off by default (mc_raw_log_enabled): logs the raw
     # request body verbatim, which adds file I/O to the request path --
     # meant for short tuning windows, not to run continuously. Placed
