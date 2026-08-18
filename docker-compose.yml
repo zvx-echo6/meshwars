@@ -15,6 +15,10 @@ services:
       HISTORY_MAX: "${HISTORY_MAX:-12}"
       MAX_HOPS: "${MAX_HOPS:-1}"
       BACKFILL_HOURS: "${BACKFILL_HOURS:-24}"
+      PLAY_AREA_NORTH: "${PLAY_AREA_NORTH:-44.10}"
+      PLAY_AREA_SOUTH: "${PLAY_AREA_SOUTH:-40.20}"
+      PLAY_AREA_WEST: "${PLAY_AREA_WEST:--117.00}"
+      PLAY_AREA_EAST: "${PLAY_AREA_EAST:--111.60}"
     volumes:
       - meshwars-data:/data
 

@@ -63,6 +63,22 @@ def valid_coord(lat: float, lon: float) -> bool:
     return True
 
 
+def in_play_area(
+    lat: float, lon: float, north: float, south: float, west: float, east: float,
+) -> bool:
+    """True if (lat, lon) is inside the box bounded by north/south
+    latitude and west/east longitude.
+
+    Setting north == south disables the check entirely (always True) --
+    this stays pure grid math with no config dependency, so the caller
+    passes the configured box in rather than this module reading
+    settings itself.
+    """
+    if north == south:
+        return True
+    return south <= lat <= north and west <= lon <= east
+
+
 def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Haversine distance between two points, in metres."""
     phi1 = math.radians(lat1)

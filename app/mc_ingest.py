@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from . import mc_scoring
 from .config import settings
 from .db import _WRITE_LOCK, connect
-from .grid import cell_center, cell_id, distance_m, valid_coord
+from .grid import cell_center, cell_id, distance_m, in_play_area, valid_coord
 
 log = logging.getLogger("mc_ingest")
 
@@ -244,6 +244,7 @@ class McIngestor:
             "pings_wrong_owner": 0,
             "pings_duplicate": 0,
             "pings_bad_coord": 0,
+            "pings_out_of_area": 0,
             "pings_no_repeaters": 0,
         }
         conn = connect()
@@ -276,8 +277,8 @@ class McIngestor:
                 "INSERT INTO player_ingest_stat("
                 "  player_id, protocol, day, batches, pings_accepted, "
                 "  pings_no_contact, pings_wrong_owner, pings_duplicate, pings_bad_coord, "
-                "  pings_no_repeaters) "
-                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) "
+                "  pings_out_of_area, pings_no_repeaters) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(player_id, protocol, day) DO UPDATE SET "
                 "  batches = batches + 1, "
                 "  pings_accepted = pings_accepted + excluded.pings_accepted, "
@@ -285,12 +286,13 @@ class McIngestor:
                 "  pings_wrong_owner = pings_wrong_owner + excluded.pings_wrong_owner, "
                 "  pings_duplicate = pings_duplicate + excluded.pings_duplicate, "
                 "  pings_bad_coord = pings_bad_coord + excluded.pings_bad_coord, "
+                "  pings_out_of_area = pings_out_of_area + excluded.pings_out_of_area, "
                 "  pings_no_repeaters = pings_no_repeaters + excluded.pings_no_repeaters",
                 (
                     player_id, PROTOCOL, day,
                     counters["pings_accepted"], counters["pings_no_contact"],
                     counters["pings_wrong_owner"], counters["pings_duplicate"],
-                    counters["pings_bad_coord"],
+                    counters["pings_bad_coord"], counters["pings_out_of_area"],
                     counters["pings_no_repeaters"],
                 ),
             )
@@ -309,10 +311,10 @@ class McIngestor:
 
         log.info(
             "mc ingest: player=%d batch processed accepted=%d no_contact=%d "
-            "wrong_owner=%d duplicate=%d bad_coord=%d no_repeaters=%d",
+            "wrong_owner=%d duplicate=%d bad_coord=%d out_of_area=%d no_repeaters=%d",
             player_id, counters["pings_accepted"], counters["pings_no_contact"],
             counters["pings_wrong_owner"], counters["pings_duplicate"],
-            counters["pings_bad_coord"],
+            counters["pings_bad_coord"], counters["pings_out_of_area"],
             counters["pings_no_repeaters"],
         )
 
@@ -331,6 +333,19 @@ class McIngestor:
         if not valid_coord(lat, lon):
             counters["pings_bad_coord"] += 1
             return
+
+        # Play-area check comes immediately after coordinate validity and
+        # before everything else -- including the contact key check and
+        # binding -- so a ping from outside the configured box never
+        # registers a radio.
+        if not in_play_area(
+            lat, lon,
+            settings.play_area_north, settings.play_area_south,
+            settings.play_area_west, settings.play_area_east,
+        ):
+            counters["pings_out_of_area"] += 1
+            return
+
         if ts_raw is None:
             counters["pings_bad_coord"] += 1
             return

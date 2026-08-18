@@ -78,6 +78,12 @@ async def config() -> dict:
         "maxDistanceMiles": 0,
         "meshview_url": _settings.meshview_url,
         "mc_default_view": _settings.mc_default_view,
+        "play_area": {
+            "north": _settings.play_area_north,
+            "south": _settings.play_area_south,
+            "west": _settings.play_area_west,
+            "east": _settings.play_area_east,
+        },
         "season": {
             "id": active["id"] if active else None,
             "started_at": active["started_at"] if active else None,

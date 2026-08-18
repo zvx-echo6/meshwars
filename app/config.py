@@ -89,6 +89,15 @@ class Settings(BaseSettings):
     # or "meshtastic". Configurable per the owner's requirement, not hardcoded.
     mc_default_view: str = "meshcore"
 
+    # Play-area bounding box: Ontario, Oregon (NW) to Provo, Utah (SE).
+    # Pings outside this box are rejected before they touch anything else.
+    # Setting play_area_north == play_area_south disables the check
+    # entirely, for an unbounded deployment.
+    play_area_north: float = 44.10   # northern edge, degrees latitude
+    play_area_south: float = 40.20   # southern edge, degrees latitude
+    play_area_west: float = -117.00  # western edge, degrees longitude
+    play_area_east: float = -111.60  # eastern edge, degrees longitude
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
