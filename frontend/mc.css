@@ -34,8 +34,8 @@
 
 .mc-switch-btn.active {
   background: #3a2f12;
-  color: #e8a735;
-  border-color: #e8a735;
+  color: var(--mw-accent);
+  border-color: var(--mw-accent);
 }
 
 .mc-scoreboard {
@@ -48,7 +48,7 @@
      viewport width -- sensible on a phone (never runs edge to edge) and
      on a large monitor (never balloons past a small info-card width). */
   box-sizing: border-box;
-  background: #1a1a1a;
+  background: var(--mw-panel);
   color: #ddd;
   padding: 10px 14px;
   border-radius: 6px;
@@ -137,7 +137,7 @@
   font-size: 12px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #e8a735;
+  color: var(--mw-accent);
   margin-bottom: 4px;
 }
 
@@ -182,7 +182,7 @@
 }
 
 .mc-scoreboard a {
-  color: #e8a735;
+  color: var(--mw-accent);
   text-decoration: none;
 }
 .mc-scoreboard a:hover { text-decoration: underline; }
@@ -196,7 +196,7 @@
 }
 #mc-lookup-input {
   flex: 1;
-  background: #0a0a0a;
+  background: var(--mw-page);
   color: #ddd;
   border: 1px solid #333;
   border-radius: 3px;
@@ -206,7 +206,7 @@
 }
 #mc-lookup-btn {
   background: #2a2a2a;
-  color: #e8a735;
+  color: var(--mw-accent);
   border: 1px solid #444;
   border-radius: 3px;
   padding: 3px 8px;
@@ -223,7 +223,7 @@
 .mc-scoreboard #mc-refresh-btn,
 .mc-scoreboard #mc-top-btn {
   background: #2a2a2a;
-  color: #e8a735;
+  color: var(--mw-accent);
   border: 1px solid #444;
   border-radius: 3px;
   padding: 5px 10px;
@@ -301,7 +301,7 @@
   justify-content: center;
 }
 .mc-modal-inner {
-  background: #1a1a1a;
+  background: var(--mw-panel);
   color: #ddd;
   border: 1px solid #444;
   border-radius: 8px;
@@ -317,7 +317,7 @@
   border-bottom: 1px solid #333;
   font-weight: 700;
   font-size: 14px;
-  color: #e8a735;
+  color: var(--mw-accent);
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -359,7 +359,7 @@
   letter-spacing: 0.05em;
 }
 .mc-winner-cell {
-  color: #e8a735;
+  color: var(--mw-accent);
   font-weight: 700;
 }
 

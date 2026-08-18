@@ -8,7 +8,7 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: #0a0a0a;
+  background: var(--mw-page);
   color: #ddd;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
                "Helvetica Neue", Arial, sans-serif;
@@ -20,7 +20,7 @@ html, body {
   left: 0;
   right: 0;
   bottom: 0;
-  background: #0a0a0a;
+  background: var(--mw-page);
 }
 
 /* -------------------------------------------------------------------------
@@ -29,7 +29,7 @@ html, body {
 #loading-overlay {
   position: fixed;
   inset: 0;
-  background: #0a0a0a;
+  background: var(--mw-page);
   z-index: 5000;
   display: flex;
   align-items: center;
@@ -43,7 +43,7 @@ html, body {
   width: 32px;
   height: 32px;
   border: 3px solid #2a2a2a;
-  border-top-color: #e8a735;
+  border-top-color: var(--mw-accent);
   border-radius: 50%;
   margin: 0 auto;
   animation: mt-spin 0.9s linear infinite;
@@ -55,7 +55,7 @@ html, body {
    ------------------------------------------------------------------------- */
 .leaflet-bar a,
 .leaflet-bar a:hover {
-  background-color: #1a1a1a;
+  background-color: var(--mw-panel);
   color: #ddd;
   border-bottom: 1px solid #333;
 }
@@ -65,7 +65,7 @@ html, body {
 }
 .leaflet-control-attribution a { color: #aaa !important; }
 .leaflet-popup-content-wrapper, .leaflet-popup-tip {
-  background: #1a1a1a;
+  background: var(--mw-panel);
   color: #ddd;
   border: 1px solid #333;
 }
@@ -76,7 +76,7 @@ html, body {
    Main settings control (top-right)
    ------------------------------------------------------------------------- */
 .mesh-control {
-  background: #1a1a1a;
+  background: var(--mw-panel);
   border: 1px solid #333;
   border-radius: 6px;
   color: #ddd;
@@ -97,7 +97,7 @@ html, body {
 }
 .mesh-control select,
 .mesh-control input[type="text"] {
-  background: #0a0a0a;
+  background: var(--mw-page);
   color: #ddd;
   border: 1px solid #333;
   border-radius: 3px;
@@ -106,12 +106,12 @@ html, body {
   min-width: 100px;
 }
 .mesh-control input[type="checkbox"] {
-  accent-color: #e8a735;
+  accent-color: var(--mw-accent);
   margin: 0;
 }
 .mesh-control button {
   background: #2a2a2a;
-  color: #e8a735;
+  color: var(--mw-accent);
   border: 1px solid #444;
   border-radius: 3px;
   padding: 5px 12px;
@@ -123,8 +123,8 @@ html, body {
 
 .mobile-toggle {
   display: none;
-  background: #1a1a1a !important;
-  color: #e8a735 !important;
+  background: var(--mw-panel) !important;
+  color: var(--mw-accent) !important;
   font-size: 16px !important;
   width: 36px !important;
   height: 36px !important;
@@ -146,7 +146,7 @@ html, body {
   width: 220px;
 }
 #repeaters-button {
-  background: #1a1a1a;
+  background: var(--mw-panel);
   color: #ddd;
   border: 1px solid #333;
   border-radius: 4px;
@@ -174,7 +174,7 @@ html, body {
 }
 .repeaters-list-header {
   padding: 10px 12px;
-  background: #0a0a0a;
+  background: var(--mw-page);
   border-bottom: 1px solid #333;
   font-weight: 600;
   color: #ddd;
@@ -193,7 +193,7 @@ html, body {
   align-items: center;
 }
 .repeaters-list-count {
-  color: #e8a735;
+  color: var(--mw-accent);
   font-weight: 600;
   font-size: 13px;
 }
@@ -226,7 +226,7 @@ html, body {
   height: 10px;
   border-radius: 50%;
   background: #50c050;
-  border: 1.5px solid #1a1a1a;
+  border: 1.5px solid var(--mw-panel);
   box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
   cursor: pointer;
 }
@@ -260,7 +260,7 @@ html, body {
    Live track tooltip
    ------------------------------------------------------------------------- */
 .track-tooltip {
-  background: #1a1a1a !important;
+  background: var(--mw-panel) !important;
   color: #ddd !important;
   border: 1px solid #444 !important;
   font-size: 12px !important;
@@ -271,7 +271,7 @@ html, body {
    ========================================================================= */
 
 .meshwars-scoreboard {
-  background: #1a1a1a;
+  background: var(--mw-panel);
   color: #ddd;
   padding: 10px 14px;
   border-radius: 6px;
@@ -285,7 +285,7 @@ html, body {
   font-size: 12px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #e8a735;
+  color: var(--mw-accent);
   margin-bottom: 4px;
 }
 .meshwars-scoreboard .mt-row {
@@ -302,7 +302,7 @@ html, body {
   color: #aaa;
 }
 .meshwars-scoreboard a {
-  color: #e8a735;
+  color: var(--mw-accent);
   text-decoration: none;
 }
 .meshwars-scoreboard a:hover { text-decoration: underline; }
@@ -370,7 +370,7 @@ html, body {
   left: 50%;
   transform: translateX(-50%);
   z-index: 1000;
-  background: #1a1a1a;
+  background: var(--mw-panel);
   border: 1px solid #555;
   border-radius: 8px;
   padding: 10px 18px;
@@ -402,7 +402,7 @@ html, body {
   justify-content: center;
 }
 .mt-modal-inner {
-  background: #1a1a1a;
+  background: var(--mw-panel);
   color: #ddd;
   border: 1px solid #444;
   border-radius: 8px;
@@ -418,7 +418,7 @@ html, body {
   border-bottom: 1px solid #333;
   font-weight: 700;
   font-size: 14px;
-  color: #e8a735;
+  color: var(--mw-accent);
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -464,7 +464,7 @@ html, body {
 }
 #mt-lookup-input {
   flex: 1;
-  background: #0a0a0a;
+  background: var(--mw-page);
   color: #ddd;
   border: 1px solid #333;
   border-radius: 3px;
@@ -474,7 +474,7 @@ html, body {
 }
 #mt-lookup-btn {
   background: #2a2a2a;
-  color: #e8a735;
+  color: var(--mw-accent);
   border: 1px solid #444;
   border-radius: 3px;
   padding: 3px 8px;
@@ -557,7 +557,7 @@ html, body {
 .meshwars-scoreboard #mt-refresh-btn,
 .meshwars-scoreboard #mt-feeders-btn {
   background: #2a2a2a;
-  color: #e8a735;
+  color: var(--mw-accent);
   border: 1px solid #444;
   border-radius: 3px;
   padding: 5px 10px;
@@ -573,7 +573,7 @@ html, body {
 .mt-feeders-list {
   display: none;
   margin-top: 4px;
-  background: #0a0a0a;
+  background: var(--mw-page);
   border: 1px solid #2a2a2a;
   border-radius: 4px;
   max-height: 350px;
@@ -595,7 +595,7 @@ html, body {
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  background: #0a0a0a;
+  background: var(--mw-page);
   border-bottom: 1px solid #2a2a2a;
 }
 .mt-pop-badge {
@@ -619,7 +619,7 @@ html, body {
 }
 .mt-pop-defense {
   background: #2a1c00;
-  color: #e8a735;
+  color: var(--mw-accent);
   padding: 6px 12px;
   font-size: 11px;
   border-bottom: 1px solid #3a2c10;
@@ -627,7 +627,7 @@ html, body {
 .mt-pop-scorebar {
   display: flex;
   height: 6px;
-  background: #0a0a0a;
+  background: var(--mw-page);
   margin: 0;
 }
 .mt-pop-scorebar-fill { height: 100%; }
@@ -662,7 +662,7 @@ html, body {
   padding: 2px 0;
 }
 .mt-pop-contrib-count {
-  color: #e8a735;
+  color: var(--mw-accent);
   font-weight: 600;
   font-family: ui-monospace, Menlo, monospace;
 }
@@ -731,18 +731,26 @@ html, body {
   justify-content: space-between;
   gap: 12px;
   padding: 0 16px;
-  background: #1a1a1a;
+  background: var(--mw-panel);
   border-bottom: 1px solid #333;
   box-sizing: border-box;
 }
 .mw-nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #e8a735;
+  color: var(--mw-accent);
   text-decoration: none;
   white-space: nowrap;
+}
+.mw-nav-crest {
+  display: block;
+  height: 28px;
+  width: auto;
 }
 .mw-nav-links {
   display: flex;
@@ -757,15 +765,16 @@ html, body {
   text-decoration: none;
   border: 1px solid #333;
   border-radius: 4px;
-  background: #1a1a1a;
+  background: var(--mw-panel);
   white-space: nowrap;
 }
-.mw-nav-links a:hover { background: #262626; color: #e8a735; }
-.mw-nav-links a.active { color: #e8a735; border-color: #e8a735; }
+.mw-nav-links a:hover { background: #262626; color: var(--mw-accent); }
+.mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
 
 @media (max-width: 600px) {
   .mw-nav { padding: 0 8px; gap: 6px; }
-  .mw-nav-brand { font-size: 12px; }
+  .mw-nav-brand { font-size: 12px; gap: 6px; }
+  .mw-nav-crest { height: 22px; }
   .mw-nav-links { gap: 3px; }
   .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
 }

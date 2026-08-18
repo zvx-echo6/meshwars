@@ -1,0 +1,26 @@
+/* MeshWars brand palette (frontend/theme.css).
+   Loaded before every other stylesheet on all three pages so the
+   custom properties below are available everywhere. The seven --mw-*
+   tokens are the pack's official palette, unchanged. The three
+   semantic aliases underneath are the site's pre-brand colours --
+   accent, panel and page background -- now pointed at the closest
+   brand token. coverage.css / landing.css / join.css / mc.css consume
+   the aliases via var() instead of a literal hex, so a future colour
+   change happens once, here, instead of in five places.
+
+   Team colours on the map are NOT represented here on purpose -- those
+   are gameplay (maximally distinguishable teams), not branding, and
+   stay exactly as they are wherever the map defines them. */
+:root {
+  --mw-gold-light: #EDD39F;
+  --mw-gold:       #A9885B;
+  --mw-bronze:     #5A422A;
+  --mw-ink:        #0C0B0A;
+  --mw-ink-soft:   #1A1815;
+  --mw-hostile:    #782A1C;
+  --mw-friendly:   #335927;
+
+  --mw-accent: var(--mw-gold);     /* was #e8a735 */
+  --mw-panel:  var(--mw-ink-soft); /* was #1a1a1a */
+  --mw-page:   var(--mw-ink);      /* was #0a0a0a */
+}
