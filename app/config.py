@@ -70,6 +70,21 @@ class Settings(BaseSettings):
     mc_raw_log_max_bytes: int = 10_000_000     # rotate after this many bytes
     mc_raw_log_backups: int = 3                # rotated files kept, beyond the active one
 
+    # MeshCore scoring: a separate scoreboard from the Meshtastic fortress
+    # game above, keyed on flat grid cells and players instead of
+    # geohashes and radios. Up to seven teams instead of two.
+    teams: str = "RED,GREEN,BLUE,PURPLE,YELLOW,ORANGE,PINK"
+    mc_season_days: int = 30
+    mc_score_per_ping: float = 0.5             # effort bonus per qualifying paint
+    mc_score_per_unique_player: float = 1.0    # one-time bonus per new painter
+    mc_score_decay_per_day: float = 0.25       # decay rate, applied to all scores
+    mc_defense_window_seconds: int = 900       # 15 minutes after capture, no flip
+    mc_cooldown_seconds: int = 300             # a player can't repaint the same cell inside this window
+
+    @property
+    def teams_list(self) -> list[str]:
+        return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
+
     @property
     def meshview_url(self) -> str:
         return self.meshview_base_url.rstrip("/")

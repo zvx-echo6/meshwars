@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from . import mc_scoring
 from .config import settings
 from .db import _WRITE_LOCK, connect
 from .grid import cell_center, cell_id, distance_m, valid_coord
@@ -186,8 +187,27 @@ class McIngestor:
         conn = connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+
+            # MeshCore season bookkeeping happens at most once per batch,
+            # not once per ping.
+            mc_scoring.maybe_roll_season(conn, received_at)
+            season_id = mc_scoring.ensure_active_season(conn, received_at)
+
+            # The whole batch belongs to one player, so their team is read
+            # once here rather than once per ping.
+            team_row = conn.execute(
+                "SELECT team FROM player WHERE player_id = ?", (player_id,)
+            ).fetchone()
+            team = team_row["team"] if team_row else None
+            if team is None:
+                log.warning(
+                    "mc ingest: player %d has no player row; MeshCore scoring "
+                    "skipped for this batch",
+                    player_id,
+                )
+
             for ping in pings:
-                self._process_one_ping(conn, player_id, ping, received_at, counters)
+                self._process_one_ping(conn, player_id, ping, received_at, counters, season_id, team)
 
             day = int(datetime.fromtimestamp(received_at, tz=timezone.utc).strftime("%Y%m%d"))
             conn.execute(
@@ -230,7 +250,7 @@ class McIngestor:
             counters["pings_bad_coord"],
         )
 
-    def _process_one_ping(self, conn, player_id, ping, received_at, counters) -> None:
+    def _process_one_ping(self, conn, player_id, ping, received_at, counters, season_id, team) -> None:
         # 1. Coordinates + timestamp
         lat = ping.get("lat") if isinstance(ping, dict) else None
         lon = ping.get("lon") if isinstance(ping, dict) else None
@@ -341,6 +361,19 @@ class McIngestor:
 
         # 8. Accepted
         counters["pings_accepted"] += 1
+
+        # 9. MeshCore scoring, inside the same write transaction as the
+        # rest of this batch. A scoring failure must not lose the
+        # counters already recorded above or abort the rest of the
+        # batch -- log it and keep going.
+        if team is not None:
+            try:
+                mc_scoring.apply_paint(conn, season_id, player_id, team, cell, ts)
+            except Exception:
+                log.exception(
+                    "mc scoring: apply_paint failed for player %d cell %s",
+                    player_id, cell,
+                )
 
     # ---- housekeeping ---------------------------------------------------
 

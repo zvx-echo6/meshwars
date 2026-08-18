@@ -239,6 +239,89 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     pings_bad_coord    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player_id, protocol, day)
 );
+
+-- ---------------------------------------------------------------------
+-- MeshCore scoring tables. This is a SEPARATE scoreboard from the
+-- Meshtastic tile/tile_score tables above -- flat grid cells and players
+-- instead of geohashes and radios. Kept fully independent so the live
+-- Meshtastic game is unaffected; a later cutover will move Meshtastic
+-- onto this model.
+-- ---------------------------------------------------------------------
+
+-- One MeshCore season at a time; mirrors `season` above but tallies teams
+-- (there can be more than two) instead of fixed red/blue/green columns.
+CREATE TABLE IF NOT EXISTS mc_season (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at  INTEGER NOT NULL,
+    ends_at     INTEGER NOT NULL,
+    status      TEXT NOT NULL,
+    winner      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mc_season_status ON mc_season(status);
+
+-- Tile count per team, written once at season close.
+CREATE TABLE IF NOT EXISTS mc_season_team_tally (
+    season_id  INTEGER NOT NULL,
+    team       TEXT NOT NULL,
+    tiles      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (season_id, team)
+);
+
+-- One row per (season, cell) that has ever been captured. No neutral
+-- state: a cell either has an owner row or does not exist yet.
+CREATE TABLE IF NOT EXISTS mc_tile (
+    season_id       INTEGER NOT NULL,
+    cell_id         TEXT NOT NULL,
+    owner_team      TEXT NOT NULL,
+    last_player_id  INTEGER NOT NULL,
+    last_report_ts  INTEGER NOT NULL,
+    paint_count     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (season_id, cell_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mc_tile_owner ON mc_tile(season_id, owner_team);
+
+-- Per-(tile, team) score. Decays on read, never stored pre-decayed.
+CREATE TABLE IF NOT EXISTS mc_tile_score (
+    season_id    INTEGER NOT NULL,
+    cell_id      TEXT NOT NULL,
+    team         TEXT NOT NULL,
+    score        REAL NOT NULL DEFAULT 0,
+    last_update  INTEGER NOT NULL,
+    PRIMARY KEY (season_id, cell_id, team)
+);
+
+-- Unique painters per (tile, team): tracks who's contributed the
+-- one-time unique-player bonus so it isn't double-counted.
+CREATE TABLE IF NOT EXISTS mc_tile_unique_painter (
+    season_id    INTEGER NOT NULL,
+    cell_id      TEXT NOT NULL,
+    team         TEXT NOT NULL,
+    player_id    INTEGER NOT NULL,
+    first_ts     INTEGER NOT NULL,
+    paint_count  INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (season_id, cell_id, team, player_id)
+);
+
+-- Capture timestamp per tile, for the post-capture defense window.
+CREATE TABLE IF NOT EXISTS mc_tile_capture (
+    season_id         INTEGER NOT NULL,
+    cell_id           TEXT NOT NULL,
+    captured_at       INTEGER NOT NULL,
+    captured_by_team  TEXT NOT NULL,
+    PRIMARY KEY (season_id, cell_id)
+);
+
+-- Capture audit log: every flip, who did it, and who it was taken from.
+CREATE TABLE IF NOT EXISTS mc_tile_capture_log (
+    season_id    INTEGER NOT NULL,
+    cell_id      TEXT NOT NULL,
+    ts           INTEGER NOT NULL,
+    by_player_id INTEGER NOT NULL,
+    by_team      TEXT NOT NULL,
+    from_team    TEXT,
+    PRIMARY KEY (season_id, cell_id, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_mc_capture_log_cell ON mc_tile_capture_log(season_id, cell_id);
 """
 
 
