@@ -30,25 +30,6 @@ body {
   padding: calc(var(--mw-nav-h) + 24px) 16px 64px;
 }
 
-/* ---- horizontal lockup banner ------------------------------------------ */
-.lockup-banner {
-  text-align: center;
-  margin: 0 0 20px;
-}
-.lockup-img {
-  display: inline-block;
-  width: 100%;
-  max-width: 500px;
-  height: auto;
-}
-
-.join-header h1 {
-  margin: 0 0 4px;
-  font-size: 1.625rem;
-  letter-spacing: 0.02em;
-  color: var(--mw-accent);
-}
-
 .join-tagline {
   margin: 0 0 20px;
   color: #aaa;

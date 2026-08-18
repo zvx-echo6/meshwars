@@ -25,18 +25,23 @@
   <meta name="twitter:description" content="Watch seven teams compete for real-world territory over mesh radio, live on the map.">
   <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
 
-  <link rel="stylesheet" href="/static/theme.css" />
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change -- do not touch the pinned external Leaflet CDN links. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260818" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
         crossorigin="anonymous" />
-  <link rel="stylesheet" href="/static/coverage.css" />
-  <link rel="stylesheet" href="/static/mc.css" />
+  <link rel="stylesheet" href="/static/coverage.css?v=20260818" />
+  <link rel="stylesheet" href="/static/mc.css?v=20260818" />
 </head>
 <body>
 
   <nav class="mw-nav">
-    <a href="/" class="mw-nav-brand"><img src="/static/assets/favicon/favicon-64x64.png" alt="" class="mw-nav-crest" />MeshWars</a>
+    <a href="/" class="mw-nav-brand"><img src="/static/assets/favicon/favicon-64x64.png" alt="" class="mw-nav-crest" width="28" height="28" />MeshWars</a>
     <div class="mw-nav-links">
       <a href="/" class="active">Map</a>
       <a href="/about">About</a>
@@ -69,7 +74,7 @@
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
 
-  <script src="/static/code.js" type="module"></script>
-  <script src="/static/mc.js" type="module"></script>
+  <script src="/static/code.js?v=20260818" type="module"></script>
+  <script src="/static/mc.js?v=20260818" type="module"></script>
 </body>
 </html>

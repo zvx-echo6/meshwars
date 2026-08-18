@@ -25,13 +25,18 @@
   <meta name="twitter:description" content="Teams claim 300 metre squares by reaching the mesh from them. How MeshWars scoring and territory control works.">
   <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
 
-  <link rel="stylesheet" href="/static/theme.css" />
-  <link rel="stylesheet" href="/static/landing.css" />
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change -- do not touch the pinned external Leaflet CDN links. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260818" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260818" />
 </head>
 <body>
 
   <nav class="mw-nav">
-    <a href="/" class="mw-nav-brand"><img src="/static/assets/favicon/favicon-64x64.png" alt="" class="mw-nav-crest" />MeshWars</a>
+    <a href="/" class="mw-nav-brand"><img src="/static/assets/favicon/favicon-64x64.png" alt="" class="mw-nav-crest" width="28" height="28" />MeshWars</a>
     <div class="mw-nav-links">
       <a href="/">Map</a>
       <a href="/about" class="active">About</a>
@@ -41,15 +46,7 @@
 
   <main class="landing-wrap">
 
-    <div class="lockup-banner">
-      <picture>
-        <source srcset="/static/assets/logo/meshwars-horizontal.webp" type="image/webp">
-        <img src="/static/assets/logo/meshwars-horizontal.png" alt="MeshWars — Territory Control Game" class="lockup-img">
-      </picture>
-    </div>
-
     <header class="landing-header">
-      <h1>MeshWars</h1>
       <p class="landing-tagline">Teams claim 300 metre squares by reaching the mesh from them.</p>
     </header>
 

@@ -25,13 +25,18 @@
   <meta name="twitter:description" content="Register your mesh radio node, pick a team, and start claiming territory in MeshWars.">
   <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
 
-  <link rel="stylesheet" href="/static/theme.css" />
-  <link rel="stylesheet" href="/static/join.css" />
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change -- do not touch the pinned external Leaflet CDN links. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260818" />
+  <link rel="stylesheet" href="/static/join.css?v=20260818" />
 </head>
 <body>
 
   <nav class="mw-nav">
-    <a href="/" class="mw-nav-brand"><img src="/static/assets/favicon/favicon-64x64.png" alt="" class="mw-nav-crest" />MeshWars</a>
+    <a href="/" class="mw-nav-brand"><img src="/static/assets/favicon/favicon-64x64.png" alt="" class="mw-nav-crest" width="28" height="28" />MeshWars</a>
     <div class="mw-nav-links">
       <a href="/">Map</a>
       <a href="/about">About</a>
@@ -41,15 +46,7 @@
 
   <main class="join-wrap">
 
-    <div class="lockup-banner">
-      <picture>
-        <source srcset="/static/assets/logo/meshwars-horizontal.webp" type="image/webp">
-        <img src="/static/assets/logo/meshwars-horizontal.png" alt="MeshWars — Territory Control Game" class="lockup-img">
-      </picture>
-    </div>
-
     <header class="join-header">
-      <h1>MeshWars</h1>
       <p class="join-tagline">Teams claim 300 metre squares by reaching the mesh from them.</p>
     </header>
 
@@ -113,6 +110,6 @@
     <section id="join-result-panel" class="join-panel" hidden></section>
   </main>
 
-  <script src="/static/join.js" type="module"></script>
+  <script src="/static/join.js?v=20260818" type="module"></script>
 </body>
 </html>
