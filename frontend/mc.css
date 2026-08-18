@@ -110,6 +110,29 @@
   .mc-scoreboard.mc-collapsed .mc-header-summary { display: inline; }
   .mc-scoreboard.mc-collapsed .mc-header-caret { transform: rotate(-90deg); }
   .mc-scoreboard.mc-collapsed .mc-panel-content { display: none; }
+
+  /* Below the breakpoint mc.js no longer applies the Meshtastic panel's
+     measured width (see applyMatchedPanelWidth) -- only one territory
+     panel is ever visible on a phone at a time, so there is nothing for
+     that match to protect against there. Let the panel size itself, but
+     cap it well short of the viewport edge so it never runs edge to
+     edge. */
+  .mc-scoreboard {
+    width: auto !important;
+    max-width: min(300px, calc(100vw - 20px));
+  }
+
+  /* One column instead of two -- the fixed-width two-column grid is
+     what overflowed the viewport on a phone (labels/counts for the
+     right-hand column ran off screen). Seven single-column rows is
+     fine now that the panel starts collapsed on phones.
+     !important: this media query block sits earlier in the cascade
+     than the unconditional .mc-scoreboard-body rule below (equal
+     specificity, source order decides), so without it the base
+     two-column rule would win even inside this query. */
+  .mc-scoreboard-body {
+    grid-template-columns: 1fr !important;
+  }
 }
 
 .mc-row {

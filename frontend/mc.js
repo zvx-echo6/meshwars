@@ -179,6 +179,14 @@ async function applyMatchedPanelWidth() {
   const mtPanel = await waitForMtPanel(3000);
   const mcPanel = document.querySelector('.mc-scoreboard');
   if (!mtPanel || !mcPanel) return;
+  // Below the narrow breakpoint only one territory panel is ever on
+  // screen at a time (see setMcCollapsed / the toggle control), so
+  // there is no toggle-induced resize for this matched width to guard
+  // against -- and the desktop-measured width, applied on top of the
+  // two-column team grid, overflowed a phone viewport and pushed three
+  // of the seven teams' counts off screen. Leave the panel to size
+  // itself (mc.css's narrow-width rules) below the breakpoint instead.
+  if (window.matchMedia(`(max-width: ${NARROW_BREAKPOINT_PX}px)`).matches) return;
   cachedMtPanelWidth = mtPanel.offsetWidth;
   if (cachedMtPanelWidth > 0) {
     // .mc-scoreboard is box-sizing: border-box (see mc.css) so this
