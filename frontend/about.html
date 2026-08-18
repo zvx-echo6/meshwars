@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260818-3" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260818-4" />
 </head>
 <body>
 
@@ -47,17 +47,52 @@
   <main class="landing-wrap">
 
     <header class="landing-header">
-      <p class="landing-tagline">Teams claim 300 metre squares by reaching the mesh from them.</p>
+      <div class="landing-hero">
+        <picture>
+          <source type="image/webp" srcset="/static/assets/logo/meshwars-horizontal.webp">
+          <img src="/static/assets/logo/meshwars-horizontal.png" alt="MeshWars" class="landing-hero-logo" width="1010" height="320" />
+        </picture>
+        <p class="landing-tagline">Teams claim 300 metre squares by reaching the mesh from them.</p>
+      </div>
     </header>
+
+    <div id="landing-stats" class="landing-stats" aria-live="polite">
+      <div class="landing-stat">
+        <span class="landing-stat-value" id="stat-squares">&ndash;</span>
+        <span class="landing-stat-label">Squares claimed</span>
+      </div>
+      <div class="landing-stat">
+        <span class="landing-stat-value" id="stat-players">&ndash;</span>
+        <span class="landing-stat-label">Players registered</span>
+      </div>
+      <div class="landing-stat">
+        <span class="landing-stat-value" id="stat-ends">&ndash;</span>
+        <span class="landing-stat-label">Season ends</span>
+      </div>
+    </div>
 
     <section class="landing-panel">
       <div class="landing-panel-title">What the game is</div>
       <p>Players are on one of seven teams. The map is divided into squares roughly 300 metres across. You claim a square for your team by being in it and hearing the mesh from it. Teams take squares from each other. The team holding the most squares when a season ends wins.</p>
     </section>
 
+    <section class="landing-panel landing-teams">
+      <div class="landing-panel-title">The seven teams</div>
+      <div class="team-chips">
+        <span class="team-chip" style="--chip-color:#ff4136">RED</span>
+        <span class="team-chip" style="--chip-color:#2ecc40">GREEN</span>
+        <span class="team-chip" style="--chip-color:#3d8bfd">BLUE</span>
+        <span class="team-chip" style="--chip-color:#b10dc9">PURPLE</span>
+        <span class="team-chip" style="--chip-color:#ffdc00">YELLOW</span>
+        <span class="team-chip" style="--chip-color:#ff9020">ORANGE</span>
+        <span class="team-chip" style="--chip-color:#f01ec0">PINK</span>
+      </div>
+      <p>Every player picks one of these seven colours, and every team competes for the same ground.</p>
+    </section>
+
     <section class="landing-panel">
       <div class="landing-panel-title">How scoring works</div>
-      <ul class="landing-list">
+      <ol class="landing-list landing-scoring">
         <li>You claim a square by hearing repeaters from it. Each repeater a ping hears is worth a tenth of a point, up to one point per ping.</li>
         <li>A ping that hears no repeaters scores nothing and claims nothing. Being somewhere is not enough &mdash; you have to reach the mesh.</li>
         <li>The first team to paint an unclaimed square takes it.</li>
@@ -66,17 +101,17 @@
         <li>The first time a new person paints a square for their team, it is worth an extra half point. More people beats one person going back and forth.</li>
         <li>The same person cannot repaint the same square within five minutes.</li>
         <li>Scores fade over time, so held ground has to be revisited.</li>
-      </ul>
+      </ol>
     </section>
 
     <section class="landing-panel">
       <div class="landing-panel-title">The two protocols</div>
       <div class="protocol-cards">
-        <div class="protocol-card">
-          <div class="protocol-card-title">MeshCore</div>
+        <div class="protocol-card protocol-card-live">
+          <div class="protocol-card-title">MeshCore <span class="protocol-live-badge">Live</span></div>
           <p>Playable now. Your position comes from the MeshMapper wardriving app, which forwards a copy of your wardrive to MeshWars.</p>
         </div>
-        <div class="protocol-card">
+        <div class="protocol-card protocol-card-pending">
           <div class="protocol-card-title">Meshtastic <span class="protocol-badge">Coming soon</span></div>
           <p>Registration is not open yet. The Meshtastic board still picks nodes up automatically from public packet data rather than by registering, and registration opens once it moves onto the player model that MeshCore already uses.</p>
         </div>
@@ -145,5 +180,6 @@
 
   </main>
 
+  <script src="/static/about.js?v=20260818-4" type="module"></script>
 </body>
 </html>

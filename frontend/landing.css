@@ -32,11 +32,89 @@ body {
   padding: calc(var(--mw-nav-h) + 16px) 16px 64px;
 }
 
+/* ---- hero --------------------------------------------------------------
+   The page's one hero moment: nav mark stays a small wordmark, this is
+   the full lockup, shown once, centered, over the topographic texture
+   plate from the brand pack (darkened so the lockup and tagline stay
+   legible). If the texture is ever removed, the gradient fallback
+   below still gives the band its own presence rather than resting on
+   flat page background. */
+.landing-hero {
+  position: relative;
+  text-align: center;
+  padding: 48px 20px 40px;
+  margin-bottom: 28px;
+  border: 1px solid #333;
+  border-radius: 12px;
+  background-color: var(--mw-page);
+  background-image:
+    linear-gradient(180deg, rgba(12, 11, 10, 0.80) 0%, rgba(12, 11, 10, 0.92) 100%),
+    url("/static/assets/texture/meshwars-topo.webp");
+  background-size: cover;
+  background-position: center;
+}
+
+.landing-hero-logo {
+  display: block;
+  width: min(640px, 100%);
+  height: auto;
+  margin: 0 auto;
+}
+
+.landing-hero .landing-tagline {
+  margin: 20px auto 0;
+  max-width: 34em;
+}
+
 /* ---- header ----------------------------------------------------------- */
 .landing-tagline {
   margin: 0 0 20px;
   color: #aaa;
   font-size: 0.875rem;
+  text-align: center;
+}
+
+/* ---- live numbers band --------------------------------------------------
+   Real-time figures fetched by about.js from the existing /api/mc/scores
+   and /api/mc/players endpoints. Every value starts as an em dash in the
+   markup itself, so with JS disabled -- or if either fetch fails -- the
+   band still renders cleanly with dashes instead of an error or a
+   layout break. This is deliberately a flat row of labeled numbers, not
+   another grey panel, so it reads as a live status strip under the hero
+   rather than one more section of text. */
+.landing-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.landing-stat {
+  flex: 1 1 160px;
+  max-width: 220px;
+  text-align: center;
+  background: var(--mw-panel);
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 14px 12px;
+}
+
+.landing-stat-value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--mw-gold-light);
+  line-height: 1.2;
+}
+
+.landing-stat-label {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.6875rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #999;
 }
 
 /* ---- panels ------------------------------------------------------------ */
@@ -44,17 +122,19 @@ body {
   background: var(--mw-panel);
   border: 1px solid #333;
   border-radius: 8px;
-  padding: 16px 18px;
-  margin-bottom: 16px;
+  padding: 20px 22px;
+  margin-bottom: 24px;
 }
 
 .landing-panel-title {
-  font-weight: 700;
-  font-size: 0.75rem;
+  font-weight: 800;
+  font-size: 0.875rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--mw-accent);
-  margin-bottom: 8px;
+  color: var(--mw-gold-light);
+  margin-bottom: 16px;
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--mw-gold);
 }
 
 .landing-panel p {
@@ -82,6 +162,81 @@ body {
 .landing-list li { margin-bottom: 8px; }
 .landing-list li:last-child { margin-bottom: 0; }
 
+/* ---- team chips ----------------------------------------------------------
+   The seven map team colours, read directly from frontend/mc.js's
+   TEAM_COLORS (not redefined here) and passed in per-chip via the
+   --chip-color custom property on each .team-chip element in the
+   markup. This is the game's most visually distinctive feature and
+   previously only appeared as a line of body text -- now it gets a
+   dedicated, glanceable row. */
+.team-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.team-chip {
+  --chip-color: #888;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #141414;
+  border: 1px solid var(--chip-color);
+  border-radius: 999px;
+  padding: 6px 14px 6px 10px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--chip-color);
+}
+
+.team-chip::before {
+  content: "";
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--chip-color);
+  box-shadow: 0 0 6px var(--chip-color);
+}
+
+/* ---- scoring sequence ----------------------------------------------------
+   "How scoring works" is an <ol> in the markup (order is meaningful --
+   it reads as how the game works, step by step) styled as a numbered
+   sequence with a visible numeral badge per step rather than a plain
+   bullet, with more breathing room between steps than the flat
+   .landing-list rhythm used elsewhere. */
+.landing-scoring {
+  list-style: none;
+  counter-reset: landing-scoring;
+  padding-left: 0;
+}
+.landing-scoring li {
+  counter-increment: landing-scoring;
+  position: relative;
+  padding-left: 40px;
+  margin-bottom: 16px;
+}
+.landing-scoring li:last-child { margin-bottom: 0; }
+.landing-scoring li::before {
+  content: counter(landing-scoring);
+  position: absolute;
+  left: 0;
+  top: -1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--mw-page);
+  border: 1px solid var(--mw-gold);
+  color: var(--mw-gold-light);
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
 /* ---- protocol cards ----------------------------------------------------- */
 .protocol-cards {
   display: grid;
@@ -96,6 +251,20 @@ body {
   padding: 12px 14px;
 }
 
+/* MeshCore is the live protocol -- a friendly-green border and a
+   filled "Live" badge give it visual weight the pending card doesn't
+   get. Meshtastic is dimmed and dashed, reading as "planned" at a
+   glance before a visitor reads a word of the copy. */
+.protocol-card-live {
+  border-color: var(--mw-friendly);
+  background: #12190f;
+}
+
+.protocol-card-pending {
+  border-style: dashed;
+  opacity: 0.82;
+}
+
 .protocol-card-title {
   font-weight: 700;
   font-size: 0.8125rem;
@@ -108,6 +277,21 @@ body {
   font-size: 0.8125rem;
   line-height: 1.5;
   color: #bbb;
+}
+
+.protocol-live-badge {
+  display: inline-block;
+  background: var(--mw-friendly);
+  color: #d8f0c8;
+  border: 1px solid #4a7a38;
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 4px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: middle;
 }
 
 /* "Coming soon" badge on the Meshtastic protocol card -- shows the
@@ -262,16 +446,19 @@ body {
    into the second once the first is full (auto-balanced), so short and
    long sections don't leave gaps around each other. break-inside: avoid
    keeps a single section from being split across the column gap. The
-   header uses column-span: all to sit above both columns rather than
-   being flowed as multicol content itself. Collapsing back below the
-   breakpoint returns to a plain single column in DOM order, so the
-   reading order is unaffected either way. */
+   header and the live-numbers band use column-span: all to sit above
+   both columns rather than being flowed as multicol content themselves.
+   Collapsing back below the breakpoint returns to a plain single column
+   in DOM order, so the reading order is unaffected either way. */
 @media (min-width: 900px) {
   .landing-wrap {
     column-count: 2;
     column-gap: 28px;
   }
   .landing-header {
+    column-span: all;
+  }
+  .landing-stats {
     column-span: all;
   }
   .landing-panel {
@@ -356,4 +543,10 @@ body {
   .mw-nav-crest { height: 22px; }
   .mw-nav-links { gap: 3px; }
   .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
+}
+
+@media (max-width: 480px) {
+  .landing-hero {
+    padding: 36px 16px 30px;
+  }
 }
