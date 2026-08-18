@@ -81,9 +81,9 @@ class Settings(BaseSettings):
     mc_defense_window_seconds: int = 900       # 15 minutes after capture, no flip
     mc_cooldown_seconds: int = 300             # a player can't repaint the same cell inside this window
 
-    # Which board the map opens on by default: "mc" (MeshCore) or "mt"
-    # (Meshtastic). Configurable per the owner's requirement, not hardcoded.
-    mc_default_view: str = "mc"
+    # Which board the map opens on by default. Valid values are "meshcore"
+    # or "meshtastic". Configurable per the owner's requirement, not hardcoded.
+    mc_default_view: str = "meshcore"
 
     @property
     def teams_list(self) -> list[str]:
