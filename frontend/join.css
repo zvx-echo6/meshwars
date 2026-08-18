@@ -239,3 +239,27 @@ body {
   margin: 0 6px;
   vertical-align: middle;
 }
+
+
+/* -------------------------------------------------------------------------
+   Site nav (Home / Map / Join). In-flow at the top of the page, shared
+   look with the landing page nav (frontend/landing.css).
+   ------------------------------------------------------------------------- */
+.mw-nav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+}
+.mw-nav a {
+  padding: 6px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #999;
+  text-decoration: none;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a1a;
+}
+.mw-nav a:hover { background: #262626; color: #e8a735; }
+.mw-nav a.active { color: #e8a735; border-color: #e8a735; }

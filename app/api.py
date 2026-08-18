@@ -658,10 +658,17 @@ def mount(app: FastAPI) -> None:
 
         @app.get("/", response_class=HTMLResponse, include_in_schema=False)
         async def index():
-            index_path = frontend_dir / "index.html"
-            if index_path.exists():
-                return FileResponse(index_path)
+            landing_path = frontend_dir / "landing.html"
+            if landing_path.exists():
+                return FileResponse(landing_path)
             return HTMLResponse("<h1>meshwars</h1><p>frontend not bundled</p>")
+
+        @app.get("/map", response_class=HTMLResponse, include_in_schema=False)
+        async def map_page():
+            map_path = frontend_dir / "index.html"
+            if map_path.exists():
+                return FileResponse(map_path)
+            return HTMLResponse("<h1>meshwars</h1><p>map page not bundled</p>")
 
         @app.get("/join", response_class=HTMLResponse, include_in_schema=False)
         async def join_page():

@@ -1,0 +1,187 @@
+/* MeshWars: styles for the / landing page (frontend/landing.html).
+   Matches the existing dark theme (see join.css / mc.css) -- self-contained,
+   no external fonts, libraries, or CDN assets. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #0a0a0a;
+  color: #ddd;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.landing-wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 16px 16px 64px;
+}
+
+/* ---- nav, shared look with join.html / index.html ------------------- */
+.mw-nav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+}
+
+.mw-nav a {
+  padding: 6px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #999;
+  text-decoration: none;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a1a;
+}
+
+.mw-nav a:hover { background: #262626; color: #e8a735; }
+.mw-nav a.active { color: #e8a735; border-color: #e8a735; }
+
+/* ---- header ----------------------------------------------------------- */
+.landing-header h1 {
+  margin: 0 0 4px;
+  font-size: 28px;
+  letter-spacing: 0.02em;
+  color: #e8a735;
+}
+
+.landing-tagline {
+  margin: 0 0 20px;
+  color: #aaa;
+  font-size: 14px;
+}
+
+/* ---- panels ------------------------------------------------------------ */
+.landing-panel {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.landing-panel-title {
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #e8a735;
+  margin-bottom: 8px;
+}
+
+.landing-panel p {
+  margin: 0 0 10px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #ccc;
+}
+.landing-panel p:last-child { margin-bottom: 0; }
+
+.landing-list {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #ccc;
+}
+.landing-list li { margin-bottom: 8px; }
+.landing-list li:last-child { margin-bottom: 0; }
+
+/* ---- protocol cards ----------------------------------------------------- */
+.protocol-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.protocol-card {
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+
+.protocol-card-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: #e8a735;
+  margin-bottom: 6px;
+}
+
+.protocol-card p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #bbb;
+}
+
+/* ---- join steps ----------------------------------------------------------- */
+.landing-steps {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #ccc;
+}
+.landing-steps li { margin-bottom: 6px; }
+.landing-steps li:last-child { margin-bottom: 0; }
+
+.landing-steps a {
+  color: #e8a735;
+}
+
+.landing-warnings {
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.landing-warnings p {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: #bbb;
+}
+.landing-warnings p:last-child { margin-bottom: 0; }
+
+.landing-join-cta {
+  display: block;
+  text-align: center;
+  background: #2a2a2a;
+  color: #e8a735;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.landing-join-cta:hover { background: #333; }
+
+/* ---- links list ----------------------------------------------------------- */
+.landing-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.landing-links li {
+  margin-bottom: 10px;
+}
+.landing-links li:last-child { margin-bottom: 0; }
+
+.landing-links a {
+  color: #e8a735;
+  font-weight: 700;
+  font-size: 14px;
+  text-decoration: none;
+}
+.landing-links a:hover { text-decoration: underline; }
+
+.landing-link-desc {
+  display: block;
+  color: #999;
+  font-size: 12px;
+  margin-top: 2px;
+}

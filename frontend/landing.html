@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <title>MeshWars</title>
+  <link rel="stylesheet" href="/static/landing.css" />
+</head>
+<body>
+
+  <main class="landing-wrap">
+
+    <nav class="mw-nav">
+      <a href="/" class="active">Home</a>
+      <a href="/map">Map</a>
+      <a href="/join">Join</a>
+    </nav>
+
+    <header class="landing-header">
+      <h1>MeshWars</h1>
+      <p class="landing-tagline">Teams claim 300 metre squares by reaching the mesh from them.</p>
+    </header>
+
+    <section class="landing-panel">
+      <div class="landing-panel-title">What the game is</div>
+      <p>Players are on one of seven teams. The map is divided into squares roughly 300 metres across. You claim a square for your team by being in it and hearing the mesh from it. Teams take squares from each other. The team holding the most squares when a season ends wins.</p>
+    </section>
+
+    <section class="landing-panel">
+      <div class="landing-panel-title">How scoring works</div>
+      <ul class="landing-list">
+        <li>You claim a square by hearing repeaters from it. Each repeater a ping hears is worth a tenth of a point, up to one point per ping.</li>
+        <li>A ping that hears no repeaters scores nothing and claims nothing. Being somewhere is not enough &mdash; you have to reach the mesh.</li>
+        <li>The first team to paint an unclaimed square takes it.</li>
+        <li>A square that has just been captured cannot be taken for fifteen minutes, no matter what.</li>
+        <li>After that it falls to whoever out-scores the team currently holding it. Only the holder's score matters, not every other team's.</li>
+        <li>The first time a new person paints a square for their team, it is worth an extra half point. More people beats one person going back and forth.</li>
+        <li>The same person cannot repaint the same square within five minutes.</li>
+        <li>Scores fade over time, so held ground has to be revisited.</li>
+      </ul>
+    </section>
+
+    <section class="landing-panel">
+      <div class="landing-panel-title">The two protocols</div>
+      <div class="protocol-cards">
+        <div class="protocol-card">
+          <div class="protocol-card-title">MeshCore</div>
+          <p>Playable now. Your position comes from the MeshMapper wardriving app, which forwards a copy of your wardrive to MeshWars.</p>
+        </div>
+        <div class="protocol-card">
+          <div class="protocol-card-title">Meshtastic</div>
+          <p>The Meshtastic board currently runs on the older system, where nodes are picked up automatically from public packet data rather than by registering. Registering a Meshtastic node now binds it, ready for when that changes over.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="landing-panel">
+      <div class="landing-panel-title">How to join</div>
+      <ol class="landing-steps">
+        <li>Get the invite code from whoever invited you.</li>
+        <li>Register at <a href="/join">/join</a>, pick a name and a team colour.</li>
+        <li>Save the API key you are given. It is shown once.</li>
+        <li>Put the endpoint and key into MeshMapper under Settings, then API Endpoints.</li>
+        <li>Start a wardriving session and drive.</li>
+      </ol>
+      <div class="landing-warnings">
+        <p>This does not replace MeshMapper &mdash; your standing there is unaffected.</p>
+        <p>You need an active wardriving session running for anything to be sent.</p>
+        <p>&quot;Include Contact Key&quot; must stay on.</p>
+      </div>
+      <a href="/join" class="landing-join-cta">Join MeshWars</a>
+    </section>
+
+    <section class="landing-panel">
+      <div class="landing-panel-title">Play area</div>
+      <p>Ontario, Oregon in the northwest to Provo, Utah in the southeast. Nothing outside it counts.</p>
+    </section>
+
+    <section class="landing-panel">
+      <div class="landing-panel-title">Links</div>
+      <ul class="landing-links">
+        <li>
+          <a href="https://meshtastic.org" target="_blank" rel="noopener noreferrer">Meshtastic</a>
+          <span class="landing-link-desc">The open source mesh radio project the Meshtastic board is built on.</span>
+        </li>
+        <li>
+          <a href="https://meshcore.io" target="_blank" rel="noopener noreferrer">MeshCore</a>
+          <span class="landing-link-desc">The open source mesh radio project the MeshCore board is built on.</span>
+        </li>
+        <li>
+          <a href="https://meshmapper.net" target="_blank" rel="noopener noreferrer">MeshMapper</a>
+          <span class="landing-link-desc">The wardriving app that sends your position to MeshWars.</span>
+        </li>
+        <li>
+          <a href="https://meshview.freq51.net" target="_blank" rel="noopener noreferrer">MeshView</a>
+          <span class="landing-link-desc">The public Meshtastic packet data the Meshtastic board is built from.</span>
+        </li>
+      </ul>
+    </section>
+
+  </main>
+
+</body>
+</html>
