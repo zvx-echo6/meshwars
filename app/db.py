@@ -157,6 +157,88 @@ CREATE TABLE IF NOT EXISTS processed_packet (
     packet_id   INTEGER PRIMARY KEY,
     processed_at INTEGER NOT NULL
 );
+
+-- ---------------------------------------------------------------------
+-- Player identity and MeshCore ingest tables, added in Phase 2.
+-- Nothing reads from these yet.
+-- ---------------------------------------------------------------------
+
+-- One row per registered person.
+CREATE TABLE IF NOT EXISTS player (
+    player_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_name  TEXT NOT NULL,
+    team          TEXT NOT NULL,           -- 'RED' | 'BLUE'
+    created_at    INTEGER NOT NULL,
+    disabled_at   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_player_team ON player(team);
+
+-- Which radios belong to which person.
+CREATE TABLE IF NOT EXISTS player_node (
+    protocol   TEXT NOT NULL,              -- 'meshtastic' | 'meshcore'
+    node_ref   TEXT NOT NULL,
+    player_id  INTEGER NOT NULL,
+    bound_at   INTEGER NOT NULL,
+    PRIMARY KEY (protocol, node_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_player_node_player ON player_node(player_id);
+
+-- Hashed per-player key MeshMapper sends on every batch.
+CREATE TABLE IF NOT EXISTS api_key (
+    key_hash      TEXT PRIMARY KEY,
+    player_id     INTEGER NOT NULL,
+    issued_at     INTEGER NOT NULL,
+    revoked_at    INTEGER,
+    last_seen_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_api_key_player ON api_key(player_id);
+
+-- Hashed single-use 15 minute registration ticket.
+CREATE TABLE IF NOT EXISTS join_token (
+    token_hash   TEXT PRIMARY KEY,
+    player_id    INTEGER NOT NULL,
+    team         TEXT NOT NULL,            -- 'RED' | 'BLUE'
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    consumed_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_join_token_player ON join_token(player_id);
+
+-- Last known cell per player, for the implausible-speed check only.
+CREATE TABLE IF NOT EXISTS player_last_fix (
+    player_id  INTEGER NOT NULL,
+    protocol   TEXT NOT NULL,
+    cell_id    TEXT NOT NULL,
+    ts         INTEGER NOT NULL,
+    PRIMARY KEY (player_id, protocol)
+);
+
+-- One row per accepted ping; serves both duplicate detection and the
+-- per-cell cooldown.
+CREATE TABLE IF NOT EXISTS player_cell_ping (
+    player_id  INTEGER NOT NULL,
+    protocol   TEXT NOT NULL,
+    cell_id    TEXT NOT NULL,
+    ts         INTEGER NOT NULL,
+    seen_at    INTEGER NOT NULL,
+    PRIMARY KEY (player_id, protocol, cell_id, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_player_cell_ping_seen ON player_cell_ping(seen_at);
+
+-- Per-player per-day counters, so we can tell a player why they are not
+-- scoring.
+CREATE TABLE IF NOT EXISTS player_ingest_stat (
+    player_id          INTEGER NOT NULL,
+    protocol           TEXT NOT NULL,
+    day                INTEGER NOT NULL,
+    batches            INTEGER NOT NULL DEFAULT 0,
+    pings_accepted     INTEGER NOT NULL DEFAULT 0,
+    pings_no_contact   INTEGER NOT NULL DEFAULT 0,
+    pings_wrong_owner  INTEGER NOT NULL DEFAULT 0,
+    pings_duplicate    INTEGER NOT NULL DEFAULT 0,
+    pings_bad_coord    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (player_id, protocol, day)
+);
 """
 
 
