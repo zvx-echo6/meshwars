@@ -61,19 +61,6 @@ body {
   margin: 0 auto;
 }
 
-.landing-hero .landing-tagline {
-  margin: 20px auto 0;
-  max-width: 34em;
-}
-
-/* ---- header ----------------------------------------------------------- */
-.landing-tagline {
-  margin: 0 0 20px;
-  color: #aaa;
-  font-size: 0.875rem;
-  text-align: center;
-}
-
 /* ---- live numbers band --------------------------------------------------
    Real-time figures fetched by about.js from the existing /api/mc/scores
    and /api/mc/players endpoints. Every value starts as an em dash in the

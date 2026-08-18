@@ -39,10 +39,10 @@ const REFRESH_INTERVAL_MS = 30000;
 // framing the MeshCore board or a player search result. A board (or a
 // single player) holding only one or two 300m cells has a tiny bounds
 // box -- fitting to it with no cap zooms in far enough that a visitor
-// sees one giant coloured rectangle filling the screen with no
+// sees one giant colored rectangle filling the screen with no
 // surrounding context. At zoom 13 a 300m square is small but clearly
-// visible with several kilometres of context around it, which reads as
-// a game board rather than a coloured blob. Keep this even once the
+// visible with several kilometers of context around it, which reads as
+// a game board rather than a colored blob. Keep this even once the
 // board is full and every fit naturally lands well under this cap --
 // it's the sparse early board (and any single-player search) this
 // exists to protect against, and that stops being visible from the UI
@@ -54,7 +54,7 @@ const MAX_FIT_ZOOM = 13;
 const NARROW_BREAKPOINT_PX = 600;
 
 // Escapes text destined for an HTML string. display_name and team are
-// attacker-controlled (a MeshCore XSS bug hit ~20 analyser sites this
+// attacker-controlled (a MeshCore XSS bug hit ~20 analyzer sites this
 // spring) -- every interpolated value that goes into an HTML string in
 // this file must pass through this first (or use textContent instead
 // of building HTML at all).

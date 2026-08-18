@@ -468,7 +468,7 @@ async function handleStatusSubmit(e) {
     });
 
     if (res.status === 401) {
-      showStatusError('That key was not recognised. Double-check you copied it correctly.');
+      showStatusError('That key was not recognized. Double-check you copied it correctly.');
       return;
     }
     if (res.status === 403) {
