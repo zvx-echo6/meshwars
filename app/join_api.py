@@ -181,6 +181,15 @@ async def join(request: Request) -> JSONResponse:
     if protocol not in ("mc", "mt"):
         return JSONResponse({"error": "invalid protocol"}, status_code=400)
 
+    # Meshtastic registration binds a radio but cannot yet affect the
+    # Meshtastic board, which still picks nodes up automatically -- see
+    # settings.join_meshtastic_enabled. Enforced here regardless of what
+    # any form shows; a disabled control in a page is not a restriction.
+    if protocol == "mt" and not settings.join_meshtastic_enabled:
+        return JSONResponse(
+            {"error": "Meshtastic registration is not open yet"}, status_code=503
+        )
+
     # 6. node_ref, required and normalized only for meshtastic.
     node_ref = None
     if protocol == "mt":

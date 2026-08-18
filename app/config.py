@@ -117,6 +117,14 @@ class Settings(BaseSettings):
     join_rate_limit_window_seconds: int = 600
     public_host: str = "meshwars.com"   # used to build the config link
 
+    # Registering a Meshtastic node (protocol "mt") binds the radio but
+    # cannot affect the Meshtastic board -- that board still picks nodes
+    # up automatically rather than from player registrations. Offering it
+    # as a working choice would mislead people, so it is disabled until
+    # the Meshtastic board moves onto the player model. Setting this true
+    # re-enables it with no code change.
+    join_meshtastic_enabled: bool = False
+
     # Admin door (/admin, /api/admin/*): lists players and keys, and can
     # revoke a key or disable a player. There is no other authentication
     # anywhere in this application -- this token is the whole of it, so

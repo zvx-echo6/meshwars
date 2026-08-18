@@ -82,6 +82,7 @@ async def config() -> dict:
         "maxDistanceMiles": 0,
         "meshview_url": _settings.meshview_url,
         "mc_default_view": _settings.mc_default_view,
+        "join_meshtastic_enabled": _settings.join_meshtastic_enabled,
         "play_area": {
             "north": _settings.play_area_north,
             "south": _settings.play_area_south,
