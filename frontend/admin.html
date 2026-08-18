@@ -94,6 +94,38 @@
       border-color: #663333;
     }
 
+    /* Delete is permanent, unlike revoke (a key) or disable (reversible) --
+       filled solid red rather than outlined, so it cannot be mistaken for
+       either at a glance or hit by accident. */
+    .admin-btn-delete {
+      background: #5a1f1f;
+      color: #ffd6d6;
+      border-color: #7a2b2b;
+    }
+    .admin-btn-delete:hover {
+      background: #6e2626;
+    }
+
+    .admin-player-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .admin-delete-result {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #ccc;
+      background: #0a0a0a;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 8px 10px;
+      display: none;
+    }
+    .admin-delete-result div {
+      padding: 1px 0;
+    }
+
     .admin-status {
       margin-top: 10px;
       font-size: 12px;
@@ -226,6 +258,7 @@
     <section class="admin-panel">
       <div class="admin-panel-title">Players</div>
       <div id="players"></div>
+      <div id="delete-result" class="admin-delete-result"></div>
     </section>
 
   </main>
@@ -242,6 +275,7 @@ var els = {
   loadBtn: document.getElementById('load-btn'),
   status: document.getElementById('status'),
   players: document.getElementById('players'),
+  deleteResult: document.getElementById('delete-result'),
 };
 
 function setStatus(msg, isError) {
@@ -334,6 +368,60 @@ async function togglePlayer(player, btn) {
   }
 }
 
+// Table names in the order the server reports them, paired with a plain
+// English label -- the operator sees consequences, not raw JSON keys.
+var DELETE_COUNT_LABELS = [
+  ['player', 'player record'],
+  ['api_key', 'API key(s)'],
+  ['player_node', 'radio binding(s)'],
+  ['player_cell_ping', 'location ping(s)'],
+  ['player_ingest_stat', 'ingest stat row(s)'],
+  ['mc_tile_unique_painter', 'unique-painter credit(s)'],
+  ['mc_tile', 'square(s) they held'],
+  ['mc_tile_score', 'square score row(s)'],
+  ['mc_tile_capture', 'square capture-window row(s)'],
+  ['mc_tile_capture_log', 'square capture-log entrie(s)'],
+];
+
+function renderDeleteResult(displayName, counts) {
+  var container = els.deleteResult;
+  container.replaceChildren();
+  var title = el('div', { text: 'Deleted ' + displayName + ':' });
+  title.style.fontWeight = '700';
+  title.style.marginBottom = '4px';
+  container.appendChild(title);
+  DELETE_COUNT_LABELS.forEach(function (pair) {
+    var key = pair[0], label = pair[1];
+    var n = counts && typeof counts[key] === 'number' ? counts[key] : 0;
+    container.appendChild(el('div', { text: n + ' ' + label }));
+  });
+  container.style.display = 'block';
+}
+
+async function deletePlayer(player, btn) {
+  var typed = window.prompt(
+    'Type "' + player.display_name + '" exactly to permanently delete this player. ' +
+    'This removes their account, keys, radios, and every square they hold. This cannot be undone.'
+  );
+  if (typed === null) return; // cancelled
+  if (typed.length === 0) return; // nothing entered, do not send the request
+
+  btn.disabled = true;
+  try {
+    var result = await apiCall('/api/admin/player/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_id: player.player_id, display_name: typed }),
+    });
+    setStatus('Deleted ' + player.display_name, false);
+    renderDeleteResult(player.display_name, result.counts);
+    await loadPlayers();
+  } catch (e) {
+    setStatus('Delete failed: ' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
 function renderPlayer(player) {
   var card = el('div', { className: 'admin-player-card' });
 
@@ -371,7 +459,18 @@ function renderPlayer(player) {
   });
   toggleBtn.type = 'button';
   toggleBtn.addEventListener('click', function () { togglePlayer(player, toggleBtn); });
-  card.appendChild(toggleBtn);
+
+  var deleteBtn = el('button', {
+    className: 'admin-btn admin-btn-delete',
+    text: 'Delete player',
+  });
+  deleteBtn.type = 'button';
+  deleteBtn.addEventListener('click', function () { deletePlayer(player, deleteBtn); });
+
+  var actions = el('div', { className: 'admin-player-actions' });
+  actions.appendChild(toggleBtn);
+  actions.appendChild(deleteBtn);
+  card.appendChild(actions);
 
   return card;
 }
