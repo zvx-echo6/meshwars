@@ -17,16 +17,31 @@ programming against a real failure mode.
 from __future__ import annotations
 
 import sqlite3
+import time
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .config import settings
 from .db import connect
 from .grid import cell_bounds
+from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .mc_scoring import team_tile_counts
 
 router = APIRouter()
+
+# ---- status-check rate limiting ---------------------------------------
+#
+# Bounded per-address tracking, same pattern as app/join_api.py's
+# _attempts/_rate_limited (itself modeled on McIngestor._key_cache in
+# app/mc_ingest.py): every distinct client IP that hits this public,
+# key-authenticated-but-still-abusable endpoint gets a tracking entry.
+# Sweep stale entries first when the cap is hit, and only clear the
+# whole dict if that alone doesn't bring it back under the cap.
+_STATUS_RATE_LIMIT_MAX_TRACKED = 10000
+
+_status_attempts: dict[str, list[float]] = {}
 
 # Fallback roster used only if `settings` does not (yet) expose a
 # MeshCore team list, or exposes it under a name this module doesn't
@@ -56,6 +71,107 @@ def _team_list() -> list[str]:
             if parsed:
                 return parsed
     return list(_FALLBACK_TEAMS)
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _status_rate_limited(ip: str) -> bool:
+    """True if `ip` has used up its /api/mc/status budget for the
+    current window. Records this attempt (by timestamp) when allowed.
+    """
+    now = time.monotonic()
+    window = settings.mc_status_rate_limit_window_seconds
+    limit = settings.mc_status_rate_limit_attempts
+
+    if len(_status_attempts) >= _STATUS_RATE_LIMIT_MAX_TRACKED:
+        stale = [
+            k for k, times in _status_attempts.items()
+            if not times or now - times[-1] >= window
+        ]
+        for k in stale:
+            del _status_attempts[k]
+        if len(_status_attempts) >= _STATUS_RATE_LIMIT_MAX_TRACKED:
+            _status_attempts.clear()
+
+    times = [t for t in _status_attempts.get(ip, []) if now - t < window]
+    if len(times) >= limit:
+        _status_attempts[ip] = times
+        return True
+    times.append(now)
+    _status_attempts[ip] = times
+    return False
+
+
+def _relative_time(now_ts: int, then_ts: int) -> str:
+    """Human phrase for the diagnosis sentence, e.g. "3 minutes ago"."""
+    delta = max(0, now_ts - then_ts)
+    if delta < 60:
+        return "just now"
+    minutes = delta // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def _diagnose(alltime: dict, squares_held: int, last_batch_at: int | None, now_ts: int) -> tuple[str, str]:
+    """Work out, server-side, why (if at all) a player isn't scoring.
+
+    Applied in order, first match wins -- see the counters this reads
+    in player_ingest_stat, written by app/mc_ingest.py's
+    _process_one_ping(). `alltime` is the player's all-time totals
+    (not just today), because "never received anything", "only ever
+    no-contact", etc. describe a standing setup problem, not a bad day.
+    """
+    total_pings = (
+        alltime["pings_bad_coord"] + alltime["pings_out_of_area"]
+        + alltime["pings_no_contact"] + alltime["pings_wrong_owner"]
+        + alltime["pings_duplicate"] + alltime["pings_accepted"]
+    )
+
+    if alltime["batches"] == 0:
+        return "never_received", (
+            "MeshWars has never received anything from your app. Check that "
+            "Custom API Endpoint is switched on in MeshMapper, that the URL "
+            "is right, and that a wardriving session is actually running."
+        )
+
+    if total_pings > 0 and alltime["pings_no_contact"] == total_pings:
+        return "no_contact_key", (
+            "Your batches are arriving but none of the pings can be "
+            "attributed to you. Turn on Include Contact Key in MeshMapper."
+        )
+
+    if total_pings > 0 and alltime["pings_out_of_area"] == total_pings:
+        return "out_of_area", (
+            "Your positions are outside the play area, which is Southern "
+            "Idaho and Northern Utah."
+        )
+
+    if alltime["pings_wrong_owner"] > 0:
+        return "wrong_owner", (
+            "A radio reporting under your key is registered to someone "
+            "else. Your key may have been shared or copied."
+        )
+
+    if (
+        alltime["pings_accepted"] > 0
+        and alltime["pings_no_repeaters"] == alltime["pings_accepted"]
+        and squares_held == 0
+    ):
+        return "no_repeaters", (
+            "Everything is working. Your positions are arriving, but none "
+            "of them heard a repeater, so no squares were claimed. That "
+            "means you are out of range of the mesh, not misconfigured."
+        )
+
+    when = _relative_time(now_ts, last_batch_at) if last_batch_at else "never"
+    return "ok", f"Working. Last heard {when}. You hold {squares_held} squares."
 
 
 def _safe_query(fn):
@@ -376,3 +492,160 @@ async def mc_cell(cell_id: str):
     if detail is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return detail
+
+
+_STAT_COLUMNS = (
+    "batches, pings_accepted, pings_no_contact, pings_wrong_owner, "
+    "pings_duplicate, pings_bad_coord, pings_out_of_area, pings_no_repeaters"
+)
+_STAT_ZERO_ROW = {
+    "batches": 0, "pings_accepted": 0, "pings_no_contact": 0,
+    "pings_wrong_owner": 0, "pings_duplicate": 0, "pings_bad_coord": 0,
+    "pings_out_of_area": 0, "pings_no_repeaters": 0,
+}
+
+
+def _counters_out(row) -> dict:
+    return {
+        "batches": row["batches"],
+        "accepted": row["pings_accepted"],
+        "no_contact": row["pings_no_contact"],
+        "wrong_owner": row["pings_wrong_owner"],
+        "duplicate": row["pings_duplicate"],
+        "bad_coord": row["pings_bad_coord"],
+        "out_of_area": row["pings_out_of_area"],
+        "no_repeaters": row["pings_no_repeaters"],
+    }
+
+
+@router.post("/api/mc/status")
+async def mc_status(request: Request) -> JSONResponse:
+    """Lets a player check whether their wardriving app is actually
+    reaching us. Every failure mode is already recorded in
+    player_ingest_stat and api_key.last_seen_at -- this reads it back
+    and works out server-side which one (if any) explains what the
+    player is seeing, so the page only has to display it.
+
+    The key arrives in the X-API-Key header on a POST, the same as
+    /api/mc/ingest, and for the same reason: a GET would put the key in
+    the URL, where it can land in a server access log, browser history,
+    or a Referer header. Checking status is deliberately not usage --
+    this never touches api_key.last_seen_at.
+    """
+    ip = _client_ip(request)
+    if _status_rate_limited(ip):
+        return JSONResponse({"error": "too many attempts, try again later"}, status_code=429)
+
+    raw_key = request.headers.get("X-API-Key", "")
+    if not raw_key:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    ingestor = request.app.state.mc_ingestor
+    auth = await ingestor.authenticate(raw_key)
+    if auth.status in ("not_found", "revoked"):
+        # Generic message for both -- don't reveal whether a key exists.
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if auth.status == "disabled":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    player_id = auth.player_id
+    now_ts = int(time.time())
+
+    conn = connect()
+    try:
+        player = conn.execute(
+            "SELECT display_name, team FROM player WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()
+
+        radio_rows = conn.execute(
+            "SELECT protocol, node_ref FROM player_node WHERE player_id = ? ORDER BY bound_at",
+            (player_id,),
+        ).fetchall()
+
+        last_batch_at = conn.execute(
+            "SELECT MAX(last_seen_at) AS ts FROM api_key WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()["ts"]
+
+        now_dt = datetime.now(timezone.utc)
+        today = int(now_dt.strftime("%Y%m%d"))
+        week_start = int((now_dt.date() - timedelta(days=6)).strftime("%Y%m%d"))
+
+        today_row = conn.execute(
+            f"SELECT {_STAT_COLUMNS} FROM player_ingest_stat "
+            " WHERE player_id = ? AND protocol = ? AND day = ?",
+            (player_id, MC_PROTOCOL, today),
+        ).fetchone()
+
+        week_row = conn.execute(
+            "SELECT COALESCE(SUM(batches),0) AS batches, "
+            "       COALESCE(SUM(pings_accepted),0) AS pings_accepted, "
+            "       COALESCE(SUM(pings_no_contact),0) AS pings_no_contact, "
+            "       COALESCE(SUM(pings_wrong_owner),0) AS pings_wrong_owner, "
+            "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
+            "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
+            "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ? "
+            "    AND day BETWEEN ? AND ?",
+            (player_id, MC_PROTOCOL, week_start, today),
+        ).fetchone()
+
+        alltime_row = conn.execute(
+            "SELECT COALESCE(SUM(batches),0) AS batches, "
+            "       COALESCE(SUM(pings_accepted),0) AS pings_accepted, "
+            "       COALESCE(SUM(pings_no_contact),0) AS pings_no_contact, "
+            "       COALESCE(SUM(pings_wrong_owner),0) AS pings_wrong_owner, "
+            "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
+            "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
+            "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ?",
+            (player_id, MC_PROTOCOL),
+        ).fetchone()
+
+        # squares held: same landing-order guard as mc_find() above -- the
+        # mc_tile schema is not part of the always-present core tables.
+        squares_held = 0
+        try:
+            season = _active_mc_season(conn)
+            if season:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM mc_tile WHERE season_id = ? AND last_player_id = ?",
+                    (season["id"], player_id),
+                ).fetchone()
+                squares_held = row["n"]
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+            squares_held = 0
+    finally:
+        conn.close()
+
+    today_out = _counters_out(today_row) if today_row else _counters_out(_STAT_ZERO_ROW)
+
+    alltime = {
+        "batches": alltime_row["batches"],
+        "pings_accepted": alltime_row["pings_accepted"],
+        "pings_no_contact": alltime_row["pings_no_contact"],
+        "pings_wrong_owner": alltime_row["pings_wrong_owner"],
+        "pings_duplicate": alltime_row["pings_duplicate"],
+        "pings_bad_coord": alltime_row["pings_bad_coord"],
+        "pings_out_of_area": alltime_row["pings_out_of_area"],
+        "pings_no_repeaters": alltime_row["pings_no_repeaters"],
+    }
+    code, message = _diagnose(alltime, squares_held, last_batch_at, now_ts)
+
+    return {
+        "display_name": player["display_name"],
+        "team": player["team"],
+        "radios": [
+            {"protocol": r["protocol"], "node_ref": r["node_ref"]} for r in radio_rows
+        ],
+        "last_batch_at": last_batch_at,
+        "today": today_out,
+        "last_7_days": _counters_out(week_row),
+        "squares_held": squares_held,
+        "diagnosis": {"code": code, "message": message},
+    }

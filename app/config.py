@@ -125,6 +125,14 @@ class Settings(BaseSettings):
     # as join_invite_code above.
     admin_token: str = ""
 
+    # Rate limit on the status-check endpoint (/api/mc/status), keyed
+    # per client address rather than per key -- a caller with no key,
+    # or the wrong one, still costs us a request, and this is the same
+    # bounded per-address limiter pattern app/join_api.py already uses
+    # for /api/join, not a second mechanism.
+    mc_status_rate_limit_attempts: int = 30
+    mc_status_rate_limit_window_seconds: int = 60
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
