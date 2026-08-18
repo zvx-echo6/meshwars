@@ -47,44 +47,119 @@ _KEY_CACHE_MAX = 10000
 # needs the same bound for the same reason.
 _RATE_LIMIT_MAX_TRACKED = 10000
 
-# Cap on how many comma-separated repeater entries count_repeaters() will
+# Cap on how many comma-separated repeater entries parse_repeaters() will
 # look at in a "heard_repeats" string. This field is attacker-controlled
 # input from the public internet; without a cap, a single crafted batch
 # could carry an enormous string and burn CPU parsing it.
 _MAX_PARSED_REPEATERS = 64
 
 
-def count_repeaters(ping: dict) -> int:
-    """Return how many distinct repeaters this ping reached, from
-    whichever field its ping type uses:
+@dataclass(frozen=True)
+class RepeaterEntry:
+    """One repeater identity observed in a single ping, plus whatever
+    signal/identity fields that ping type carries for it.
+
+    `kind` is the crucial distinction this whole module is built around,
+    and it must never be collapsed:
+
+    - "direct": from a DISC/TRACE ping. A measured relationship between
+      this position and this one named repeater -- local_snr,
+      local_rssi, and remote_snr describe that link directly. DISC pings
+      additionally carry public_key/node_type (TRACE does not).
+    - "heard": from a TX/RX ping's `heard_repeats` string. This
+      repeater's id came back through the mesh, possibly over multiple
+      hops -- it describes the network's reach from this square, not
+      necessarily a direct line to the position. heard_snr is whatever
+      SNR that string reported for it.
+
+    Conflating "direct" and "heard" observations would make someone
+    standing beneath their own well-connected repeater indistinguishable
+    from someone on a ridge with genuine multi-hop reach -- so callers
+    must always keep direct_count and heard_count (see app/db.py's
+    repeater_observation table) separate, never summed into one figure.
+    """
+    repeater_id: str
+    kind: str  # "direct" | "heard"
+    local_snr: float | None = None
+    local_rssi: float | None = None
+    remote_snr: float | None = None
+    heard_snr: float | None = None
+    public_key: str | None = None
+    node_type: str | None = None
+
+
+def _coerce_float(value: object) -> float | None:
+    """Best-effort float, or None for anything that isn't a plain finite
+    number. Attacker-controlled input -- never raises.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):  # NaN / inf guard
+        return None
+    return f
+
+
+def _coerce_str(value: object) -> str | None:
+    """A non-empty string, or None. Attacker-controlled input -- never
+    raises.
+    """
+    if isinstance(value, str) and value and value != "None":
+        return value
+    return None
+
+
+def _parse_heard_snr(text: str) -> float | None:
+    """Parse the "<snr>" out of a "<id>(<snr>)" heard_repeats entry, given
+    the text after the "(". Malformed numbers are ignored, never raised
+    on -- this field is attacker-controlled input.
+    """
+    text = text.rstrip(")").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def parse_repeaters(ping: dict) -> list[RepeaterEntry]:
+    """Return the distinct repeaters this ping reached, with whatever
+    signal/identity detail its ping type carries, from whichever field
+    its ping type uses:
 
     - type "TX"/"RX": `heard_repeats`, a string like
       "a1b2(3.5),c3d4(-2.0)", or the literal "None" when nothing was
       heard. Each entry is a repeater id followed by an SNR in
-      parentheses; distinct ids are counted, SNR is ignored.
+      parentheses; distinct ids are kept as "heard" entries, deduped by
+      id (matching the id-count behaviour this replaces exactly).
     - type "DISC"/"TRACE": `repeater_id`, a single id, or the literal
-      "None" when the discovery failed.
+      "None" when the discovery failed. Kept as a single "direct" entry
+      carrying local_snr/local_rssi/remote_snr (and public_key/node_type
+      for DISC).
 
-    The literal "None", an empty string, and a missing field all count
-    as zero. This is attacker-controlled input from the public internet
-    -- malformed entries are ignored, never raised on, and parsing is
-    capped at _MAX_PARSED_REPEATERS entries.
+    The literal "None", an empty string, and a missing field all yield
+    an empty list. This is attacker-controlled input from the public
+    internet -- malformed entries are ignored, never raised on, and
+    parsing is capped at _MAX_PARSED_REPEATERS entries.
 
-    SNR is deliberately not used for anything, even though it's right
-    there in the string -- signal strength mostly reflects the antenna
-    someone is carrying, not the coverage they actually found, and
-    scoring on repeater count rather than signal quality was a
-    deliberate call.
+    count_repeaters() below is a thin wrapper -- len(parse_repeaters(...))
+    -- so scoring's repeater count and the observations recorded from
+    this same call can never drift apart from a second, separately
+    maintained parser.
     """
     if not isinstance(ping, dict):
-        return 0
+        return []
     ping_type = ping.get("type")
 
     if ping_type in ("TX", "RX"):
         heard = ping.get("heard_repeats")
         if not isinstance(heard, str) or not heard or heard == "None":
-            return 0
-        ids: set[str] = set()
+            return []
+        entries: dict[str, RepeaterEntry] = {}
         for entry in heard.split(",")[:_MAX_PARSED_REPEATERS]:
             entry = entry.strip()
             if not entry:
@@ -97,16 +172,125 @@ def count_repeaters(ping: dict) -> int:
             rid = entry[:paren].strip()
             if not rid:
                 continue
-            ids.add(rid)
-        return len(ids)
+            snr = _parse_heard_snr(entry[paren + 1:])
+            existing = entries.get(rid)
+            if existing is None:
+                entries[rid] = RepeaterEntry(repeater_id=rid, kind="heard", heard_snr=snr)
+            elif snr is not None and (existing.heard_snr is None or snr > existing.heard_snr):
+                # Same id repeated within one ping (e.g. two hops away by
+                # two different paths) -- keep the strongest SNR seen for
+                # it. Does not change the distinct-id count either way.
+                entries[rid] = RepeaterEntry(repeater_id=rid, kind="heard", heard_snr=snr)
+        return list(entries.values())
 
     if ping_type in ("DISC", "TRACE"):
         rid = ping.get("repeater_id")
         if not isinstance(rid, str) or not rid or rid == "None":
-            return 0
-        return 1
+            return []
+        return [RepeaterEntry(
+            repeater_id=rid,
+            kind="direct",
+            local_snr=_coerce_float(ping.get("local_snr")),
+            local_rssi=_coerce_float(ping.get("local_rssi")),
+            remote_snr=_coerce_float(ping.get("remote_snr")),
+            public_key=_coerce_str(ping.get("public_key")),
+            node_type=_coerce_str(ping.get("node_type")),
+        )]
 
-    return 0
+    return []
+
+
+def count_repeaters(ping: dict) -> int:
+    """Return how many distinct repeaters this ping reached.
+
+    SNR is deliberately not used for anything in the resulting count,
+    even though it's right there in the string -- signal strength mostly
+    reflects the antenna someone is carrying, not the coverage they
+    actually found, and scoring on repeater count rather than signal
+    quality was a deliberate call. (The signal values are still recorded
+    as observation evidence -- see record_repeater_observations below --
+    just never folded into score.)
+
+    This is a thin wrapper over parse_repeaters() rather than a second,
+    independent parser -- see that function's docstring for why.
+    """
+    return len(parse_repeaters(ping))
+
+
+# Upsert clauses shared by every repeater_observation write below. SQLite's
+# MAX(a, b) returns NULL if EITHER argument is NULL, which is wrong for
+# "keep the best value seen so far" once either side can be unset -- these
+# CASE expressions treat a NULL on either side as "no information," not as
+# a value that wins or loses the comparison.
+_BEST_SNR_UPDATE = (
+    "CASE WHEN excluded.{col} IS NULL THEN {col} "
+    "WHEN {col} IS NULL THEN excluded.{col} "
+    "ELSE MAX({col}, excluded.{col}) END"
+)
+
+
+def record_repeater_observations(
+    conn, protocol: str, cell: str, entries: list[RepeaterEntry], ts: int,
+) -> None:
+    """Record that these repeaters were audible from this cell, at cell
+    granularity only -- no player id, no raw coordinate, ever (see
+    app/db.py's repeater_observation/repeater_identity tables).
+
+    Called for every ping that reaches this point in _process_one_ping --
+    i.e. every ping that has already passed coordinate validation, the
+    play-area check, the contact-key check, and the duplicate check --
+    INCLUDING pings that mc_scoring.apply_paint() will go on to reject
+    for the repaint cooldown. A cooldown means "this paint doesn't score
+    again yet," not "nothing was heard here" -- the square's audibility
+    is real evidence either way, so it must not be gated on the scoring
+    outcome. Caller already holds app.db's write lock and an open write
+    transaction on `conn`, same as mc_scoring.apply_paint -- this
+    function opens no connection and takes no lock of its own.
+
+    `entries` is whatever parse_repeaters(ping) returned for this ping --
+    direct_count/heard_count below come straight from each entry's
+    `kind`, never merged, per the module-level note on RepeaterEntry.
+    """
+    for e in entries:
+        direct_inc = 1 if e.kind == "direct" else 0
+        heard_inc = 1 if e.kind == "heard" else 0
+        conn.execute(
+            "INSERT INTO repeater_observation("
+            "  protocol, repeater_id, cell_id, first_seen, last_seen,"
+            "  direct_count, heard_count, best_local_snr, best_remote_snr, best_heard_snr"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(protocol, repeater_id, cell_id) DO UPDATE SET "
+            "  last_seen = MAX(last_seen, excluded.last_seen), "
+            "  direct_count = direct_count + excluded.direct_count, "
+            "  heard_count = heard_count + excluded.heard_count, "
+            f"  best_local_snr = {_BEST_SNR_UPDATE.format(col='best_local_snr')}, "
+            f"  best_remote_snr = {_BEST_SNR_UPDATE.format(col='best_remote_snr')}, "
+            f"  best_heard_snr = {_BEST_SNR_UPDATE.format(col='best_heard_snr')}",
+            (
+                protocol, e.repeater_id, cell, ts, ts,
+                direct_inc, heard_inc,
+                e.local_snr, e.remote_snr, e.heard_snr,
+            ),
+        )
+
+        # Identity (public_key/node_type) only ever comes from a DISC
+        # ping; TRACE also yields a "direct" entry but never carries
+        # those two fields (see RepeaterEntry/parse_repeaters), so this
+        # still records first_seen/last_seen for a TRACE sighting of a
+        # known repeater id without overwriting a real public_key/
+        # node_type with nulls -- COALESCE keeps whatever was already
+        # stored when the new value is null.
+        if e.kind == "direct":
+            conn.execute(
+                "INSERT INTO repeater_identity("
+                "  protocol, repeater_id, public_key, node_type, first_seen, last_seen"
+                ") VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(protocol, repeater_id) DO UPDATE SET "
+                "  last_seen = MAX(last_seen, excluded.last_seen), "
+                "  public_key = COALESCE(excluded.public_key, public_key), "
+                "  node_type = COALESCE(excluded.node_type, node_type)",
+                (protocol, e.repeater_id, e.public_key, e.node_type, ts, ts),
+            )
 
 
 def hash_secret(raw: str) -> str:
@@ -482,6 +666,21 @@ class McIngestor:
             counters["pings_duplicate"] += 1
             return
 
+        # 5b. Parse the repeater fields once here -- both the observation
+        # evidence recorded immediately below and the score computed in
+        # step 9 come from this same parse, so they can never drift apart.
+        #
+        # Recorded for every ping that reaches this line, i.e. every ping
+        # that has passed coordinate validation, the play-area check, the
+        # contact-key check, and the duplicate check above -- INCLUDING a
+        # ping that mc_scoring.apply_paint() (step 10, below) will go on
+        # to reject for the repaint cooldown. A cooldown blocks scoring,
+        # not what this square can actually hear -- that's still real
+        # evidence, so it is recorded before scoring even runs, and
+        # regardless of what scoring later decides.
+        entries = parse_repeaters(ping)
+        record_repeater_observations(conn, PROTOCOL, cell, entries, ts)
+
         # 6. Sanity gates -- log only, never reject; these need real data
         # to tune.
         last_fix = conn.execute(
@@ -528,9 +727,12 @@ class McIngestor:
         # 9. Repeaters heard -> points. A ping that reached zero repeaters
         # earns zero points -- it is still counted above as accepted (it
         # was a valid ping) but flagged here separately so a player can be
-        # told why it isn't scoring.
+        # told why it isn't scoring. `entries` was already parsed in step
+        # 5b (and its observations already recorded there); the count
+        # used for scoring is derived from that same list, never a second
+        # parse of the ping.
         points = min(
-            count_repeaters(ping) * settings.mc_points_per_repeater,
+            len(entries) * settings.mc_points_per_repeater,
             settings.mc_max_points_per_ping,
         )
         if points <= 0:

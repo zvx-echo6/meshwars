@@ -327,6 +327,65 @@ CREATE TABLE IF NOT EXISTS mc_tile_capture_log (
     PRIMARY KEY (season_id, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_mc_capture_log_cell ON mc_tile_capture_log(season_id, cell_id);
+
+-- ---------------------------------------------------------------------
+-- Repeater observation evidence. Purely data collection for now -- future
+-- work will generate points of interest from what a square can actually
+-- hear, instead of guessing, and that needs to know which repeaters are
+-- audible from where. Nothing here reads from these tables yet, nothing
+-- here changes scoring, and nothing here is new to the schema in the
+-- migration sense: both tables are brand new, so CREATE TABLE IF NOT
+-- EXISTS in SCHEMA is sufficient on its own -- there is no existing,
+-- already-deployed table shape to ALTER, which is the only reason an
+-- entry would need to go in MIGRATIONS instead.
+--
+-- A repeater can appear in a ping two different ways, and they mean
+-- different things -- this distinction is the entire point of splitting
+-- direct_count from heard_count below, and it must never be collapsed:
+--   * DISC/TRACE pings carry `repeater_id` plus local_snr, local_rssi,
+--     and remote_snr -- a directly measured relationship between this
+--     one position and this one named repeater.
+--   * TX/RX pings carry `heard_repeats`, e.g. "5331(12.50),a1b2(-3.0)"
+--     -- what came back through the mesh, which may include repeaters
+--     reached over multiple hops. This describes the network's reach
+--     from this square, not necessarily a direct line to the position.
+-- A wardriver standing beneath their own well-connected repeater would
+-- be indistinguishable from one on a ridge with genuine multi-hop reach
+-- if these were merged into one counter -- so they never are.
+-- ---------------------------------------------------------------------
+
+-- One row per (protocol, repeater_id, cell_id) ever observed. Cell-level
+-- only: no player id and no raw coordinate are stored here, matching the
+-- privacy rule the rest of MeshCore ingest already follows -- this is
+-- aggregate evidence about places, not a record of who was where.
+CREATE TABLE IF NOT EXISTS repeater_observation (
+    protocol        TEXT NOT NULL,
+    repeater_id     TEXT NOT NULL,
+    cell_id         TEXT NOT NULL,
+    first_seen      INTEGER NOT NULL,
+    last_seen       INTEGER NOT NULL,
+    direct_count    INTEGER NOT NULL DEFAULT 0,
+    heard_count     INTEGER NOT NULL DEFAULT 0,
+    best_local_snr  REAL,
+    best_remote_snr REAL,
+    best_heard_snr  REAL,
+    PRIMARY KEY (protocol, repeater_id, cell_id)
+);
+CREATE INDEX IF NOT EXISTS idx_repeater_obs_cell ON repeater_observation(protocol, cell_id);
+
+-- One row per (protocol, repeater_id) ever observed directly. Only
+-- DISC/TRACE pings carry public_key and node_type, so those columns are
+-- nullable and only ever filled in from those ping types; the most
+-- recently seen non-null values are kept.
+CREATE TABLE IF NOT EXISTS repeater_identity (
+    protocol    TEXT NOT NULL,
+    repeater_id TEXT NOT NULL,
+    public_key  TEXT,
+    node_type   TEXT,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    PRIMARY KEY (protocol, repeater_id)
+);
 """
 
 
