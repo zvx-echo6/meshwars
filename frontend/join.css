@@ -1,0 +1,241 @@
+/* MeshWars: styles for the /join registration page (frontend/join.js).
+   Matches the existing dark theme (see mc.css) -- self-contained, no
+   external fonts, libraries, or CDN assets. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #0a0a0a;
+  color: #ddd;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.join-wrap {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+.join-header h1 {
+  margin: 0 0 4px;
+  font-size: 26px;
+  letter-spacing: 0.02em;
+  color: #e8a735;
+}
+
+.join-tagline {
+  margin: 0 0 20px;
+  color: #aaa;
+  font-size: 14px;
+}
+
+.join-panel {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.join-panel-title {
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #e8a735;
+  margin-bottom: 8px;
+}
+
+.join-panel-subtitle {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #888;
+  margin: 14px 0 6px;
+}
+
+.join-play-area #play-area-text {
+  font-size: 13px;
+  color: #ccc;
+}
+
+.join-field {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: #999;
+}
+
+.join-field > span {
+  display: block;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 11px;
+}
+
+.join-field input[type="text"] {
+  width: 100%;
+  background: #0a0a0a;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.join-field input[type="text"]:focus {
+  outline: none;
+  border-color: #e8a735;
+}
+
+.hint {
+  font-size: 11px;
+  color: #888;
+  margin: 4px 0 0;
+}
+.hint code {
+  background: #0a0a0a;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.team-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 8px;
+}
+
+.team-swatch {
+  --swatch-color: #888;
+  background: #0a0a0a;
+  color: var(--swatch-color);
+  border: 1px solid var(--swatch-color);
+  border-radius: 4px;
+  padding: 8px 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.team-swatch:hover {
+  background: #151515;
+}
+
+.team-swatch.active {
+  background: var(--swatch-color);
+  color: #0a0a0a;
+}
+
+.protocol-picker {
+  display: flex;
+  gap: 16px;
+}
+
+.protocol-choice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #ddd;
+  cursor: pointer;
+}
+
+.protocol-block {
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: #bbb;
+}
+
+.protocol-block p {
+  margin: 0 0 8px;
+}
+.protocol-block p:last-child {
+  margin-bottom: 0;
+}
+
+#join-submit {
+  width: 100%;
+  background: #2a2a2a;
+  color: #e8a735;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+#join-submit:hover { background: #333; }
+#join-submit:disabled { opacity: 0.5; cursor: default; }
+
+.join-error {
+  background: #2a1414;
+  border: 1px solid #663333;
+  color: #f08080;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  margin-bottom: 14px;
+}
+
+.join-key-warning {
+  color: #ffdc00;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.copy-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.copy-row input {
+  flex: 1;
+  background: #0a0a0a;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.copy-row button {
+  background: #2a2a2a;
+  color: #e8a735;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.copy-row button:hover { background: #333; }
+
+.join-steps {
+  font-size: 12px;
+  color: #ccc;
+  padding-left: 20px;
+  margin: 8px 0 0;
+}
+.join-steps li {
+  margin-bottom: 4px;
+}
+
+.mc-dot-inline {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin: 0 6px;
+  vertical-align: middle;
+}

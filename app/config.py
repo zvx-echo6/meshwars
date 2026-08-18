@@ -98,6 +98,16 @@ class Settings(BaseSettings):
     play_area_west: float = -117.00  # western edge, degrees longitude
     play_area_east: float = -111.60  # eastern edge, degrees longitude
 
+    # Public self-registration (/api/join). Empty invite code disables
+    # registration entirely -- empty must mean off, never open, since we
+    # never want a blank submitted code to register as a "match" against
+    # a blank configured one. See the check at the top of join() in
+    # app/join_api.py.
+    join_invite_code: str = ""          # empty disables registration entirely
+    join_rate_limit_attempts: int = 5
+    join_rate_limit_window_seconds: int = 600
+    public_host: str = "meshwars.com"   # used to build the config link
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

@@ -91,8 +91,14 @@
   column-gap: 14px;
 }
 
+/* Fixed width (not just a min-width floor) so every row's count starts
+   at the same x-offset -- a flex item's content otherwise grows past
+   min-width for longer names ("YELLOW:", "PURPLE:"), which is what put
+   the right-hand column's numbers out of line with each other. */
 .mc-team-label {
-  min-width: 56px;
+  min-width: 64px;
+  flex: 0 0 64px;
+  white-space: nowrap;
 }
 
 .mc-team-count {

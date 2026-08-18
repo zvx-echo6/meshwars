@@ -82,6 +82,9 @@ let scoreboardControl = null;
 let scoreboardBody = null;
 let refreshTimer = null;
 let scoreboardEndsAt = null;
+// Play-area box from /config, loaded once at boot -- used to frame the
+// map when the MeshCore board has no owned cells yet (see refreshBoard).
+let playAreaBounds = null;
 
 // Show/hide the Meshtastic scoreboard control (Red/Blue/Neutral counts,
 // season countdown, node search, History/Roster, Top MQTT Feeders) while
@@ -179,6 +182,27 @@ async function loadDefaultMode() {
   return 'meshcore';
 }
 
+// Loaded once at boot, in parallel with loadDefaultMode(). If /config is
+// unreachable or play_area is missing, playAreaBounds stays null and
+// refreshBoard() simply leaves the map wherever it already is, same as
+// before this existed.
+async function loadPlayArea() {
+  try {
+    const res = await fetch('/config');
+    if (!res.ok) return;
+    const cfg = await res.json();
+    const pa = cfg.play_area;
+    if (
+      pa && typeof pa.north === 'number' && typeof pa.south === 'number' &&
+      typeof pa.west === 'number' && typeof pa.east === 'number'
+    ) {
+      playAreaBounds = L.latLngBounds([pa.south, pa.west], [pa.north, pa.east]);
+    }
+  } catch (e) {
+    // leave playAreaBounds null
+  }
+}
+
 // ===== Toggle control =====
 
 function buildToggleControl() {
@@ -247,7 +271,7 @@ function buildScoreboardControl() {
     div.innerHTML = `
       <div class="mc-row mc-title">MeshCore Territory</div>
       <div class="mc-scoreboard-body"></div>
-      <div class="mc-row mc-countdown">Ends in <span id="mc-countdown">--</span></div>
+      <div class="mc-row mc-countdown">Ends in&nbsp;<span id="mc-countdown">--</span></div>
       <div class="mc-row mc-lookup-row">
         <input type="text" id="mc-lookup-input" placeholder="player name" />
         <button type="button" id="mc-lookup-btn">Find</button>
@@ -635,7 +659,13 @@ async function refreshBoard(fitToBoard) {
     drawBoard(cells);
     if (fitToBoard) {
       const bounds = boardBounds(cells);
-      if (bounds && map) map.fitBounds(bounds, { padding: [24, 24] });
+      if (bounds && map) {
+        map.fitBounds(bounds, { padding: [24, 24] });
+      } else if (map && playAreaBounds) {
+        // No owned cells yet -- frame the configured play area instead
+        // of leaving the map wherever it happened to be.
+        map.fitBounds(playAreaBounds);
+      }
     }
   } catch (err) {
     console.warn('mc board refresh failed:', err);
@@ -717,7 +747,7 @@ async function boot() {
   // isn't the default view.
   await applyMatchedPanelWidth();
 
-  const defaultMode = await loadDefaultMode();
+  const [defaultMode] = await Promise.all([loadDefaultMode(), loadPlayArea()]);
   setMode(defaultMode);
 
   refreshTimer = setInterval(() => {

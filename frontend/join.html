@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <title>MeshWars &mdash; Join</title>
+  <link rel="stylesheet" href="/static/join.css" />
+</head>
+<body>
+
+  <main class="join-wrap">
+    <header class="join-header">
+      <h1>MeshWars</h1>
+      <p class="join-tagline">Teams claim 300 metre squares by reaching the mesh from them.</p>
+    </header>
+
+    <section class="join-panel join-play-area">
+      <div class="join-panel-title">Play area</div>
+      <div id="play-area-text">Loading&hellip;</div>
+    </section>
+
+    <section id="join-form-panel" class="join-panel">
+      <form id="join-form" novalidate autocomplete="off">
+        <div id="join-error" class="join-error" role="alert" hidden></div>
+
+        <label class="join-field">
+          <span>Invite code</span>
+          <input type="text" id="f-invite" autocomplete="off" required />
+        </label>
+
+        <label class="join-field">
+          <span>Display name</span>
+          <input type="text" id="f-name" maxlength="32" autocomplete="off" required />
+        </label>
+
+        <div class="join-field">
+          <span>Team</span>
+          <div id="team-picker" class="team-picker"></div>
+        </div>
+
+        <div class="join-field">
+          <span>Protocol</span>
+          <div class="protocol-picker">
+            <label class="protocol-choice">
+              <input type="radio" name="protocol" value="mc" checked />
+              <span>MeshCore</span>
+            </label>
+            <label class="protocol-choice">
+              <input type="radio" name="protocol" value="mt" />
+              <span>Meshtastic</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="mc-instructions" class="protocol-block">
+          <p>This does NOT replace MeshMapper. Your coverage data, points and leaderboard standing there are unaffected. MeshWars receives a copy.</p>
+          <p>You must have an ACTIVE wardriving session running for MeshWars to see anything.</p>
+          <p>&quot;Include Contact Key&quot; must stay ON, otherwise your pings cannot be attributed to you and will be discarded.</p>
+        </div>
+
+        <div id="mt-instructions" class="protocol-block" hidden>
+          <label class="join-field">
+            <span>Node ID</span>
+            <input type="text" id="f-node-ref" placeholder="!a1b2c3d4" autocomplete="off" />
+          </label>
+          <p class="hint">Looks like <code>!a1b2c3d4</code>.</p>
+          <p>Meshtastic scoring still runs on the older system today. Registering now binds your node ready for when it changes over, but does not yet affect the Meshtastic board.</p>
+        </div>
+
+        <button type="submit" id="join-submit">Join</button>
+      </form>
+    </section>
+
+    <section id="join-result-panel" class="join-panel" hidden></section>
+  </main>
+
+  <script src="/static/join.js" type="module"></script>
+</body>
+</html>

@@ -23,6 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .config import settings
 from .db import connect
+from .join_api import router as join_router
 from .mc_api import router as mc_router
 from .mc_ingest import hash_secret, log_raw_batch
 from .seasons import (
@@ -648,6 +649,7 @@ async def mc_ingest(request: Request) -> JSONResponse:
 def mount(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(mc_router)
+    app.include_router(join_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
@@ -660,3 +662,10 @@ def mount(app: FastAPI) -> None:
             if index_path.exists():
                 return FileResponse(index_path)
             return HTMLResponse("<h1>meshwars</h1><p>frontend not bundled</p>")
+
+        @app.get("/join", response_class=HTMLResponse, include_in_schema=False)
+        async def join_page():
+            join_path = frontend_dir / "join.html"
+            if join_path.exists():
+                return FileResponse(join_path)
+            return HTMLResponse("<h1>meshwars</h1><p>join page not bundled</p>")
