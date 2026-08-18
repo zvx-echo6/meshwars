@@ -120,6 +120,23 @@ function buildCopyRow(value) {
   return row;
 }
 
+function buildLabel(text) {
+  const label = document.createElement('div');
+  label.className = 'join-panel-subtitle';
+  label.textContent = text;
+  return label;
+}
+
+// config_link (built server-side by app/join_api.py's _config_link) is
+// always "meshmapper://custom-api?url=<host>/api/mc/ingest&key=<key>".
+// Method two (manual entry) needs just the "<host>/api/mc/ingest" part,
+// pulled out of that known, server-generated shape rather than
+// hardcoded here -- this stays correct if PUBLIC_HOST ever changes.
+function extractEndpointFromConfigLink(configLink) {
+  const match = /^meshmapper:\/\/custom-api\?url=([^&]+)&key=/.exec(configLink);
+  return match ? match[1] : null;
+}
+
 function renderResult(data) {
   document.getElementById('join-form-panel').hidden = true;
 
@@ -156,12 +173,21 @@ function renderResult(data) {
   panel.appendChild(buildCopyRow(data.key));
 
   if (data.config_link) {
-    const linkTitle = document.createElement('div');
-    linkTitle.className = 'join-panel-subtitle';
-    linkTitle.textContent = 'MeshMapper config link';
-    panel.appendChild(linkTitle);
+    const methodsTitle = document.createElement('div');
+    methodsTitle.className = 'join-panel-title';
+    methodsTitle.textContent = 'Set up MeshMapper';
+    panel.appendChild(methodsTitle);
 
+    // ---- Method one: import the link ----------------------------------
+    panel.appendChild(buildLabel('Method 1: import the link'));
     panel.appendChild(buildCopyRow(data.config_link));
+
+    const linkWarning = document.createElement('p');
+    linkWarning.className = 'join-key-warning';
+    linkWarning.textContent =
+      'This is a link for MeshMapper to import -- it is NOT a web address. ' +
+      'Do not paste it into a URL or endpoint field; that will not work.';
+    panel.appendChild(linkWarning);
 
     const steps = document.createElement('ol');
     steps.className = 'join-steps';
@@ -175,6 +201,33 @@ function renderResult(data) {
       steps.appendChild(li);
     });
     panel.appendChild(steps);
+
+    // ---- Method two: enter it by hand (more reliable) ------------------
+    const endpoint = extractEndpointFromConfigLink(data.config_link);
+    if (endpoint) {
+      panel.appendChild(
+        buildLabel('Method 2: enter it by hand (recommended -- more reliable)')
+      );
+
+      const endpointLabel = document.createElement('p');
+      endpointLabel.className = 'hint';
+      endpointLabel.textContent = 'Endpoint URL:';
+      panel.appendChild(endpointLabel);
+      panel.appendChild(buildCopyRow(endpoint));
+
+      const keyLabel = document.createElement('p');
+      keyLabel.className = 'hint';
+      keyLabel.textContent = 'API key:';
+      panel.appendChild(keyLabel);
+      panel.appendChild(buildCopyRow(data.key));
+
+      const schemeNote = document.createElement('p');
+      schemeNote.className = 'hint';
+      schemeNote.textContent =
+        `If the app refuses the URL without a scheme, use https://${endpoint} ` +
+        'instead. It must be HTTPS.';
+      panel.appendChild(schemeNote);
+    }
   }
 }
 
