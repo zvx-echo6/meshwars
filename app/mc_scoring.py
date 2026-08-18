@@ -5,10 +5,16 @@ shape, but working on flat grid cells and players instead of geohashes and
 radios, and supporting any number of teams instead of a fixed two.
 
 Each team has an independent score per cell that:
-- Increases by settings.mc_score_per_ping per qualifying paint
+- Increases, per qualifying paint, by the number of distinct repeaters
+  that ping heard times settings.mc_points_per_repeater, capped at
+  settings.mc_max_points_per_ping -- a ping that heard no repeaters
+  reached no one and earns nothing (see app/mc_ingest.py for where the
+  repeater count is parsed and turned into points before it reaches
+  apply_paint here)
 - Increases by settings.mc_score_per_unique_player the first time a given
   PLAYER from that team paints there (once per player, not per radio --
-  a player may own more than one MeshCore radio)
+  a player may own more than one MeshCore radio), but only on a paint
+  that itself scored points
 - Decays at settings.mc_score_decay_per_day per day toward zero (floor=0)
 
 Ownership rules:
@@ -54,6 +60,8 @@ SECONDS_PER_DAY = 86400.0
 class PaintResult:
     """Outcome of apply_paint(). outcome is one of:
     "cooldown"   -- same player repainted the same cell too soon; nothing changed.
+    "no_signal"  -- the ping heard zero repeaters, so it earned zero points;
+                    nothing painted, nothing captured, no scores touched.
     "reinforced" -- the painting team already owned the cell; ownership unchanged.
     "captured"   -- the cell had no owner yet and this paint took it.
     "attacked"   -- a different team owns the cell and this paint did not flip it
@@ -213,8 +221,16 @@ def apply_paint(
     team: str,
     cell_id: str,
     ts: int,
+    points: float,
 ) -> PaintResult:
     """Score one accepted ping against a cell and resolve ownership.
+
+    `points` is the score this specific ping earned -- repeaters heard
+    times settings.mc_points_per_repeater, capped at
+    settings.mc_max_points_per_ping, computed by the caller in
+    app/mc_ingest.py from the ping's repeater fields. A ping that heard
+    no repeaters reached no one, so points <= 0 here paints nothing,
+    captures nothing, and touches no scores at all.
 
     Caller must already hold app.db's write lock and have an open write
     transaction on `conn` -- this function does neither itself.
@@ -222,10 +238,13 @@ def apply_paint(
     if recently_painted(conn, player_id, cell_id, ts, settings.mc_cooldown_seconds):
         return PaintResult("cooldown", cell_id, team)
 
+    if points <= 0:
+        return PaintResult("no_signal", cell_id, team)
+
     # Effort score for this paint, plus the one-time unique-player bonus
     # the first time this player has painted this cell for this team.
     current = get_team_score(conn, season_id, cell_id, team, ts)
-    new_score = current + settings.mc_score_per_ping
+    new_score = current + points
     if is_first_paint_for_player(conn, season_id, cell_id, team, player_id, ts):
         new_score += settings.mc_score_per_unique_player
     upsert_team_score(conn, season_id, cell_id, team, new_score, ts)

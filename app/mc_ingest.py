@@ -42,6 +42,67 @@ _HOUSEKEEPING_INTERVAL_S = 3600  # at most once per hour
 # dict without bound and can exhaust process memory. This caps it.
 _KEY_CACHE_MAX = 10000
 
+# Cap on how many comma-separated repeater entries count_repeaters() will
+# look at in a "heard_repeats" string. This field is attacker-controlled
+# input from the public internet; without a cap, a single crafted batch
+# could carry an enormous string and burn CPU parsing it.
+_MAX_PARSED_REPEATERS = 64
+
+
+def count_repeaters(ping: dict) -> int:
+    """Return how many distinct repeaters this ping reached, from
+    whichever field its ping type uses:
+
+    - type "TX"/"RX": `heard_repeats`, a string like
+      "a1b2(3.5),c3d4(-2.0)", or the literal "None" when nothing was
+      heard. Each entry is a repeater id followed by an SNR in
+      parentheses; distinct ids are counted, SNR is ignored.
+    - type "DISC"/"TRACE": `repeater_id`, a single id, or the literal
+      "None" when the discovery failed.
+
+    The literal "None", an empty string, and a missing field all count
+    as zero. This is attacker-controlled input from the public internet
+    -- malformed entries are ignored, never raised on, and parsing is
+    capped at _MAX_PARSED_REPEATERS entries.
+
+    SNR is deliberately not used for anything, even though it's right
+    there in the string -- signal strength mostly reflects the antenna
+    someone is carrying, not the coverage they actually found, and
+    scoring on repeater count rather than signal quality was a
+    deliberate call.
+    """
+    if not isinstance(ping, dict):
+        return 0
+    ping_type = ping.get("type")
+
+    if ping_type in ("TX", "RX"):
+        heard = ping.get("heard_repeats")
+        if not isinstance(heard, str) or not heard or heard == "None":
+            return 0
+        ids: set[str] = set()
+        for entry in heard.split(",")[:_MAX_PARSED_REPEATERS]:
+            entry = entry.strip()
+            if not entry:
+                continue
+            # "<id>(<snr>)" -- an entry with no "(" before an id doesn't
+            # match the expected shape and is ignored, not counted.
+            paren = entry.find("(")
+            if paren <= 0:
+                continue
+            rid = entry[:paren].strip()
+            if not rid:
+                continue
+            ids.add(rid)
+        return len(ids)
+
+    if ping_type in ("DISC", "TRACE"):
+        rid = ping.get("repeater_id")
+        if not isinstance(rid, str) or not rid or rid == "None":
+            return 0
+        return 1
+
+    return 0
+
 
 def hash_secret(raw: str) -> str:
     """SHA-256 hex digest of a raw API key, for storage/lookup by hash."""
@@ -183,6 +244,7 @@ class McIngestor:
             "pings_wrong_owner": 0,
             "pings_duplicate": 0,
             "pings_bad_coord": 0,
+            "pings_no_repeaters": 0,
         }
         conn = connect()
         try:
@@ -213,20 +275,23 @@ class McIngestor:
             conn.execute(
                 "INSERT INTO player_ingest_stat("
                 "  player_id, protocol, day, batches, pings_accepted, "
-                "  pings_no_contact, pings_wrong_owner, pings_duplicate, pings_bad_coord) "
-                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?) "
+                "  pings_no_contact, pings_wrong_owner, pings_duplicate, pings_bad_coord, "
+                "  pings_no_repeaters) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(player_id, protocol, day) DO UPDATE SET "
                 "  batches = batches + 1, "
                 "  pings_accepted = pings_accepted + excluded.pings_accepted, "
                 "  pings_no_contact = pings_no_contact + excluded.pings_no_contact, "
                 "  pings_wrong_owner = pings_wrong_owner + excluded.pings_wrong_owner, "
                 "  pings_duplicate = pings_duplicate + excluded.pings_duplicate, "
-                "  pings_bad_coord = pings_bad_coord + excluded.pings_bad_coord",
+                "  pings_bad_coord = pings_bad_coord + excluded.pings_bad_coord, "
+                "  pings_no_repeaters = pings_no_repeaters + excluded.pings_no_repeaters",
                 (
                     player_id, PROTOCOL, day,
                     counters["pings_accepted"], counters["pings_no_contact"],
                     counters["pings_wrong_owner"], counters["pings_duplicate"],
                     counters["pings_bad_coord"],
+                    counters["pings_no_repeaters"],
                 ),
             )
 
@@ -244,10 +309,11 @@ class McIngestor:
 
         log.info(
             "mc ingest: player=%d batch processed accepted=%d no_contact=%d "
-            "wrong_owner=%d duplicate=%d bad_coord=%d",
+            "wrong_owner=%d duplicate=%d bad_coord=%d no_repeaters=%d",
             player_id, counters["pings_accepted"], counters["pings_no_contact"],
             counters["pings_wrong_owner"], counters["pings_duplicate"],
             counters["pings_bad_coord"],
+            counters["pings_no_repeaters"],
         )
 
     def _process_one_ping(self, conn, player_id, ping, received_at, counters, season_id, team) -> None:
@@ -362,13 +428,24 @@ class McIngestor:
         # 8. Accepted
         counters["pings_accepted"] += 1
 
-        # 9. MeshCore scoring, inside the same write transaction as the
+        # 9. Repeaters heard -> points. A ping that reached zero repeaters
+        # earns zero points -- it is still counted above as accepted (it
+        # was a valid ping) but flagged here separately so a player can be
+        # told why it isn't scoring.
+        points = min(
+            count_repeaters(ping) * settings.mc_points_per_repeater,
+            settings.mc_max_points_per_ping,
+        )
+        if points <= 0:
+            counters["pings_no_repeaters"] += 1
+
+        # 10. MeshCore scoring, inside the same write transaction as the
         # rest of this batch. A scoring failure must not lose the
         # counters already recorded above or abort the rest of the
         # batch -- log it and keep going.
         if team is not None:
             try:
-                mc_scoring.apply_paint(conn, season_id, player_id, team, cell, ts)
+                mc_scoring.apply_paint(conn, season_id, player_id, team, cell, ts, points)
             except Exception:
                 log.exception(
                     "mc scoring: apply_paint failed for player %d cell %s",

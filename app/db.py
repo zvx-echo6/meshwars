@@ -237,6 +237,7 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     pings_wrong_owner  INTEGER NOT NULL DEFAULT 0,
     pings_duplicate    INTEGER NOT NULL DEFAULT 0,
     pings_bad_coord    INTEGER NOT NULL DEFAULT 0,
+    pings_no_repeaters INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player_id, protocol, day)
 );
 
@@ -329,6 +330,7 @@ CREATE INDEX IF NOT EXISTS idx_mc_capture_log_cell ON mc_tile_capture_log(season
 MIGRATIONS = [
     "ALTER TABLE tile ADD COLUMN last_packet_id INTEGER",
     "ALTER TABLE tile_unique_painter ADD COLUMN paint_count INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_no_repeaters INTEGER NOT NULL DEFAULT 0",
 ]
 
 PRAGMAS = [

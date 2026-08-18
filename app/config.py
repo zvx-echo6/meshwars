@@ -75,8 +75,12 @@ class Settings(BaseSettings):
     # geohashes and radios. Up to seven teams instead of two.
     teams: str = "RED,GREEN,BLUE,PURPLE,YELLOW,ORANGE,PINK"
     mc_season_days: int = 30
-    mc_score_per_ping: float = 0.5             # effort bonus per qualifying paint
-    mc_score_per_unique_player: float = 1.0    # one-time bonus per new painter
+    # Points per repeater a ping heard, and the cap on points a single
+    # ping can earn -- see app/mc_scoring.py and app/mc_ingest.py for how
+    # these turn a heard-repeater count into points.
+    mc_points_per_repeater: float = 0.1        # points earned per distinct repeater heard
+    mc_max_points_per_ping: float = 1.0        # ceiling on points from any one ping
+    mc_score_per_unique_player: float = 0.5    # one-time bonus per new painter
     mc_score_decay_per_day: float = 0.25       # decay rate, applied to all scores
     mc_defense_window_seconds: int = 900       # 15 minutes after capture, no flip
     mc_cooldown_seconds: int = 300             # a player can't repaint the same cell inside this window
