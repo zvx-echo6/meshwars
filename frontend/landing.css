@@ -1,9 +1,15 @@
-/* MeshWars: styles for the About overlay content (moved from the former
-   standalone /landing.html page; now rendered as a hidden panel inside
-   frontend/index.html and toggled open over the map). Content-only --
-   page chrome (body reset, box-sizing reset, nav) now lives with the
-   map page in coverage.css, since this stylesheet is loaded alongside
-   it rather than standing alone. */
+/* MeshWars: styles for the standalone /about page (frontend/about.html).
+   Matches the dark theme shared with join.css -- self-contained, no
+   external fonts, libraries, or CDN assets. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #0a0a0a;
+  color: #ddd;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
 
 .landing-wrap {
   max-width: 640px;
@@ -164,3 +170,30 @@
   font-size: 12px;
   margin-top: 2px;
 }
+
+/* -------------------------------------------------------------------------
+   Site nav (Map / About / Join). In-flow at the top of the page -- same
+   markup and look as join.css's nav, since the two content pages share
+   the same nav element (frontend/about.html, frontend/join.html). The
+   map page uses this class too, but styled instead as a fixed floating
+   panel by coverage.css -- the two stylesheets are never loaded on the
+   same page, so there's no conflict.
+   ------------------------------------------------------------------------- */
+.mw-nav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+}
+.mw-nav a {
+  padding: 6px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #999;
+  text-decoration: none;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a1a;
+}
+.mw-nav a:hover { background: #262626; color: #e8a735; }
+.mw-nav a.active { color: #e8a735; border-color: #e8a735; }

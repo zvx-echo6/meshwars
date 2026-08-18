@@ -11,13 +11,15 @@ to pick the fill color before falling back to the existing palette.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
+from email.utils import formatdate
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -646,6 +648,60 @@ async def mc_ingest(request: Request) -> JSONResponse:
     return JSONResponse({"accepted": len(data)}, status_code=202)
 
 
+def _file_etag(path: Path) -> tuple[str, str]:
+    """Reproduce Starlette FileResponse's own ETag/Last-Modified scheme
+    (mtime + size, md5) so the value we compare an incoming
+    If-None-Match against is exactly the one FileResponse would have
+    sent anyway."""
+    st = path.stat()
+    last_modified = formatdate(st.st_mtime, usegmt=True)
+    etag_base = f"{st.st_mtime}-{st.st_size}"
+    etag = f'"{hashlib.md5(etag_base.encode(), usedforsecurity=False).hexdigest()}"'
+    return etag, last_modified
+
+
+def _html_page(request: Request, path: Path, missing_message: str) -> Response:
+    """Serve a top-level HTML document (the map, /join, /about).
+
+    These are NOT given to the static mount below -- they get an
+    explicit Cache-Control: no-cache so a browser always revalidates
+    with us before showing a cached copy. Without that directive a
+    browser invents its own heuristic expiry and can keep serving a
+    stale page after a deploy, invisibly, until a hard reload. The
+    /static assets are fine to cache and deliberately keep the
+    no-cache directive OFF -- do not "fix" that by moving this header
+    onto the StaticFiles mount, that would defeat the point of caching
+    them at all.
+
+    "no-cache" means "revalidate every time", not "never store": we
+    still honour If-None-Match ourselves (Starlette's FileResponse
+    does not do this on its own) and return a bare 304 when the file
+    hasn't changed, so revalidation stays cheap.
+    """
+    if not path.exists():
+        return HTMLResponse(f"<h1>meshwars</h1><p>{missing_message}</p>", status_code=404)
+
+    etag, last_modified = _file_etag(path)
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Last-Modified": last_modified,
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    return FileResponse(
+        path,
+        headers={
+            "Cache-Control": "no-cache",
+            "ETag": etag,
+            "Last-Modified": last_modified,
+        },
+    )
+
+
 def mount(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(mc_router)
@@ -657,15 +713,13 @@ def mount(app: FastAPI) -> None:
         app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
         @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-        async def index():
-            map_path = frontend_dir / "index.html"
-            if map_path.exists():
-                return FileResponse(map_path)
-            return HTMLResponse("<h1>meshwars</h1><p>map page not bundled</p>")
+        async def index(request: Request):
+            return _html_page(request, frontend_dir / "index.html", "map page not bundled")
 
         @app.get("/join", response_class=HTMLResponse, include_in_schema=False)
-        async def join_page():
-            join_path = frontend_dir / "join.html"
-            if join_path.exists():
-                return FileResponse(join_path)
-            return HTMLResponse("<h1>meshwars</h1><p>join page not bundled</p>")
+        async def join_page(request: Request):
+            return _html_page(request, frontend_dir / "join.html", "join page not bundled")
+
+        @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
+        async def about_page(request: Request):
+            return _html_page(request, frontend_dir / "about.html", "about page not bundled")
