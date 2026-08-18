@@ -4,6 +4,16 @@
 
 * { box-sizing: border-box; }
 
+/* Type scales modestly with the viewport instead of being one fixed
+   size everywhere -- subtle (15px-17px base), not the enormous text a
+   naive vw-only scale would produce on a large monitor. Site chrome
+   (.mw-nav, further down) stays in px throughout and is unaffected --
+   it needs to render identically on every page regardless of this
+   page's root font-size. */
+html {
+  font-size: clamp(15px, 0.35vw + 14px, 17px);
+}
+
 body {
   margin: 0;
   background: #0a0a0a;
@@ -12,7 +22,12 @@ body {
 }
 
 .landing-wrap {
-  max-width: 640px;
+  /* Fluid: grows with the viewport (block default width is already
+     100% of the available space) up to a real reading-page maximum,
+     rather than a fixed narrow column. On a phone this is just 100%
+     minus the 16px side padding below -- effectively full width with
+     small gutters. */
+  max-width: 1160px;
   margin: 0 auto;
   padding: calc(var(--mw-nav-h) + 16px) 16px 64px;
 }
@@ -20,7 +35,7 @@ body {
 /* ---- header ----------------------------------------------------------- */
 .landing-header h1 {
   margin: 0 0 4px;
-  font-size: 28px;
+  font-size: 1.75rem;
   letter-spacing: 0.02em;
   color: #e8a735;
 }
@@ -28,7 +43,7 @@ body {
 .landing-tagline {
   margin: 0 0 20px;
   color: #aaa;
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 /* ---- panels ------------------------------------------------------------ */
@@ -42,7 +57,7 @@ body {
 
 .landing-panel-title {
   font-weight: 700;
-  font-size: 12px;
+  font-size: 0.75rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: #e8a735;
@@ -51,7 +66,7 @@ body {
 
 .landing-panel p {
   margin: 0 0 10px;
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1.5;
   color: #ccc;
 }
@@ -67,7 +82,7 @@ body {
 .landing-list {
   margin: 0;
   padding-left: 20px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
   color: #ccc;
 }
@@ -90,14 +105,14 @@ body {
 
 .protocol-card-title {
   font-weight: 700;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: #e8a735;
   margin-bottom: 6px;
 }
 
 .protocol-card p {
   margin: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.5;
   color: #bbb;
 }
@@ -106,7 +121,7 @@ body {
 .landing-steps {
   margin: 0 0 12px;
   padding-left: 20px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
   color: #ccc;
 }
@@ -126,7 +141,7 @@ body {
 }
 .landing-warnings p {
   margin: 0 0 6px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: #bbb;
 }
 .landing-warnings p:last-child { margin-bottom: 0; }
@@ -139,7 +154,7 @@ body {
   border: 1px solid #444;
   border-radius: 4px;
   padding: 10px;
-  font-size: 14px;
+  font-size: 0.875rem;
   font-weight: 700;
   text-decoration: none;
 }
@@ -159,7 +174,7 @@ body {
 .landing-links a {
   color: #e8a735;
   font-weight: 700;
-  font-size: 14px;
+  font-size: 0.875rem;
   text-decoration: none;
 }
 .landing-links a:hover { text-decoration: underline; }
@@ -167,8 +182,36 @@ body {
 .landing-link-desc {
   display: block;
   color: #999;
-  font-size: 12px;
+  font-size: 0.75rem;
   margin-top: 2px;
+}
+
+/* ---- wide-screen layout -------------------------------------------------
+   Above this breakpoint the page has room for two columns, so it reads
+   as a page rather than one long strip. CSS multicol rather than a grid:
+   the six .landing-panel sections vary a lot in height (a one-paragraph
+   "Where it's played" next to the long "How scoring works" list), and a
+   two-column grid pairs them up by index -- row height is forced to the
+   taller of each pair, leaving a large dead gap under the shorter one.
+   Multicol instead flows content down the first column and only spills
+   into the second once the first is full (auto-balanced), so short and
+   long sections don't leave gaps around each other. break-inside: avoid
+   keeps a single section from being split across the column gap. The
+   header uses column-span: all to sit above both columns rather than
+   being flowed as multicol content itself. Collapsing back below the
+   breakpoint returns to a plain single column in DOM order, so the
+   reading order is unaffected either way. */
+@media (min-width: 900px) {
+  .landing-wrap {
+    column-count: 2;
+    column-gap: 28px;
+  }
+  .landing-header {
+    column-span: all;
+  }
+  .landing-panel {
+    break-inside: avoid;
+  }
 }
 
 /* -------------------------------------------------------------------------

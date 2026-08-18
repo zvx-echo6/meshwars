@@ -39,10 +39,14 @@
 }
 
 .mc-scoreboard {
-  /* box-sizing: border-box so the explicit width mc.js applies at boot
-     (matched to the Meshtastic panel's offsetWidth) is the panel's
-     *total* rendered width, the same quantity offsetWidth measures --
-     not content-only width plus this panel's own padding/border on top. */
+  /* No JS-applied width anymore (see the removed applyMatchedPanelWidth
+     in mc.js) -- the switch living in this card now makes matching the
+     Meshtastic panel's width pointless: that panel is a separate,
+     unrelated box again (see setMode's 'mc-territory-hidden'), not
+     something this card needs to visually agree with. Instead: size to
+     content, capped by a fluid max-width that is the same at every
+     viewport width -- sensible on a phone (never runs edge to edge) and
+     on a large monitor (never balloons past a small info-card width). */
   box-sizing: border-box;
   background: #1a1a1a;
   color: #ddd;
@@ -51,6 +55,7 @@
   border: 1px solid #333;
   font-size: 12px;
   min-width: 140px;
+  max-width: min(300px, calc(100vw - 20px));
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
@@ -107,17 +112,6 @@
   .mc-scoreboard.mc-collapsed .mc-header-summary { display: inline; }
   .mc-scoreboard.mc-collapsed .mc-header-caret { transform: rotate(-90deg); }
   .mc-scoreboard.mc-collapsed .mc-panel-content { display: none; }
-
-  /* Below the breakpoint mc.js no longer applies the Meshtastic panel's
-     measured width (see applyMatchedPanelWidth) -- only one territory
-     panel is ever visible on a phone at a time, so there is nothing for
-     that match to protect against there. Let the panel size itself, but
-     cap it well short of the viewport edge so it never runs edge to
-     edge. */
-  .mc-scoreboard {
-    width: auto !important;
-    max-width: min(300px, calc(100vw - 20px));
-  }
 
   /* One column instead of two -- the fixed-width two-column grid is
      what overflowed the viewport on a phone (labels/counts for the

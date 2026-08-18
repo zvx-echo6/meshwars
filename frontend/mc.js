@@ -144,58 +144,6 @@ function waitForMap() {
   });
 }
 
-// code.js mounts its .meshwars-scoreboard control synchronously, a few
-// lines after the map-ready handoff this module waits on -- in practice
-// there's no yield point between the two, so it's already in the DOM by
-// the time boot() gets here. Poll anyway (short timeout) rather than
-// assume that ordering; if code.js's control never shows up at all, the
-// MeshCore panel just keeps its own natural (min-width driven) size.
-function waitForMtPanel(timeoutMs) {
-  return new Promise((resolve) => {
-    const existing = document.querySelector('.meshwars-scoreboard');
-    if (existing) { resolve(existing); return; }
-    const deadline = Date.now() + timeoutMs;
-    const poll = setInterval(() => {
-      const el = document.querySelector('.meshwars-scoreboard');
-      if (el || Date.now() > deadline) {
-        clearInterval(poll);
-        resolve(el);
-      }
-    }, 50);
-  });
-}
-
-// Cached at boot, once, while both panels are still in their initial
-// un-hidden state. code.js's setMode()/setMeshtasticControlsVisible(false)
-// sets the Meshtastic panel to display:none as soon as the MeshCore view
-// becomes active -- after that its offsetWidth reads back as 0, so this
-// measurement can never be safely retaken later. Not re-measured on
-// window resize or on later view toggles; the two panels share one
-// width for the life of the page load.
-let cachedMtPanelWidth = null;
-
-async function applyMatchedPanelWidth() {
-  const mtPanel = await waitForMtPanel(3000);
-  const mcPanel = document.querySelector('.mc-scoreboard');
-  if (!mtPanel || !mcPanel) return;
-  // Below the narrow breakpoint only one territory panel is ever on
-  // screen at a time (see setMcCollapsed / the toggle control), so
-  // there is no toggle-induced resize for this matched width to guard
-  // against -- and the desktop-measured width, applied on top of the
-  // two-column team grid, overflowed a phone viewport and pushed three
-  // of the seven teams' counts off screen. Leave the panel to size
-  // itself (mc.css's narrow-width rules) below the breakpoint instead.
-  if (window.matchMedia(`(max-width: ${NARROW_BREAKPOINT_PX}px)`).matches) return;
-  cachedMtPanelWidth = mtPanel.offsetWidth;
-  if (cachedMtPanelWidth > 0) {
-    // .mc-scoreboard is box-sizing: border-box (see mc.css) so this
-    // sets the *total* rendered width to match, the same quantity
-    // offsetWidth measures on the Meshtastic side -- regardless of any
-    // padding/border differences between the two panels.
-    mcPanel.style.width = `${cachedMtPanelWidth}px`;
-  }
-}
-
 async function loadDefaultMode() {
   try {
     const res = await fetch('/config');
@@ -797,11 +745,6 @@ async function boot() {
   if (window.matchMedia(`(max-width: ${NARROW_BREAKPOINT_PX}px)`).matches) {
     setMcCollapsed(true);
   }
-
-  // Match panel widths (see cachedMtPanelWidth comment above) -- must
-  // happen before setMode() below, which is what hides whichever panel
-  // isn't the default view.
-  await applyMatchedPanelWidth();
 
   const [defaultMode] = await Promise.all([loadDefaultMode(), loadPlayArea()]);
   setMode(defaultMode);
