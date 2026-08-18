@@ -263,6 +263,14 @@ def apply_paint(
             (season_id, cell_id, team, player_id, ts),
         )
         record_capture(conn, season_id, cell_id, team, ts)
+        # This is a real capture -- unowned ground just became owned --
+        # so it belongs in the same audit log a flip writes to. There is
+        # no previous owner, so from_team is null here.
+        conn.execute(
+            "INSERT INTO mc_tile_capture_log(season_id, cell_id, ts, by_player_id, by_team, from_team) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (season_id, cell_id, ts, player_id, team, None),
+        )
         log.info("mc scoring: cell %s captured by %s (first paint)", cell_id, team)
         return PaintResult("captured", cell_id, team, score=new_score)
 

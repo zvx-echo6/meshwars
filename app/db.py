@@ -343,6 +343,31 @@ MIGRATIONS = [
     # clause matches nothing, so every later run is a no-op rather than
     # an error.
     "UPDATE player_node SET node_ref = lower(node_ref) WHERE node_ref <> lower(node_ref)",
+    # Backfill: mc_tile_capture_log was never written for a square's
+    # first claim (only flips were logged) until the fix above, so two
+    # real captures already on the board have no log row even though
+    # mc_tile_capture and mc_tile both record them happening. Recover a
+    # log row for each one, but ONLY where mc_tile.paint_count = 1 --
+    # that means the square has been painted exactly once, so the
+    # player who painted it (mc_tile.last_player_id) is necessarily the
+    # one who captured it. A square painted more than once could have
+    # been captured by an earlier, different paint and reinforced since,
+    # in which case last_player_id would name the wrong person -- a
+    # fabricated record naming the wrong capturer is worse than no
+    # record at all, so those are left alone. Safe to re-run: once a
+    # (season_id, cell_id) pair has a log row the NOT EXISTS guard below
+    # excludes it, so the SELECT finds nothing left to insert.
+    """
+    INSERT INTO mc_tile_capture_log(season_id, cell_id, ts, by_player_id, by_team, from_team)
+    SELECT tc.season_id, tc.cell_id, tc.captured_at, t.last_player_id, tc.captured_by_team, NULL
+      FROM mc_tile_capture tc
+      JOIN mc_tile t ON t.season_id = tc.season_id AND t.cell_id = tc.cell_id
+     WHERE t.paint_count = 1
+       AND NOT EXISTS (
+             SELECT 1 FROM mc_tile_capture_log l
+              WHERE l.season_id = tc.season_id AND l.cell_id = tc.cell_id
+           )
+    """,
 ]
 
 PRAGMAS = [
