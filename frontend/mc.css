@@ -4,44 +4,35 @@
    in its own file, with its own class names, so it can be edited
    without touching coverage.css or reusing code.js's modal markup. */
 
-.mc-toggle {
-  background: #1a1a1a;
-  color: #ddd;
-  padding: 8px 10px;
-  border-radius: 4px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-  font-size: 12px;
-}
-
-.mc-toggle-label {
-  font-weight: 700;
-  font-size: 11px;
-  letter-spacing: 0.05em;
-  color: #888;
-  text-transform: uppercase;
-  margin-bottom: 4px;
-}
-
-.mc-toggle-row {
+/* Board switch -- the territory card's own top row (see mc.js's
+   buildScoreboardControl). Always visible: never inside .mc-panel-content,
+   so it survives both the phone collapse (.mc-collapsed) and the
+   meshtastic-mode content hide (.mc-territory-hidden) below. */
+.mc-switch-row {
   display: flex;
   gap: 4px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2a2a2a;
 }
 
-.mc-toggle-btn {
+.mc-switch-btn {
+  flex: 1 1 0;
   background: #2a2a2a;
   color: #ccc;
   border: 1px solid #444;
   border-radius: 3px;
-  padding: 4px 8px;
+  padding: 6px 8px;
   font-size: 12px;
+  text-align: center;
   cursor: pointer;
 }
 
-.mc-toggle-btn:hover {
+.mc-switch-btn:hover {
   background: #333;
 }
 
-.mc-toggle-btn.active {
+.mc-switch-btn.active {
   background: #3a2f12;
   color: #e8a735;
   border-color: #e8a735;
@@ -63,7 +54,13 @@
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
-.mc-scoreboard.mc-hidden {
+/* Meshtastic mode: the card itself stays visible (it holds the board
+   switch), but the MeshCore title/summary row and everything collapsible
+   below it are hidden -- they're meaningless while Meshtastic is the
+   active board. Leaves the card as a slim switch-only bar. See mc.js's
+   setMode(). */
+.mc-scoreboard.mc-territory-hidden .mc-header-btn,
+.mc-scoreboard.mc-territory-hidden .mc-panel-content {
   display: none;
 }
 

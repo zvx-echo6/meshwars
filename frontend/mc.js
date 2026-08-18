@@ -95,7 +95,6 @@ let map = null;
 let meshtasticLayers = [];
 let mcLayerGroup = null;
 let mode = 'meshcore'; // 'meshcore' | 'meshtastic'
-let toggleControl = null;
 let scoreboardControl = null;
 let scoreboardBody = null;
 let scoreboardPanelEl = null;
@@ -232,51 +231,8 @@ async function loadPlayArea() {
   }
 }
 
-// ===== Toggle control =====
-
-function buildToggleControl() {
-  const control = L.control({ position: 'topright' });
-  control.onAdd = function () {
-    const div = L.DomUtil.create('div', 'leaflet-control mc-toggle');
-
-    const label = document.createElement('div');
-    label.className = 'mc-toggle-label';
-    label.textContent = 'View';
-    div.appendChild(label);
-
-    const row = document.createElement('div');
-    row.className = 'mc-toggle-row';
-    div.appendChild(row);
-
-    const btnMeshtastic = document.createElement('button');
-    btnMeshtastic.type = 'button';
-    btnMeshtastic.id = 'mc-toggle-meshtastic';
-    btnMeshtastic.className = 'mc-toggle-btn';
-    btnMeshtastic.textContent = 'Meshtastic';
-    row.appendChild(btnMeshtastic);
-
-    const btnMeshcore = document.createElement('button');
-    btnMeshcore.type = 'button';
-    btnMeshcore.id = 'mc-toggle-meshcore';
-    btnMeshcore.className = 'mc-toggle-btn';
-    btnMeshcore.textContent = 'MeshCore';
-    row.appendChild(btnMeshcore);
-
-    btnMeshtastic.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setMode('meshtastic');
-    });
-    btnMeshcore.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setMode('meshcore');
-    });
-
-    L.DomEvent.disableClickPropagation(div);
-    L.DomEvent.disableScrollPropagation(div);
-    return div;
-  };
-  return control;
-}
+// ===== Board switch (now the territory card's own top row -- see
+// buildScoreboardControl) =====
 
 function updateToggleButtons() {
   const btnMeshtastic = document.getElementById('mc-toggle-meshtastic');
@@ -298,6 +254,10 @@ function buildScoreboardControl() {
   control.onAdd = function () {
     const div = L.DomUtil.create('div', 'leaflet-control mc-scoreboard');
     div.innerHTML = `
+      <div class="mc-switch-row" id="mc-switch-row">
+        <button type="button" id="mc-toggle-meshtastic" class="mc-switch-btn">Meshtastic</button>
+        <button type="button" id="mc-toggle-meshcore" class="mc-switch-btn">MeshCore</button>
+      </div>
       <button type="button" class="mc-row mc-title mc-header-btn" id="mc-header-btn" aria-expanded="true">
         <span class="mc-header-title-text">MeshCore Territory</span>
         <span class="mc-header-right">
@@ -329,6 +289,19 @@ function buildScoreboardControl() {
 
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
+
+    // Board switch -- row one of the card, always visible (see mc.css's
+    // .mc-switch-row), never inside .mc-panel-content, so it survives
+    // both the phone collapse and the meshtastic-mode content hide
+    // below (setMode's 'mc-territory-hidden' class).
+    div.querySelector('#mc-toggle-meshtastic').addEventListener('click', (e) => {
+      e.stopPropagation();
+      setMode('meshtastic');
+    });
+    div.querySelector('#mc-toggle-meshcore').addEventListener('click', (e) => {
+      e.stopPropagation();
+      setMode('meshcore');
+    });
 
     // Collapsible territory panel (phones only) -- see mc.css's
     // .mc-collapsed rule, which is itself gated to NARROW_BREAKPOINT_PX
@@ -757,6 +730,13 @@ async function refreshScores() {
 }
 
 // ===== Mode switching =====
+//
+// The card itself (.mc-scoreboard) is never hidden here -- its top row
+// holds the board switch, which must stay reachable in both modes so a
+// visitor can switch back. Only the MeshCore-specific title/summary row
+// and everything collapsible below it (the 'mc-territory-hidden' class,
+// see mc.css) are hidden while Meshtastic is the active board, leaving
+// the card as a slim switch-only bar in that mode.
 
 function setMode(newMode) {
   mode = newMode === 'meshtastic' ? 'meshtastic' : 'meshcore';
@@ -766,15 +746,13 @@ function setMode(newMode) {
       if (layer && map.hasLayer(layer)) map.removeLayer(layer);
     });
     if (mcLayerGroup && !map.hasLayer(mcLayerGroup)) mcLayerGroup.addTo(map);
-    const scoreboardDiv = document.querySelector('.mc-scoreboard');
-    if (scoreboardDiv) scoreboardDiv.classList.remove('mc-hidden');
+    if (scoreboardPanelEl) scoreboardPanelEl.classList.remove('mc-territory-hidden');
     setMeshtasticControlsVisible(false);
     refreshBoard(true);
     refreshScores();
   } else {
     if (mcLayerGroup && map.hasLayer(mcLayerGroup)) map.removeLayer(mcLayerGroup);
-    const scoreboardDiv = document.querySelector('.mc-scoreboard');
-    if (scoreboardDiv) scoreboardDiv.classList.add('mc-hidden');
+    if (scoreboardPanelEl) scoreboardPanelEl.classList.add('mc-territory-hidden');
     setMeshtasticControlsVisible(true);
     meshtasticLayers.forEach((layer) => {
       if (layer && !map.hasLayer(layer)) layer.addTo(map);
@@ -794,24 +772,23 @@ async function boot() {
 
   mcLayerGroup = L.layerGroup();
 
-  toggleControl = buildToggleControl();
-  toggleControl.addTo(map);
-
-  // Leaflet stacks controls in the same corner in add order, so without
-  // this the VIEW toggle would end up wherever it happens to land relative
-  // to the two territory panels -- and since only one territory panel is
-  // visible at a time, hiding one lets the controls below it slide up,
-  // making the toggle (and the visible panel) jump position when the user
-  // switches boards. Force the toggle to be the first child of its corner
-  // container so it always stays put, with whichever territory panel is
-  // active directly beneath it. Do not remove this thinking it is a no-op.
-  const toggleContainer = toggleControl.getContainer();
-  if (toggleContainer && toggleContainer.parentNode) {
-    toggleContainer.parentNode.insertBefore(toggleContainer, toggleContainer.parentNode.firstChild);
-  }
-
   scoreboardControl = buildScoreboardControl();
   scoreboardControl.addTo(map);
+
+  // Leaflet stacks controls in the same corner in add order, and code.js's
+  // own meshwars-scoreboard (the Meshtastic panel) was already added to
+  // this same corner before this module's boot() resumed (see the
+  // map-ready handoff above). In Meshtastic mode both that panel and this
+  // one are visible at once now -- our card as a slim switch-only bar
+  // (see setMode's 'mc-territory-hidden') -- so force our card to be the
+  // first child of the corner container. That keeps the switch in the
+  // same visual spot at the top of the stack regardless of which board
+  // is active. Do not remove this thinking it is a no-op.
+  const scoreboardContainer = scoreboardControl.getContainer();
+  if (scoreboardContainer && scoreboardContainer.parentNode) {
+    scoreboardContainer.parentNode.insertBefore(scoreboardContainer, scoreboardContainer.parentNode.firstChild);
+  }
+
   renderScores(null); // seed all-zero rows immediately, before the first fetch
 
   // Territory panel starts collapsed on narrow screens only (phones) --
