@@ -363,6 +363,17 @@ class McIngestor:
             log.debug("mc ingest: ping missing/invalid contact key for player %d", player_id)
             return
 
+        # Real hardware reports this key in uppercase (confirmed from a
+        # live MeshMapper payload) while our own test fixtures used
+        # lowercase, and it is compared as exact text below to decide
+        # which player a ping belongs to. Without normalizing, the same
+        # radio reporting in a different case would register as a second
+        # radio, and the mismatch check just below could be sidestepped
+        # by changing case. Normalize once here; every use of `contact`
+        # from this point on -- the binding lookup, the insert, and the
+        # mismatch check -- sees the normalized value.
+        contact = contact.lower()
+
         # 3. Binding: this IS registration for the radio, there is no
         # separate flow.
         row = conn.execute(

@@ -333,6 +333,13 @@ MIGRATIONS = [
     "ALTER TABLE tile_unique_painter ADD COLUMN paint_count INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_out_of_area INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_no_repeaters INTEGER NOT NULL DEFAULT 0",
+    # Data fixup, not a schema change: real MeshCore hardware reports the
+    # contact key in uppercase (app/mc_ingest.py now lowercases on
+    # ingest), but one row was written before that normalization existed.
+    # A plain UPDATE is safe to re-run here -- once applied, the WHERE
+    # clause matches nothing, so every later run is a no-op rather than
+    # an error.
+    "UPDATE player_node SET node_ref = lower(node_ref) WHERE node_ref <> lower(node_ref)",
 ]
 
 PRAGMAS = [
