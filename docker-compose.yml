@@ -23,6 +23,8 @@ services:
       JOIN_RATE_LIMIT_ATTEMPTS: "${JOIN_RATE_LIMIT_ATTEMPTS:-5}"
       JOIN_RATE_LIMIT_WINDOW_SECONDS: "${JOIN_RATE_LIMIT_WINDOW_SECONDS:-600}"
       PUBLIC_HOST: "${PUBLIC_HOST:-meshwars.com}"
+      MC_RAW_LOG_ENABLED: "${MC_RAW_LOG_ENABLED:-false}"
+      MC_RAW_LOG_PATH: "${MC_RAW_LOG_PATH:-/data/mc_raw.log}"
     volumes:
       - meshwars-data:/data
 
