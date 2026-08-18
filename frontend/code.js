@@ -333,6 +333,11 @@ async function initMap() {
   initSVGPatterns();
 
   scoreboardControl.addTo(map);  // unified panel (settings card removed)
+  // Hand the scoreboard's container to mc.js so it can hide/show the
+  // Meshtastic-only Territory panel (and the Top MQTT Feeders button
+  // nested inside it) when the MeshCore view is active, without mc.js
+  // reaching into this module's DOM structure.
+  window.MESHWARS_MT_CONTROLS = [scoreboardControl.getContainer()];
 
   // (old feeders-panel removal no longer needed; unified into scoreboard)
 

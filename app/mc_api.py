@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .db import connect
 from .grid import cell_bounds
+from .mc_scoring import team_tile_counts
 
 router = APIRouter()
 
@@ -129,11 +130,15 @@ async def mc_scores() -> dict:
         season = _active_mc_season(conn)
         if not season:
             return None
-        rows = conn.execute(
-            "SELECT team, tiles FROM mc_season_team_tally WHERE season_id = ?",
-            (season["id"],),
-        ).fetchall()
-        counts = {r["team"]: r["tiles"] for r in rows}
+        # Live counts, not the season-close tally: mc_season_team_tally is
+        # only populated by maybe_roll_season() when a season CLOSES, so it
+        # stays empty/stale for the entire span of an active season. Count
+        # current ownership straight from mc_tile via the same helper
+        # season rollover itself uses, so this always matches the live
+        # board. mc_season_team_tally is still the correct source for
+        # historical (closed) season standings -- leave it alone, don't
+        # wire it back in here.
+        counts = team_tile_counts(conn, season["id"])
         return {
             "season_id": season["id"],
             "started_at": season["started_at"],

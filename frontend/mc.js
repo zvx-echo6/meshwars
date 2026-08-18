@@ -83,6 +83,19 @@ let scoreboardControl = null;
 let scoreboardBody = null;
 let refreshTimer = null;
 
+// Show/hide the Meshtastic scoreboard control (Red/Blue/Neutral counts,
+// season countdown, node search, History/Roster, Top MQTT Feeders) while
+// the MeshCore view is active -- those are Meshtastic-only concepts.
+// code.js hands us its container(s) via this global, the same handoff
+// pattern used for window.MESHWARS_MAP / window.MESHWARS_MESHTASTIC_LAYERS,
+// so this module never has to guess at code.js's DOM structure.
+function setMeshtasticControlsVisible(visible) {
+  const controls = Array.isArray(window.MESHWARS_MT_CONTROLS) ? window.MESHWARS_MT_CONTROLS : [];
+  controls.forEach((el) => {
+    if (el) el.style.display = visible ? '' : 'none';
+  });
+}
+
 function waitForMap() {
   return new Promise((resolve) => {
     if (window.MESHWARS_MAP) {
@@ -307,12 +320,35 @@ function drawBoard(cells) {
   });
 }
 
-async function refreshBoard() {
+// Bounding box of every cell the board API returned, using the bounds
+// it already computes server-side (app.grid.cell_bounds) -- this module
+// never recomputes cell geometry itself.
+function boardBounds(cells) {
+  if (!Array.isArray(cells) || cells.length === 0) return null;
+  let south = Infinity, west = Infinity, north = -Infinity, east = -Infinity;
+  cells.forEach((c) => {
+    if (c.south < south) south = c.south;
+    if (c.west < west) west = c.west;
+    if (c.north > north) north = c.north;
+    if (c.east > east) east = c.east;
+  });
+  return L.latLngBounds([south, west], [north, east]);
+}
+
+// fitToBoard is true only when this refresh is the result of switching
+// INTO the MeshCore view (or the initial load, if MeshCore is the
+// default) -- never on the 30s auto-refresh timer, which must not fight
+// the user's own panning/zooming.
+async function refreshBoard(fitToBoard) {
   try {
     const res = await fetch('/api/mc/board');
     if (!res.ok) return;
     const cells = await res.json();
     drawBoard(cells);
+    if (fitToBoard) {
+      const bounds = boardBounds(cells);
+      if (bounds && map) map.fitBounds(bounds, { padding: [24, 24] });
+    }
   } catch (err) {
     console.warn('mc board refresh failed:', err);
   }
@@ -341,12 +377,14 @@ function setMode(newMode) {
     if (mcLayerGroup && !map.hasLayer(mcLayerGroup)) mcLayerGroup.addTo(map);
     const scoreboardDiv = document.querySelector('.mc-scoreboard');
     if (scoreboardDiv) scoreboardDiv.classList.remove('mc-hidden');
-    refreshBoard();
+    setMeshtasticControlsVisible(false);
+    refreshBoard(true);
     refreshScores();
   } else {
     if (mcLayerGroup && map.hasLayer(mcLayerGroup)) map.removeLayer(mcLayerGroup);
     const scoreboardDiv = document.querySelector('.mc-scoreboard');
     if (scoreboardDiv) scoreboardDiv.classList.add('mc-hidden');
+    setMeshtasticControlsVisible(true);
     meshtasticLayers.forEach((layer) => {
       if (layer && !map.hasLayer(layer)) layer.addTo(map);
     });
@@ -377,7 +415,7 @@ async function boot() {
 
   refreshTimer = setInterval(() => {
     if (mode === 'meshcore') {
-      refreshBoard();
+      refreshBoard(false);
       refreshScores();
     }
   }, REFRESH_INTERVAL_MS);
