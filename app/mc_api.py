@@ -175,6 +175,133 @@ async def mc_players() -> list[dict]:
     return result if result is not None else []
 
 
+@router.get("/api/mc/history")
+async def mc_history() -> list[dict]:
+    """Closed MeshCore seasons, newest first, each with its final
+    per-team tile tally.
+
+    mc_season_team_tally, not mc_tile, is the correct source here: it
+    is written once at season close (see maybe_roll_season() in
+    mc_scoring.py) and is the only place a closed season's standings
+    still live, since mc_tile itself moves on to the next season.
+    """
+
+    def run(conn):
+        seasons = conn.execute(
+            "SELECT id, started_at, ends_at, winner FROM mc_season "
+            " WHERE status = 'closed' ORDER BY id DESC"
+        ).fetchall()
+        out = []
+        for s in seasons:
+            tally_rows = conn.execute(
+                "SELECT team, tiles FROM mc_season_team_tally WHERE season_id = ?",
+                (s["id"],),
+            ).fetchall()
+            tallies = {r["team"]: r["tiles"] for r in tally_rows}
+            out.append({
+                "id": s["id"],
+                "started_at": s["started_at"],
+                "ends_at": s["ends_at"],
+                "winner": s["winner"],
+                "teams": [{"team": t, "tiles": tallies.get(t, 0)} for t in _team_list()],
+            })
+        return out
+
+    result = _safe_query(run)
+    return result if result is not None else []
+
+
+@router.get("/api/mc/find")
+async def mc_find(name: str):
+    """Case-insensitive exact match on a player's display name.
+
+    Returns their team and how many cells they currently hold as last
+    painter in the active season, plus the bounding box of those cells
+    so the map can zoom to them. 404s if no such player exists.
+
+    The player table itself is not part of the mc_* landing-order race
+    described at the top of this module (it predates it), so that
+    lookup runs directly; only the season/mc_tile half -- which does
+    the actual "holds cells" answer -- is guarded against a missing
+    table, degrading to zero cells rather than a 500. A player who
+    exists but holds nothing right now (no active season, or simply no
+    cells) is a normal 200 with tiles_held=0 and bounds=null, not a 404.
+    """
+    conn = connect()
+    try:
+        player = conn.execute(
+            "SELECT player_id, display_name, team FROM player "
+            " WHERE disabled_at IS NULL AND LOWER(display_name) = LOWER(?)",
+            (name,),
+        ).fetchone()
+        if not player:
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        cell_ids: list[str] = []
+        try:
+            season = _active_mc_season(conn)
+            if season:
+                rows = conn.execute(
+                    "SELECT cell_id FROM mc_tile WHERE season_id = ? AND last_player_id = ?",
+                    (season["id"], player["player_id"]),
+                ).fetchall()
+                cell_ids = [r["cell_id"] for r in rows]
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+            cell_ids = []
+
+        bounds = None
+        if cell_ids:
+            souths, wests, norths, easts = zip(*(cell_bounds(c) for c in cell_ids))
+            bounds = {
+                "south": min(souths),
+                "west": min(wests),
+                "north": max(norths),
+                "east": max(easts),
+            }
+
+        return {
+            "display_name": player["display_name"],
+            "team": player["team"],
+            "tiles_held": len(cell_ids),
+            "bounds": bounds,
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/api/mc/top")
+async def mc_top() -> list[dict]:
+    """Players ranked by capture-event count in the active season,
+    from mc_tile_capture_log. Top 20, empty list if there's no data
+    (or no active season).
+    """
+
+    def run(conn):
+        season = _active_mc_season(conn)
+        if not season:
+            return []
+        rows = conn.execute(
+            "SELECT p.display_name AS display_name, p.team AS team, "
+            "       COUNT(*) AS captures "
+            "  FROM mc_tile_capture_log l "
+            "  JOIN player p ON p.player_id = l.by_player_id "
+            " WHERE l.season_id = ? "
+            " GROUP BY l.by_player_id "
+            " ORDER BY captures DESC "
+            " LIMIT 20",
+            (season["id"],),
+        ).fetchall()
+        return [
+            {"display_name": r["display_name"], "team": r["team"], "captures": r["captures"]}
+            for r in rows
+        ]
+
+    result = _safe_query(run)
+    return result if result is not None else []
+
+
 @router.get("/api/mc/cell/{cell_id}")
 async def mc_cell(cell_id: str):
     """Detail for one cell: owner, capture time, per-team current

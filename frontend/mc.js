@@ -4,33 +4,18 @@
  * Self-contained module -- no external libraries, nothing beyond what
  * Leaflet (already loaded by index.html) and the browser provide.
  *
- * This module does not create its own Leaflet map; it attaches to the
- * one code.js creates. Wiring the two together is a separate change
- * (this file is landed unwired, per the task that produced it). The
- * contract that follow-up change needs to satisfy, once it edits
- * frontend/code.js:
+ * This module attaches to the Leaflet map code.js creates via the
+ * window.MESHWARS_MAP / window.MESHWARS_MESHTASTIC_LAYERS / 'meshwars:map-ready'
+ * handoff and window.MESHWARS_MT_CONTROLS (see code.js's initMap for where
+ * those are set). This module never reaches into code.js's internals
+ * beyond that handoff, and code.js is never modified by this module.
  *
- *   1. Load this file as a module after code.js, e.g. in index.html:
- *        <script src="/static/mc.js" type="module"></script>
- *
- *   2. In code.js's initMap(), right after the layer groups are
- *      created (coverageLayer, edgeLayer, sampleLayer, repeaterLayer,
- *      liveTrackLayer), expose the map and the layers that are
- *      normally shown by default -- NOT repeaterLayer, which the
- *      Meshtastic view already keeps off the map by default:
- *
- *        window.MESHWARS_MAP = map;
- *        window.MESHWARS_MESHTASTIC_LAYERS =
- *          [coverageLayer, edgeLayer, sampleLayer, liveTrackLayer];
- *        window.dispatchEvent(new Event('meshwars:map-ready'));
- *
- *      That's the whole integration -- this module discovers the map
- *      via that global/event and takes it from there. No other change
- *      to code.js is required.
- *
- * Until that wiring lands, this module loads, waits for the map, and
- * simply never gets it -- it has no effect on the existing Meshtastic
- * view.
+ * The MeshCore territory panel built below is a parity match for
+ * code.js's Meshtastic scoreboard control (season countdown, player
+ * search, History/Roster links, Refresh map, and a ranked-players
+ * button) -- but every modal and popup here has its own markup/styles
+ * (this file + mc.css), never code.js's #mt-history-modal or its
+ * openHistoryModal/openRosterModal functions.
  */
 
 // One place to change team colors. Chosen to be saturated and
@@ -53,7 +38,8 @@ const REFRESH_INTERVAL_MS = 30000;
 // Escapes text destined for an HTML string. display_name and team are
 // attacker-controlled (a MeshCore XSS bug hit ~20 analyser sites this
 // spring) -- every interpolated value that goes into an HTML string in
-// this file must pass through this first.
+// this file must pass through this first (or use textContent instead
+// of building HTML at all).
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;',
@@ -73,6 +59,19 @@ function formatTs(ts) {
   }
 }
 
+// Same wording/thresholds as code.js's formatCountdown -- duplicated
+// rather than imported since code.js does not export it and this
+// module must not reach into code.js's internals.
+function formatCountdown(secondsRemaining) {
+  if (secondsRemaining <= 0) return 'closing';
+  const days = Math.floor(secondsRemaining / 86400);
+  const hours = Math.floor((secondsRemaining % 86400) / 3600);
+  const mins = Math.floor((secondsRemaining % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
 // ---- module state ----
 let map = null;
 let meshtasticLayers = [];
@@ -82,6 +81,7 @@ let toggleControl = null;
 let scoreboardControl = null;
 let scoreboardBody = null;
 let refreshTimer = null;
+let scoreboardEndsAt = null;
 
 // Show/hide the Meshtastic scoreboard control (Red/Blue/Neutral counts,
 // season countdown, node search, History/Roster, Top MQTT Feeders) while
@@ -119,6 +119,50 @@ function waitForMap() {
       }
     }, 100);
   });
+}
+
+// code.js mounts its .meshwars-scoreboard control synchronously, a few
+// lines after the map-ready handoff this module waits on -- in practice
+// there's no yield point between the two, so it's already in the DOM by
+// the time boot() gets here. Poll anyway (short timeout) rather than
+// assume that ordering; if code.js's control never shows up at all, the
+// MeshCore panel just keeps its own natural (min-width driven) size.
+function waitForMtPanel(timeoutMs) {
+  return new Promise((resolve) => {
+    const existing = document.querySelector('.meshwars-scoreboard');
+    if (existing) { resolve(existing); return; }
+    const deadline = Date.now() + timeoutMs;
+    const poll = setInterval(() => {
+      const el = document.querySelector('.meshwars-scoreboard');
+      if (el || Date.now() > deadline) {
+        clearInterval(poll);
+        resolve(el);
+      }
+    }, 50);
+  });
+}
+
+// Cached at boot, once, while both panels are still in their initial
+// un-hidden state. code.js's setMode()/setMeshtasticControlsVisible(false)
+// sets the Meshtastic panel to display:none as soon as the MeshCore view
+// becomes active -- after that its offsetWidth reads back as 0, so this
+// measurement can never be safely retaken later. Not re-measured on
+// window resize or on later view toggles; the two panels share one
+// width for the life of the page load.
+let cachedMtPanelWidth = null;
+
+async function applyMatchedPanelWidth() {
+  const mtPanel = await waitForMtPanel(3000);
+  const mcPanel = document.querySelector('.mc-scoreboard');
+  if (!mtPanel || !mcPanel) return;
+  cachedMtPanelWidth = mtPanel.offsetWidth;
+  if (cachedMtPanelWidth > 0) {
+    // .mc-scoreboard is box-sizing: border-box (see mc.css) so this
+    // sets the *total* rendered width to match, the same quantity
+    // offsetWidth measures on the Meshtastic side -- regardless of any
+    // padding/border differences between the two panels.
+    mcPanel.style.width = `${cachedMtPanelWidth}px`;
+  }
 }
 
 async function loadDefaultMode() {
@@ -189,24 +233,69 @@ function updateToggleButtons() {
 }
 
 // ===== Scoreboard control =====
+//
+// Parity match for code.js's .meshwars-scoreboard control: team counts,
+// season countdown, player search + Find, History/Roster links, a
+// Refresh map button, and a ranked-players button (Top Wardrivers --
+// the MeshCore equivalent of Meshtastic's Top MQTT Feeders, since
+// MeshCore has no MQTT feeders, only players).
 
 function buildScoreboardControl() {
   const control = L.control({ position: 'topright' });
   control.onAdd = function () {
     const div = L.DomUtil.create('div', 'leaflet-control mc-scoreboard');
-
-    const title = document.createElement('div');
-    title.className = 'mc-row mc-title';
-    title.textContent = 'MeshCore Territory';
-    div.appendChild(title);
-
-    const body = document.createElement('div');
-    body.className = 'mc-scoreboard-body';
-    div.appendChild(body);
-    scoreboardBody = body;
+    div.innerHTML = `
+      <div class="mc-row mc-title">MeshCore Territory</div>
+      <div class="mc-scoreboard-body"></div>
+      <div class="mc-row mc-countdown">Ends in <span id="mc-countdown">--</span></div>
+      <div class="mc-row mc-lookup-row">
+        <input type="text" id="mc-lookup-input" placeholder="player name" />
+        <button type="button" id="mc-lookup-btn">Find</button>
+      </div>
+      <div id="mc-lookup-result" class="mc-lookup-result"></div>
+      <div class="mc-row"><a href="#" id="mc-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mc-roster-link">Roster</a></div>
+      <div class="mc-row mc-actions">
+        <button type="button" id="mc-refresh-btn">Refresh map</button>
+      </div>
+      <div class="mc-row mc-actions">
+        <button type="button" id="mc-top-btn">Top Wardrivers</button>
+      </div>
+    `;
+    scoreboardBody = div.querySelector('.mc-scoreboard-body');
 
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
+
+    div.querySelector('#mc-history-link').addEventListener('click', (e) => {
+      e.preventDefault();
+      openHistoryModal();
+    });
+    div.querySelector('#mc-roster-link').addEventListener('click', (e) => {
+      e.preventDefault();
+      openRosterModal();
+    });
+
+    const lookupInput = div.querySelector('#mc-lookup-input');
+    const lookupBtn = div.querySelector('#mc-lookup-btn');
+    const doLookup = () => doPlayerFind(lookupInput.value);
+    lookupBtn.addEventListener('click', doLookup);
+    lookupInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLookup(); });
+    // Stop the map from stealing keystrokes while typing -- same fix
+    // code.js applies to its own #mt-lookup-input.
+    L.DomEvent.on(lookupInput, 'keydown keypress keyup mousedown mouseup click dblclick',
+                  L.DomEvent.stopPropagation);
+
+    div.querySelector('#mc-refresh-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      refreshBoard(false);
+      refreshScores();
+    });
+
+    div.querySelector('#mc-top-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openTopModal();
+    });
+
     return div;
   };
   return control;
@@ -243,6 +332,205 @@ function renderScores(data) {
 
     scoreboardBody.appendChild(row);
   });
+}
+
+function tickCountdown() {
+  const el = document.getElementById('mc-countdown');
+  if (!el || !scoreboardEndsAt) return;
+  const now = Math.floor(Date.now() / 1000);
+  el.textContent = formatCountdown(scoreboardEndsAt - now);
+}
+
+// ===== Player search (Find) =====
+//
+// Placeholder text and copy deliberately say "player" rather than
+// "node"/"radio" -- MeshCore's /api/mc/find looks up a person by
+// display name, not a piece of hardware by id. Every branch below sets
+// textContent only, never innerHTML, so this path needs no separate
+// escaping review: it structurally cannot execute a payload.
+async function doPlayerFind(value) {
+  const resultEl = document.getElementById('mc-lookup-result');
+  if (!resultEl) return;
+  const name = (value || '').trim();
+  if (!name) { resultEl.textContent = ''; return; }
+  resultEl.textContent = 'Searching...';
+  try {
+    const res = await fetch(`/api/mc/find?name=${encodeURIComponent(name)}`);
+    if (res.status === 404) {
+      resultEl.textContent = `Not found: ${name}`;
+      return;
+    }
+    if (!res.ok) {
+      resultEl.textContent = 'Search failed.';
+      return;
+    }
+    const data = await res.json();
+    if (!data.bounds || !data.tiles_held) {
+      resultEl.textContent = `${data.display_name} (${data.team}) holds no cells right now.`;
+      return;
+    }
+    const b = data.bounds;
+    if (map) map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [24, 24] });
+    const plural = data.tiles_held === 1 ? '' : 's';
+    resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`;
+  } catch (err) {
+    resultEl.textContent = 'Search failed.';
+  }
+}
+
+// ===== Modal (History / Roster / Top Wardrivers) =====
+//
+// Built and styled entirely in this module (markup here, styles in
+// mc.css) -- deliberately not index.html's #mt-history-modal or
+// code.js's openHistoryModal/openRosterModal, which operate on
+// Meshtastic data and that module's own DOM.
+
+let mcModalEl = null;
+let mcModalTitleEl = null;
+let mcModalBodyEl = null;
+
+function ensureModal() {
+  if (mcModalEl) return;
+  mcModalEl = document.createElement('div');
+  mcModalEl.id = 'mc-modal';
+  mcModalEl.className = 'mc-modal';
+  mcModalEl.innerHTML = `
+    <div class="mc-modal-inner">
+      <div class="mc-modal-header">
+        <span id="mc-modal-title"></span>
+        <button type="button" class="mc-modal-close" id="mc-modal-close">&times;</button>
+      </div>
+      <div id="mc-modal-body"></div>
+    </div>
+  `;
+  document.body.appendChild(mcModalEl);
+  mcModalTitleEl = mcModalEl.querySelector('#mc-modal-title');
+  mcModalBodyEl = mcModalEl.querySelector('#mc-modal-body');
+  mcModalEl.querySelector('#mc-modal-close').addEventListener('click', closeMcModal);
+  // Click on the dimmed backdrop (not the inner card) closes the modal.
+  mcModalEl.addEventListener('click', (e) => {
+    if (e.target === mcModalEl) closeMcModal();
+  });
+}
+
+function openMcModal(title) {
+  ensureModal();
+  mcModalTitleEl.textContent = title;
+  mcModalBodyEl.replaceChildren();
+  const loading = document.createElement('div');
+  loading.className = 'mc-modal-loading';
+  loading.textContent = 'Loading...';
+  mcModalBodyEl.appendChild(loading);
+  mcModalEl.style.display = 'flex';
+  return mcModalBodyEl;
+}
+
+function closeMcModal() {
+  if (mcModalEl) mcModalEl.style.display = 'none';
+}
+
+function showModalMessage(body, className, text) {
+  body.replaceChildren();
+  const el = document.createElement('div');
+  el.className = className;
+  el.textContent = text;
+  body.appendChild(el);
+}
+
+async function openHistoryModal() {
+  const body = openMcModal('Past Seasons');
+  try {
+    const res = await fetch('/api/mc/history');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const seasons = await res.json();
+    if (!Array.isArray(seasons) || seasons.length === 0) {
+      showModalMessage(body, 'mc-modal-empty', 'No completed seasons yet.');
+      return;
+    }
+    const rows = seasons.map((s) => {
+      const started = s.started_at ? new Date(s.started_at * 1000).toLocaleDateString() : '?';
+      const ended = s.ends_at ? new Date(s.ends_at * 1000).toLocaleDateString() : '?';
+      const teams = Array.isArray(s.teams) ? s.teams : [];
+      const tallyText = teams
+        .filter((t) => (t.tiles ?? 0) > 0)
+        .map((t) => `${escapeHtml(t.team)} ${escapeHtml(t.tiles)}`)
+        .join(', ') || 'no tiles recorded';
+      return `<tr>
+        <td>#${escapeHtml(s.id)}</td>
+        <td>${escapeHtml(started)} &ndash; ${escapeHtml(ended)}</td>
+        <td class="mc-winner-cell">${escapeHtml(s.winner || '-')}</td>
+        <td>${tallyText}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `<table class="mc-history-table">
+      <thead><tr><th>Season</th><th>Dates</th><th>Winner</th><th>Final tallies</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  } catch (err) {
+    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+  }
+}
+
+async function openRosterModal() {
+  const body = openMcModal('Player Roster');
+  try {
+    const res = await fetch('/api/mc/players');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const players = await res.json();
+    if (!Array.isArray(players) || players.length === 0) {
+      showModalMessage(body, 'mc-modal-empty', 'No players yet.');
+      return;
+    }
+    const byTeam = new Map();
+    players.forEach((p) => {
+      const team = p.team || 'UNKNOWN';
+      if (!byTeam.has(team)) byTeam.set(team, []);
+      byTeam.get(team).push(p);
+    });
+    const teamOrder = TEAM_ORDER.filter((t) => byTeam.has(t))
+      .concat([...byTeam.keys()].filter((t) => !TEAM_ORDER.includes(t)));
+    const sections = teamOrder.map((team) => {
+      const list = (byTeam.get(team) || []).slice()
+        .sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''));
+      const rows = list.map((p) => `<tr><td>${escapeHtml(p.display_name)}</td></tr>`).join('');
+      const color = TEAM_COLORS[team] || '#888';
+      return `<div class="mc-roster-team">
+        <h3 style="color:${color};">${escapeHtml(team)} &mdash; ${list.length}</h3>
+        <table class="mc-roster-table"><tbody>${rows}</tbody></table>
+      </div>`;
+    }).join('');
+    body.innerHTML = `<div class="mc-roster-grid">${sections}</div>`;
+  } catch (err) {
+    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+  }
+}
+
+async function openTopModal() {
+  const body = openMcModal('Top Wardrivers');
+  try {
+    const res = await fetch('/api/mc/top');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) {
+      showModalMessage(body, 'mc-modal-empty', 'No capture activity yet.');
+      return;
+    }
+    const trs = rows.map((r, i) => {
+      const color = TEAM_COLORS[r.team] || '#888';
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${escapeHtml(r.display_name)}</td>
+        <td><span class="mc-dot" style="background:${color}"></span>${escapeHtml(r.team)}</td>
+        <td>${escapeHtml(r.captures)}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `<table class="mc-history-table">
+      <thead><tr><th>#</th><th>Player</th><th>Team</th><th>Captures</th></tr></thead>
+      <tbody>${trs}</tbody>
+    </table>`;
+  } catch (err) {
+    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+  }
 }
 
 // ===== Board rendering =====
@@ -337,8 +625,8 @@ function boardBounds(cells) {
 
 // fitToBoard is true only when this refresh is the result of switching
 // INTO the MeshCore view (or the initial load, if MeshCore is the
-// default) -- never on the 30s auto-refresh timer, which must not fight
-// the user's own panning/zooming.
+// default) -- never on the 30s auto-refresh timer or the Refresh map
+// button, which must not fight the user's own panning/zooming.
 async function refreshBoard(fitToBoard) {
   try {
     const res = await fetch('/api/mc/board');
@@ -360,6 +648,7 @@ async function refreshScores() {
     if (!res.ok) return;
     const data = await res.json();
     renderScores(data);
+    scoreboardEndsAt = data.ends_at || null;
   } catch (err) {
     console.warn('mc scores refresh failed:', err);
   }
@@ -423,6 +712,11 @@ async function boot() {
   scoreboardControl.addTo(map);
   renderScores(null); // seed all-zero rows immediately, before the first fetch
 
+  // Match panel widths (see cachedMtPanelWidth comment above) -- must
+  // happen before setMode() below, which is what hides whichever panel
+  // isn't the default view.
+  await applyMatchedPanelWidth();
+
   const defaultMode = await loadDefaultMode();
   setMode(defaultMode);
 
@@ -432,6 +726,8 @@ async function boot() {
       refreshScores();
     }
   }, REFRESH_INTERVAL_MS);
+
+  setInterval(tickCountdown, 1000);
 }
 
 boot().catch((err) => {

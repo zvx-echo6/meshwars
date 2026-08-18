@@ -1,7 +1,8 @@
-/* MeshWars: styles for the MeshCore toggle + scoreboard controls and
-   cell popups (frontend/mc.js). Matches the existing dark theme used
-   by .meshwars-scoreboard in coverage.css; kept in its own file so it
-   can be added without touching coverage.css. */
+/* MeshWars: styles for the MeshCore toggle + scoreboard controls,
+   cell popups, and modals (frontend/mc.js). Matches the existing dark
+   theme used by .meshwars-scoreboard / .mt-modal in coverage.css; kept
+   in its own file, with its own class names, so it can be edited
+   without touching coverage.css or reusing code.js's modal markup. */
 
 .mc-toggle {
   background: #1a1a1a;
@@ -47,13 +48,19 @@
 }
 
 .mc-scoreboard {
+  /* box-sizing: border-box so the explicit width mc.js applies at boot
+     (matched to the Meshtastic panel's offsetWidth) is the panel's
+     *total* rendered width, the same quantity offsetWidth measures --
+     not content-only width plus this panel's own padding/border on top. */
+  box-sizing: border-box;
   background: #1a1a1a;
   color: #ddd;
   padding: 10px 14px;
-  border-radius: 4px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  border-radius: 6px;
+  border: 1px solid #333;
   font-size: 12px;
   min-width: 140px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
 .mc-scoreboard.mc-hidden {
@@ -70,11 +77,22 @@
   font-weight: 700;
   font-size: 12px;
   letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #e8a735;
   margin-bottom: 4px;
 }
 
+/* Team counts in two columns rather than one row per team -- with up
+   to seven MeshCore teams, a single stacked column made this panel
+   much taller than the three-row Meshtastic one. */
+.mc-scoreboard-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 14px;
+}
+
 .mc-team-label {
-  min-width: 62px;
+  min-width: 56px;
 }
 
 .mc-team-count {
@@ -88,6 +106,69 @@
   border-radius: 50%;
   margin-right: 6px;
   flex: 0 0 auto;
+}
+
+.mc-countdown {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #2a2a2a;
+  font-size: 11px;
+  color: #aaa;
+}
+
+.mc-scoreboard a {
+  color: #e8a735;
+  text-decoration: none;
+}
+.mc-scoreboard a:hover { text-decoration: underline; }
+
+/* Player search */
+.mc-lookup-row {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid #2a2a2a;
+  gap: 4px !important;
+}
+#mc-lookup-input {
+  flex: 1;
+  background: #0a0a0a;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 11px;
+  min-width: 0;
+}
+#mc-lookup-btn {
+  background: #2a2a2a;
+  color: #e8a735;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+#mc-lookup-btn:hover { background: #333; }
+.mc-lookup-result { font-size: 11px; margin-top: 4px; color: #ccc; }
+
+/* Refresh / Top Wardrivers buttons */
+.mc-scoreboard .mc-actions {
+  margin-top: 4px;
+}
+.mc-scoreboard #mc-refresh-btn,
+.mc-scoreboard #mc-top-btn {
+  background: #2a2a2a;
+  color: #e8a735;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  width: 100%;
+}
+.mc-scoreboard #mc-refresh-btn:hover,
+.mc-scoreboard #mc-top-btn:hover {
+  background: #333;
 }
 
 /* Cell popup content, rendered inside a Leaflet popup */
@@ -139,4 +220,109 @@
 .mc-popup-loading {
   color: #888;
   font-style: italic;
+}
+
+/* ===== Modals (History / Roster / Top Wardrivers) =====
+   Own implementation -- not code.js's #mt-history-modal -- but the
+   same visual treatment: dimmed backdrop, dark card, amber header. */
+
+.mc-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.7);
+  align-items: center;
+  justify-content: center;
+}
+.mc-modal-inner {
+  background: #1a1a1a;
+  color: #ddd;
+  border: 1px solid #444;
+  border-radius: 8px;
+  width: min(700px, 92vw);
+  max-height: 80vh;
+  overflow: auto;
+}
+.mc-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 18px;
+  border-bottom: 1px solid #333;
+  font-weight: 700;
+  font-size: 14px;
+  color: #e8a735;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.mc-modal-close {
+  cursor: pointer;
+  color: #aaa;
+  font-size: 22px;
+  background: none;
+  border: none;
+  line-height: 1;
+}
+.mc-modal-loading,
+.mc-modal-empty {
+  padding: 1em;
+  color: #888;
+  font-style: italic;
+}
+.mc-modal-error {
+  padding: 1em;
+  color: #c66;
+}
+
+.mc-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.mc-history-table th,
+.mc-history-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid #2a2a2a;
+}
+.mc-history-table th {
+  color: #888;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.mc-winner-cell {
+  color: #e8a735;
+  font-weight: 700;
+}
+
+/* Roster modal -- responsive per-team sections rather than a fixed
+   two-column grid, since MeshCore can have up to seven teams (versus
+   Meshtastic's fixed Red/Blue). */
+.mc-roster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+  padding: 12px 16px;
+}
+.mc-roster-team h3 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.mc-roster-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.mc-roster-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid #232323;
+}
+
+@media (max-width: 600px) {
+  .mc-roster-grid { grid-template-columns: 1fr; }
 }
