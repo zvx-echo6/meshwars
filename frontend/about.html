@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260818" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260818-2" />
 </head>
 <body>
 
@@ -77,8 +77,8 @@
           <p>Playable now. Your position comes from the MeshMapper wardriving app, which forwards a copy of your wardrive to MeshWars.</p>
         </div>
         <div class="protocol-card">
-          <div class="protocol-card-title">Meshtastic</div>
-          <p>The Meshtastic board currently runs on the older system, where nodes are picked up automatically from public packet data rather than by registering. Registering a Meshtastic node now binds it, ready for when that changes over.</p>
+          <div class="protocol-card-title">Meshtastic <span class="protocol-badge">Coming soon</span></div>
+          <p>Registration is not open yet. The Meshtastic board still picks nodes up automatically from public packet data rather than by registering, and registration opens once it moves onto the player model that MeshCore already uses.</p>
         </div>
       </div>
     </section>
@@ -89,7 +89,23 @@
         <li>Get the invite code from whoever invited you.</li>
         <li>Register at <a href="/join">/join</a>, pick a name and a team colour.</li>
         <li>Save the API key you are given. It is shown once.</li>
-        <li>Put the endpoint and key into MeshMapper under Settings, then API Endpoints.</li>
+        <li>
+          Connect MeshMapper:
+          <ol class="landing-substeps">
+            <li>Open MeshMapper</li>
+            <li>Open Settings</li>
+            <li>Scroll down to API Endpoints</li>
+            <li class="landing-step-critical"><strong>Toggle Custom API Endpoint on</strong></li>
+            <li>URL: <code>https://meshwars.com/api/mc/ingest</code></li>
+            <li>API Key: your key</li>
+            <li>Save</li>
+            <li>Make sure <strong>Include Contact Key</strong> is on</li>
+            <li>Start a wardriving session &mdash; nothing is sent without one</li>
+          </ol>
+          <div class="landing-warning-box">
+            <strong>Do not paste the meshmapper:// link into the URL field.</strong> It is not a web address. It is only for Import from Clipboard.
+          </div>
+        </li>
         <li>Start a wardriving session and drive.</li>
       </ol>
       <div class="landing-warnings">

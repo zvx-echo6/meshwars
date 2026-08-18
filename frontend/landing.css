@@ -110,6 +110,25 @@ body {
   color: #bbb;
 }
 
+/* "Coming soon" badge on the Meshtastic protocol card -- shows the
+   option is planned rather than hiding it, while making clear it
+   isn't open yet. Same treatment as join.css's .protocol-badge on the
+   /join protocol picker, kept in sync wording-wise. */
+.protocol-badge {
+  display: inline-block;
+  background: #2a2410;
+  color: var(--mw-accent);
+  border: 1px solid #4a3f1a;
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 4px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
 /* ---- join steps ----------------------------------------------------------- */
 .landing-steps {
   margin: 0 0 12px;
@@ -123,6 +142,59 @@ body {
 
 .landing-steps a {
   color: var(--mw-accent);
+}
+
+/* Nested numbered list for the MeshMapper connection sub-steps inside
+   "How to join" step 4 -- same list styling as join.css's .join-steps
+   so the instructions read identically whichever page a player is on. */
+.landing-substeps {
+  margin: 8px 0;
+  padding-left: 20px;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: #ccc;
+}
+.landing-substeps li { margin-bottom: 8px; }
+.landing-substeps li:last-child { margin-bottom: 0; }
+.landing-substeps code {
+  background: var(--mw-page);
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+/* The one step people actually miss (switching Custom API Endpoint on)
+   -- everything else can be set up perfectly and nothing is sent while
+   this stays off, so it gets real visual weight instead of blending in
+   as list item number four. */
+.landing-step-critical {
+  background: #241c0a;
+  border: 1px solid var(--mw-accent);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-left: -8px;
+  color: var(--mw-gold-light);
+}
+
+/* A clear-box warning, distinct from the smaller inline
+   .landing-warnings text below -- used for the "do not paste the
+   meshmapper:// link into the URL field" caution, which needs to stop
+   the eye rather than blend into the surrounding paragraphs. Same
+   treatment as join.css's .join-warning-box. */
+.landing-warning-box {
+  background: #2a1a10;
+  border: 1px solid var(--mw-hostile);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 10px 0 4px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #f0c0a8;
+}
+.landing-warning-box strong {
+  display: block;
+  color: #ffb088;
+  margin-bottom: 2px;
 }
 
 .landing-warnings {

@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/join.css?v=20260818" />
+  <link rel="stylesheet" href="/static/join.css?v=20260818-2" />
 </head>
 <body>
 
@@ -53,6 +53,27 @@
     <section class="join-panel join-play-area">
       <div class="join-panel-title">Where it's played</div>
       <p>MeshWars is currently scoped for Southern Idaho and Northern Utah. If you'd like to join the fun or need help, please reach out to malice in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a>.</p>
+    </section>
+
+    <section id="status-check-panel" class="join-panel status-check-panel">
+      <div class="join-panel-title">Already registered? Check your setup</div>
+      <p class="hint">Paste your API key to see whether MeshWars is receiving anything from your app.</p>
+
+      <form id="status-form" novalidate autocomplete="off">
+        <div id="status-error" class="join-error" role="alert" hidden></div>
+
+        <label class="join-field">
+          <span>API key</span>
+          <div class="key-input-row">
+            <input type="password" id="f-status-key" autocomplete="off" required />
+            <button type="button" id="status-key-toggle" aria-label="Show key">Show</button>
+          </div>
+        </label>
+
+        <button type="submit" id="status-submit">Check</button>
+      </form>
+
+      <div id="status-result" class="status-result" hidden></div>
     </section>
 
     <section id="join-form-panel" class="join-panel">
@@ -81,11 +102,12 @@
               <input type="radio" name="protocol" value="mc" checked />
               <span>MeshCore</span>
             </label>
-            <label class="protocol-choice">
-              <input type="radio" name="protocol" value="mt" />
-              <span>Meshtastic</span>
+            <label class="protocol-choice protocol-choice-disabled" id="mt-protocol-choice">
+              <input type="radio" name="protocol" value="mt" id="f-protocol-mt" disabled />
+              <span>Meshtastic <span class="protocol-badge" id="mt-badge">Coming soon</span></span>
             </label>
           </div>
+          <p class="hint" id="mt-coming-soon-hint">The Meshtastic board still picks nodes up automatically today. Registration opens once it moves onto the player model.</p>
         </div>
 
         <div id="mc-instructions" class="protocol-block">
@@ -110,6 +132,6 @@
     <section id="join-result-panel" class="join-panel" hidden></section>
   </main>
 
-  <script src="/static/join.js?v=20260818" type="module"></script>
+  <script src="/static/join.js?v=20260818-2" type="module"></script>
 </body>
 </html>
