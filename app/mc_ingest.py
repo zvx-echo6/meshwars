@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import logging.handlers
 import re
 import time
 from dataclasses import dataclass
@@ -380,3 +382,87 @@ class McIngestor:
         finally:
             conn.close()
         return removed_pings, removed_stats
+
+
+# ---- raw batch diagnostic log ---------------------------------------------
+#
+# Opt-in, off by default (settings.mc_raw_log_enabled). Records each
+# received batch verbatim -- including real GPS positions -- to a
+# dedicated rotating file, so real MeshMapper payloads can be inspected
+# before thresholds are tuned. Never touches the database and never the
+# normal application log.
+
+_raw_log_logger: logging.Logger | None = None
+_raw_log_setup_done = False
+_raw_log_broken = False
+
+
+def _get_raw_logger() -> logging.Logger | None:
+    """Lazily set up the dedicated raw-batch logger the first time it's
+    needed, and only once per process. Returns None if raw logging is
+    off, or if setup already failed once (a broken handler is not
+    retried on every request).
+    """
+    global _raw_log_logger, _raw_log_setup_done, _raw_log_broken
+
+    if _raw_log_broken:
+        return None
+    if _raw_log_setup_done:
+        return _raw_log_logger
+    _raw_log_setup_done = True
+
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            settings.mc_raw_log_path,
+            maxBytes=settings.mc_raw_log_max_bytes,
+            backupCount=settings.mc_raw_log_backups,
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        raw_logger = logging.getLogger("meshwars.mc_raw")
+        raw_logger.setLevel(logging.INFO)
+        raw_logger.propagate = False  # never leak into the normal app log
+        raw_logger.addHandler(handler)
+        _raw_log_logger = raw_logger
+    except Exception:
+        _raw_log_broken = True
+        log.warning(
+            "mc ingest: could not set up raw batch log at %s -- raw batch "
+            "logging disabled for the rest of this process",
+            settings.mc_raw_log_path, exc_info=True,
+        )
+        return None
+
+    log.warning(
+        "mc ingest: raw batch logging is ON -- %s will contain real GPS "
+        "positions from wardriving batches",
+        settings.mc_raw_log_path,
+    )
+    return _raw_log_logger
+
+
+def log_raw_batch(player_id: int, key_hash: str, raw_body: bytes) -> None:
+    """Append one JSON line to the raw batch diagnostic log, if enabled.
+    This is a diagnostic, not a feature: nothing in here may ever raise
+    into the request path, so a logging failure can't fail a request.
+    """
+    if not settings.mc_raw_log_enabled:
+        return  # no file handle, no setup, no cost
+    try:
+        raw_logger = _get_raw_logger()
+        if raw_logger is None:
+            return
+        try:
+            body_text = raw_body.decode("utf-8", errors="replace")
+        except Exception:
+            body_text = "<undecodable body>"
+        record = {
+            "received_at": time.time(),
+            "player_id": player_id,
+            # Only the first 8 characters of the key hash are stored --
+            # never the raw API key, and never the full hash.
+            "key_hash_prefix": key_hash[:8],
+            "body": body_text,
+        }
+        raw_logger.info(json.dumps(record))
+    except Exception:
+        log.warning("mc ingest: raw batch logging failed", exc_info=True)

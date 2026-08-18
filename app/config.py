@@ -58,6 +58,18 @@ class Settings(BaseSettings):
     mc_ping_retention_hours: int = 48
     mc_stat_retention_days: int = 30
 
+    # MeshCore raw batch diagnostic log: writes each received batch
+    # verbatim (including real GPS positions) so real MeshMapper payloads
+    # can be inspected before the ingest thresholds above are tuned, and
+    # so the MeshMapper grid-origin assumption can be checked against
+    # real data. This records real GPS tracks of real people -- meant to
+    # be switched on briefly for tuning and switched back off, not left
+    # running.
+    mc_raw_log_enabled: bool = False
+    mc_raw_log_path: str = "/data/mc_raw.log"  # where the raw batch log is written
+    mc_raw_log_max_bytes: int = 10_000_000     # rotate after this many bytes
+    mc_raw_log_backups: int = 3                # rotated files kept, beyond the active one
+
     @property
     def meshview_url(self) -> str:
         return self.meshview_base_url.rstrip("/")

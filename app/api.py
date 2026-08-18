@@ -23,7 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .config import settings
 from .db import connect
-from .mc_ingest import hash_secret
+from .mc_ingest import hash_secret, log_raw_batch
 from .seasons import (
     get_active_season,
     get_history,
@@ -608,6 +608,16 @@ async def mc_ingest(request: Request) -> JSONResponse:
     if auth.status == "disabled":
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
+    key_hash = hash_secret(raw_key)
+
+    # Diagnostic only, off by default (mc_raw_log_enabled): logs the raw
+    # request body verbatim, which adds file I/O to the request path --
+    # meant for short tuning windows, not to run continuously. Placed
+    # after auth succeeds, so an unauthenticated caller can never make us
+    # write to disk, and before body validation, so malformed payloads
+    # are captured too.
+    log_raw_batch(auth.player_id, key_hash, await request.body())
+
     try:
         body = await request.json()
     except Exception:
@@ -620,7 +630,6 @@ async def mc_ingest(request: Request) -> JSONResponse:
     if not data or len(data) > settings.mc_max_batch_pings:
         return JSONResponse({"error": "bad request"}, status_code=400)
 
-    key_hash = hash_secret(raw_key)
     accepted = ingestor.submit(auth.player_id, key_hash, data, int(time.time()))
     if not accepted:
         return JSONResponse({"error": "queue full"}, status_code=503)
