@@ -35,6 +35,24 @@ const TEAM_ORDER = Object.keys(TEAM_COLORS);
 // Same cadence code.js uses for its own coverage/scoreboard refresh.
 const REFRESH_INTERVAL_MS = 30000;
 
+// Cap on how far map.fitBounds() is ever allowed to zoom in when
+// framing the MeshCore board or a player search result. A board (or a
+// single player) holding only one or two 300m cells has a tiny bounds
+// box -- fitting to it with no cap zooms in far enough that a visitor
+// sees one giant coloured rectangle filling the screen with no
+// surrounding context. At zoom 13 a 300m square is small but clearly
+// visible with several kilometres of context around it, which reads as
+// a game board rather than a coloured blob. Keep this even once the
+// board is full and every fit naturally lands well under this cap --
+// it's the sparse early board (and any single-player search) this
+// exists to protect against, and that stops being visible from the UI
+// once the symptom is gone.
+const MAX_FIT_ZOOM = 13;
+
+// Matches the breakpoint used elsewhere in mc.css/coverage.css (the
+// settings control, roster grid, About overlay) for "phone-width".
+const NARROW_BREAKPOINT_PX = 600;
+
 // Escapes text destined for an HTML string. display_name and team are
 // attacker-controlled (a MeshCore XSS bug hit ~20 analyser sites this
 // spring) -- every interpolated value that goes into an HTML string in
@@ -80,6 +98,9 @@ let mode = 'meshcore'; // 'meshcore' | 'meshtastic'
 let toggleControl = null;
 let scoreboardControl = null;
 let scoreboardBody = null;
+let scoreboardPanelEl = null;
+let scoreboardHeaderBtn = null;
+let scoreboardSummaryEl = null;
 let refreshTimer = null;
 let scoreboardEndsAt = null;
 // Play-area box from /config, loaded once at boot -- used to frame the
@@ -269,26 +290,46 @@ function buildScoreboardControl() {
   control.onAdd = function () {
     const div = L.DomUtil.create('div', 'leaflet-control mc-scoreboard');
     div.innerHTML = `
-      <div class="mc-row mc-title">MeshCore Territory</div>
-      <div class="mc-scoreboard-body"></div>
-      <div class="mc-row mc-countdown">Ends in&nbsp;<span id="mc-countdown">--</span></div>
-      <div class="mc-row mc-lookup-row">
-        <input type="text" id="mc-lookup-input" placeholder="player name" />
-        <button type="button" id="mc-lookup-btn">Find</button>
-      </div>
-      <div id="mc-lookup-result" class="mc-lookup-result"></div>
-      <div class="mc-row"><a href="#" id="mc-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mc-roster-link">Roster</a></div>
-      <div class="mc-row mc-actions">
-        <button type="button" id="mc-refresh-btn">Refresh map</button>
-      </div>
-      <div class="mc-row mc-actions">
-        <button type="button" id="mc-top-btn">Top Wardrivers</button>
+      <button type="button" class="mc-row mc-title mc-header-btn" id="mc-header-btn" aria-expanded="true">
+        <span class="mc-header-title-text">MeshCore Territory</span>
+        <span class="mc-header-right">
+          <span class="mc-header-summary" id="mc-header-summary"></span>
+          <span class="mc-header-caret" aria-hidden="true">&#9662;</span>
+        </span>
+      </button>
+      <div class="mc-panel-content" id="mc-panel-content">
+        <div class="mc-scoreboard-body"></div>
+        <div class="mc-row mc-countdown">Ends in&nbsp;<span id="mc-countdown">--</span></div>
+        <div class="mc-row mc-lookup-row">
+          <input type="text" id="mc-lookup-input" placeholder="player name" />
+          <button type="button" id="mc-lookup-btn">Find</button>
+        </div>
+        <div id="mc-lookup-result" class="mc-lookup-result"></div>
+        <div class="mc-row"><a href="#" id="mc-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mc-roster-link">Roster</a></div>
+        <div class="mc-row mc-actions">
+          <button type="button" id="mc-refresh-btn">Refresh map</button>
+        </div>
+        <div class="mc-row mc-actions">
+          <button type="button" id="mc-top-btn">Top Wardrivers</button>
+        </div>
       </div>
     `;
     scoreboardBody = div.querySelector('.mc-scoreboard-body');
+    scoreboardPanelEl = div;
+    scoreboardHeaderBtn = div.querySelector('#mc-header-btn');
+    scoreboardSummaryEl = div.querySelector('#mc-header-summary');
 
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
+
+    // Collapsible territory panel (phones only) -- see mc.css's
+    // .mc-collapsed rule, which is itself gated to NARROW_BREAKPOINT_PX
+    // so this toggle has no visual effect on desktop even though the
+    // button and listener exist there too.
+    scoreboardHeaderBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setMcCollapsed(!scoreboardPanelEl.classList.contains('mc-collapsed'));
+    });
 
     div.querySelector('#mc-history-link').addEventListener('click', (e) => {
       e.preventDefault();
@@ -325,6 +366,24 @@ function buildScoreboardControl() {
   return control;
 }
 
+// Picks whichever team currently holds the most cells, for the
+// collapsed-header summary ("TEAM count") on phones -- the /api/mc/scores
+// teams array is in fixed TEAM_ORDER, not sorted by tile count, so this
+// has to be computed client-side rather than just taking teams[0].
+function leadingTeam(teams) {
+  let best = null;
+  teams.forEach((t) => {
+    if (!best || (t.tiles ?? 0) > (best.tiles ?? 0)) best = t;
+  });
+  return best;
+}
+
+function setMcCollapsed(collapsed) {
+  if (!scoreboardPanelEl || !scoreboardHeaderBtn) return;
+  scoreboardPanelEl.classList.toggle('mc-collapsed', collapsed);
+  scoreboardHeaderBtn.setAttribute('aria-expanded', String(!collapsed));
+}
+
 function renderScores(data) {
   if (!scoreboardBody) return;
   // Rebuild from scratch each refresh -- textContent throughout, no
@@ -334,6 +393,11 @@ function renderScores(data) {
   const teams = (data && Array.isArray(data.teams) && data.teams.length)
     ? data.teams
     : TEAM_ORDER.map((t) => ({ team: t, tiles: 0 }));
+
+  if (scoreboardSummaryEl) {
+    const lead = leadingTeam(teams);
+    scoreboardSummaryEl.textContent = lead ? `${lead.team} ${lead.tiles ?? 0}` : '';
+  }
 
   teams.forEach((entry) => {
     const row = document.createElement('div');
@@ -394,7 +458,7 @@ async function doPlayerFind(value) {
       return;
     }
     const b = data.bounds;
-    if (map) map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [24, 24] });
+    if (map) map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [24, 24], maxZoom: MAX_FIT_ZOOM });
     const plural = data.tiles_held === 1 ? '' : 's';
     resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`;
   } catch (err) {
@@ -660,7 +724,7 @@ async function refreshBoard(fitToBoard) {
     if (fitToBoard) {
       const bounds = boardBounds(cells);
       if (bounds && map) {
-        map.fitBounds(bounds, { padding: [24, 24] });
+        map.fitBounds(bounds, { padding: [24, 24], maxZoom: MAX_FIT_ZOOM });
       } else if (map && playAreaBounds) {
         // No owned cells yet -- frame the configured play area instead
         // of leaving the map wherever it happened to be.
@@ -741,6 +805,13 @@ async function boot() {
   scoreboardControl = buildScoreboardControl();
   scoreboardControl.addTo(map);
   renderScores(null); // seed all-zero rows immediately, before the first fetch
+
+  // Territory panel starts collapsed on narrow screens only (phones) --
+  // it otherwise eats roughly the top half of a phone screen. Desktop
+  // always starts (and stays) expanded; see setMcCollapsed / mc.css.
+  if (window.matchMedia(`(max-width: ${NARROW_BREAKPOINT_PX}px)`).matches) {
+    setMcCollapsed(true);
+  }
 
   // Match panel widths (see cachedMtPanelWidth comment above) -- must
   // happen before setMode() below, which is what hides whichever panel

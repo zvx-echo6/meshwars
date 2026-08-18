@@ -213,30 +213,51 @@ const scoreboardControl = L.control({ position: 'topright' });
 scoreboardControl.onAdd = function () {
   const div = L.DomUtil.create('div', 'leaflet-control meshwars-scoreboard');
   div.innerHTML = `
-    <div class="mt-row mt-title">Territory</div>
-    <div class="mt-row"><span class="mt-dot mt-red"></span> Red: <span id="mt-red-count">0</span></div>
-    <div class="mt-row"><span class="mt-dot mt-blue"></span> Blue: <span id="mt-blue-count">0</span></div>
-    <div class="mt-row"><span class="mt-dot mt-green"></span> Neutral: <span id="mt-green-count">0</span></div>
-    <div class="mt-row mt-countdown">Ends in <span id="mt-countdown">--</span></div>
-    <div class="mt-row mt-lookup-row">
-      <input type="text" id="mt-lookup-input" placeholder="!abcd1234 or short name" />
-      <button type="button" id="mt-lookup-btn">Find</button>
-    </div>
-    <div id="mt-lookup-result" class="mt-lookup-result"></div>
-    <div class="mt-row"><a href="#" id="mt-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mt-roster-link">Roster</a></div>
-    <div class="mt-row mt-actions">
-      <button type="button" id="mt-refresh-btn">Refresh map</button>
-    </div>
-    <div class="mt-row mt-actions">
-      <button type="button" id="mt-feeders-btn">Top MQTT Feeders</button>
-    </div>
-    <div id="mt-feeders-list" class="mt-feeders-list">
-      <div class="repeaters-list-header">Feeders by Coverage</div>
-      <div id="mt-feeders-list-content"></div>
+    <button type="button" class="mt-row mt-title mt-header-btn" id="mt-header-btn" aria-expanded="true">
+      <span class="mt-header-title-text">Territory</span>
+      <span class="mt-header-right">
+        <span class="mt-header-summary" id="mt-header-summary"></span>
+        <span class="mt-header-caret" aria-hidden="true">&#9662;</span>
+      </span>
+    </button>
+    <div class="mt-panel-content" id="mt-panel-content">
+      <div class="mt-row"><span class="mt-dot mt-red"></span> Red: <span id="mt-red-count">0</span></div>
+      <div class="mt-row"><span class="mt-dot mt-blue"></span> Blue: <span id="mt-blue-count">0</span></div>
+      <div class="mt-row"><span class="mt-dot mt-green"></span> Neutral: <span id="mt-green-count">0</span></div>
+      <div class="mt-row mt-countdown">Ends in <span id="mt-countdown">--</span></div>
+      <div class="mt-row mt-lookup-row">
+        <input type="text" id="mt-lookup-input" placeholder="!abcd1234 or short name" />
+        <button type="button" id="mt-lookup-btn">Find</button>
+      </div>
+      <div id="mt-lookup-result" class="mt-lookup-result"></div>
+      <div class="mt-row"><a href="#" id="mt-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mt-roster-link">Roster</a></div>
+      <div class="mt-row mt-actions">
+        <button type="button" id="mt-refresh-btn">Refresh map</button>
+      </div>
+      <div class="mt-row mt-actions">
+        <button type="button" id="mt-feeders-btn">Top MQTT Feeders</button>
+      </div>
+      <div id="mt-feeders-list" class="mt-feeders-list">
+        <div class="repeaters-list-header">Feeders by Coverage</div>
+        <div id="mt-feeders-list-content"></div>
+      </div>
     </div>
   `;
   L.DomEvent.disableClickPropagation(div);
   L.DomEvent.disableScrollPropagation(div);
+
+  // Collapsible territory panel (phones only) -- see coverage.css's
+  // .mt-collapsed rule, gated to the same breakpoint isMobile() uses,
+  // so this toggle has no visual effect on desktop even though the
+  // button and listener exist there too.
+  const headerBtn = div.querySelector('#mt-header-btn');
+  headerBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const collapsed = div.classList.toggle('mt-collapsed');
+    headerBtn.setAttribute('aria-expanded', String(!collapsed));
+  });
+  if (isMobile()) div.classList.add('mt-collapsed');
+
   div.querySelector('#mt-history-link').addEventListener('click', (e) => {
     e.preventDefault();
     openHistoryModal();
@@ -1147,6 +1168,15 @@ async function refreshScoreboard() {
     setText('mt-red-count', s.red);
     setText('mt-blue-count', s.blue);
     setText('mt-green-count', s.green);
+    // Collapsed-header summary (phones only, see .mt-collapsed in
+    // coverage.css) -- Red vs Blue only; Neutral/green tiles are
+    // unclaimed, not held by a team, so they don't count as "leading".
+    const summaryEl = document.getElementById('mt-header-summary');
+    if (summaryEl) {
+      const lead = (s.red ?? 0) >= (s.blue ?? 0) ? 'RED' : 'BLUE';
+      const leadCount = lead === 'RED' ? (s.red ?? 0) : (s.blue ?? 0);
+      summaryEl.textContent = `${lead} ${leadCount}`;
+    }
     scoreboardEndsAt = s.ends_at;
   } catch (e) { /* ignore */ }
 }
