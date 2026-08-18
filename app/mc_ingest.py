@@ -33,6 +33,12 @@ _CONTACT_RE = re.compile(r"^[0-9a-fA-F]{8}$")
 
 _HOUSEKEEPING_INTERVAL_S = 3600  # at most once per hour
 
+# Every distinct key hash looked up gets a cache entry, including hashes
+# for keys that do not exist -- and the ingest endpoint is reachable from
+# the public internet. Without a limit, a flood of bogus keys grows this
+# dict without bound and can exhaust process memory. This caps it.
+_KEY_CACHE_MAX = 10000
+
 
 def hash_secret(raw: str) -> str:
     """SHA-256 hex digest of a raw API key, for storage/lookup by hash."""
@@ -89,6 +95,18 @@ class McIngestor:
             return cached[1]
 
         result = await asyncio.to_thread(self._lookup_key_sync, key_hash)
+        if len(self._key_cache) >= _KEY_CACHE_MAX:
+            # First sweep out anything already expired -- that alone
+            # usually frees plenty of room. If the cache is still at
+            # the limit after that, clear it outright: it is only a
+            # cache, so the worst case is a few extra database reads
+            # to repopulate it, and that is always better than letting
+            # an unbounded cache take down the process.
+            expired = [k for k, (exp, _) in self._key_cache.items() if exp <= now]
+            for k in expired:
+                del self._key_cache[k]
+            if len(self._key_cache) >= _KEY_CACHE_MAX:
+                self._key_cache.clear()
         self._key_cache[key_hash] = (now + settings.mc_key_cache_seconds, result)
         return result
 
