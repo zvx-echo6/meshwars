@@ -351,6 +351,14 @@ async function initMap() {
   window.MESHWARS_MESHTASTIC_LAYERS = [coverageLayer, edgeLayer, sampleLayer, liveTrackLayer];
   window.dispatchEvent(new Event('meshwars:map-ready'));
 
+  // #map is now sized by CSS (top: var(--mw-nav-h), below the fixed site
+  // nav bar) rather than filling the whole viewport, so it's already the
+  // right size before L.map() reads it above. Nudge Leaflet to
+  // re-measure anyway once this layout pass has settled, so a container
+  // size that a browser reports late (e.g. a slow web-font swap shifting
+  // the bar's height) can never leave the map under- or over-sized.
+  requestAnimationFrame(() => map.invalidateSize());
+
   initSVGPatterns();
 
   scoreboardControl.addTo(map);  // unified panel (settings card removed)

@@ -14,7 +14,7 @@ body {
 .join-wrap {
   max-width: 560px;
   margin: 0 auto;
-  padding: 24px 16px 64px;
+  padding: calc(var(--mw-nav-h) + 24px) 16px 64px;
 }
 
 .join-header h1 {
@@ -250,15 +250,54 @@ body {
 
 
 /* -------------------------------------------------------------------------
-   Site nav (Home / Map / Join). In-flow at the top of the page, shared
-   look with the landing page nav (frontend/landing.css).
+/* -------------------------------------------------------------------------
+   Site nav bar (Map / About / Join). Fixed, full width, across the very
+   top of every page (frontend/index.html, about.html, join.html) --
+   wordmark on the left, page links on the right, current page marked
+   with .active. Identical declarations duplicated in coverage.css /
+   landing.css / join.css (the same per-page duplication pattern .mw-nav
+   already used before this) since the three pages never share a
+   stylesheet. --mw-nav-h is read by each page's own layout rules so
+   content starts exactly at the bar's bottom edge with no gap or
+   overlap.
    ------------------------------------------------------------------------- */
+:root {
+  --mw-nav-h: 48px;
+}
+@media (max-width: 600px) {
+  :root { --mw-nav-h: 40px; }
+}
+
 .mw-nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--mw-nav-h);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+  box-sizing: border-box;
+}
+.mw-nav-brand {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #e8a735;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.mw-nav-links {
   display: flex;
   gap: 4px;
-  margin-bottom: 20px;
 }
-.mw-nav a {
+.mw-nav-links a {
   padding: 6px 12px;
   font-size: 12px;
   text-transform: uppercase;
@@ -268,6 +307,14 @@ body {
   border: 1px solid #333;
   border-radius: 4px;
   background: #1a1a1a;
+  white-space: nowrap;
 }
-.mw-nav a:hover { background: #262626; color: #e8a735; }
-.mw-nav a.active { color: #e8a735; border-color: #e8a735; }
+.mw-nav-links a:hover { background: #262626; color: #e8a735; }
+.mw-nav-links a.active { color: #e8a735; border-color: #e8a735; }
+
+@media (max-width: 600px) {
+  .mw-nav { padding: 0 8px; gap: 6px; }
+  .mw-nav-brand { font-size: 12px; }
+  .mw-nav-links { gap: 3px; }
+  .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
+}

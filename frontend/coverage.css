@@ -16,7 +16,10 @@ html, body {
 
 #map {
   position: absolute;
-  inset: 0;
+  top: var(--mw-nav-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
   background: #0a0a0a;
 }
 
@@ -363,7 +366,7 @@ html, body {
 
 .mt-winner-banner {
   position: absolute;
-  top: 12px;
+  top: calc(var(--mw-nav-h) + 12px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 1000;
@@ -699,61 +702,70 @@ html, body {
 
 
 /* -------------------------------------------------------------------------
-   Site nav (About / Join). Sits top-left, directly below Leaflet's
-   default zoom control (also top-left) -- previously fixed bottom-left,
-   small and grey, directly above the map attribution strip and, on a
-   phone, right where browser chrome usually sits: the worst spot for
-   the only control that explains the game to a first-time visitor.
-   Styled like the territory panels (.mc-scoreboard / .meshwars-scoreboard)
-   -- same background/border/radius/shadow -- with tall tap targets.
-   About is the primary control (amber-highlighted, like an active
-   view-toggle button) since it's the one a newcomer actually needs;
-   Join stays secondary.
+   Site nav bar (Map / About / Join). Fixed, full width, across the very
+   top of every page (frontend/index.html, about.html, join.html) --
+   wordmark on the left, page links on the right, current page marked
+   with .active. Identical declarations duplicated in coverage.css /
+   landing.css / join.css (the same per-page duplication pattern .mw-nav
+   already used before this) since the three pages never share a
+   stylesheet. --mw-nav-h is read by each page's own layout rules so
+   content starts exactly at the bar's bottom edge with no gap or
+   overlap.
    ------------------------------------------------------------------------- */
+:root {
+  --mw-nav-h: 48px;
+}
+@media (max-width: 600px) {
+  :root { --mw-nav-h: 40px; }
+}
+
 .mw-nav {
   position: fixed;
-  /* Leaflet's zoom control renders at 10px from the map top and is
-     65px tall (measured: two buttons + divider) -- see leaflet.css.
-     Land this panel a clear 10px below that, never touching it at any
-     width (it isn't part of Leaflet's own control stack). */
-  top: 85px;
-  left: 10px;
-  z-index: 900;
-  display: flex;
-  gap: 2px;
-  background: #1a1a1a;
-  border: 1px solid #333;
-  border-radius: 6px;
-  overflow: hidden;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-}
-.mw-nav a,
-.mw-nav button {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--mw-nav-h);
+  z-index: 1000;
   display: flex;
   align-items: center;
-  justify-content: center;
-  /* Comfortable phone tap target, not just a font-size bump. */
-  min-height: 40px;
-  box-sizing: border-box;
+  justify-content: space-between;
+  gap: 12px;
   padding: 0 16px;
-  font-size: 12px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-               "Helvetica Neue", Arial, sans-serif;
-  color: #ccc;
-  text-decoration: none;
-  background: none;
-  border: none;
-  cursor: pointer;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+  box-sizing: border-box;
 }
-.mw-nav a:hover,
-.mw-nav button:hover { background: #262626; color: #e8a735; }
-.mw-nav a.active,
-.mw-nav button.active { color: #e8a735; font-weight: 700; }
-/* About is the primary control -- amber-highlighted like an active
-   view-toggle button, so it reads as the one to press first. */
-#about-open-btn {
-  background: #3a2f12;
-  color: #e8a735;
+.mw-nav-brand {
+  font-size: 15px;
   font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #e8a735;
+  text-decoration: none;
+  white-space: nowrap;
 }
-#about-open-btn:hover { background: #4a3a18; }
+.mw-nav-links {
+  display: flex;
+  gap: 4px;
+}
+.mw-nav-links a {
+  padding: 6px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #999;
+  text-decoration: none;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a1a;
+  white-space: nowrap;
+}
+.mw-nav-links a:hover { background: #262626; color: #e8a735; }
+.mw-nav-links a.active { color: #e8a735; border-color: #e8a735; }
+
+@media (max-width: 600px) {
+  .mw-nav { padding: 0 8px; gap: 6px; }
+  .mw-nav-brand { font-size: 12px; }
+  .mw-nav-links { gap: 3px; }
+  .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
+}
