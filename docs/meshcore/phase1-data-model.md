@@ -124,7 +124,7 @@ ts         INTEGER NOT NULL
 PRIMARY KEY (player_id, protocol)
 ```
 
-This is one row per player-per-protocol that gets overwritten every time a new position comes in — it is not a history and never accumulates rows. It stores a grid cell, never an exact coordinate. A roughly 300-metre cell is plenty precise enough to catch someone who apparently teleported across the map between two reports; it doesn't need to know exactly where within that cell they were.
+This is one row per player-per-protocol that gets overwritten every time a new position comes in — it is not a history and never accumulates rows. It stores a grid cell, never an exact coordinate. A roughly 300-meter cell is plenty precise enough to catch someone who apparently teleported across the map between two reports; it doesn't need to know exactly where within that cell they were.
 
 ### player_cell_ping
 
@@ -176,7 +176,7 @@ Kept for 30 days. The practical payoff: when someone says "MeshWars isn't seeing
 
 ### season
 
-Gains `protocol`. Loses the three hardcoded colour tally columns.
+Gains `protocol`. Loses the three hardcoded color tally columns.
 
 The primary key stays `(id)`. `protocol` becomes a plain column, and there is one active season per protocol at a time (one active Meshtastic season, one active MeshCore season, running independently).
 
@@ -255,14 +255,14 @@ If the owner wants `sample` kept anyway, it would have to be recorded at cell-le
 
 ## Privacy
 
-**No raw latitude or longitude from MeshCore is ever written to the database.** The conversion from a real coordinate to a cell id happens in the background worker, in memory, before anything touches storage. The only position-shaped thing that ever gets persisted is a cell id — a roughly 300-metre square someone was somewhere inside of, never their exact point.
+**No raw latitude or longitude from MeshCore is ever written to the database.** The conversion from a real coordinate to a cell id happens in the background worker, in memory, before anything touches storage. The only position-shaped thing that ever gets persisted is a cell id — a roughly 300-meter square someone was somewhere inside of, never their exact point.
 
 The one exception is a raw-batch debug log, which the owner specifically asked for so real MeshMapper payloads can be inspected while tuning the ingest logic. That log must:
 
 - be off by default,
 - be controlled by a config flag (not a code change) to turn on,
 - write to a rotating log file on disk, never to the database, and
-- be clearly labelled, in the file itself and in any documentation of it, as containing real GPS tracks of real people.
+- be clearly labeled, in the file itself and in any documentation of it, as containing real GPS tracks of real people.
 
 The recommendation is that this flag only ever gets turned on briefly, for active tuning, and turned back off immediately afterward — not left on as a standing feature.
 

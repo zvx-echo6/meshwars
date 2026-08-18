@@ -1,6 +1,6 @@
 # MeshWars
 
-A territory control game played over mesh radio. Seven teams claim roughly 300 metre squares of ground by reaching the mesh from them.
+A territory control game played over mesh radio. Seven teams claim roughly 300 meter squares of ground by reaching the mesh from them.
 
 ![MeshCore board](docs/img/map.png)
 
