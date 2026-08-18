@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, Request
@@ -22,6 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .config import settings
 from .db import connect
+from .mc_ingest import hash_secret
 from .seasons import (
     get_active_season,
     get_history,
@@ -583,6 +585,47 @@ def _node_hex(node_id: int | None) -> str:
     if node_id is None:
         return ""
     return f"!{node_id:08x}"
+
+
+@router.post("/api/mc/ingest")
+async def mc_ingest(request: Request) -> JSONResponse:
+    """Accepts a batch of wardriving pings pushed by the MeshCore
+    MeshMapper app. Must answer fast: authenticate, validate shape, hand
+    off to the queue. No scoring or tile work here -- see mc_ingest.py.
+    """
+    if not settings.mc_ingest_enabled:
+        return JSONResponse({"error": "mc ingest disabled"}, status_code=503)
+
+    raw_key = request.headers.get("X-API-Key", "")
+    if not raw_key:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    ingestor = request.app.state.mc_ingestor
+    auth = await ingestor.authenticate(raw_key)
+    if auth.status in ("not_found", "revoked"):
+        # Generic message for both cases -- don't reveal whether a key exists.
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if auth.status == "disabled":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    data = body["data"]
+    if not data or len(data) > settings.mc_max_batch_pings:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    key_hash = hash_secret(raw_key)
+    accepted = ingestor.submit(auth.player_id, key_hash, data, int(time.time()))
+    if not accepted:
+        return JSONResponse({"error": "queue full"}, status_code=503)
+
+    return JSONResponse({"accepted": len(data)}, status_code=202)
 
 
 def mount(app: FastAPI) -> None:

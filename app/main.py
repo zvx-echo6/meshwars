@@ -11,6 +11,7 @@ from .api import mount
 from .config import settings
 from .db import init_db
 from .ingest import Ingestor
+from .mc_ingest import McIngestor
 from .meshview_client import MeshviewClient
 
 logging.basicConfig(
@@ -29,9 +30,14 @@ async def lifespan(app: FastAPI):
     ingestor = Ingestor(client)
     task = asyncio.create_task(ingestor.run_forever(), name="ingest")
 
+    mc_ingestor = McIngestor()
+    if settings.mc_ingest_enabled:
+        await mc_ingestor.start()
+
     app.state.client = client
     app.state.ingestor = ingestor
     app.state.ingest_task = task
+    app.state.mc_ingestor = mc_ingestor
 
     try:
         yield
@@ -43,6 +49,8 @@ async def lifespan(app: FastAPI):
             await task
         except (asyncio.CancelledError, Exception):
             pass
+        if settings.mc_ingest_enabled:
+            await mc_ingestor.stop()
         await client.aclose()
 
 

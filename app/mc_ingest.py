@@ -1,0 +1,364 @@
+"""MeshCore wardriving ingest: queue and worker.
+
+This module receives batches of position "pings" pushed by the MeshCore
+companion app (MeshMapper) during wardriving sessions. The HTTP handler in
+app/api.py that accepts these batches must answer in single-digit
+milliseconds: MeshMapper gives the request ten seconds and does not retry
+on failure or timeout, so the request path only authenticates the caller,
+checks that the batch is well formed, and hands it to an in-memory queue.
+
+All real work -- attributing pings to a player, converting coordinates to
+a grid cell, deduping, and writing to the database -- happens here in the
+background worker, off the request path entirely.
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import re
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+from .config import settings
+from .db import _WRITE_LOCK, connect
+from .grid import cell_center, cell_id, distance_m, valid_coord
+
+log = logging.getLogger("mc_ingest")
+
+PROTOCOL = "mc"
+
+_CONTACT_RE = re.compile(r"^[0-9a-fA-F]{8}$")
+
+_HOUSEKEEPING_INTERVAL_S = 3600  # at most once per hour
+
+
+def hash_secret(raw: str) -> str:
+    """SHA-256 hex digest of a raw API key, for storage/lookup by hash."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class AuthResult:
+    """Outcome of authenticate(). status is one of:
+    "not_found", "revoked", "disabled", "ok".
+    player_id is set for every status except "not_found".
+    """
+    status: str
+    player_id: int | None = None
+
+
+_AUTH_NOT_FOUND = AuthResult("not_found")
+
+
+class McIngestor:
+    """Bounded queue + background worker for MeshCore ingest batches."""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=settings.mc_queue_max)
+        self._worker_task: asyncio.Task | None = None
+        self._key_cache: dict[str, tuple[float, AuthResult]] = {}
+        self._last_housekeeping = 0.0
+
+    async def start(self) -> None:
+        self._worker_task = asyncio.create_task(self._run_worker(), name="mc-ingest-worker")
+        log.info("mc ingest worker started; queue_max=%d", settings.mc_queue_max)
+
+    async def stop(self) -> None:
+        if self._worker_task is None:
+            return
+        self._worker_task.cancel()
+        try:
+            await self._worker_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._worker_task = None
+        log.info("mc ingest worker stopped")
+
+    # ---- authentication ---------------------------------------------------
+
+    async def authenticate(self, raw_key: str) -> AuthResult:
+        """Resolve an API key to a player, using a short-TTL cache so a
+        flood of bad keys can't force a database read per request.
+        """
+        key_hash = hash_secret(raw_key)
+        now = time.monotonic()
+        cached = self._key_cache.get(key_hash)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+        result = await asyncio.to_thread(self._lookup_key_sync, key_hash)
+        self._key_cache[key_hash] = (now + settings.mc_key_cache_seconds, result)
+        return result
+
+    def _lookup_key_sync(self, key_hash: str) -> AuthResult:
+        conn = connect()
+        try:
+            row = conn.execute(
+                "SELECT a.player_id, a.revoked_at, p.disabled_at "
+                "  FROM api_key a JOIN player p ON p.player_id = a.player_id "
+                " WHERE a.key_hash = ?",
+                (key_hash,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return _AUTH_NOT_FOUND
+        if row["revoked_at"] is not None:
+            return AuthResult("revoked", row["player_id"])
+        if row["disabled_at"] is not None:
+            return AuthResult("disabled", row["player_id"])
+        return AuthResult("ok", row["player_id"])
+
+    # ---- submission ---------------------------------------------------
+
+    def submit(self, player_id: int, key_hash: str, pings: list, received_at: int) -> bool:
+        """Enqueue one batch for background processing. Non-blocking;
+        returns False if the queue is full. Must stay fast -- this runs on
+        the request path.
+        """
+        try:
+            self._queue.put_nowait((player_id, key_hash, pings, received_at))
+            return True
+        except asyncio.QueueFull:
+            return False
+
+    # ---- worker ---------------------------------------------------
+
+    async def _run_worker(self) -> None:
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(self._queue.get(), timeout=300)
+                except asyncio.TimeoutError:
+                    await self._maybe_housekeeping()
+                    continue
+                player_id, key_hash, pings, received_at = item
+                try:
+                    await self._process_batch(player_id, key_hash, pings, received_at)
+                except Exception:
+                    log.exception("mc ingest: batch processing failed for player %s", player_id)
+                finally:
+                    self._queue.task_done()
+                await self._maybe_housekeeping()
+        except asyncio.CancelledError:
+            raise
+
+    async def _process_batch(self, player_id, key_hash, pings, received_at) -> None:
+        # All database work for a batch runs in a single thread call, under
+        # the same write lock app/db.py uses for the Meshtastic ingest loop,
+        # so a slow batch never blocks the event loop (and the HTTP server
+        # with it) and writes stay serialized fleet-wide.
+        async with _WRITE_LOCK:
+            await asyncio.to_thread(
+                self._process_batch_sync, player_id, key_hash, pings, received_at
+            )
+
+    def _process_batch_sync(self, player_id, key_hash, pings, received_at) -> None:
+        counters = {
+            "pings_accepted": 0,
+            "pings_no_contact": 0,
+            "pings_wrong_owner": 0,
+            "pings_duplicate": 0,
+            "pings_bad_coord": 0,
+        }
+        conn = connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for ping in pings:
+                self._process_one_ping(conn, player_id, ping, received_at, counters)
+
+            day = int(datetime.fromtimestamp(received_at, tz=timezone.utc).strftime("%Y%m%d"))
+            conn.execute(
+                "INSERT INTO player_ingest_stat("
+                "  player_id, protocol, day, batches, pings_accepted, "
+                "  pings_no_contact, pings_wrong_owner, pings_duplicate, pings_bad_coord) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(player_id, protocol, day) DO UPDATE SET "
+                "  batches = batches + 1, "
+                "  pings_accepted = pings_accepted + excluded.pings_accepted, "
+                "  pings_no_contact = pings_no_contact + excluded.pings_no_contact, "
+                "  pings_wrong_owner = pings_wrong_owner + excluded.pings_wrong_owner, "
+                "  pings_duplicate = pings_duplicate + excluded.pings_duplicate, "
+                "  pings_bad_coord = pings_bad_coord + excluded.pings_bad_coord",
+                (
+                    player_id, PROTOCOL, day,
+                    counters["pings_accepted"], counters["pings_no_contact"],
+                    counters["pings_wrong_owner"], counters["pings_duplicate"],
+                    counters["pings_bad_coord"],
+                ),
+            )
+
+            conn.execute(
+                "UPDATE api_key SET last_seen_at = ? WHERE key_hash = ?",
+                (received_at, key_hash),
+            )
+
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+        log.info(
+            "mc ingest: player=%d batch processed accepted=%d no_contact=%d "
+            "wrong_owner=%d duplicate=%d bad_coord=%d",
+            player_id, counters["pings_accepted"], counters["pings_no_contact"],
+            counters["pings_wrong_owner"], counters["pings_duplicate"],
+            counters["pings_bad_coord"],
+        )
+
+    def _process_one_ping(self, conn, player_id, ping, received_at, counters) -> None:
+        # 1. Coordinates + timestamp
+        lat = ping.get("lat") if isinstance(ping, dict) else None
+        lon = ping.get("lon") if isinstance(ping, dict) else None
+        ts_raw = ping.get("timestamp") if isinstance(ping, dict) else None
+
+        if not isinstance(lat, (int, float)) or isinstance(lat, bool):
+            counters["pings_bad_coord"] += 1
+            return
+        if not isinstance(lon, (int, float)) or isinstance(lon, bool):
+            counters["pings_bad_coord"] += 1
+            return
+        if not valid_coord(lat, lon):
+            counters["pings_bad_coord"] += 1
+            return
+        if ts_raw is None:
+            counters["pings_bad_coord"] += 1
+            return
+        try:
+            ts = int(ts_raw)
+        except (TypeError, ValueError):
+            counters["pings_bad_coord"] += 1
+            return
+
+        # 2. Contact key -- "Include Contact Key" toggle off in MeshMapper
+        # is a common user setup problem, not an attack; log at debug.
+        contact = ping.get("contact")
+        if not contact or not isinstance(contact, str) or not _CONTACT_RE.match(contact):
+            counters["pings_no_contact"] += 1
+            log.debug("mc ingest: ping missing/invalid contact key for player %d", player_id)
+            return
+
+        # 3. Binding: this IS registration for the radio, there is no
+        # separate flow.
+        row = conn.execute(
+            "SELECT player_id FROM player_node WHERE protocol = ? AND node_ref = ?",
+            (PROTOCOL, contact),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) "
+                "VALUES (?, ?, ?, ?)",
+                (PROTOCOL, contact, player_id, received_at),
+            )
+            log.info("mc ingest: bound contact %s to player %d", contact, player_id)
+        elif row["player_id"] != player_id:
+            counters["pings_wrong_owner"] += 1
+            log.warning(
+                "mc ingest: contact %s belongs to player %d, not requesting player %d "
+                "-- possible key sharing or attack; ping dropped",
+                contact, row["player_id"], player_id,
+            )
+            return
+
+        # 4. Cell. Raw lat/lon are never written to the database anywhere;
+        # they are discarded right here, after being reduced to a cell id.
+        cell = cell_id(lat, lon)
+        del lat, lon
+
+        # 5. Duplicate check
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO player_cell_ping"
+            "(player_id, protocol, cell_id, ts, seen_at) VALUES (?, ?, ?, ?, ?)",
+            (player_id, PROTOCOL, cell, ts, received_at),
+        )
+        if cur.rowcount == 0:
+            counters["pings_duplicate"] += 1
+            return
+
+        # 6. Sanity gates -- log only, never reject; these need real data
+        # to tune.
+        last_fix = conn.execute(
+            "SELECT cell_id, ts FROM player_last_fix WHERE player_id = ? AND protocol = ?",
+            (player_id, PROTOCOL),
+        ).fetchone()
+
+        if last_fix is not None and ts > last_fix["ts"]:
+            elapsed = ts - last_fix["ts"]
+            prev_lat, prev_lon = cell_center(last_fix["cell_id"])
+            cur_lat, cur_lon = cell_center(cell)
+            speed = distance_m(prev_lat, prev_lon, cur_lat, cur_lon) / elapsed
+            if speed > settings.mc_max_speed_mps:
+                log.warning(
+                    "mc ingest: implausible speed for player %d: %.1f m/s over %ds",
+                    player_id, speed, elapsed,
+                )
+
+        skew = abs(ts - received_at)
+        if skew > settings.mc_max_clock_skew_seconds:
+            log.warning(
+                "mc ingest: clock skew for player %d: %ds (ping ts=%d, server=%d)",
+                player_id, skew, ts, received_at,
+            )
+
+        # 7. Update last fix, only if this timestamp is at or after the
+        # stored one.
+        if last_fix is None:
+            conn.execute(
+                "INSERT INTO player_last_fix(player_id, protocol, cell_id, ts) "
+                "VALUES (?, ?, ?, ?)",
+                (player_id, PROTOCOL, cell, ts),
+            )
+        elif ts >= last_fix["ts"]:
+            conn.execute(
+                "UPDATE player_last_fix SET cell_id = ?, ts = ? "
+                " WHERE player_id = ? AND protocol = ?",
+                (cell, ts, player_id, PROTOCOL),
+            )
+
+        # 8. Accepted
+        counters["pings_accepted"] += 1
+
+    # ---- housekeeping ---------------------------------------------------
+
+    async def _maybe_housekeeping(self) -> None:
+        now = time.monotonic()
+        if now - self._last_housekeeping < _HOUSEKEEPING_INTERVAL_S:
+            return
+        self._last_housekeeping = now
+        async with _WRITE_LOCK:
+            removed_pings, removed_stats = await asyncio.to_thread(self._housekeeping_sync)
+        log.info(
+            "mc ingest housekeeping: removed %d stale player_cell_ping rows, "
+            "%d stale player_ingest_stat rows",
+            removed_pings, removed_stats,
+        )
+
+    def _housekeeping_sync(self) -> tuple:
+        now_ts = int(time.time())
+        ping_cutoff = now_ts - settings.mc_ping_retention_hours * 3600
+        stat_cutoff_day = int(
+            (datetime.now(timezone.utc) - timedelta(days=settings.mc_stat_retention_days))
+            .strftime("%Y%m%d")
+        )
+        conn = connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cur1 = conn.execute(
+                "DELETE FROM player_cell_ping WHERE seen_at < ?", (ping_cutoff,)
+            )
+            removed_pings = cur1.rowcount
+            cur2 = conn.execute(
+                "DELETE FROM player_ingest_stat WHERE day < ?", (stat_cutoff_day,)
+            )
+            removed_stats = cur2.rowcount
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        return removed_pings, removed_stats

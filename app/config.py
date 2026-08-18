@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     score_decay_per_day: float = 0.25      # decay rate, applied to all scores
     defense_window_seconds: int = 900      # 15 minutes after capture, no flip
 
+    # MeshCore ingest: wardriving batches pushed by the MeshMapper app
+    mc_ingest_enabled: bool = True
+    mc_queue_max: int = 10000
+    mc_max_batch_pings: int = 50
+    mc_key_cache_seconds: int = 60
+    mc_max_speed_mps: float = 89.0          # about 200 mph
+    mc_max_clock_skew_seconds: int = 3600
+    mc_ping_retention_hours: int = 48
+    mc_stat_retention_days: int = 30
+
     @property
     def meshview_url(self) -> str:
         return self.meshview_base_url.rstrip("/")
