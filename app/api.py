@@ -23,6 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .config import settings
 from .db import connect
+from .mc_api import router as mc_router
 from .mc_ingest import hash_secret, log_raw_batch
 from .seasons import (
     get_active_season,
@@ -76,6 +77,7 @@ async def config() -> dict:
         "initialZoom": zoom,
         "maxDistanceMiles": 0,
         "meshview_url": _settings.meshview_url,
+        "mc_default_view": _settings.mc_default_view,
         "season": {
             "id": active["id"] if active else None,
             "started_at": active["started_at"] if active else None,
@@ -639,6 +641,7 @@ async def mc_ingest(request: Request) -> JSONResponse:
 
 def mount(app: FastAPI) -> None:
     app.include_router(router)
+    app.include_router(mc_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"

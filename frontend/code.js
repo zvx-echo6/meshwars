@@ -321,6 +321,15 @@ async function initMap() {
   repeaterLayer = L.layerGroup();  // not added to map (territory-only view)
   liveTrackLayer = L.layerGroup().addTo(map);
 
+  // Expose the map and the layers shown by default (not repeaterLayer,
+  // which stays off by default in the Meshtastic view too) so mc.js can
+  // attach its MeshCore board toggle without this module knowing
+  // anything about MeshCore. See frontend/mc.js's header comment for
+  // the contract.
+  window.MESHWARS_MAP = map;
+  window.MESHWARS_MESHTASTIC_LAYERS = [coverageLayer, edgeLayer, sampleLayer, liveTrackLayer];
+  window.dispatchEvent(new Event('meshwars:map-ready'));
+
   initSVGPatterns();
 
   scoreboardControl.addTo(map);  // unified panel (settings card removed)

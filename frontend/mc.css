@@ -1,0 +1,142 @@
+/* MeshWars: styles for the MeshCore toggle + scoreboard controls and
+   cell popups (frontend/mc.js). Matches the existing dark theme used
+   by .meshwars-scoreboard in coverage.css; kept in its own file so it
+   can be added without touching coverage.css. */
+
+.mc-toggle {
+  background: #1a1a1a;
+  color: #ddd;
+  padding: 8px 10px;
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+}
+
+.mc-toggle-label {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: #888;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.mc-toggle-row {
+  display: flex;
+  gap: 4px;
+}
+
+.mc-toggle-btn {
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mc-toggle-btn:hover {
+  background: #333;
+}
+
+.mc-toggle-btn.active {
+  background: #3a2f12;
+  color: #e8a735;
+  border-color: #e8a735;
+}
+
+.mc-scoreboard {
+  background: #1a1a1a;
+  color: #ddd;
+  padding: 10px 14px;
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  min-width: 140px;
+}
+
+.mc-scoreboard.mc-hidden {
+  display: none;
+}
+
+.mc-row {
+  margin: 3px 0;
+  display: flex;
+  align-items: center;
+}
+
+.mc-title {
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.mc-team-label {
+  min-width: 62px;
+}
+
+.mc-team-count {
+  font-weight: 600;
+}
+
+.mc-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex: 0 0 auto;
+}
+
+/* Cell popup content, rendered inside a Leaflet popup */
+.mc-popup {
+  color: #ddd;
+  font-size: 12px;
+  min-width: 200px;
+}
+
+.mc-popup-header {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+}
+
+.mc-popup-row {
+  margin: 2px 0;
+}
+
+.mc-popup-section-title {
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #888;
+  margin-top: 8px;
+  margin-bottom: 3px;
+}
+
+.mc-popup-score-row {
+  display: flex;
+  align-items: center;
+  margin: 2px 0;
+}
+
+.mc-popup-capture-row {
+  margin: 2px 0;
+  font-size: 11px;
+  color: #bbb;
+}
+
+.mc-popup-empty {
+  color: #777;
+  font-style: italic;
+}
+
+.mc-popup-loading {
+  color: #888;
+  font-style: italic;
+}
