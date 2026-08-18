@@ -6,12 +6,15 @@ single writer (the poll loop / scheduler).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
 from .config import settings
+
+log = logging.getLogger("db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS season (
@@ -381,12 +384,21 @@ def init_db() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
-        # Idempotent column-add migrations for existing DBs
+        # Idempotent schema patches for existing DBs. Only "this was
+        # already applied" is expected here (re-adding a column that
+        # exists already) and is silently skipped -- anything else is a
+        # real failure and must be loud, not swallowed, since the
+        # application would otherwise start up against a schema the
+        # code does not expect it to have.
         for stmt in MIGRATIONS:
             try:
                 conn.execute(stmt)
-            except Exception:
-                pass  # column already exists
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                if "duplicate column name" in msg or "already exists" in msg:
+                    continue  # already applied, nothing to do
+                log.error("schema patch failed: %s -- statement: %s", e, stmt)
+                raise
     finally:
         conn.close()
 
