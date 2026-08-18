@@ -406,6 +406,19 @@ async function boot() {
   toggleControl = buildToggleControl();
   toggleControl.addTo(map);
 
+  // Leaflet stacks controls in the same corner in add order, so without
+  // this the VIEW toggle would end up wherever it happens to land relative
+  // to the two territory panels -- and since only one territory panel is
+  // visible at a time, hiding one lets the controls below it slide up,
+  // making the toggle (and the visible panel) jump position when the user
+  // switches boards. Force the toggle to be the first child of its corner
+  // container so it always stays put, with whichever territory panel is
+  // active directly beneath it. Do not remove this thinking it is a no-op.
+  const toggleContainer = toggleControl.getContainer();
+  if (toggleContainer && toggleContainer.parentNode) {
+    toggleContainer.parentNode.insertBefore(toggleContainer, toggleContainer.parentNode.firstChild);
+  }
+
   scoreboardControl = buildScoreboardControl();
   scoreboardControl.addTo(map);
   renderScores(null); // seed all-zero rows immediately, before the first fetch
