@@ -1,8 +1,8 @@
-/* MeshWars: styles for the MeshCore toggle + scoreboard controls,
-   cell popups, and modals (frontend/mc.js). Matches the existing dark
-   theme used by .meshwars-scoreboard / .mt-modal in coverage.css; kept
-   in its own file, with its own class names, so it can be edited
-   without touching coverage.css or reusing code.js's modal markup. */
+/* MeshWars: styles for the board switch + territory panel, cell
+   popups, and modals (frontend/mc.js) -- shared by both boards. Page
+   layout, the loading overlay, and Leaflet's own dark-theme chrome live
+   in coverage.css instead; kept in this separate file so the panel
+   (and its class names) can be edited without touching that. */
 
 /* Board switch -- the territory card's own top row (see mc.js's
    buildScoreboardControl). Always visible: never inside .mc-panel-content,
@@ -57,16 +57,6 @@
   min-width: 140px;
   max-width: min(300px, calc(100vw - 20px));
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
-}
-
-/* Meshtastic mode: the card itself stays visible (it holds the board
-   switch), but the MeshCore title/summary row and everything collapsible
-   below it are hidden -- they're meaningless while Meshtastic is the
-   active board. Leaves the card as a slim switch-only bar. See mc.js's
-   setMode(). */
-.mc-scoreboard.mc-territory-hidden .mc-header-btn,
-.mc-scoreboard.mc-territory-hidden .mc-panel-content {
-  display: none;
 }
 
 /* Collapsible territory panel (phones only) -- see mc.js's
@@ -216,7 +206,9 @@
 #mc-lookup-btn:hover { background: #333; }
 .mc-lookup-result { font-size: 11px; margin-top: 4px; color: #ccc; }
 
-/* Refresh / Top Wardrivers buttons */
+/* Refresh / Top-players buttons -- the top button's label text (Top
+   Wardrivers on MeshCore, Top Operators on Meshtastic) comes from
+   mc.js's PROTOCOLS table, not from CSS. */
 .mc-scoreboard .mc-actions {
   margin-top: 4px;
 }
@@ -287,9 +279,8 @@
   font-style: italic;
 }
 
-/* ===== Modals (History / Roster / Top Wardrivers) =====
-   Own implementation -- not code.js's #mt-history-modal -- but the
-   same visual treatment: dimmed backdrop, dark card, amber header. */
+/* ===== Modals (History / Roster / Top-players) =====
+   Dimmed backdrop, dark card, amber header -- shared by both boards. */
 
 .mc-modal {
   display: none;

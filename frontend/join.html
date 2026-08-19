@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/join.css?v=20260818-6" />
+  <link rel="stylesheet" href="/static/join.css?v=20260819" />
 </head>
 <body>
 
@@ -86,7 +86,7 @@
               <span>Meshtastic <span class="protocol-badge" id="mt-badge">Coming soon</span></span>
             </label>
           </div>
-          <p class="hint" id="mt-coming-soon-hint">The Meshtastic board still picks nodes up automatically today. Registration opens once it moves onto the player model.</p>
+          <p class="hint" id="mt-coming-soon-hint">Meshtastic registration isn't open yet. Once it is, it works the same way MeshCore's does here -- register, then add your node ID.</p>
 
           <div id="mc-instructions" class="protocol-block">
             <p>This does NOT replace MeshMapper. Your coverage data, points and leaderboard standing there are unaffected. MeshWars receives a copy.</p>
@@ -98,7 +98,7 @@
               <input type="text" id="f-node-ref" placeholder="!a1b2c3d4" autocomplete="off" />
             </label>
             <p class="hint">Looks like <code>!a1b2c3d4</code>.</p>
-            <p>Meshtastic scoring still runs on the older system today. Registering now binds your node ready for when it changes over, but does not yet affect the Meshtastic board.</p>
+            <p>Optional here -- you can register with no radio at all and add this (or several) afterward from the setup-check panel at the bottom of this page. See the steps below for the radio settings that make sure MeshWars can actually see you.</p>
           </div>
         </li>
 
@@ -116,15 +116,30 @@
           </div>
         </li>
 
-        <li>
+        <!-- =====================================================================
+             PROTOCOL-SPECIFIC JOIN STEPS. Everything from here to the closing
+             </ol> below is either a MeshCore step (.proto-step-mc) or a
+             Meshtastic step (.proto-step-mt) -- join.js's setupProtocolToggle()
+             shows only the set matching the selected protocol radio above,
+             the same toggle that already switches #mc-instructions/#mt-instructions.
+             This is the ONE place both protocols' copy lives -- edit the <li>
+             text directly below rather than hunting elsewhere on the page.
+
+             Owner TODO: the two Meshtastic steps marked below still need the
+             exact Meshtastic app menu path (Radio Configuration -> Channels,
+             as best understood while writing this) and the FREQ51 wording
+             confirmed before this goes live.
+             ===================================================================== -->
+
+        <li class="proto-step-mc">
           <p class="join-flow-label">Open MeshMapper, then Settings, then scroll to API Endpoints.</p>
         </li>
 
-        <li class="join-step-critical">
+        <li class="proto-step-mc join-step-critical">
           <p><strong>Toggle Custom API Endpoint on.</strong></p>
         </li>
 
-        <li>
+        <li class="proto-step-mc">
           <p class="join-flow-label">Paste this as the URL.</p>
           <div class="copy-row">
             <input type="text" id="f-endpoint-url" readonly value="https://meshwars.com/api/mc/ingest" />
@@ -135,23 +150,49 @@
           </div>
         </li>
 
-        <li>
+        <li class="proto-step-mc">
           <p class="join-flow-label">Paste your API key into the API Key field.</p>
           <div id="key-slot-2" class="key-slot">
             <p class="key-slot-placeholder">Your key will appear here once you join.</p>
           </div>
         </li>
 
-        <li>
+        <li class="proto-step-mc">
           <p class="join-flow-label">Save.</p>
         </li>
 
-        <li>
+        <li class="proto-step-mc">
           <p class="join-flow-label">In the same API section, make sure <strong>Include Contact Key</strong> is on.</p>
         </li>
 
-        <li>
+        <li class="proto-step-mc">
           <p class="join-flow-label">Start a wardriving session &mdash; nothing is sent without one.</p>
+        </li>
+
+        <li class="proto-step-mt" hidden>
+          <p class="join-flow-label">Find your node ID in the Meshtastic app &mdash; it looks like <code>!a1b2c3d4</code>.</p>
+        </li>
+
+        <li class="proto-step-mt" hidden>
+          <p class="join-flow-label">Paste your key into the box at the bottom of this page (under <a href="#status-check-panel">Check your setup</a>) and add that node ID. You can add as many radios as you like, any time.</p>
+        </li>
+
+        <li class="proto-step-mt" hidden>
+          <p class="join-flow-label">In the Meshtastic app, under Radio Configuration &rarr; LoRa, turn on <strong>OK to MQTT</strong>. Without it no gateway will forward your packets and MeshWars will never see you.</p>
+        </li>
+
+        <li class="proto-step-mt" hidden>
+          <p class="join-flow-label">Under Radio Configuration &rarr; Position, make sure GPS is enabled and your node is broadcasting its position.</p>
+        </li>
+
+        <li class="proto-step-mt" hidden>
+          <!-- Owner TODO: confirm this is the right screen/menu path. -->
+          <p class="join-flow-label">Under Channels, on your primary channel, set position precision to full. If it is reduced, your position gets rounded off and you will paint the wrong square, or none at all.</p>
+        </li>
+
+        <li class="proto-step-mt" hidden>
+          <!-- Owner TODO: confirm the FREQ51 wording/gateway name is still correct. -->
+          <p class="join-flow-label">Make sure you are on FREQ51, so a gateway that feeds meshview can actually hear you.</p>
         </li>
 
       </ol>
@@ -159,9 +200,23 @@
 
     <section id="working-check-panel" class="join-panel">
       <div class="join-panel-title">How do I know it's working?</div>
-      <p>MeshMapper sends a batch every fifteen to thirty seconds while a wardriving session is running. Nothing is sent between sessions.</p>
-      <p>Squares are only claimed where your radio hears a repeater. Driving through an area with no mesh coverage logs your position and claims nothing — that is normal, not a fault.</p>
-      <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last heard from you and what is wrong if anything is.</p>
+
+      <!-- Protocol-aware, same toggle as the join-flow steps above
+           (join.js's setupProtocolToggle()) -- MeshCore and Meshtastic
+           are pushed/pulled completely differently (see app/ingest.py's
+           module docstring), so this is honest separate copy for each,
+           not one paragraph stretched to cover both. -->
+      <div id="working-check-mc" class="protocol-block">
+        <p>MeshMapper sends a batch every fifteen to thirty seconds while a wardriving session is running. Nothing is sent between sessions.</p>
+        <p>Squares are only claimed where your radio hears a repeater. Driving through an area with no mesh coverage logs your position and claims nothing — that is normal, not a fault.</p>
+        <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last heard from you and what is wrong if anything is.</p>
+      </div>
+
+      <div id="working-check-mt" class="protocol-block" hidden>
+        <p>Nothing is pushed to MeshWars at all. MeshWars polls meshview every 45 seconds and picks you up whenever your node broadcasts a position that a feeder hears — there is no session to start or batch to send.</p>
+        <p>Squares are only claimed where a feeder hears your node's position. If you're somewhere with no feeder coverage, your position is never reported to meshview in the first place, so nothing gets claimed — that is normal, not a fault.</p>
+        <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you your registered radios and how many squares you currently hold.</p>
+      </div>
     </section>
 
     <section id="status-check-panel" class="join-panel status-check-panel">
@@ -220,6 +275,6 @@
 
   </main>
 
-  <script src="/static/join.js?v=20260818-8" type="module"></script>
+  <script src="/static/join.js?v=20260819" type="module"></script>
 </body>
 </html>

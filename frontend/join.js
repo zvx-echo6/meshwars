@@ -100,15 +100,29 @@ function buildTeamPicker() {
   });
 }
 
+// Every place on this page whose content depends on the selected
+// protocol -- the registration-block pair, the join-flow's protocol-only
+// steps (see join.html's "PROTOCOL-SPECIFIC JOIN STEPS" comment), and
+// the "how do I know it's working?" panel -- toggles together off this
+// one radio group, so a visitor never sees mismatched MeshCore/Meshtastic
+// copy on the same view of the page.
 function setupProtocolToggle() {
   const radios = document.querySelectorAll('input[name="protocol"]');
   const mcBlock = document.getElementById('mc-instructions');
   const mtBlock = document.getElementById('mt-instructions');
+  const workingMc = document.getElementById('working-check-mc');
+  const workingMt = document.getElementById('working-check-mt');
+  const stepsMc = document.querySelectorAll('.proto-step-mc');
+  const stepsMt = document.querySelectorAll('.proto-step-mt');
   function apply() {
     const checked = document.querySelector('input[name="protocol"]:checked');
     const value = checked ? checked.value : 'mc';
     mcBlock.hidden = value !== 'mc';
     mtBlock.hidden = value !== 'mt';
+    if (workingMc) workingMc.hidden = value !== 'mc';
+    if (workingMt) workingMt.hidden = value !== 'mt';
+    stepsMc.forEach((li) => { li.hidden = value !== 'mc'; });
+    stepsMt.forEach((li) => { li.hidden = value !== 'mt'; });
   }
   radios.forEach((r) => r.addEventListener('change', apply));
   apply();
@@ -353,10 +367,31 @@ function buildLabel(text) {
   return label;
 }
 
+// /api/mc/status (app/mc_api.py) is, despite its now-generic-sounding
+// name, entirely MeshCore-scoped under the hood: every counter, the
+// diagnosis, last_batch_at, and squares_held all read player_ingest_stat/
+// mc_tile filtered to protocol='mc' specifically -- there is no
+// equivalent status endpoint for Meshtastic (Meshtastic's own ingest
+// loop, app/ingest.py, writes real protocol='mt' rows to the same
+// player_ingest_stat table, but nothing serves them back out yet). For
+// a player with no MeshCore radio those fields are not just empty, they
+// are actively misleading: batches stays 0 forever so the diagnosis
+// always claims "MeshWars has never received anything from your app...
+// check that Custom API Endpoint is switched on in MeshMapper" to
+// someone who has never opened MeshMapper. This function decides what
+// to show from data.radios (which protocols this player actually has
+// registered) rather than rendering that response at face value --
+// this is a real backend gap, not a styling choice; see the
+// commit/report for the follow-up it needs (a protocol-aware status
+// route) before real Meshtastic diagnostics can show here.
 function renderStatusResult(data) {
   const panel = document.getElementById('status-result');
   panel.replaceChildren();
   panel.hidden = false;
+
+  const radios = Array.isArray(data.radios) ? data.radios : [];
+  const hasMc = radios.some((r) => r.protocol === 'mc');
+  const hasMt = radios.some((r) => r.protocol === 'mt');
 
   const nameLine = document.createElement('p');
   nameLine.appendChild(document.createTextNode('Name: '));
@@ -374,28 +409,50 @@ function renderStatusResult(data) {
   teamLine.appendChild(document.createTextNode(data.team || ''));
   panel.appendChild(teamLine);
 
-  const lastHeardLine = document.createElement('p');
-  lastHeardLine.appendChild(document.createTextNode('Last heard from you: '));
-  const lastHeardStrong = document.createElement('strong');
-  lastHeardStrong.textContent = relativeTimeFromEpoch(data.last_batch_at);
-  lastHeardLine.appendChild(lastHeardStrong);
-  panel.appendChild(lastHeardLine);
+  if (hasMc) {
+    // Everything below this point is genuinely MeshCore-scoped data, so
+    // only show it to a player who actually has a MeshCore radio.
+    const lastHeardLine = document.createElement('p');
+    lastHeardLine.appendChild(document.createTextNode('Last MeshCore batch: '));
+    const lastHeardStrong = document.createElement('strong');
+    lastHeardStrong.textContent = relativeTimeFromEpoch(data.last_batch_at);
+    lastHeardLine.appendChild(lastHeardStrong);
+    panel.appendChild(lastHeardLine);
 
-  const code = data.diagnosis && data.diagnosis.code;
-  const diagnosis = document.createElement('div');
-  diagnosis.className = 'status-diagnosis ' + (code === 'ok' ? 'status-diagnosis-ok' : 'status-diagnosis-attention');
-  diagnosis.textContent = (data.diagnosis && data.diagnosis.message) || '';
-  panel.appendChild(diagnosis);
+    const code = data.diagnosis && data.diagnosis.code;
+    const diagnosis = document.createElement('div');
+    diagnosis.className = 'status-diagnosis ' + (code === 'ok' ? 'status-diagnosis-ok' : 'status-diagnosis-attention');
+    diagnosis.textContent = (data.diagnosis && data.diagnosis.message) || '';
+    panel.appendChild(diagnosis);
 
-  const squaresLine = document.createElement('p');
-  squaresLine.appendChild(document.createTextNode('Squares held: '));
-  const squaresStrong = document.createElement('strong');
-  squaresStrong.textContent = String(data.squares_held ?? 0);
-  squaresLine.appendChild(squaresStrong);
-  panel.appendChild(squaresLine);
+    const squaresLine = document.createElement('p');
+    squaresLine.appendChild(document.createTextNode('MeshCore squares held: '));
+    const squaresStrong = document.createElement('strong');
+    squaresStrong.textContent = String(data.squares_held ?? 0);
+    squaresLine.appendChild(squaresStrong);
+    panel.appendChild(squaresLine);
 
-  panel.appendChild(buildLabel('Today and last 7 days'));
-  panel.appendChild(buildCountersTable(data.today || COUNTER_ZERO_ROW, data.last_7_days || COUNTER_ZERO_ROW));
+    panel.appendChild(buildLabel('MeshCore batches: today and last 7 days'));
+    panel.appendChild(buildCountersTable(data.today || COUNTER_ZERO_ROW, data.last_7_days || COUNTER_ZERO_ROW));
+  }
+
+  if (hasMt) {
+    const mtNote = document.createElement('p');
+    mtNote.className = 'hint';
+    mtNote.textContent = hasMc
+      // Has both: the MeshCore section above is real and accurate for
+      // that radio, but does not cover the Meshtastic one too.
+      ? 'The MeshCore activity above does not cover your Meshtastic radio -- there is no live status check for Meshtastic yet. Use the map\'s player search (search by node ID) to see your current Meshtastic squares.'
+      : 'There is no live status check for Meshtastic yet. MeshWars polls meshview every 45 seconds and picks up your node whenever it broadcasts a position a feeder hears -- use the map\'s player search (search by node ID) to see your current Meshtastic squares.';
+    panel.appendChild(mtNote);
+  }
+
+  if (!hasMc && !hasMt) {
+    const noRadiosNote = document.createElement('p');
+    noRadiosNote.className = 'hint';
+    noRadiosNote.textContent = 'You have no radios registered yet -- add one below.';
+    panel.appendChild(noRadiosNote);
+  }
 
   // /api/mc/status already returns the same radios array app/nodes_api.py
   // hands back from every add/remove call -- this reuses it directly

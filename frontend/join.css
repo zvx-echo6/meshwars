@@ -213,6 +213,17 @@ body {
   text-transform: uppercase;
   vertical-align: middle;
 }
+/* join.js's applyMeshtasticAvailability() sets the `hidden` attribute
+   directly on this badge once Meshtastic registration is open -- but
+   this rule's own `display: inline-block` above outranks the browser's
+   default `[hidden] { display: none }` (same specificity, author
+   stylesheet beats user-agent stylesheet regardless of source order),
+   so without this override the badge stayed visibly stuck on "Coming
+   soon" even after the radio itself was already enabled. Found while
+   testing the Meshtastic join-flow copy this same commit adds. */
+.protocol-badge[hidden] {
+  display: none;
+}
 
 .protocol-block {
   background: #141414;

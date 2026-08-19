@@ -1,25 +1,38 @@
 /*
- * MeshWars: MeshCore board rendering.
+ * MeshWars: map page (/). Boots the Leaflet map and renders BOTH boards
+ * -- MeshCore (protocol='mc') and Meshtastic (protocol='mt') -- through
+ * one renderer and one top-right panel. Self-contained module -- no
+ * external libraries, nothing beyond what Leaflet (loaded by index.html)
+ * and the browser provide.
  *
- * Self-contained module -- no external libraries, nothing beyond what
- * Leaflet (already loaded by index.html) and the browser provide.
+ * History: this file used to attach a MeshCore-only board on top of a
+ * separate legacy module (frontend/code.js) that drew the retired
+ * Meshtastic geohash-tile fortress game -- team colors, palette, and
+ * grid all specific to that retired game. The backend has since moved
+ * Meshtastic onto the exact same player/grid-cell model MeshCore already
+ * runs on (see app/ingest.py's module docstring), so code.js's
+ * geohash-drawing/color-palette/Territory-Mode/sample-dot code had
+ * nothing left to draw and was deleted outright rather than restyled --
+ * this module now owns map bootstrapping too and renders both boards by
+ * asking each protocol-parameterized endpoint for the same shape of
+ * data (see PROTOCOLS below).
  *
- * This module attaches to the Leaflet map code.js creates via the
- * window.MESHWARS_MAP / window.MESHWARS_MESHTASTIC_LAYERS / 'meshwars:map-ready'
- * handoff and window.MESHWARS_MT_CONTROLS (see code.js's initMap for where
- * those are set). This module never reaches into code.js's internals
- * beyond that handoff, and code.js is never modified by this module.
- *
- * The MeshCore territory panel built below is a parity match for
- * code.js's Meshtastic scoreboard control (season countdown, player
- * search, History/Roster links, Refresh map, and a ranked-players
- * button) -- but every modal and popup here has its own markup/styles
- * (this file + mc.css), never code.js's #mt-history-modal or its
- * openHistoryModal/openRosterModal functions.
+ * The two boards use different endpoint families because the Meshtastic
+ * routes were grandfathered in at the API root (/get-nodes, /scores,
+ * /history, /cell/{id}, /teams, /team/{node_ref} -- see app/api.py)
+ * while MeshCore's are namespaced under /api/mc/*, but both sides read
+ * the exact same mc_season/mc_tile* tables underneath (app/mc_api.py's
+ * protocol-parameterized helpers) -- see the PROTOCOLS table below for
+ * the one-to-one mapping and the honest gaps where no Meshtastic
+ * equivalent of an /api/mc/* route exists yet.
  */
 
 // One place to change team colors. Chosen to be saturated and
-// distinguishable from each other on the existing dark basemap.
+// distinguishable from each other on the existing dark basemap. The
+// ONLY team-color map in the frontend for the map page -- both boards
+// read this same object, never a second copy (frontend/join.js keeps
+// its own, deliberately, since that page must load independently of
+// this one -- see that file's header comment).
 const TEAM_COLORS = {
   RED: '#ff4136',
   GREEN: '#2ecc40',
@@ -32,26 +45,33 @@ const TEAM_COLORS = {
 
 const TEAM_ORDER = Object.keys(TEAM_COLORS);
 
-// Same cadence code.js uses for its own coverage/scoreboard refresh.
+// Same cadence the retired code.js used for its own coverage/scoreboard
+// refresh.
 const REFRESH_INTERVAL_MS = 30000;
 
 // Cap on how far map.fitBounds() is ever allowed to zoom in when
-// framing the MeshCore board or a player search result. A board (or a
+// framing a board or a single player search result. A board (or a
 // single player) holding only one or two 300m cells has a tiny bounds
 // box -- fitting to it with no cap zooms in far enough that a visitor
 // sees one giant colored rectangle filling the screen with no
 // surrounding context. At zoom 13 a 300m square is small but clearly
 // visible with several kilometers of context around it, which reads as
-// a game board rather than a colored blob. Keep this even once the
-// board is full and every fit naturally lands well under this cap --
-// it's the sparse early board (and any single-player search) this
-// exists to protect against, and that stops being visible from the UI
-// once the symptom is gone.
+// a game board rather than a colored blob. Keep this even once a board
+// is full and every fit naturally lands well under this cap -- it's the
+// sparse early board (and any single-player search) this exists to
+// protect against, and that stops being visible from the UI once the
+// symptom is gone.
 const MAX_FIT_ZOOM = 13;
 
-// Matches the breakpoint used elsewhere in mc.css/coverage.css (the
-// settings control, roster grid, About overlay) for "phone-width".
+// Matches the breakpoint used elsewhere in mc.css (the collapsible
+// header, roster grid) for "phone-width".
 const NARROW_BREAKPOINT_PX = 600;
+
+// Fallback map center/zoom if /config is unreachable, and the starting
+// values before it resolves.
+let centerPos = [37.3382, -121.8863];
+let initialZoom = 10;
+let maxDistanceMiles = 0;
 
 // Escapes text destined for an HTML string. display_name and team are
 // attacker-controlled (a MeshCore XSS bug hit ~20 analyzer sites this
@@ -77,9 +97,6 @@ function formatTs(ts) {
   }
 }
 
-// Same wording/thresholds as code.js's formatCountdown -- duplicated
-// rather than imported since code.js does not export it and this
-// module must not reach into code.js's internals.
 function formatCountdown(secondsRemaining) {
   if (secondsRemaining <= 0) return 'closing';
   const days = Math.floor(secondsRemaining / 86400);
@@ -90,97 +107,126 @@ function formatCountdown(secondsRemaining) {
   return `${mins}m`;
 }
 
+// =====================================================================
+// PROTOCOLS -- the one-to-one mapping between the two boards, and the
+// vocabulary that differs between them. Everything in this module that
+// varies by board reads from here, so the swap is one lookup, never a
+// scattered set of `if (protocol === 'mt')` branches.
+//
+// Board switch is data-only, on purpose (the owner's explicit
+// requirement): only the values below and the fetched data ever change
+// between boards. The panel's structure, control order, and position
+// are identical regardless of which entry is active.
+//
+// Endpoint parity, and the two honest gaps this file does NOT paper
+// over with invented data:
+//
+//  - Board cells:   MeshCore /api/mc/board (array) vs Meshtastic
+//                    /get-nodes (.coverage) -- both cell shapes match,
+//                    just fetched/unwrapped differently. See fetchBoardCells.
+//  - Scores/season: /api/mc/scores vs /scores -- identical shape
+//                    (app/api.py's /scores calls the exact same
+//                    scores_for() helper mc_api.py's own route does).
+//  - Cell popup:    /api/mc/cell/{id} vs /cell/{id} -- identical shape
+//                    (same cell_detail_for() helper on both sides).
+//  - History modal: /api/mc/history (array) vs /history (.seasons) --
+//                    same per-season shape once unwrapped.
+//  - Roster modal:  /api/mc/players (flat [{display_name,team}]) vs
+//                    /teams ({teams:{TEAM:[{display_name,node_hex}]}})
+//                    -- different shape, both grouped into a common
+//                    Map<team, [{display_name}]> by fetchRoster below.
+//  - GAP -- player Find: /api/mc/find?name= looks a player up BY NAME
+//                    and returns a bounds box to zoom to. There is no
+//                    Meshtastic equivalent of that route -- the closest
+//                    is /team/{node_ref}, which looks a player up by
+//                    NODE REFERENCE instead of name and returns no
+//                    bounds at all. So on the Meshtastic board this
+//                    control searches by node ID instead of name, and
+//                    a successful search cannot zoom the map -- both
+//                    intentional, not bugs. See doPlayerFind.
+//  - GAP -- top-ranked players: /api/mc/top ranks players by capture
+//                    count in the active MeshCore season. No Meshtastic
+//                    route computes anything equivalent (nor could this
+//                    module derive it client-side: neither /get-nodes'
+//                    coverage cells nor /cell/{id} expose which player
+//                    owns a cell, only which TEAM does). The Meshtastic
+//                    "Top Operators" modal says so plainly rather than
+//                    showing invented or zeroed numbers. See openTopModal.
+//  - GAP -- cell popup feeders/repeaters: neither /cell/{id} nor
+//                    /api/mc/cell/{id} return anything about which
+//                    repeaters/feeders can hear a given cell -- the old
+//                    per-tile `rptr` list doesn't exist in the new
+//                    mc_tile-backed model. app/db.py's own comment on
+//                    the repeater_observation/repeater_identity tables
+//                    confirms this is deliberate for now ("nothing here
+//                    reads from these tables yet"). This module does
+//                    not reintroduce the old distance-guessed
+//                    repeater-per-tile heuristic to fake the gap --
+//                    that guess is exactly what those tables exist to
+//                    eventually replace with real observation data. See
+//                    the module docstring / final report for the
+//                    follow-up this needs on the backend.
+// =====================================================================
+const PROTOCOLS = {
+  meshcore: {
+    protocol: 'mc',
+    boardTitle: 'MeshCore Territory',
+    topButtonLabel: 'Top Wardrivers',
+    topModalTitle: 'Top Wardrivers',
+    lookupPlaceholder: 'player name',
+    lookupHelp: 'Search by player name.',
+    boardEndpoint: '/api/mc/board',
+    scoresEndpoint: '/api/mc/scores',
+    cellEndpoint: (id) => `/api/mc/cell/${encodeURIComponent(id)}`,
+    historyEndpoint: '/api/mc/history',
+    rosterEndpoint: '/api/mc/players',
+    findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
+    topEndpoint: '/api/mc/top',
+  },
+  meshtastic: {
+    protocol: 'mt',
+    boardTitle: 'Meshtastic Territory',
+    // "Wardrivers" is MeshCore-specific vocabulary (MeshMapper is a
+    // deliberate wardriving app); a Meshtastic node just broadcasts its
+    // own position, so the community term for the person behind a node
+    // -- "operator" -- fits better than reusing "wardriver" here.
+    topButtonLabel: 'Top Operators',
+    topModalTitle: 'Top Operators',
+    lookupPlaceholder: 'node ID (!a1b2c3d4)',
+    lookupHelp: 'Search by node ID -- Meshtastic players are looked up by radio, not by name.',
+    boardEndpoint: '/get-nodes',
+    scoresEndpoint: '/scores',
+    cellEndpoint: (id) => `/cell/${encodeURIComponent(id)}`,
+    historyEndpoint: '/history',
+    rosterEndpoint: '/teams',
+    findEndpoint: null, // no by-name lookup route -- see doPlayerFind
+    topEndpoint: null,  // no ranking route -- see openTopModal
+  },
+};
+
 // ---- module state ----
 let map = null;
-let meshtasticLayers = [];
-let mcLayerGroup = null;
-let mode = 'meshcore'; // 'meshcore' | 'meshtastic'
+let cellLayerGroup = null;
+let mode = 'meshcore'; // key into PROTOCOLS
 let scoreboardControl = null;
 let scoreboardBody = null;
 let scoreboardPanelEl = null;
 let scoreboardHeaderBtn = null;
 let scoreboardSummaryEl = null;
+let scoreboardTitleEl = null;
+let scoreboardTopBtn = null;
+let scoreboardLookupInput = null;
 let refreshTimer = null;
 let scoreboardEndsAt = null;
 // Play-area box from /config, loaded once at boot -- used to frame the
-// map when the MeshCore board has no owned cells yet (see refreshBoard).
+// map when a board has no owned cells yet (see refreshBoard).
 let playAreaBounds = null;
 
-// Show/hide the Meshtastic scoreboard control (Red/Blue/Neutral counts,
-// season countdown, node search, History/Roster, Top MQTT Feeders) while
-// the MeshCore view is active -- those are Meshtastic-only concepts.
-// code.js hands us its container(s) via this global, the same handoff
-// pattern used for window.MESHWARS_MAP / window.MESHWARS_MESHTASTIC_LAYERS,
-// so this module never has to guess at code.js's DOM structure.
-function setMeshtasticControlsVisible(visible) {
-  const controls = Array.isArray(window.MESHWARS_MT_CONTROLS) ? window.MESHWARS_MT_CONTROLS : [];
-  controls.forEach((el) => {
-    if (el) el.style.display = visible ? '' : 'none';
-  });
+function cfg() {
+  return PROTOCOLS[mode];
 }
 
-function waitForMap() {
-  return new Promise((resolve) => {
-    if (window.MESHWARS_MAP) {
-      resolve(window.MESHWARS_MAP);
-      return;
-    }
-    const onReady = () => {
-      window.removeEventListener('meshwars:map-ready', onReady);
-      clearInterval(poll);
-      resolve(window.MESHWARS_MAP);
-    };
-    window.addEventListener('meshwars:map-ready', onReady);
-    // In case the ready event fired before this module attached its
-    // listener (module load order isn't guaranteed relative to the
-    // event dispatch), also poll for the global directly.
-    const poll = setInterval(() => {
-      if (window.MESHWARS_MAP) {
-        window.removeEventListener('meshwars:map-ready', onReady);
-        clearInterval(poll);
-        resolve(window.MESHWARS_MAP);
-      }
-    }, 100);
-  });
-}
-
-async function loadDefaultMode() {
-  try {
-    const res = await fetch('/config');
-    if (!res.ok) return 'meshcore';
-    const cfg = await res.json();
-    const raw = String(cfg.mc_default_view || '').trim().toLowerCase();
-    if (raw === 'meshtastic') return 'meshtastic';
-    if (raw === 'meshcore') return 'meshcore';
-  } catch (e) {
-    // fall through to default below
-  }
-  return 'meshcore';
-}
-
-// Loaded once at boot, in parallel with loadDefaultMode(). If /config is
-// unreachable or play_area is missing, playAreaBounds stays null and
-// refreshBoard() simply leaves the map wherever it already is, same as
-// before this existed.
-async function loadPlayArea() {
-  try {
-    const res = await fetch('/config');
-    if (!res.ok) return;
-    const cfg = await res.json();
-    const pa = cfg.play_area;
-    if (
-      pa && typeof pa.north === 'number' && typeof pa.south === 'number' &&
-      typeof pa.west === 'number' && typeof pa.east === 'number'
-    ) {
-      playAreaBounds = L.latLngBounds([pa.south, pa.west], [pa.north, pa.east]);
-    }
-  } catch (e) {
-    // leave playAreaBounds null
-  }
-}
-
-// ===== Board switch (now the territory card's own top row -- see
-// buildScoreboardControl) =====
+// ===== Board switch (the territory card's own top row) =====
 
 function updateToggleButtons() {
   const btnMeshtastic = document.getElementById('mc-toggle-meshtastic');
@@ -191,11 +237,13 @@ function updateToggleButtons() {
 
 // ===== Scoreboard control =====
 //
-// Parity match for code.js's .meshwars-scoreboard control: team counts,
-// season countdown, player search + Find, History/Roster links, a
-// Refresh map button, and a ranked-players button (Top Wardrivers --
-// the MeshCore equivalent of Meshtastic's Top MQTT Feeders, since
-// MeshCore has no MQTT feeders, only players).
+// One panel for both boards: board switch, collapsible header with live
+// summary, seven-team scoreboard with color dots, season countdown,
+// player lookup, History/Roster, Refresh, and a ranked-players button.
+// Every element below exists in the DOM at every width and for both
+// boards -- only its text/data content changes with mode (see setMode
+// and the per-board fetch functions) -- so the panel never gains or
+// loses a control when the board switches.
 
 function buildScoreboardControl() {
   const control = L.control({ position: 'topright' });
@@ -207,7 +255,7 @@ function buildScoreboardControl() {
         <button type="button" id="mc-toggle-meshcore" class="mc-switch-btn">MeshCore</button>
       </div>
       <button type="button" class="mc-row mc-title mc-header-btn" id="mc-header-btn" aria-expanded="true">
-        <span class="mc-header-title-text">MeshCore Territory</span>
+        <span class="mc-header-title-text" id="mc-header-title-text"></span>
         <span class="mc-header-right">
           <span class="mc-header-summary" id="mc-header-summary"></span>
           <span class="mc-header-caret" aria-hidden="true">&#9662;</span>
@@ -226,7 +274,7 @@ function buildScoreboardControl() {
           <button type="button" id="mc-refresh-btn">Refresh map</button>
         </div>
         <div class="mc-row mc-actions">
-          <button type="button" id="mc-top-btn">Top Wardrivers</button>
+          <button type="button" id="mc-top-btn"></button>
         </div>
       </div>
     `;
@@ -234,14 +282,15 @@ function buildScoreboardControl() {
     scoreboardPanelEl = div;
     scoreboardHeaderBtn = div.querySelector('#mc-header-btn');
     scoreboardSummaryEl = div.querySelector('#mc-header-summary');
+    scoreboardTitleEl = div.querySelector('#mc-header-title-text');
+    scoreboardTopBtn = div.querySelector('#mc-top-btn');
+    scoreboardLookupInput = div.querySelector('#mc-lookup-input');
 
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
 
-    // Board switch -- row one of the card, always visible (see mc.css's
-    // .mc-switch-row), never inside .mc-panel-content, so it survives
-    // both the phone collapse and the meshtastic-mode content hide
-    // below (setMode's 'mc-territory-hidden' class).
+    // Board switch -- row one of the card, always visible, never inside
+    // .mc-panel-content, so it survives the phone collapse below.
     div.querySelector('#mc-toggle-meshtastic').addEventListener('click', (e) => {
       e.stopPropagation();
       setMode('meshtastic');
@@ -269,14 +318,12 @@ function buildScoreboardControl() {
       openRosterModal();
     });
 
-    const lookupInput = div.querySelector('#mc-lookup-input');
     const lookupBtn = div.querySelector('#mc-lookup-btn');
-    const doLookup = () => doPlayerFind(lookupInput.value);
+    const doLookup = () => doPlayerFind(scoreboardLookupInput.value);
     lookupBtn.addEventListener('click', doLookup);
-    lookupInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLookup(); });
-    // Stop the map from stealing keystrokes while typing -- same fix
-    // code.js applies to its own #mt-lookup-input.
-    L.DomEvent.on(lookupInput, 'keydown keypress keyup mousedown mouseup click dblclick',
+    scoreboardLookupInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLookup(); });
+    // Stop the map from stealing keystrokes while typing.
+    L.DomEvent.on(scoreboardLookupInput, 'keydown keypress keyup mousedown mouseup click dblclick',
                   L.DomEvent.stopPropagation);
 
     div.querySelector('#mc-refresh-btn').addEventListener('click', (e) => {
@@ -285,7 +332,7 @@ function buildScoreboardControl() {
       refreshScores();
     });
 
-    div.querySelector('#mc-top-btn').addEventListener('click', (e) => {
+    scoreboardTopBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       openTopModal();
     });
@@ -296,9 +343,10 @@ function buildScoreboardControl() {
 }
 
 // Picks whichever team currently holds the most cells, for the
-// collapsed-header summary ("TEAM count") on phones -- the /api/mc/scores
-// teams array is in fixed TEAM_ORDER, not sorted by tile count, so this
-// has to be computed client-side rather than just taking teams[0].
+// collapsed-header summary ("TEAM count") on phones -- the scores
+// endpoint's teams array is in fixed TEAM_ORDER, not sorted by tile
+// count, so this has to be computed client-side rather than just
+// taking teams[0].
 function leadingTeam(teams) {
   let best = null;
   teams.forEach((t) => {
@@ -358,49 +406,121 @@ function tickCountdown() {
   el.textContent = formatCountdown(scoreboardEndsAt - now);
 }
 
+// ===== Board cell fetch (protocol-parameterized) =====
+
+// The two boards' "give me every owned cell" routes return different
+// envelopes (see PROTOCOLS' comment above) -- this is the one place
+// that difference is unwrapped, so every caller below just gets an
+// array of cells either way.
+async function fetchBoardCells(c) {
+  const res = await fetch(c.boardEndpoint);
+  if (!res.ok) return [];
+  const data = await res.json();
+  if (Array.isArray(data)) return data; // MeshCore: array directly
+  return Array.isArray(data.coverage) ? data.coverage : []; // Meshtastic: {coverage, repeaters}
+}
+
+async function fetchHistorySeasons(c) {
+  const res = await fetch(c.historyEndpoint);
+  if (!res.ok) return [];
+  const data = await res.json();
+  if (Array.isArray(data)) return data; // MeshCore: array directly
+  return Array.isArray(data.seasons) ? data.seasons : []; // Meshtastic: {seasons}
+}
+
+// Normalizes both roster shapes into a common Map<team, [{display_name}]>
+// -- MeshCore's /api/mc/players is a flat list this groups itself;
+// Meshtastic's /teams is already grouped, just keyed differently
+// (node_hex instead of nothing extra). Only display_name is used either
+// way, since that's all the roster modal shows.
+async function fetchRosterByTeam(c) {
+  const byTeam = new Map();
+  if (c.protocol === 'mc') {
+    const res = await fetch(c.rosterEndpoint);
+    if (!res.ok) return byTeam;
+    const players = await res.json();
+    if (!Array.isArray(players)) return byTeam;
+    players.forEach((p) => {
+      const team = p.team || 'UNKNOWN';
+      if (!byTeam.has(team)) byTeam.set(team, []);
+      byTeam.get(team).push({ display_name: p.display_name });
+    });
+  } else {
+    const res = await fetch(c.rosterEndpoint);
+    if (!res.ok) return byTeam;
+    const data = await res.json();
+    const teams = (data && data.teams) || {};
+    Object.keys(teams).forEach((team) => {
+      byTeam.set(team, (teams[team] || []).map((p) => ({ display_name: p.display_name })));
+    });
+  }
+  return byTeam;
+}
+
 // ===== Player search (Find) =====
 //
-// Placeholder text and copy deliberately say "player" rather than
-// "node"/"radio" -- MeshCore's /api/mc/find looks up a person by
-// display name, not a piece of hardware by id. Every branch below sets
-// textContent only, never innerHTML, so this path needs no separate
-// escaping review: it structurally cannot execute a payload.
+// MeshCore looks a player up by display name and gets back a bounds box
+// to zoom to (/api/mc/find). Meshtastic has no by-name route -- the
+// closest available is /team/{node_ref}, a by-NODE-REFERENCE lookup
+// that returns no bounds at all -- so on that board this searches by
+// node ID instead, and a hit reports team/tiles-owned as text without
+// moving the map. Both are real, working lookups against real routes;
+// neither fakes the other board's behavior. See PROTOCOLS' comment for
+// why. Every branch below sets textContent only, never innerHTML.
 async function doPlayerFind(value) {
+  const c = cfg();
   const resultEl = document.getElementById('mc-lookup-result');
   if (!resultEl) return;
-  const name = (value || '').trim();
-  if (!name) { resultEl.textContent = ''; return; }
+  const query = (value || '').trim();
+  if (!query) { resultEl.textContent = ''; return; }
   resultEl.textContent = 'Searching...';
-  try {
-    const res = await fetch(`/api/mc/find?name=${encodeURIComponent(name)}`);
-    if (res.status === 404) {
-      resultEl.textContent = `Not found: ${name}`;
-      return;
+
+  if (c.protocol === 'mc') {
+    try {
+      const res = await fetch(c.findEndpoint(query));
+      if (res.status === 404) {
+        resultEl.textContent = `Not found: ${query}`;
+        return;
+      }
+      if (!res.ok) {
+        resultEl.textContent = 'Search failed.';
+        return;
+      }
+      const data = await res.json();
+      if (!data.bounds || !data.tiles_held) {
+        resultEl.textContent = `${data.display_name} (${data.team}) holds no cells right now.`;
+        return;
+      }
+      const b = data.bounds;
+      if (map) map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [24, 24], maxZoom: MAX_FIT_ZOOM });
+      const plural = data.tiles_held === 1 ? '' : 's';
+      resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`;
+    } catch (err) {
+      resultEl.textContent = 'Search failed.';
     }
+    return;
+  }
+
+  // Meshtastic: /team/{node_ref} -- by node reference, no bounds.
+  try {
+    const res = await fetch(`/team/${encodeURIComponent(query)}`);
     if (!res.ok) {
       resultEl.textContent = 'Search failed.';
       return;
     }
     const data = await res.json();
-    if (!data.bounds || !data.tiles_held) {
-      resultEl.textContent = `${data.display_name} (${data.team}) holds no cells right now.`;
+    if (!data.found) {
+      resultEl.textContent = `Not found: ${query}`;
       return;
     }
-    const b = data.bounds;
-    if (map) map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [24, 24], maxZoom: MAX_FIT_ZOOM });
-    const plural = data.tiles_held === 1 ? '' : 's';
-    resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`;
+    const plural = data.tiles_owned === 1 ? '' : 's';
+    resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_owned} cell${plural}.`;
   } catch (err) {
     resultEl.textContent = 'Search failed.';
   }
 }
 
-// ===== Modal (History / Roster / Top Wardrivers) =====
-//
-// Built and styled entirely in this module (markup here, styles in
-// mc.css) -- deliberately not index.html's #mt-history-modal or
-// code.js's openHistoryModal/openRosterModal, which operate on
-// Meshtastic data and that module's own DOM.
+// ===== Modal (History / Roster / Top) =====
 
 let mcModalEl = null;
 let mcModalTitleEl = null;
@@ -455,12 +575,11 @@ function showModalMessage(body, className, text) {
 }
 
 async function openHistoryModal() {
+  const c = cfg();
   const body = openMcModal('Past Seasons');
   try {
-    const res = await fetch('/api/mc/history');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const seasons = await res.json();
-    if (!Array.isArray(seasons) || seasons.length === 0) {
+    const seasons = await fetchHistorySeasons(c);
+    if (!seasons.length) {
       showModalMessage(body, 'mc-modal-empty', 'No completed seasons yet.');
       return;
     }
@@ -489,21 +608,14 @@ async function openHistoryModal() {
 }
 
 async function openRosterModal() {
+  const c = cfg();
   const body = openMcModal('Player Roster');
   try {
-    const res = await fetch('/api/mc/players');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const players = await res.json();
-    if (!Array.isArray(players) || players.length === 0) {
+    const byTeam = await fetchRosterByTeam(c);
+    if (byTeam.size === 0) {
       showModalMessage(body, 'mc-modal-empty', 'No players yet.');
       return;
     }
-    const byTeam = new Map();
-    players.forEach((p) => {
-      const team = p.team || 'UNKNOWN';
-      if (!byTeam.has(team)) byTeam.set(team, []);
-      byTeam.get(team).push(p);
-    });
     const teamOrder = TEAM_ORDER.filter((t) => byTeam.has(t))
       .concat([...byTeam.keys()].filter((t) => !TEAM_ORDER.includes(t)));
     const sections = teamOrder.map((team) => {
@@ -522,10 +634,22 @@ async function openRosterModal() {
   }
 }
 
+// GAP: no Meshtastic route ranks players by squares held or captures
+// (see PROTOCOLS' comment) -- this says so honestly rather than
+// inventing or zeroing numbers. Real backend follow-up needed before
+// this can show real Meshtastic rankings.
 async function openTopModal() {
-  const body = openMcModal('Top Wardrivers');
+  const c = cfg();
+  const body = openMcModal(c.topModalTitle);
+
+  if (!c.topEndpoint) {
+    showModalMessage(body, 'mc-modal-empty',
+      'Player rankings aren\'t available for the Meshtastic board yet -- check Roster for the full player list.');
+    return;
+  }
+
   try {
-    const res = await fetch('/api/mc/top');
+    const res = await fetch(c.topEndpoint);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const rows = await res.json();
     if (!Array.isArray(rows) || rows.length === 0) {
@@ -552,6 +676,10 @@ async function openTopModal() {
 
 // ===== Board rendering =====
 
+// GAP: no field on either /cell/{id} or /api/mc/cell/{id} names which
+// repeaters/feeders can hear this cell -- see PROTOCOLS' comment above
+// for why this section deliberately does not exist here. Everything
+// below is otherwise identical for both boards.
 function buildCellPopupHtml(cellId, detail) {
   const scoreRows = TEAM_ORDER.map((team) => {
     const score = detail.scores && detail.scores[team] !== undefined ? detail.scores[team] : 0;
@@ -589,13 +717,14 @@ function buildCellPopupHtml(cellId, detail) {
 
 // Bound once per rectangle at creation time -- Leaflet opens a layer's
 // bound popup on click by default, so no separate 'click' handler is
-// needed. Detail is lazy-loaded on 'popupopen', same pattern code.js
-// uses for its own tile popups.
-function bindCellPopup(rect, cellId) {
+// needed. Detail is lazy-loaded on 'popupopen'. `c` is captured at
+// draw time (not read from `cfg()` again on open) so a popup a visitor
+// already has open keeps working even if they've since flipped boards.
+function bindCellPopup(rect, cellId, c) {
   rect.bindPopup('<div class="mc-popup-loading">Loading…</div>', { maxWidth: 320, className: 'mc-tile-popup' });
   rect.on('popupopen', async (e) => {
     try {
-      const res = await fetch(`/api/mc/cell/${encodeURIComponent(cellId)}`);
+      const res = await fetch(c.cellEndpoint(cellId));
       if (!res.ok) {
         e.popup.setContent('<div class="mc-popup-loading">No data for this cell.</div>');
         return;
@@ -603,15 +732,15 @@ function bindCellPopup(rect, cellId) {
       const detail = await res.json();
       e.popup.setContent(buildCellPopupHtml(cellId, detail));
     } catch (err) {
-      console.warn('mc cell detail load failed:', err);
+      console.warn('cell detail load failed:', err);
       e.popup.setContent('<div class="mc-popup-loading">Failed to load cell detail.</div>');
     }
   });
 }
 
-function drawBoard(cells) {
-  if (!mcLayerGroup) return;
-  mcLayerGroup.clearLayers();
+function drawBoard(cells, c) {
+  if (!cellLayerGroup) return;
+  cellLayerGroup.clearLayers();
   if (!Array.isArray(cells)) return;
 
   cells.forEach((cell) => {
@@ -620,14 +749,15 @@ function drawBoard(cells) {
       [[cell.south, cell.west], [cell.north, cell.east]],
       { color, weight: 1, fillColor: color, fillOpacity: 0.55 },
     );
-    bindCellPopup(rect, cell.cell_id);
-    mcLayerGroup.addLayer(rect);
+    bindCellPopup(rect, cell.cell_id, c);
+    cellLayerGroup.addLayer(rect);
   });
 }
 
 // Bounding box of every cell the board API returned, using the bounds
 // it already computes server-side (app.grid.cell_bounds) -- this module
-// never recomputes cell geometry itself.
+// never recomputes cell geometry itself, and never decodes a geohash on
+// the client for either board any more.
 function boardBounds(cells) {
   if (!Array.isArray(cells) || cells.length === 0) return null;
   let south = Infinity, west = Infinity, north = -Infinity, east = -Infinity;
@@ -641,15 +771,14 @@ function boardBounds(cells) {
 }
 
 // fitToBoard is true only when this refresh is the result of switching
-// INTO the MeshCore view (or the initial load, if MeshCore is the
-// default) -- never on the 30s auto-refresh timer or the Refresh map
-// button, which must not fight the user's own panning/zooming.
+// INTO this board (or the initial load) -- never on the 30s auto-refresh
+// timer or the Refresh map button, which must not fight the user's own
+// panning/zooming.
 async function refreshBoard(fitToBoard) {
+  const c = cfg();
   try {
-    const res = await fetch('/api/mc/board');
-    if (!res.ok) return;
-    const cells = await res.json();
-    drawBoard(cells);
+    const cells = await fetchBoardCells(c);
+    drawBoard(cells, c);
     if (fitToBoard) {
       const bounds = boardBounds(cells);
       if (bounds && map) {
@@ -661,81 +790,108 @@ async function refreshBoard(fitToBoard) {
       }
     }
   } catch (err) {
-    console.warn('mc board refresh failed:', err);
+    console.warn('board refresh failed:', err);
   }
 }
 
 async function refreshScores() {
+  const c = cfg();
   try {
-    const res = await fetch('/api/mc/scores');
+    const res = await fetch(c.scoresEndpoint);
     if (!res.ok) return;
     const data = await res.json();
     renderScores(data);
     scoreboardEndsAt = data.ends_at || null;
   } catch (err) {
-    console.warn('mc scores refresh failed:', err);
+    console.warn('scores refresh failed:', err);
   }
 }
 
 // ===== Mode switching =====
-//
-// The card itself (.mc-scoreboard) is never hidden here -- its top row
-// holds the board switch, which must stay reachable in both modes so a
-// visitor can switch back. Only the MeshCore-specific title/summary row
-// and everything collapsible below it (the 'mc-territory-hidden' class,
-// see mc.css) are hidden while Meshtastic is the active board, leaving
-// the card as a slim switch-only bar in that mode.
+
+function applyProtocolChrome() {
+  const c = cfg();
+  if (scoreboardTitleEl) scoreboardTitleEl.textContent = c.boardTitle;
+  if (scoreboardTopBtn) scoreboardTopBtn.textContent = c.topButtonLabel;
+  if (scoreboardLookupInput) {
+    scoreboardLookupInput.placeholder = c.lookupPlaceholder;
+    scoreboardLookupInput.title = c.lookupHelp;
+  }
+  const resultEl = document.getElementById('mc-lookup-result');
+  if (resultEl) resultEl.textContent = '';
+}
 
 function setMode(newMode) {
   mode = newMode === 'meshtastic' ? 'meshtastic' : 'meshcore';
-
-  if (mode === 'meshcore') {
-    meshtasticLayers.forEach((layer) => {
-      if (layer && map.hasLayer(layer)) map.removeLayer(layer);
-    });
-    if (mcLayerGroup && !map.hasLayer(mcLayerGroup)) mcLayerGroup.addTo(map);
-    if (scoreboardPanelEl) scoreboardPanelEl.classList.remove('mc-territory-hidden');
-    setMeshtasticControlsVisible(false);
-    refreshBoard(true);
-    refreshScores();
-  } else {
-    if (mcLayerGroup && map.hasLayer(mcLayerGroup)) map.removeLayer(mcLayerGroup);
-    if (scoreboardPanelEl) scoreboardPanelEl.classList.add('mc-territory-hidden');
-    setMeshtasticControlsVisible(true);
-    meshtasticLayers.forEach((layer) => {
-      if (layer && !map.hasLayer(layer)) layer.addTo(map);
-    });
-  }
-
+  applyProtocolChrome();
   updateToggleButtons();
+  refreshBoard(true);
+  refreshScores();
 }
 
-// ===== Boot =====
+// ===== Map bootstrap =====
+
+async function loadConfig() {
+  try {
+    const res = await fetch('/config');
+    if (!res.ok) return null;
+    const cfgData = await res.json();
+    if (cfgData.centerPos) centerPos = cfgData.centerPos;
+    if (typeof cfgData.initialZoom === 'number') initialZoom = cfgData.initialZoom;
+    if (typeof cfgData.maxDistanceMiles === 'number') maxDistanceMiles = cfgData.maxDistanceMiles;
+    const pa = cfgData.play_area;
+    if (
+      pa && typeof pa.north === 'number' && typeof pa.south === 'number' &&
+      typeof pa.west === 'number' && typeof pa.east === 'number'
+    ) {
+      playAreaBounds = L.latLngBounds([pa.south, pa.west], [pa.north, pa.east]);
+    }
+    const raw = String(cfgData.mc_default_view || '').trim().toLowerCase();
+    return raw === 'meshtastic' ? 'meshtastic' : 'meshcore';
+  } catch (e) {
+    return null;
+  }
+}
 
 async function boot() {
-  map = await waitForMap();
-  meshtasticLayers = Array.isArray(window.MESHWARS_MESHTASTIC_LAYERS)
-    ? window.MESHWARS_MESHTASTIC_LAYERS
-    : [];
+  const defaultMode = (await loadConfig()) || 'meshcore';
 
-  mcLayerGroup = L.layerGroup();
+  let savedView = null;
+  try {
+    const raw = localStorage.getItem('mapView');
+    if (raw) savedView = JSON.parse(raw);
+  } catch (e) { /* ignore */ }
+
+  const startCenter = savedView ? [savedView.lat, savedView.lng] : centerPos;
+  const startZoom = savedView ? savedView.zoom : initialZoom;
+
+  map = L.map('map', {
+    worldCopyJump: true,
+    preferCanvas: true,
+  }).setView(startCenter, startZoom);
+
+  map.on('moveend', () => {
+    const c = map.getCenter();
+    localStorage.setItem('mapView', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
+  });
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>'
+  }).addTo(map);
+
+  // #map is sized by CSS (top: var(--mw-nav-h), below the fixed site nav
+  // bar) rather than filling the whole viewport, so it's already the
+  // right size before L.map() reads it above. Nudge Leaflet to
+  // re-measure anyway once this layout pass has settled, so a container
+  // size a browser reports late (e.g. a slow web-font swap shifting the
+  // bar's height) can never leave the map under- or over-sized.
+  requestAnimationFrame(() => map.invalidateSize());
+
+  cellLayerGroup = L.layerGroup().addTo(map);
 
   scoreboardControl = buildScoreboardControl();
   scoreboardControl.addTo(map);
-
-  // Leaflet stacks controls in the same corner in add order, and code.js's
-  // own meshwars-scoreboard (the Meshtastic panel) was already added to
-  // this same corner before this module's boot() resumed (see the
-  // map-ready handoff above). In Meshtastic mode both that panel and this
-  // one are visible at once now -- our card as a slim switch-only bar
-  // (see setMode's 'mc-territory-hidden') -- so force our card to be the
-  // first child of the corner container. That keeps the switch in the
-  // same visual spot at the top of the stack regardless of which board
-  // is active. Do not remove this thinking it is a no-op.
-  const scoreboardContainer = scoreboardControl.getContainer();
-  if (scoreboardContainer && scoreboardContainer.parentNode) {
-    scoreboardContainer.parentNode.insertBefore(scoreboardContainer, scoreboardContainer.parentNode.firstChild);
-  }
 
   renderScores(null); // seed all-zero rows immediately, before the first fetch
 
@@ -746,19 +902,31 @@ async function boot() {
     setMcCollapsed(true);
   }
 
-  const [defaultMode] = await Promise.all([loadDefaultMode(), loadPlayArea()]);
+  if (maxDistanceMiles > 0) {
+    L.circle(centerPos, {
+      radius: maxDistanceMiles * 1609.34,
+      color: '#555', weight: 1, fill: false, dashArray: '6, 8', opacity: 0.3
+    }).addTo(map);
+  }
+
   setMode(defaultMode);
 
+  const loadingOverlay = document.getElementById('loading-overlay');
+  if (loadingOverlay) {
+    loadingOverlay.classList.add('fade-out');
+    setTimeout(() => loadingOverlay.remove(), 500);
+  }
+
   refreshTimer = setInterval(() => {
-    if (mode === 'meshcore') {
-      refreshBoard(false);
-      refreshScores();
-    }
+    refreshBoard(false);
+    refreshScores();
   }, REFRESH_INTERVAL_MS);
 
   setInterval(tickCountdown, 1000);
 }
 
 boot().catch((err) => {
-  console.error('MeshCore module failed to start:', err);
+  console.error('MeshWars map failed to start:', err);
+  const mapDiv = document.getElementById('map');
+  if (mapDiv) mapDiv.innerHTML = `<div style="padding: 20px; color: red;">Failed to load map: ${err.message}</div>`;
 });
