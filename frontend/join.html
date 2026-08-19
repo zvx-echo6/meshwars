@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/join.css?v=20260819-2" />
+  <link rel="stylesheet" href="/static/join.css?v=20260819-3" />
 </head>
 <body>
 
@@ -220,7 +220,7 @@
       <div id="working-check-mt" class="protocol-block" hidden>
         <p>Nothing is pushed to MeshWars at all. MeshWars polls meshview every 45 seconds and picks you up whenever your node broadcasts a position that a feeder hears — there is no session to start or batch to send.</p>
         <p>Squares are only claimed where a feeder hears your node's position. If you're somewhere with no feeder coverage, your position is never reported to meshview in the first place, so nothing gets claimed — that is normal, not a fault.</p>
-        <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will confirm which radios are registered to you -- it does not show a Meshtastic square count. For that, use the map's player search (search by player name).</p>
+        <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last picked up your node from meshview, how many squares you hold, and what is wrong if anything is.</p>
       </div>
     </section>
 
@@ -233,7 +233,7 @@
            is ever sent to us from a Meshtastic node; we pull from
            meshview instead, so that wording would be false for it. -->
       <p id="status-hint-mc" class="hint">Paste your API key to see whether MeshWars is receiving anything from your app.</p>
-      <p id="status-hint-mt" class="hint" hidden>Paste your API key to see what MeshWars has picked up from meshview for your node — nothing is sent to us directly.</p>
+      <p id="status-hint-mt" class="hint" hidden>Paste your API key to see when MeshWars last picked up your node from meshview, how many squares you hold, and what is wrong if anything is — nothing is sent to us directly.</p>
 
       <form id="status-form" novalidate autocomplete="off">
         <div id="status-error" class="join-error" role="alert" hidden></div>
@@ -287,6 +287,6 @@
 
   </main>
 
-  <script src="/static/join.js?v=20260819-5" type="module"></script>
+  <script src="/static/join.js?v=20260819-6" type="module"></script>
 </body>
 </html>
