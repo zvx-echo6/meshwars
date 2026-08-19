@@ -508,8 +508,8 @@ class McIngestor:
 
             # MeshCore season bookkeeping happens at most once per batch,
             # not once per ping.
-            mc_scoring.maybe_roll_season(conn, received_at)
-            season_id = mc_scoring.ensure_active_season(conn, received_at)
+            mc_scoring.maybe_roll_season(conn, received_at, PROTOCOL)
+            season_id = mc_scoring.ensure_active_season(conn, received_at, PROTOCOL)
 
             # The whole batch belongs to one player, so their team is read
             # once here rather than once per ping.
@@ -744,7 +744,7 @@ class McIngestor:
         # batch -- log it and keep going.
         if team is not None:
             try:
-                mc_scoring.apply_paint(conn, season_id, player_id, team, cell, ts, points)
+                mc_scoring.apply_paint(conn, season_id, player_id, team, cell, ts, points, PROTOCOL)
             except Exception:
                 log.exception(
                     "mc scoring: apply_paint failed for player %d cell %s",

@@ -255,14 +255,22 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
 
 -- One MeshCore season at a time; mirrors `season` above but tallies teams
 -- (there can be more than two) instead of fixed red/blue/green columns.
+--
+-- `protocol` is the ONLY column that separates the MeshCore board from
+-- the Meshtastic board once Meshtastic is moved onto this model ('mc' /
+-- 'mt'). Deliberately placed here and nowhere else: every other mc_*
+-- table keys off season_id, so as long as a season's protocol never
+-- changes and every lookup filters on it, the two boards stay fully
+-- independent without needing a protocol column on the tile tables too.
 CREATE TABLE IF NOT EXISTS mc_season (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    protocol    TEXT NOT NULL DEFAULT 'mc',  -- 'mc' | 'mt'
     started_at  INTEGER NOT NULL,
     ends_at     INTEGER NOT NULL,
     status      TEXT NOT NULL,
     winner      TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_mc_season_status ON mc_season(status);
+CREATE INDEX IF NOT EXISTS idx_mc_season_status ON mc_season(protocol, status);
 
 -- Tile count per team, written once at season close.
 CREATE TABLE IF NOT EXISTS mc_season_team_tally (
@@ -395,6 +403,12 @@ MIGRATIONS = [
     "ALTER TABLE tile_unique_painter ADD COLUMN paint_count INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_out_of_area INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_no_repeaters INTEGER NOT NULL DEFAULT 0",
+    # Every mc_season row that exists before this migration runs was
+    # created by the MeshCore ingest path, so backfilling to 'mc' is not
+    # a guess -- it is the only value that has ever been possible. SQLite
+    # applies the column default to existing rows on ADD COLUMN, so this
+    # single ALTER both adds the column and backfills it in one step.
+    "ALTER TABLE mc_season ADD COLUMN protocol TEXT NOT NULL DEFAULT 'mc'",
     # Data fixup, not a schema change: real MeshCore hardware reports the
     # contact key in uppercase (app/mc_ingest.py now lowercases on
     # ingest), but one row was written before that normalization existed.

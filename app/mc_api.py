@@ -194,9 +194,17 @@ def _safe_query(fn):
 
 
 def _active_mc_season(conn) -> sqlite3.Row | None:
+    """The active MeshCore ('mc') season. Every mc_* API route reads
+    through this one helper rather than querying mc_season directly, so
+    the protocol filter only has to be written in one place -- once the
+    Meshtastic board moves onto mc_season too, an 'mt' season being
+    active would otherwise look, to an unfiltered query, exactly like an
+    'mc' season being active.
+    """
     return conn.execute(
         "SELECT id, started_at, ends_at, status, winner FROM mc_season "
-        " WHERE status = 'active' ORDER BY id DESC LIMIT 1"
+        " WHERE protocol = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+        (MC_PROTOCOL,),
     ).fetchone()
 
 
@@ -304,9 +312,13 @@ async def mc_history() -> list[dict]:
     """
 
     def run(conn):
+        # protocol = 'mc' for the same reason as _active_mc_season() above:
+        # once mt_season rows exist too, an unfiltered query here would
+        # start mixing Meshtastic seasons into the MeshCore history feed.
         seasons = conn.execute(
             "SELECT id, started_at, ends_at, winner FROM mc_season "
-            " WHERE status = 'closed' ORDER BY id DESC"
+            " WHERE protocol = ? AND status = 'closed' ORDER BY id DESC",
+            (MC_PROTOCOL,),
         ).fetchall()
         out = []
         for s in seasons:

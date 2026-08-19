@@ -162,19 +162,25 @@ def recently_painted(
     cell_id: str,
     ts: int,
     window: int,
+    protocol: str,
 ) -> bool:
     """True if this player already painted this EXACT cell within `window`
-    seconds before ts. Read from player_cell_ping (player_id, protocol='mc',
+    seconds before ts. Read from player_cell_ping (player_id, protocol,
     cell_id) with an exact cell_id match -- MeshCore cells are flat grid
     ids, not geohash prefixes, so the Meshtastic prefix-matching trick does
     not apply here.
+
+    `protocol` filters player_cell_ping the same way it will eventually
+    filter mc_season -- a cooldown is per-board, so a Meshtastic paint on
+    a cell must never suppress a MeshCore paint on the cell that happens
+    to share the same cell_id, and vice versa.
     """
     row = conn.execute(
         "SELECT 1 FROM player_cell_ping"
-        " WHERE player_id = ? AND protocol = 'mc' AND cell_id = ?"
+        " WHERE player_id = ? AND protocol = ? AND cell_id = ?"
         "   AND ts < ? AND ts >= ?"
         " LIMIT 1",
-        (player_id, cell_id, ts, ts - window),
+        (player_id, protocol, cell_id, ts, ts - window),
     ).fetchone()
     return row is not None
 
@@ -222,6 +228,7 @@ def apply_paint(
     cell_id: str,
     ts: int,
     points: float,
+    protocol: str,
 ) -> PaintResult:
     """Score one accepted ping against a cell and resolve ownership.
 
@@ -232,10 +239,19 @@ def apply_paint(
     no repeaters reached no one, so points <= 0 here paints nothing,
     captures nothing, and touches no scores at all.
 
+    `protocol` only reaches recently_painted() below -- everything else
+    in this function (ownership, scoring, decay, the unique-player bonus)
+    is scoped by season_id alone, and season_id is already
+    protocol-specific by construction (see ensure_active_season). It is
+    threaded through as an explicit argument rather than re-derived from
+    season_id here so the caller -- which already knows which board it
+    is ingesting for -- states it once, instead of this function having
+    to look the season back up just to read its protocol column.
+
     Caller must already hold app.db's write lock and have an open write
     transaction on `conn` -- this function does neither itself.
     """
-    if recently_painted(conn, player_id, cell_id, ts, settings.mc_cooldown_seconds):
+    if recently_painted(conn, player_id, cell_id, ts, settings.mc_cooldown_seconds, protocol):
         return PaintResult("cooldown", cell_id, team)
 
     if points <= 0:
@@ -333,28 +349,42 @@ def team_tile_counts(conn: sqlite3.Connection, season_id: int) -> dict[str, int]
     return {r["owner_team"]: r["c"] for r in rows}
 
 
-def ensure_active_season(conn: sqlite3.Connection, now: int) -> int:
-    """Return the id of the active MeshCore season, creating one running
-    settings.mc_season_days from now if none exists yet.
+def ensure_active_season(conn: sqlite3.Connection, now: int, protocol: str) -> int:
+    """Return the id of the active season for `protocol`, creating one
+    running settings.mc_season_days from now if none exists yet.
+
+    `protocol` scopes both the lookup and the INSERT below -- 'mc' and
+    'mt' each run their own season independently, on their own clock,
+    with their own winner. Filtering only the SELECT and letting the
+    INSERT default the column would still be correct today (the column
+    default is 'mc'), but it would silently do the wrong thing the
+    moment this is ever called for 'mt', so the value is written
+    explicitly here instead of relying on the schema default.
     """
     row = conn.execute(
-        "SELECT id FROM mc_season WHERE status = 'active' ORDER BY id DESC LIMIT 1"
+        "SELECT id FROM mc_season WHERE protocol = ? AND status = 'active' "
+        "ORDER BY id DESC LIMIT 1",
+        (protocol,),
     ).fetchone()
     if row:
         return row["id"]
     ends_at = now + settings.mc_season_days * 86400
     conn.execute(
-        "INSERT INTO mc_season(started_at, ends_at, status) VALUES (?, ?, 'active')",
-        (now, ends_at),
+        "INSERT INTO mc_season(protocol, started_at, ends_at, status) "
+        "VALUES (?, ?, ?, 'active')",
+        (protocol, now, ends_at),
     )
     season_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    log.info("mc scoring: created initial season id=%d ends_at=%d", season_id, ends_at)
+    log.info(
+        "mc scoring: created initial %s season id=%d ends_at=%d",
+        protocol, season_id, ends_at,
+    )
     return season_id
 
 
-def maybe_roll_season(conn: sqlite3.Connection, now: int) -> bool:
-    """If the active MeshCore season has expired, close it and open a
-    fresh one. Returns True if a roll happened.
+def maybe_roll_season(conn: sqlite3.Connection, now: int, protocol: str) -> bool:
+    """If the active season for `protocol` has expired, close it and open
+    a fresh one for the same protocol. Returns True if a roll happened.
 
     On close: tally each team's tile count into mc_season_team_tally and
     set the closing season's winner to whichever team holds the most
@@ -366,7 +396,9 @@ def maybe_roll_season(conn: sqlite3.Connection, now: int) -> bool:
     Meshtastic side only prunes once a season count threshold is hit.
     """
     row = conn.execute(
-        "SELECT id, ends_at FROM mc_season WHERE status = 'active' ORDER BY id DESC LIMIT 1"
+        "SELECT id, ends_at FROM mc_season WHERE protocol = ? AND status = 'active' "
+        "ORDER BY id DESC LIMIT 1",
+        (protocol,),
     ).fetchone()
     if not row or now < row["ends_at"]:
         return False
@@ -398,9 +430,10 @@ def maybe_roll_season(conn: sqlite3.Connection, now: int) -> bool:
 
     ends_at = now + settings.mc_season_days * 86400
     conn.execute(
-        "INSERT INTO mc_season(started_at, ends_at, status) VALUES (?, ?, 'active')",
-        (now, ends_at),
+        "INSERT INTO mc_season(protocol, started_at, ends_at, status) "
+        "VALUES (?, ?, ?, 'active')",
+        (protocol, now, ends_at),
     )
     new_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    log.info("mc scoring: opened season %d ends_at=%d", new_id, ends_at)
+    log.info("mc scoring: opened %s season %d ends_at=%d", protocol, new_id, ends_at)
     return True
