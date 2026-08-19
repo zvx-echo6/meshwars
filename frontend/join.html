@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/join.css?v=20260818-5" />
+  <link rel="stylesheet" href="/static/join.css?v=20260818-6" />
 </head>
 <body>
 
@@ -183,6 +183,34 @@
       </form>
 
       <div id="status-result" class="status-result" hidden></div>
+
+      <!-- Radio management: shown only once the key above has checked
+           out (see renderStatusResult() in join.js), which is also the
+           only point this page ever has both a live key and a player
+           to attach radios to. Lives inside the same panel/form rather
+           than a page of its own -- extending the existing setup-check
+           box, not adding a new page or nav entry. -->
+      <div id="status-radios" class="status-radios" hidden>
+        <div class="join-panel-subtitle">Your radios</div>
+        <ul id="radios-list" class="radios-list"></ul>
+
+        <div id="radios-error" class="join-error" role="alert" hidden></div>
+
+        <form id="add-radio-form" class="add-radio-form" novalidate autocomplete="off">
+          <label class="join-field">
+            <span>Node ID</span>
+            <input type="text" id="f-add-node-ref" placeholder="!a1b2c3d4" autocomplete="off" required />
+          </label>
+          <label class="join-field">
+            <span>Protocol</span>
+            <select id="f-add-protocol">
+              <option value="mt" selected>Meshtastic</option>
+              <option value="mc">MeshCore</option>
+            </select>
+          </label>
+          <button type="submit" id="add-radio-submit">Add radio</button>
+        </form>
+      </div>
     </section>
 
     <section class="join-panel join-play-area">
@@ -192,6 +220,6 @@
 
   </main>
 
-  <script src="/static/join.js?v=20260818-7" type="module"></script>
+  <script src="/static/join.js?v=20260818-8" type="module"></script>
 </body>
 </html>

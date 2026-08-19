@@ -21,9 +21,14 @@
  * string written in this file.
  *
  * The status-check API key never leaves this file except in the
- * X-API-Key header of the /api/mc/status request itself -- it is never
- * put in a URL, never persisted (no localStorage/sessionStorage/cookie),
- * and never logged.
+ * X-API-Key header of a request itself (/api/mc/status, and now
+ * /api/nodes for the radio list/add/remove calls below) -- it is never
+ * put in a URL or request body, never persisted (no
+ * localStorage/sessionStorage/cookie), and never logged. The radio
+ * add/remove calls read it fresh from #f-status-key on every call
+ * rather than caching it in a variable, same reasoning: there is
+ * already exactly one place this key lives on the page, and it should
+ * stay that way.
  */
 
 // Same roster/colors as frontend/mc.js -- duplicated rather than
@@ -57,6 +62,11 @@ const COUNTER_ZERO_ROW = COUNTER_LABELS.reduce((acc, [key]) => {
   acc[key] = 0;
   return acc;
 }, {});
+
+// Display labels for the "Your radios" list and the add-radio protocol
+// select -- keys match exactly what the server uses everywhere else
+// (player_node.protocol, app/nodes_api.py's _VALID_PROTOCOLS).
+const PROTOCOL_LABELS = { mt: 'Meshtastic', mc: 'MeshCore' };
 
 let selectedTeam = null;
 
@@ -386,12 +396,173 @@ function renderStatusResult(data) {
 
   panel.appendChild(buildLabel('Today and last 7 days'));
   panel.appendChild(buildCountersTable(data.today || COUNTER_ZERO_ROW, data.last_7_days || COUNTER_ZERO_ROW));
+
+  // /api/mc/status already returns the same radios array app/nodes_api.py
+  // hands back from every add/remove call -- this reuses it directly
+  // rather than making a second request just to populate the list.
+  clearRadiosError();
+  renderRadiosList(data.radios);
+  document.getElementById('status-radios').hidden = false;
+}
+
+// ---- Radio management (GET/POST/DELETE /api/nodes) -----------------------
+//
+// Lives inside the same setup-check box as the status result above,
+// only shown once that check has succeeded -- that is the only point
+// on this page where a live, verified key and a known player both
+// exist together. Every call here reads the key fresh from
+// #f-status-key rather than storing it anywhere else (see the module
+// docstring at the top of this file).
+
+function showRadiosError(message) {
+  const el = document.getElementById('radios-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearRadiosError() {
+  const el = document.getElementById('radios-error');
+  el.textContent = '';
+  el.hidden = true;
+}
+
+function statusKeyValue() {
+  return document.getElementById('f-status-key').value;
+}
+
+// Renders the "Your radios" list and wires each row's Remove button.
+// Called after the initial status check and again after every
+// successful add/remove, always from the radios array the server just
+// returned -- never an optimistic local guess, so the list can never
+// drift from what player_node actually holds.
+function renderRadiosList(radios) {
+  const list = document.getElementById('radios-list');
+  list.replaceChildren();
+
+  if (!radios || radios.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'radios-empty';
+    li.textContent = 'No radios registered yet.';
+    list.appendChild(li);
+    return;
+  }
+
+  radios.forEach((radio) => {
+    const li = document.createElement('li');
+    li.className = 'radios-item';
+
+    const label = document.createElement('span');
+    label.textContent = `${PROTOCOL_LABELS[radio.protocol] || radio.protocol} ${radio.node_ref}`;
+    li.appendChild(label);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', () => {
+      handleRemoveRadio(radio.protocol, radio.node_ref, removeBtn);
+    });
+    li.appendChild(removeBtn);
+
+    list.appendChild(li);
+  });
+}
+
+// Shared response handling for both the add and remove calls below --
+// the status codes and meanings are identical because both routes sit
+// behind the exact same X-API-Key authentication in app/nodes_api.py.
+// Returns true if the caller should stop (an error was shown already).
+function handleRadiosApiError(res, data) {
+  if (res.status === 401) {
+    showRadiosError('That key was not recognized. Double-check you copied it correctly.');
+    return true;
+  }
+  if (res.status === 403) {
+    showRadiosError('This account has been disabled.');
+    return true;
+  }
+  if (res.status === 429) {
+    showRadiosError('Too many changes, too fast. Wait a moment and try again.');
+    return true;
+  }
+  if (!res.ok) {
+    const message = (data && typeof data.error === 'string')
+      ? data.error
+      : 'Something went wrong. Try again in a moment.';
+    showRadiosError(message);
+    return true;
+  }
+  return false;
+}
+
+async function handleRemoveRadio(protocol, nodeRef, button) {
+  clearRadiosError();
+  const key = statusKeyValue();
+  if (!key) {
+    showRadiosError('Enter your API key above first.');
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    const url = `/api/nodes/${encodeURIComponent(nodeRef)}?protocol=${encodeURIComponent(protocol)}`;
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: { 'X-API-Key': key },
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (handleRadiosApiError(res, data)) return;
+    renderRadiosList(data.radios);
+  } catch (err) {
+    showRadiosError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function handleAddRadioSubmit(e) {
+  e.preventDefault();
+  clearRadiosError();
+
+  const key = statusKeyValue();
+  if (!key) {
+    showRadiosError('Enter your API key above first.');
+    return;
+  }
+
+  const nodeRefInput = document.getElementById('f-add-node-ref');
+  const protocol = document.getElementById('f-add-protocol').value;
+  const nodeRef = nodeRefInput.value;
+  if (!nodeRef) {
+    showRadiosError('Enter a node ID.');
+    return;
+  }
+
+  const submitBtn = document.getElementById('add-radio-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/nodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+      body: JSON.stringify({ node_ref: nodeRef, protocol }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (handleRadiosApiError(res, data)) return;
+    renderRadiosList(data.radios);
+    nodeRefInput.value = '';
+  } catch (err) {
+    showRadiosError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
 }
 
 async function handleStatusSubmit(e) {
   e.preventDefault();
   clearStatusError();
   document.getElementById('status-result').hidden = true;
+  document.getElementById('status-radios').hidden = true;
 
   const key = document.getElementById('f-status-key').value;
   if (!key) {
@@ -453,6 +624,7 @@ function boot() {
   setupEndpointCopy();
   document.getElementById('join-submit').addEventListener('click', handleJoinClick);
   document.getElementById('status-form').addEventListener('submit', handleStatusSubmit);
+  document.getElementById('add-radio-form').addEventListener('submit', handleAddRadioSubmit);
 }
 
 boot();

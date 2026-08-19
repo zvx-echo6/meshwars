@@ -23,7 +23,6 @@ module ever transmits on a radio.
 from __future__ import annotations
 
 import asyncio
-import re
 import secrets
 import time
 import unicodedata
@@ -34,10 +33,9 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .db import connect
 from .mc_ingest import hash_secret
+from .node_ref import normalize_node_ref
 
 router = APIRouter()
-
-_NODE_REF_RE = re.compile(r"^[0-9a-fA-F]{8}$")
 
 # Small fixed delay added before returning "wrong invite code", so a
 # flood of guesses can't be timed to distinguish a wrong code from a
@@ -89,17 +87,12 @@ def _rate_limited(ip: str) -> bool:
 
 
 # ---- validation helpers -----------------------------------------------
-
-def _normalize_node_ref(raw: object) -> str | None:
-    """Accept `!a1b2c3d4` or `a1b2c3d4` (any case); return the canonical
-    lowercase `!xxxxxxxx` form, or None if it isn't 8 hex characters.
-    """
-    if not isinstance(raw, str):
-        return None
-    bare = raw[1:] if raw.startswith("!") else raw
-    if not _NODE_REF_RE.match(bare):
-        return None
-    return f"!{bare.lower()}"
+#
+# Node-reference normalization (_NODE_REF_RE / normalize_node_ref) lives
+# in app/node_ref.py now -- app/nodes_api.py needs the exact same
+# definition, and a table whose primary key is a literal string compare
+# on node_ref must never have two independent ideas of what "valid"
+# means.
 
 
 def _validate_display_name(raw: object) -> tuple[str | None, str | None]:
@@ -190,16 +183,28 @@ async def join(request: Request) -> JSONResponse:
             {"error": "Meshtastic registration is not open yet"}, status_code=503
         )
 
-    # 6. node_ref, required and normalized only for meshtastic.
+    # 6. node_ref: OPTIONAL, even for meshtastic. A player can register
+    # with no radio at all and add one (or several) afterward through
+    # the key-authenticated routes in app/nodes_api.py -- that is the
+    # whole point of that module. MeshCore radios still self-bind on
+    # their own from a position batch's contact key and never take a
+    # node_ref here, so this only ever applies to protocol == "mt". If
+    # a node_ref IS supplied at signup, though, it is validated and
+    # bound exactly as before, including the already-registered check
+    # below -- an empty/missing value is the only thing that now means
+    # "skip it", not a relaxed version of the format check.
     node_ref = None
     if protocol == "mt":
-        node_ref = _normalize_node_ref(body.get("node_ref"))
-        if node_ref is None:
-            return JSONResponse(
-                {"error": "node_ref is required for meshtastic and must be "
-                          "8 hex characters, with or without a leading !"},
-                status_code=400,
-            )
+        raw_node_ref = body.get("node_ref")
+        supplied = isinstance(raw_node_ref, str) and raw_node_ref.strip() != ""
+        if supplied:
+            node_ref = normalize_node_ref(raw_node_ref)
+            if node_ref is None:
+                return JSONResponse(
+                    {"error": "node_ref must be 8 hex characters, with or "
+                              "without a leading !"},
+                    status_code=400,
+                )
 
     now = int(time.time())
     conn = connect()
@@ -214,7 +219,7 @@ async def join(request: Request) -> JSONResponse:
             conn.execute("ROLLBACK")
             return JSONResponse({"error": "that name is taken"}, status_code=409)
 
-        if protocol == "mt":
+        if node_ref is not None:
             bound = conn.execute(
                 "SELECT player_id FROM player_node WHERE protocol = 'mt' AND node_ref = ?",
                 (node_ref,),
@@ -239,7 +244,7 @@ async def join(request: Request) -> JSONResponse:
             (hash_secret(raw_key), player_id, now),
         )
 
-        if protocol == "mt":
+        if node_ref is not None:
             conn.execute(
                 "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) "
                 "VALUES ('mt', ?, ?, ?)",
