@@ -12,7 +12,20 @@ route below is expected to see sqlite3.OperationalError("no such
 table: mc_*") -- so every query goes through `_safe_query`, which
 catches "no such table" and degrades to an empty result instead of a
 500. That is a deliberate landing-order guard, not defensive
-programming against a real failure mode.
+programming against a real failure mode. (The mc_* tables have existed
+unconditionally since that parallel change landed, so in practice the
+guard no longer triggers -- it is kept because it is still correct and
+harmless, not because the race it was written for is still live.)
+
+Several of the functions below (active_season, board_for, scores_for,
+history_for, cell_detail_for, season_team_tally, winner_banner_active,
+latest_closed_season, team_list) take an explicit `protocol` argument
+and are called from here with MC_PROTOCOL -- and, now that the
+Meshtastic board runs on this same mc_season/mc_tile* model, also
+called from app/api.py with 'mt', so the query logic for each pair of
+near-identical mc/mt endpoints lives in exactly one place. None of that
+changes what any /api/mc/* route returns; every route here still passes
+MC_PROTOCOL explicitly, same as before this module had a second caller.
 """
 from __future__ import annotations
 
@@ -51,7 +64,7 @@ _status_attempts: dict[str, list[float]] = {}
 _FALLBACK_TEAMS = ["RED", "GREEN", "BLUE", "PURPLE", "YELLOW", "ORANGE", "PINK"]
 
 
-def _team_list() -> list[str]:
+def team_list() -> list[str]:
     """Read the MeshCore team roster from settings.
 
     Tries a few plausible attribute names/shapes so this keeps working
@@ -193,30 +206,76 @@ def _safe_query(fn):
         conn.close()
 
 
-def _active_mc_season(conn) -> sqlite3.Row | None:
-    """The active MeshCore ('mc') season. Every mc_* API route reads
-    through this one helper rather than querying mc_season directly, so
-    the protocol filter only has to be written in one place -- once the
-    Meshtastic board moves onto mc_season too, an 'mt' season being
-    active would otherwise look, to an unfiltered query, exactly like an
-    'mc' season being active.
+def active_season(conn, protocol: str) -> sqlite3.Row | None:
+    """The active season for `protocol` ('mc' or 'mt'). Every mc_* AND
+    (now that the Meshtastic board has moved onto mc_season too, see
+    app/api.py) mt route reads through this one helper rather than
+    querying mc_season directly, so the protocol filter only has to be
+    written in one place -- an unfiltered query would otherwise treat an
+    'mt' season being active as indistinguishable from an 'mc' one, and
+    vice versa. Every call site in this module passes MC_PROTOCOL
+    explicitly (never left to a default) so it stays impossible to reuse
+    one of these helpers for the wrong board by accident.
     """
     return conn.execute(
         "SELECT id, started_at, ends_at, status, winner FROM mc_season "
         " WHERE protocol = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
-        (MC_PROTOCOL,),
+        (protocol,),
     ).fetchone()
 
 
-@router.get("/api/mc/board")
-async def mc_board() -> list[dict]:
-    """Every owned cell in the active MeshCore season, with bounds
+def latest_closed_season(conn, protocol: str) -> sqlite3.Row | None:
+    """The most recently closed season for `protocol`, or None if this
+    board has never closed one yet. New helper -- no existing /api/mc/*
+    route needed a single "latest closed" season (mc_history returns
+    every closed season), this exists for app/api.py's /season and
+    /config winner-banner logic, which the old (now-deleted)
+    app/seasons.py provided for the legacy `season` table.
+    """
+    return conn.execute(
+        "SELECT id, started_at, ends_at, status, winner FROM mc_season "
+        " WHERE protocol = ? AND status = 'closed' ORDER BY id DESC LIMIT 1",
+        (protocol,),
+    ).fetchone()
+
+
+def winner_banner_active(closed_season: sqlite3.Row | dict | None, now_ts: int) -> bool:
+    """Is the winner banner for `closed_season` still inside its display
+    window (settings.winner_banner_hours after ends_at)? Protocol-agnostic
+    -- it only looks at the row it's given, same contract the deleted
+    app/seasons.py version had for the legacy `season` table.
+    """
+    if not closed_season:
+        return False
+    return now_ts < closed_season["ends_at"] + settings.winner_banner_hours * 3600
+
+
+def season_team_tally(conn, season_id: int) -> dict[str, int]:
+    """team -> tiles for a season's final tally, from mc_season_team_tally
+    (written once at season close, see mc_scoring.maybe_roll_season).
+    Shared by mc_history() below and app/api.py's /config winner banner,
+    which both need a closed season's per-team standings.
+    """
+    rows = conn.execute(
+        "SELECT team, tiles FROM mc_season_team_tally WHERE season_id = ?",
+        (season_id,),
+    ).fetchall()
+    return {r["team"]: r["tiles"] for r in rows}
+
+
+def board_for(protocol: str) -> list[dict]:
+    """Every owned cell in the active season for `protocol`, with bounds
     computed server-side so the browser never has to reimplement the
     grid maths in app.grid.
+
+    Factored out of mc_board() below so app/api.py's Meshtastic
+    /get-nodes route can build its own (richer) coverage list from the
+    same raw ownership rows instead of re-deriving them -- see that
+    module for how it enriches these with per-cell scores/capture time.
     """
 
     def run(conn):
-        season = _active_mc_season(conn)
+        season = active_season(conn, protocol)
         if not season:
             return []
         rows = conn.execute(
@@ -243,16 +302,24 @@ async def mc_board() -> list[dict]:
     return result if result is not None else []
 
 
-@router.get("/api/mc/scores")
-async def mc_scores() -> dict:
-    """Active season id/window plus every team's current tile count.
+@router.get("/api/mc/board")
+async def mc_board() -> list[dict]:
+    """Every owned cell in the active MeshCore season. See board_for()."""
+    return board_for(MC_PROTOCOL)
 
-    Always returns all seven teams (zero-filled) so the scoreboard
-    doesn't jump around as teams appear on the board.
+
+def scores_for(protocol: str) -> dict:
+    """Active season id/window plus every team's current tile count for
+    `protocol`. Always returns all seven teams (zero-filled) so the
+    scoreboard doesn't jump around as teams appear on the board.
+
+    Factored out of mc_scores() below so app/api.py's Meshtastic /scores
+    route returns the exact same shape for its own board instead of a
+    hand-copied near-duplicate.
     """
 
     def run(conn):
-        season = _active_mc_season(conn)
+        season = active_season(conn, protocol)
         if not season:
             return None
         # Live counts, not the season-close tally: mc_season_team_tally is
@@ -268,7 +335,7 @@ async def mc_scores() -> dict:
             "season_id": season["id"],
             "started_at": season["started_at"],
             "ends_at": season["ends_at"],
-            "teams": [{"team": t, "tiles": counts.get(t, 0)} for t in _team_list()],
+            "teams": [{"team": t, "tiles": counts.get(t, 0)} for t in team_list()],
         }
 
     result = _safe_query(run)
@@ -278,8 +345,15 @@ async def mc_scores() -> dict:
         "season_id": None,
         "started_at": None,
         "ends_at": None,
-        "teams": [{"team": t, "tiles": 0} for t in _team_list()],
+        "teams": [{"team": t, "tiles": 0} for t in team_list()],
     }
+
+
+@router.get("/api/mc/scores")
+async def mc_scores() -> dict:
+    """Active season id/window plus every team's current tile count for
+    MeshCore. See scores_for()."""
+    return scores_for(MC_PROTOCOL)
 
 
 @router.get("/api/mc/players")
@@ -300,44 +374,54 @@ async def mc_players() -> list[dict]:
     return result if result is not None else []
 
 
-@router.get("/api/mc/history")
-async def mc_history() -> list[dict]:
-    """Closed MeshCore seasons, newest first, each with its final
+def history_for(protocol: str) -> list[dict]:
+    """Closed seasons for `protocol`, newest first, each with its final
     per-team tile tally.
 
-    mc_season_team_tally, not mc_tile, is the correct source here: it
-    is written once at season close (see maybe_roll_season() in
-    mc_scoring.py) and is the only place a closed season's standings
-    still live, since mc_tile itself moves on to the next season.
+    mc_season_team_tally (see season_team_tally() above), not mc_tile, is
+    the correct source here: it is written once at season close (see
+    maybe_roll_season() in mc_scoring.py) and is the only place a closed
+    season's standings still live, since mc_tile itself moves on to the
+    next season.
+
+    Factored out of mc_history() below so app/api.py's Meshtastic
+    /history route returns the exact same per-season shape instead of a
+    hand-copied near-duplicate. Per the owner's explicit decision, the
+    Meshtastic /history feed surfaces only 'mt' seasons under this
+    player-model scheme -- the three legacy geohash-era seasons stay in
+    the `season` table (never dropped) but are not read through here.
     """
 
     def run(conn):
-        # protocol = 'mc' for the same reason as _active_mc_season() above:
-        # once mt_season rows exist too, an unfiltered query here would
-        # start mixing Meshtastic seasons into the MeshCore history feed.
+        # protocol filter for the same reason as active_season() above:
+        # an unfiltered query here would mix the two boards' seasons
+        # into one history feed.
         seasons = conn.execute(
             "SELECT id, started_at, ends_at, winner FROM mc_season "
             " WHERE protocol = ? AND status = 'closed' ORDER BY id DESC",
-            (MC_PROTOCOL,),
+            (protocol,),
         ).fetchall()
         out = []
         for s in seasons:
-            tally_rows = conn.execute(
-                "SELECT team, tiles FROM mc_season_team_tally WHERE season_id = ?",
-                (s["id"],),
-            ).fetchall()
-            tallies = {r["team"]: r["tiles"] for r in tally_rows}
+            tallies = season_team_tally(conn, s["id"])
             out.append({
                 "id": s["id"],
                 "started_at": s["started_at"],
                 "ends_at": s["ends_at"],
                 "winner": s["winner"],
-                "teams": [{"team": t, "tiles": tallies.get(t, 0)} for t in _team_list()],
+                "teams": [{"team": t, "tiles": tallies.get(t, 0)} for t in team_list()],
             })
         return out
 
     result = _safe_query(run)
     return result if result is not None else []
+
+
+@router.get("/api/mc/history")
+async def mc_history() -> list[dict]:
+    """Closed MeshCore seasons, newest first, each with its final
+    per-team tile tally. See history_for()."""
+    return history_for(MC_PROTOCOL)
 
 
 @router.get("/api/mc/find")
@@ -368,7 +452,7 @@ async def mc_find(name: str):
 
         cell_ids: list[str] = []
         try:
-            season = _active_mc_season(conn)
+            season = active_season(conn, MC_PROTOCOL)
             if season:
                 rows = conn.execute(
                     "SELECT cell_id FROM mc_tile WHERE season_id = ? AND last_player_id = ?",
@@ -408,7 +492,7 @@ async def mc_top() -> list[dict]:
     """
 
     def run(conn):
-        season = _active_mc_season(conn)
+        season = active_season(conn, MC_PROTOCOL)
         if not season:
             return []
         rows = conn.execute(
@@ -431,18 +515,20 @@ async def mc_top() -> list[dict]:
     return result if result is not None else []
 
 
-@router.get("/api/mc/cell/{cell_id}")
-async def mc_cell(cell_id: str):
-    """Detail for one cell: owner, capture time, per-team current
-    scores, and a few recent capture-log entries with display names.
+def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
+    """Detail for one cell in `protocol`'s active season: owner, capture
+    time, per-team current scores, and a few recent capture-log entries
+    with display names. None when the cell has no owner -- including
+    when there is no active season, or the mc_* schema doesn't exist
+    yet, since in both of those cases the cell has no owner either.
 
-    404s when the cell has no owner -- including when there is no
-    active season, or the mc_* schema doesn't exist yet, since in both
-    of those cases the cell has no owner either.
+    Factored out of mc_cell() below so app/api.py's Meshtastic
+    /cell/{cell_id} route returns the exact same per-cell shape instead
+    of a hand-copied near-duplicate.
     """
 
     def run(conn):
-        season = _active_mc_season(conn)
+        season = active_season(conn, protocol)
         if not season:
             return None
 
@@ -485,7 +571,7 @@ async def mc_cell(cell_id: str):
             "paint_count": tile["paint_count"],
             "captured_at": cap["captured_at"] if cap else None,
             "captured_by_team": cap["captured_by_team"] if cap else None,
-            "scores": {t: scores.get(t, 0) for t in _team_list()},
+            "scores": {t: scores.get(t, 0) for t in team_list()},
             "south": south,
             "west": west,
             "north": north,
@@ -501,7 +587,14 @@ async def mc_cell(cell_id: str):
             ],
         }
 
-    detail = _safe_query(run)
+    return _safe_query(run)
+
+
+@router.get("/api/mc/cell/{cell_id}")
+async def mc_cell(cell_id: str):
+    """Detail for one cell on the active MeshCore board. See
+    cell_detail_for()."""
+    detail = cell_detail_for(MC_PROTOCOL, cell_id)
     if detail is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return detail
@@ -622,7 +715,7 @@ async def mc_status(request: Request) -> JSONResponse:
         # mc_tile schema is not part of the always-present core tables.
         squares_held = 0
         try:
-            season = _active_mc_season(conn)
+            season = active_season(conn, MC_PROTOCOL)
             if season:
                 row = conn.execute(
                     "SELECT COUNT(*) AS n FROM mc_tile WHERE season_id = ? AND last_player_id = ?",

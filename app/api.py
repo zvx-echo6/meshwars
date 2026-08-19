@@ -1,12 +1,22 @@
-"""HTTP endpoints.
+"""HTTP endpoints for the Meshtastic board.
 
-We implement the exact contract the existing coverage-map frontend
-expects (/config, /get-nodes, /get-samples, /live-tracks,
-/live-tracks/stream) and add a few game-specific ones (/scores,
-/history, /season).
+Historically this module implemented its own retired geohash/tile
+fortress game (the `season` / `tile` / `tile_score` / `tile_capture` /
+`tile_capture_log` / `tile_unique_painter` / `sample` / `activity` /
+`team_assignment` tables, app/scoring.py, app/draft.py, app/seasons.py).
+That game is gone -- see app/ingest.py's module docstring for the full
+story of the cutover. Every route below now reads the same
+mc_season/mc_tile* model app/mc_api.py already serves for the MeshCore
+board, scoped to protocol='mt' via app/mc_api.py's protocol-parameterized
+helpers (active_season, board_for, scores_for, history_for,
+cell_detail_for, ...) rather than duplicating that query logic here.
 
-Tiles in /get-nodes carry an `owner_team` field; the frontend uses that
-to pick the fill color before falling back to the existing palette.
+The legacy tables above are NOT dropped and NOT written to any more --
+three completed seasons of history live in them and the owner wants that
+data kept, just no longer surfaced anywhere in this API. A couple of
+routes below (/get-samples, /teams, /team/{node_ref}) used to read them
+too; they have been re-pointed at the new player/mc_tile model instead,
+since there is no legacy-shaped equivalent left to fall back to.
 """
 from __future__ import annotations
 
@@ -23,26 +33,29 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
+from . import mc_api
 from .admin_api import router as admin_router
 from .config import settings
 from .db import connect
 from .join_api import router as join_router
 from .mc_api import router as mc_router
 from .mc_ingest import hash_secret, log_raw_batch
+from .mc_scoring import team_tile_counts
+from .node_ref import normalize_node_ref
 from .nodes_api import router as nodes_router
-from .seasons import (
-    get_active_season,
-    get_history,
-    get_latest_closed_season,
-    get_team_assignments,
-    now_s,
-    tally_tiles,
-    winner_banner_active,
-)
 
 log = logging.getLogger("api")
 
 router = APIRouter()
+
+# This board's protocol tag in mc_season/mc_tile* etc. Duplicated as a
+# plain literal (matching app/ingest.py's own module-level PROTOCOL
+# constant) rather than imported from there: app/ingest.py imports
+# _node_hex from this module, so importing app/ingest.py back from here
+# would be a circular import. Keep the two in sync by hand if this ever
+# changes -- unlikely, since it is also baked into player_node,
+# player_cell_ping, and mc_season rows already on disk.
+MT_PROTOCOL = "mt"
 
 
 def _truncate(ts: int) -> int:
@@ -53,42 +66,43 @@ def _truncate(ts: int) -> int:
 
 @router.get("/config")
 async def config() -> dict:
+    now_ts = int(time.time())
     conn = connect()
     try:
-        active = get_active_season(conn)
-        closed = get_latest_closed_season(conn)
+        active = mc_api.active_season(conn, MT_PROTOCOL)
+        closed = mc_api.latest_closed_season(conn, MT_PROTOCOL)
 
         # Derive map center from node_seen for the current season.
         center, zoom = _derive_map_center(conn, active["id"] if active else None)
-        counts = tally_tiles(conn, active["id"]) if active else {"RED": 0, "BLUE": 0, "GREEN": 0}
+        counts = team_tile_counts(conn, active["id"]) if active else {}
 
         banner = None
-        if winner_banner_active(closed):
+        if mc_api.winner_banner_active(closed, now_ts):
+            tallies = mc_api.season_team_tally(conn, closed["id"])
             banner = {
                 "season_id": closed["id"],
                 "started_at": closed["started_at"],
                 "ends_at": closed["ends_at"],
                 "winner": closed["winner"],
-                "red_tiles": closed["red_tiles"],
-                "blue_tiles": closed["blue_tiles"],
-                "green_tiles": closed["green_tiles"],
+                "teams": [
+                    {"team": t, "tiles": tallies.get(t, 0)} for t in mc_api.team_list()
+                ],
             }
     finally:
         conn.close()
 
-    from .config import settings as _settings
     resp = {
         "centerPos": center,
         "initialZoom": zoom,
         "maxDistanceMiles": 0,
-        "meshview_url": _settings.meshview_url,
-        "mc_default_view": _settings.mc_default_view,
-        "join_meshtastic_enabled": _settings.join_meshtastic_enabled,
+        "meshview_url": settings.meshview_url,
+        "mc_default_view": settings.mc_default_view,
+        "join_meshtastic_enabled": settings.join_meshtastic_enabled,
         "play_area": {
-            "north": _settings.play_area_north,
-            "south": _settings.play_area_south,
-            "west": _settings.play_area_west,
-            "east": _settings.play_area_east,
+            "north": settings.play_area_north,
+            "south": settings.play_area_south,
+            "west": settings.play_area_west,
+            "east": settings.play_area_east,
         },
         "season": {
             "id": active["id"] if active else None,
@@ -96,19 +110,21 @@ async def config() -> dict:
             "ends_at": active["ends_at"] if active else None,
         },
         "winner_banner": banner,
+        # Seven-team shaped, same list-of-{team,tiles} shape
+        # /api/mc/scores and /scores below use -- not the old fixed
+        # red/blue/green keys, which only ever made sense for the
+        # retired two-team geohash game.
         "scoreboard": {
-            "red": counts.get("RED", 0),
-            "blue": counts.get("BLUE", 0),
-            "green": counts.get("GREEN", 0),
+            "teams": [{"team": t, "tiles": counts.get(t, 0)} for t in mc_api.team_list()],
         },
-        "now": now_s(),
+        "now": now_ts,
     }
 
     # Only surfaced when the owner has explicitly opted in AND a code is
     # actually configured -- omitted entirely (not empty, not null) in
     # every other case, per join_invite_code_public's contract.
-    if _settings.join_invite_code_public and _settings.join_invite_code:
-        resp["join_invite_code"] = _settings.join_invite_code
+    if settings.join_invite_code_public and settings.join_invite_code:
+        resp["join_invite_code"] = settings.join_invite_code
 
     return resp
 
@@ -142,99 +158,100 @@ def _derive_map_center(conn, season_id: int | None) -> tuple[list[float], int]:
     return ([center_lat, center_lon], zoom)
 
 
+def _cell_score_map(conn, season_id: int) -> dict[str, dict[str, float]]:
+    """cell_id -> {team: score} for every scored cell in a season, in one
+    batch query -- enriches /get-nodes' coverage list with the same
+    per-team scores mc_api.cell_detail_for() exposes for a single cell,
+    without a query per cell. Raw stored scores, not decayed on read,
+    matching cell_detail_for's own choice for this field -- that
+    function already doesn't decay a single cell's scores, so this batch
+    version stays consistent with it rather than "fixing" it here.
+    """
+    rows = conn.execute(
+        "SELECT cell_id, team, score FROM mc_tile_score WHERE season_id = ?",
+        (season_id,),
+    ).fetchall()
+    out: dict[str, dict[str, float]] = {}
+    for r in rows:
+        out.setdefault(r["cell_id"], {})[r["team"]] = r["score"]
+    return out
+
+
+def _cell_capture_map(conn, season_id: int) -> dict[str, int]:
+    """cell_id -> captured_at for every captured cell in a season, in one
+    batch query -- same field mc_api.cell_detail_for() reads per-cell.
+    """
+    rows = conn.execute(
+        "SELECT cell_id, captured_at FROM mc_tile_capture WHERE season_id = ?",
+        (season_id,),
+    ).fetchall()
+    return {r["cell_id"]: r["captured_at"] for r in rows}
+
+
+def _mt_node_teams(conn) -> dict[int, str]:
+    """node_id -> team for every registered, non-disabled Meshtastic
+    player's radio. Node ids not in this dict are not registered players
+    -- unlike the retired snake-draft team_assignment table (which
+    auto-enrolled every known node and fell back to a "GREEN" neutral
+    team when rendering it), there is no neutral/unregistered team in the
+    new model: only a registered player has a team at all.
+    """
+    rows = conn.execute(
+        "SELECT pn.node_ref, p.team "
+        "  FROM player_node pn JOIN player p ON p.player_id = pn.player_id "
+        " WHERE pn.protocol = ? AND p.disabled_at IS NULL",
+        (MT_PROTOCOL,),
+    ).fetchall()
+    out: dict[int, str] = {}
+    for r in rows:
+        try:
+            out[int(r["node_ref"].lstrip("!"), 16)] = r["team"]
+        except (ValueError, AttributeError):
+            continue
+    return out
+
+
 @router.get("/get-nodes")
 async def get_nodes() -> dict:
+    """The map's main data route.
+
+    `coverage` is grid cells straight from mc_tile/mc_tile_score/
+    mc_tile_capture (owner team, per-team scores, capture time) --
+    replaces the old geohash `tile`/`tile_score`/`tile_capture` reads.
+    `repeaters` still comes from node_seen, same as before this cutover;
+    that is a map-marker/display concern entirely separate from scoring
+    and was never part of the retired game logic. There is no more
+    `samples` key -- see /get-samples below for why.
+    """
     conn = connect()
     try:
-        active = get_active_season(conn)
+        active = mc_api.active_season(conn, MT_PROTOCOL)
         if not active:
-            return {"coverage": [], "samples": [], "repeaters": []}
+            return {"coverage": [], "repeaters": []}
         season_id = active["id"]
-        teams = get_team_assignments(conn, season_id)
 
-        tile_rows = conn.execute(
-            "SELECT geohash, rcv, lost, last_sender_node_id, last_report_ts, "
-            "       last_snr, last_rssi, owner_team, rptr_json "
-            "  FROM tile WHERE season_id = ?",
-            (season_id,),
-        ).fetchall()
-
-        # Load fortress scores for this season in one batch
-        from .scoring import decayed_score
-        import time as _time
-        now_ts = int(_time.time())
-        score_rows = conn.execute(
-            "SELECT geohash, team, score, last_update FROM tile_score "
-            " WHERE season_id = ?",
-            (season_id,),
-        ).fetchall()
-        # geohash -> {RED: float, BLUE: float}
-        score_map: dict[str, dict[str, float]] = {}
-        for sr in score_rows:
-            score_map.setdefault(sr["geohash"], {})[sr["team"]] = \
-                decayed_score(sr["score"], sr["last_update"], now_ts)
-
-        # Capture timestamps for defense-window display
-        cap_rows = conn.execute(
-            "SELECT geohash, captured_at FROM tile_capture WHERE season_id = ?",
-            (season_id,),
-        ).fetchall()
-        cap_map = {r["geohash"]: r["captured_at"] for r in cap_rows}
+        cells = mc_api.board_for(MT_PROTOCOL)
+        score_map = _cell_score_map(conn, season_id)
+        cap_map = _cell_capture_map(conn, season_id)
+        teams = mc_api.team_list()
 
         coverage = []
-        for r in tile_rows:
-            try:
-                rptr = json.loads(r["rptr_json"])
-            except json.JSONDecodeError:
-                rptr = []
-            scores = score_map.get(r["geohash"], {})
-            owner_score = scores.get(r["owner_team"], 0.0)
+        for c in cells:
+            cid = c["cell_id"]
             coverage.append({
-                "id": r["geohash"],
-                "rcv": r["rcv"],
-                "lost": r["lost"],
-                "rptr": [_node_hex(x) for x in rptr],
-                "time": _truncate(r["last_report_ts"]),
-                "ut": _truncate(r["last_report_ts"]),
-                "lot": _truncate(r["last_report_ts"]),
-                "lht": _truncate(r["last_report_ts"]),
-                "obs": 1,
-                "snr": r["last_snr"],
-                "rssi": r["last_rssi"],
-                "owner_team": r["owner_team"],
-                "last_sender": _node_hex(r["last_sender_node_id"]),
-                "score": round(owner_score, 2),
-                "red_score": round(scores.get("RED", 0.0), 2),
-                "blue_score": round(scores.get("BLUE", 0.0), 2),
-                "captured_at": cap_map.get(r["geohash"]),
+                "cell_id": cid,
+                "owner_team": c["owner_team"],
+                "last_report_ts": c["last_report_ts"],
+                "paint_count": c["paint_count"],
+                "captured_at": cap_map.get(cid),
+                "scores": {t: score_map.get(cid, {}).get(t, 0) for t in teams},
+                "south": c["south"],
+                "west": c["west"],
+                "north": c["north"],
+                "east": c["east"],
             })
 
-        # Aggregated samples (the frontend reads /get-nodes.samples too)
-        sample_rows = conn.execute(
-            "SELECT sample_hash, ts, snr, rssi, path_json, sender_node_id, observed "
-            "  FROM sample WHERE season_id = ?",
-            (season_id,),
-        ).fetchall()
-        samples = []
-        for r in sample_rows:
-            try:
-                path = json.loads(r["path_json"])
-            except json.JSONDecodeError:
-                path = []
-            sender_team = teams.get(r["sender_node_id"], "GREEN")
-            samples.append({
-                "id": r["sample_hash"][:6],  # truncate to coverage-tile precision for aggregation
-                "heard": 1,
-                "lost": 0,
-                "time": _truncate(r["ts"]),
-                "path": [_node_hex(x) for x in path],
-                "snr": r["snr"],
-                "rssi": r["rssi"],
-                "obs": True,
-                "owner_team": sender_team,
-            })
-
-        # Repeater list = nodes with known positions
+        node_teams = _mt_node_teams(conn)
         node_rows = conn.execute(
             "SELECT node_id, name, lat, lon, elev, last_seen "
             "  FROM node_seen "
@@ -243,7 +260,6 @@ async def get_nodes() -> dict:
         ).fetchall()
         repeaters = []
         for r in node_rows:
-            team = teams.get(r["node_id"], "GREEN")
             repeaters.append({
                 "id": _node_hex(r["node_id"]),
                 "name": r["name"],
@@ -251,52 +267,25 @@ async def get_nodes() -> dict:
                 "lon": r["lon"],
                 "elev": r["elev"] or 0,
                 "time": _truncate(r["last_seen"]),
-                "team": team,
+                "team": node_teams.get(r["node_id"]),
             })
     finally:
         conn.close()
 
-    return {"coverage": coverage, "samples": samples, "repeaters": repeaters}
+    return {"coverage": coverage, "repeaters": repeaters}
 
 
 @router.get("/get-samples")
 async def get_samples() -> dict:
-    conn = connect()
-    try:
-        active = get_active_season(conn)
-        if not active:
-            return {"keys": []}
-        season_id = active["id"]
-        teams = get_team_assignments(conn, season_id)
-        rows = conn.execute(
-            "SELECT sample_hash, sender_node_id, ts, snr, rssi, path_json "
-            "  FROM sample WHERE season_id = ? "
-            " ORDER BY ts DESC LIMIT 5000",
-            (season_id,),
-        ).fetchall()
-    finally:
-        conn.close()
-
-    keys = []
-    for r in rows:
-        try:
-            path = json.loads(r["path_json"])
-        except json.JSONDecodeError:
-            path = []
-        sender_team = teams.get(r["sender_node_id"], "GREEN")
-        keys.append({
-            "name": r["sample_hash"],
-            "metadata": {
-                "path": [_node_hex(x) for x in path],
-                "observed": True,
-                "snr": r["snr"],
-                "rssi": r["rssi"],
-                "time": r["ts"] * 1000,  # frontend expects ms
-                "owner_team": sender_team,
-                "sender": _node_hex(r["sender_node_id"]),
-            },
-        })
-    return {"keys": keys}
+    """Per-position sample data from the retired geohash board (the old
+    `sample` table) has no equivalent in the new grid-cell model --
+    ingest no longer writes anything there (see app/ingest.py), and
+    /get-nodes' `coverage` list is the cell-level replacement. This
+    route is kept, always empty, so an old caller gets a sane empty
+    response instead of a 404 or 500 -- not because it still does
+    anything.
+    """
+    return {"keys": []}
 
 
 @router.get("/live-tracks")
@@ -320,287 +309,147 @@ async def live_tracks_stream(request: Request):
 
 @router.get("/scores")
 async def scores() -> dict:
-    conn = connect()
-    try:
-        active = get_active_season(conn)
-        if not active:
-            return {"red": 0, "blue": 0, "green": 0}
-        counts = tally_tiles(conn, active["id"])
-    finally:
-        conn.close()
-    return {
-        "red": counts.get("RED", 0),
-        "blue": counts.get("BLUE", 0),
-        "green": counts.get("GREEN", 0),
-        "season_id": active["id"],
-        "ends_at": active["ends_at"],
-    }
+    """Seven-team tile counts for the active Meshtastic season. See
+    app/mc_api.py's scores_for(), which this calls directly with
+    protocol='mt' rather than duplicating its query logic -- this is the
+    exact same shape /api/mc/scores returns for the MeshCore board.
+    """
+    return mc_api.scores_for(MT_PROTOCOL)
 
 
 @router.get("/history")
 async def history() -> dict:
-    conn = connect()
-    try:
-        seasons = get_history(conn, settings.history_max)
-    finally:
-        conn.close()
-    return {"seasons": seasons}
+    """Closed Meshtastic seasons under the new player model, newest
+    first, each with its final per-team tile tally. See app/mc_api.py's
+    history_for().
+
+    Per the owner's explicit decision, this surfaces only 'mt' seasons
+    from mc_season -- the three legacy geohash-era seasons remain in the
+    `season` table (never dropped, still queryable directly against the
+    database) but are not read through here any more.
+    """
+    return {"seasons": mc_api.history_for(MT_PROTOCOL)}
 
 
 @router.get("/season")
 async def season_info() -> dict:
+    now_ts = int(time.time())
     conn = connect()
     try:
-        active = get_active_season(conn)
-        closed = get_latest_closed_season(conn)
-        banner = winner_banner_active(closed)
+        active = mc_api.active_season(conn, MT_PROTOCOL)
+        active = dict(active) if active else None
+        closed = mc_api.latest_closed_season(conn, MT_PROTOCOL)
+        closed = dict(closed) if closed else None
+        banner = mc_api.winner_banner_active(closed, now_ts)
     finally:
         conn.close()
     return {
         "active": active,
         "latest_closed": closed,
         "winner_banner_active": banner,
-        "now": now_s(),
+        "now": now_ts,
     }
-
 
 
 @router.get("/teams")
 async def teams_list() -> dict:
-    """Full roster of team assignments for the active season."""
+    """Full roster of registered Meshtastic players, grouped by team.
+
+    Unlike the retired snake-draft `team_assignment` table (reassigned
+    every season, keyed by season_id), a player's team in the new model
+    is a permanent attribute of the player row (see app/join_api.py) --
+    there is no seasonal reassignment any more, so this reads the player
+    roster directly and is not scoped to a season at all.
+    """
     conn = connect()
     try:
-        active = get_active_season(conn)
-        if not active:
-            return {"season_id": None, "red": [], "blue": []}
-        season_id = active["id"]
         rows = conn.execute(
-            "SELECT t.node_id, t.team, t.activity_score, "
-            "       n.name, n.short_name "
-            "  FROM team_assignment t "
-            "  LEFT JOIN node_seen n "
-            "    ON n.season_id = t.season_id AND n.node_id = t.node_id "
-            " WHERE t.season_id = ? "
-            " ORDER BY t.team, COALESCE(n.short_name, n.name, CAST(t.node_id AS TEXT))",
-            (season_id,),
+            "SELECT p.player_id, p.display_name, p.team, pn.node_ref "
+            "  FROM player p "
+            "  JOIN player_node pn ON pn.player_id = p.player_id AND pn.protocol = ? "
+            " WHERE p.disabled_at IS NULL "
+            " ORDER BY p.team, p.display_name",
+            (MT_PROTOCOL,),
         ).fetchall()
     finally:
         conn.close()
 
-    red, blue = [], []
+    teams: dict[str, list[dict]] = {t: [] for t in mc_api.team_list()}
     for r in rows:
-        item = {
-            "node_id": r["node_id"],
-            "node_hex": _node_hex(r["node_id"]),
-            "name": r["name"],
-            "short_name": r["short_name"],
-            "activity_score": r["activity_score"],
-        }
-        (red if r["team"] == "RED" else blue).append(item)
-    return {"season_id": season_id, "red": red, "blue": blue}
+        teams.setdefault(r["team"], []).append({
+            "player_id": r["player_id"],
+            "display_name": r["display_name"],
+            "node_hex": r["node_ref"],
+        })
+    return {"teams": teams}
 
 
 @router.get("/team/{node_ref}")
 async def team_lookup(node_ref: str) -> dict:
-    """Look up a single node's team. Accepts decimal id, hex id, or !hex."""
-    nid = _parse_node_ref(node_ref)
-    if nid is None:
+    """Look up a single Meshtastic radio's registered player and team.
+
+    Accepts the same input shapes app/node_ref.py already defines for
+    every other route that takes a node reference (`!a1b2c3d4` or bare
+    `a1b2c3d4`, any case) -- replaces the old _parse_node_ref, which also
+    accepted a decimal node id or a short_name/name lookup against
+    node_seen. Both of those only ever made sense against the old
+    auto-enrolling roster; player_node.node_ref is the canonical identity
+    now, and it is always stored in exactly this one normalized form.
+    """
+    ref = normalize_node_ref(node_ref)
+    if ref is None:
         return {"found": False, "error": "could not parse node reference"}
 
     conn = connect()
     try:
-        active = get_active_season(conn)
-        if not active:
-            return {"found": False, "error": "no active season"}
-        season_id = active["id"]
         row = conn.execute(
-            "SELECT t.team, t.activity_score, n.name, n.short_name, n.lat, n.lon "
-            "  FROM team_assignment t "
-            "  LEFT JOIN node_seen n "
-            "    ON n.season_id = t.season_id AND n.node_id = t.node_id "
-            " WHERE t.season_id = ? AND t.node_id = ?",
-            (season_id, nid),
+            "SELECT p.player_id, p.display_name, p.team "
+            "  FROM player_node pn JOIN player p ON p.player_id = pn.player_id "
+            " WHERE pn.protocol = ? AND pn.node_ref = ? AND p.disabled_at IS NULL",
+            (MT_PROTOCOL, ref),
         ).fetchone()
 
-        # Also check tile count if found
-        tile_count = 0
+        tiles_owned = 0
         if row:
-            tc = conn.execute(
-                "SELECT COUNT(*) AS c FROM tile "
-                " WHERE season_id = ? AND last_sender_node_id = ?",
-                (season_id, nid),
-            ).fetchone()
-            tile_count = tc["c"] if tc else 0
+            active = mc_api.active_season(conn, MT_PROTOCOL)
+            if active:
+                tc = conn.execute(
+                    "SELECT COUNT(*) AS c FROM mc_tile "
+                    " WHERE season_id = ? AND last_player_id = ?",
+                    (active["id"], row["player_id"]),
+                ).fetchone()
+                tiles_owned = tc["c"] if tc else 0
     finally:
         conn.close()
 
     if not row:
         return {
             "found": False,
-            "node_id": nid,
-            "node_hex": _node_hex(nid),
-            "message": "not in current season roster",
+            "node_ref": ref,
+            "message": "not a registered player radio",
         }
     return {
         "found": True,
-        "node_id": nid,
-        "node_hex": _node_hex(nid),
+        "node_ref": ref,
+        "player_id": row["player_id"],
+        "display_name": row["display_name"],
         "team": row["team"],
-        "name": row["name"],
-        "short_name": row["short_name"],
-        "lat": row["lat"],
-        "lon": row["lon"],
-        "tiles_owned": tile_count,
+        "tiles_owned": tiles_owned,
     }
 
 
-def _parse_node_ref(ref: str) -> int | None:
-    """Accept decimal int, hex with !, plain hex, or short_name lookup."""
-    if not ref:
-        return None
-    ref = ref.strip()
-    # !abcd1234 or abcd1234 → hex
-    bare = ref.lstrip("!")
-    try:
-        if any(c in "abcdefABCDEF" for c in bare):
-            return int(bare, 16)
-        return int(bare)
-    except ValueError:
-        pass
-    # Maybe it's a short_name — look it up in node_seen
-    conn = connect()
-    try:
-        row = conn.execute(
-            "SELECT node_id FROM node_seen "
-            " WHERE short_name = ? OR name = ? "
-            " ORDER BY last_seen DESC LIMIT 1",
-            (ref, ref),
-        ).fetchone()
-        return row["node_id"] if row else None
-    finally:
-        conn.close()
-
-
-
-@router.get("/tile/{geohash}")
-async def tile_detail(geohash: str) -> dict:
-    """Rich popup data for a single tile."""
-    conn = connect()
-    try:
-        active = get_active_season(conn)
-        if not active:
-            return {"found": False}
-        season_id = active["id"]
-
-        tile = conn.execute(
-            "SELECT geohash, rcv, lost, last_sender_node_id, last_report_ts, "
-            "       last_snr, last_rssi, owner_team, last_packet_id "
-            "  FROM tile WHERE season_id = ? AND geohash = ?",
-            (season_id, geohash),
-        ).fetchone()
-        if not tile:
-            return {"found": False}
-
-        from .scoring import decayed_score
-        import time as _time
-        now_ts = int(_time.time())
-
-        # Scores per team
-        sr = conn.execute(
-            "SELECT team, score, last_update FROM tile_score "
-            " WHERE season_id = ? AND geohash = ?",
-            (season_id, geohash),
-        ).fetchall()
-        scores = {r["team"]: decayed_score(r["score"], r["last_update"], now_ts) for r in sr}
-
-        # Capture log
-        cap_rows = conn.execute(
-            "SELECT ts, by_node_id, by_team, from_team, packet_id "
-            "  FROM tile_capture_log "
-            " WHERE season_id = ? AND geohash = ? "
-            " ORDER BY ts DESC LIMIT 5",
-            (season_id, geohash),
-        ).fetchall()
-        cap_count = conn.execute(
-            "SELECT COUNT(*) AS c FROM tile_capture_log "
-            " WHERE season_id = ? AND geohash = ?",
-            (season_id, geohash),
-        ).fetchone()["c"]
-
-        # Current defense-window state
-        cap_now = conn.execute(
-            "SELECT captured_at, captured_by_team FROM tile_capture "
-            " WHERE season_id = ? AND geohash = ?",
-            (season_id, geohash),
-        ).fetchone()
-
-        # Top contributors for owning team (by paint_count)
-        top = conn.execute(
-            "SELECT p.node_id, p.paint_count, p.first_ts, n.short_name, n.name "
-            "  FROM tile_unique_painter p "
-            "  LEFT JOIN node_seen n "
-            "    ON n.season_id = p.season_id AND n.node_id = p.node_id "
-            " WHERE p.season_id = ? AND p.geohash = ? AND p.team = ? "
-            " ORDER BY p.paint_count DESC LIMIT 5",
-            (season_id, geohash, tile["owner_team"]),
-        ).fetchall() if tile["owner_team"] in ("RED", "BLUE") else []
-
-        # Sender label lookup
-        sender_row = conn.execute(
-            "SELECT short_name, name FROM node_seen "
-            " WHERE season_id = ? AND node_id = ?",
-            (season_id, tile["last_sender_node_id"]),
-        ).fetchone()
-
-        return {
-            "found": True,
-            "geohash": geohash,
-            "owner_team": tile["owner_team"],
-            "rcv": tile["rcv"],
-            "last_report_ts": tile["last_report_ts"],
-            "last_snr": tile["last_snr"],
-            "last_rssi": tile["last_rssi"],
-            "last_packet_id": tile["last_packet_id"],
-            "last_sender": {
-                "node_id": tile["last_sender_node_id"],
-                "hex": _node_hex(tile["last_sender_node_id"]),
-                "short_name": sender_row["short_name"] if sender_row else None,
-                "name": sender_row["name"] if sender_row else None,
-            },
-            "scores": {
-                "RED": round(scores.get("RED", 0.0), 2),
-                "BLUE": round(scores.get("BLUE", 0.0), 2),
-            },
-            "captures": {
-                "count": cap_count,
-                "current_captured_at": cap_now["captured_at"] if cap_now else None,
-                "current_captured_by": cap_now["captured_by_team"] if cap_now else None,
-                "recent": [
-                    {
-                        "ts": r["ts"],
-                        "node_id": r["by_node_id"],
-                        "node_hex": _node_hex(r["by_node_id"]),
-                        "team": r["by_team"],
-                        "from_team": r["from_team"],
-                        "packet_id": r["packet_id"],
-                    }
-                    for r in cap_rows
-                ],
-            },
-            "top_contributors": [
-                {
-                    "node_id": r["node_id"],
-                    "node_hex": _node_hex(r["node_id"]),
-                    "short_name": r["short_name"],
-                    "name": r["name"],
-                    "paint_count": r["paint_count"],
-                    "first_ts": r["first_ts"],
-                }
-                for r in top
-            ],
-        }
-    finally:
-        conn.close()
+@router.get("/cell/{cell_id}")
+async def cell_detail(cell_id: str):
+    """Rich popup data for a single grid cell -- the cell-keyed
+    replacement for the old geohash-keyed /tile/{geohash}. See
+    app/mc_api.py's cell_detail_for(), which this calls directly with
+    protocol='mt' rather than duplicating its query logic; the response
+    shape is identical to /api/mc/cell/{cell_id}'s.
+    """
+    detail = mc_api.cell_detail_for(MT_PROTOCOL, cell_id)
+    if detail is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return detail
 
 
 def _node_hex(node_id: int | None) -> str:

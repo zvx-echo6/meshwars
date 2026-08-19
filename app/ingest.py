@@ -33,9 +33,12 @@ actually tell us:
 
 Everything upstream of scoring -- the poll loop, the /api/packets fetch,
 the /api/packets_seen/{id} reception lookup used to build the feeder
-list, the processed_packet dedup table, and the node_seen roster
-refresh -- is untouched; that plumbing lives in app/meshview_client.py
-and stays exactly as it was.
+list, and the processed_packet dedup table -- is untouched; that
+plumbing lives in app/meshview_client.py and stays exactly as it was.
+The one exception is the node_seen roster refresh (_refresh_roster
+below): it still records the same nodes the same way, but is now keyed
+on the active 'mt' mc_season instead of the retired `season` table,
+since that table is frozen history now and no longer rolls forward.
 """
 from __future__ import annotations
 
@@ -60,7 +63,6 @@ from .meshview_client import (
     hop_count,
     is_via_mqtt,
 )
-from .seasons import ensure_initial_season, get_active_season
 
 log = logging.getLogger("ingest")
 
@@ -140,17 +142,13 @@ class Ingestor:
 
     async def run_forever(self) -> None:
         log.info("ingest loop starting; poll=%ds", settings.poll_interval_seconds)
-        # The legacy `season` table's only remaining job is giving
-        # node_seen somewhere to key off of -- it feeds the map's node
-        # markers and has nothing to do with scoring any more (see
-        # _refresh_roster below and app/mc_scoring.py's mc_season, which
-        # is what actually governs the Meshtastic scoring clock now via
-        # protocol='mt'). ensure_initial_season() just guarantees a row
-        # exists; nothing here rolls it any more -- there is no more
-        # tile/snake-draft machinery on the other end of a rollover to
-        # run.
-        await ensure_initial_season()
-        # Snapshot roster on startup so we have something to render
+        # Snapshot roster on startup so we have something to render. This
+        # also ensures the active 'mt' mc_season exists (see
+        # _refresh_roster below) -- there is no separate
+        # ensure_initial_season() call any more for the legacy `season`
+        # table. That table is frozen history now (see app/api.py's
+        # module docstring): node_seen and Meshtastic scoring both key
+        # off mc_season instead.
         await self._refresh_roster()
         try:
             await self._backfill()
@@ -175,11 +173,17 @@ class Ingestor:
     async def _refresh_roster(self) -> None:
         """Snapshot active nodes from meshview into node_seen for this season.
 
-        Unchanged by the move to registered-player scoring: this stays
-        keyed off the legacy `season` table (not mc_season) and still
-        records EVERY node meshview reports, registered or not -- it
-        feeds the map's node markers, which is a display concern
-        completely separate from who is allowed to score.
+        node_seen is keyed on the active MESHTASTIC ('mt') mc_season now,
+        not the frozen legacy `season` table -- that table stopped being
+        written the moment this board moved onto the shared player model
+        (see app/api.py's module docstring), so pinning node_seen to it
+        would freeze the roster at whatever season existed the moment
+        this cutover shipped. mc_season is protocol-aware (app/mc_scoring.py)
+        and keeps rolling forward on its own schedule; reading through it
+        here keeps the roster on the same season Meshtastic scoring
+        itself is using. Still records EVERY node meshview reports,
+        registered or not -- it feeds the map's node markers, a display
+        concern completely separate from who is allowed to score.
         """
         try:
             nodes = await self.client.nodes(days_active=settings.season_days)
@@ -189,17 +193,16 @@ class Ingestor:
         if not nodes:
             return
 
-        conn = connect()
-        try:
-            active = get_active_season(conn)
-            if not active:
-                return
-            season_id = active["id"]
-        finally:
-            conn.close()
-
         ts = int(time.time())
         async with WriteSession() as conn:
+            # Season bookkeeping, same as _poll_once/_backfill above --
+            # see the matching comment there for why this has to run
+            # inside WriteSession rather than a plain read. Cheap and
+            # idempotent to repeat here: this only runs once, at startup,
+            # before either of those loops has had a chance to do it.
+            mc_scoring.maybe_roll_season(conn, ts, PROTOCOL)
+            season_id = mc_scoring.ensure_active_season(conn, ts, PROTOCOL)
+
             for n in nodes:
                 node_id = extract_node_id(n) or _node_id_from_dict(n)
                 if node_id is None:
