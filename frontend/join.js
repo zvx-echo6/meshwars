@@ -474,8 +474,8 @@ function renderStatusResult(data) {
     mtNote.textContent = hasMc
       // Has both: the MeshCore section above is real and accurate for
       // that radio, but does not cover the Meshtastic one too.
-      ? 'The MeshCore activity above does not cover your Meshtastic radio -- there is no live status check for Meshtastic yet. Use the map\'s player search (search by node ID) to see your current Meshtastic squares.'
-      : 'There is no live status check for Meshtastic yet. MeshWars polls meshview every 45 seconds and picks up your node whenever it broadcasts a position a feeder hears -- use the map\'s player search (search by node ID) to see your current Meshtastic squares.';
+      ? 'The MeshCore activity above does not cover your Meshtastic radio -- there is no live status check for Meshtastic yet. Use the map\'s player search (search by player name) to see your current Meshtastic squares.'
+      : 'There is no live status check for Meshtastic yet. MeshWars polls meshview every 45 seconds and picks up your node whenever it broadcasts a position a feeder hears -- use the map\'s player search (search by player name) to see your current Meshtastic squares.';
     panel.appendChild(mtNote);
   }
 
