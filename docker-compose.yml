@@ -13,7 +13,7 @@ services:
       SEASON_DAYS: "${SEASON_DAYS:-30}"
       WINNER_BANNER_HOURS: "${WINNER_BANNER_HOURS:-72}"
       HISTORY_MAX: "${HISTORY_MAX:-12}"
-      MAX_HOPS: "${MAX_HOPS:-1}"
+      MAX_HOPS: "${MAX_HOPS:-0}"
       BACKFILL_HOURS: "${BACKFILL_HOURS:-24}"
       PLAY_AREA_NORTH: "${PLAY_AREA_NORTH:-44.10}"
       PLAY_AREA_SOUTH: "${PLAY_AREA_SOUTH:-40.20}"
@@ -28,6 +28,8 @@ services:
       ADMIN_TOKEN: "${ADMIN_TOKEN:-}"
       MC_RAW_LOG_ENABLED: "${MC_RAW_LOG_ENABLED:-false}"
       MC_RAW_LOG_PATH: "${MC_RAW_LOG_PATH:-/data/mc_raw.log}"
+      MT_POINTS_PER_FEEDER: "${MT_POINTS_PER_FEEDER:-0.1}"
+      MT_MAX_POINTS_PER_PING: "${MT_MAX_POINTS_PER_PING:-1.0}"
     volumes:
       - meshwars-data:/data
 

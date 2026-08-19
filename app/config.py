@@ -98,6 +98,21 @@ class Settings(BaseSettings):
     # or "meshtastic". Configurable per the owner's requirement, not hardcoded.
     mc_default_view: str = "meshcore"
 
+    # Meshtastic scoring: same idea as MeshCore's mc_points_per_repeater /
+    # mc_max_points_per_ping above, inverted. MeshCore scores by how many
+    # repeaters the PLAYER heard (parsed from the radio's own
+    # heard_repeats/repeater_id fields); meshview gives us no such thing
+    # for a Meshtastic position packet -- it only tells us which MQTT
+    # feeders (meshview's gateway nodes that heard the packet over the air
+    # and republished it to MQTT) heard THE PLAYER. That is the only
+    # direction meshview can observe, so Meshtastic scores on the distinct
+    # feeder count instead of a repeater count. Kept as separate knobs
+    # from the mc_ ones (not reused) so the two boards can be tuned
+    # independently -- see app/ingest.py for where a ping's distinct
+    # feeder count turns into points.
+    mt_points_per_feeder: float = 0.1    # points earned per distinct MQTT feeder that heard a ping
+    mt_max_points_per_ping: float = 1.0  # ceiling on points from any one ping
+
     # Play-area bounding box: Ontario, Oregon (NW) to Provo, Utah (SE).
     # Pings outside this box are rejected before they touch anything else.
     # Setting play_area_north == play_area_south disables the check
