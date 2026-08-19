@@ -30,6 +30,29 @@ app/main.py's lifespan regardless of settings.mc_ingest_enabled --
 only its background worker is gated by that flag -- so authenticate()
 is always available here even on a deployment that has MeshCore
 ingest turned off entirely.
+
+Two independent rate limiters guard these routes, same as the two
+different limiters already in this codebase answer two different
+questions:
+
+- An address-keyed limiter runs FIRST, before the X-API-Key header is
+  even read -- mirroring exactly how /api/mc/status (app/mc_api.py)
+  puts _status_rate_limited(ip) as the first thing in its handler. A
+  caller with no key, or the wrong one, still costs us a request: once
+  McIngestor's short-TTL key cache misses (which a flood of DISTINCT
+  bad keys does on every single request), _lookup_key_sync opens a
+  database connection. That cost has to be bounded before
+  authentication runs, not after -- an unauthenticated flood should
+  never reach the per-key limiter below, because it never has a valid
+  key to be limited by. Reuses settings.mc_status_rate_limit_* rather
+  than adding a third pair of settings: these routes see the same
+  usage shape /api/mc/status does (an occasional, human-driven check),
+  not a bulk/automated one, so the same budget fits.
+- A per-key limiter runs after authentication succeeds, same as
+  McIngestor.rate_limit_ok does for /api/mc/ingest -- bounds abuse by a
+  caller who DOES hold a valid key, which the address limiter above
+  cannot do on its own (multiple players can share an address, e.g.
+  behind NAT).
 """
 from __future__ import annotations
 
@@ -48,18 +71,24 @@ router = APIRouter()
 _VALID_PROTOCOLS = ("mt", "mc")
 _DEFAULT_PROTOCOL = "mt"
 
-# ---- rate limiting ------------------------------------------------------
+# ---- rate limiting: per API key (post-auth) ------------------------------
 #
 # Same bounded-dictionary pattern as _attempts in app/join_api.py and
 # _status_attempts in app/mc_api.py, keyed here on the API key hash
-# rather than the caller's address -- every route in this module is
-# already authenticated by the time this check runs (see _authenticate
-# below), so limiting by key is both simpler and more accurate than
-# limiting by address, the same choice McIngestor.rate_limit_ok makes
-# for /api/mc/ingest. A distinct dict from that one, though: ingest
-# batches and a person clicking "add radio" a few times are different
-# usage shapes with different budgets, and settings.node_api_rate_limit_*
-# is a separate, much smaller ceiling from settings.mc_ingest_rate_limit_*.
+# rather than the caller's address -- this one only ever runs once
+# authentication has already succeeded (see _authenticate below), so
+# limiting by key is both simpler and more accurate than limiting by
+# address for THIS check, the same choice McIngestor.rate_limit_ok
+# makes for /api/mc/ingest. A distinct dict from that one, though:
+# ingest batches and a person clicking "add radio" a few times are
+# different usage shapes with different budgets, and
+# settings.node_api_rate_limit_* is a separate, much smaller ceiling
+# from settings.mc_ingest_rate_limit_*.
+#
+# This is NOT the only limiter in this module -- see _addr_rate_limited
+# below, which runs first, before a key is even read, and exists
+# precisely because this one can't do that job (an invalid or missing
+# key never reaches here).
 _RATE_LIMIT_MAX_TRACKED = 10000
 
 _rate_limit_hits: dict[str, list[float]] = {}
@@ -89,6 +118,56 @@ def _rate_limited(key_hash: str) -> bool:
     return False
 
 
+# ---- rate limiting: per address (pre-auth) --------------------------------
+#
+# Runs BEFORE the X-API-Key header is read, mirroring exactly how
+# /api/mc/status (app/mc_api.py) puts _status_rate_limited(ip) as the
+# very first thing in its handler, before it even reads the header --
+# see the module docstring above for why an unauthenticated caller
+# still has to be bounded, and why that can't be the per-key limiter
+# above. Reuses settings.mc_status_rate_limit_attempts/window_seconds
+# rather than adding a third pair of settings, since the usage shape
+# these routes see (an occasional, human-driven check or edit) is the
+# same one /api/mc/status was sized for -- a genuinely different
+# shape would earn its own setting, this one doesn't.
+#
+# A separate bounded dict from _status_attempts in app/mc_api.py, not
+# a shared one -- that name is private to that module, and this one is
+# an independent budget of the same size, not a shared budget split
+# across two endpoints.
+_ADDR_RATE_LIMIT_MAX_TRACKED = 10000
+
+_addr_rate_limit_hits: dict[str, list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _addr_rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    window = settings.mc_status_rate_limit_window_seconds
+    limit = settings.mc_status_rate_limit_attempts
+
+    if len(_addr_rate_limit_hits) >= _ADDR_RATE_LIMIT_MAX_TRACKED:
+        stale = [
+            k for k, hits in _addr_rate_limit_hits.items()
+            if not hits or now - hits[-1] >= window
+        ]
+        for k in stale:
+            del _addr_rate_limit_hits[k]
+        if len(_addr_rate_limit_hits) >= _ADDR_RATE_LIMIT_MAX_TRACKED:
+            _addr_rate_limit_hits.clear()
+
+    hits = [t for t in _addr_rate_limit_hits.get(ip, []) if now - t < window]
+    if len(hits) >= limit:
+        _addr_rate_limit_hits[ip] = hits
+        return True
+    hits.append(now)
+    _addr_rate_limit_hits[ip] = hits
+    return False
+
+
 # ---- shared auth + response helpers --------------------------------------
 
 async def _authenticate(request: Request):
@@ -100,7 +179,16 @@ async def _authenticate(request: Request):
     "not_found" and "revoked" collapse to the same 401 "unauthorized"
     so a caller can never learn from the response alone whether a key
     ever existed.
+
+    The address-keyed limiter runs FIRST, before the header is even
+    read -- see _addr_rate_limited above for why: a caller with no key
+    or the wrong one has to be bounded too, and can never reach the
+    per-key limiter further down since that one needs a key to key on.
     """
+    ip = _client_ip(request)
+    if _addr_rate_limited(ip):
+        return None, JSONResponse({"error": "rate limited"}, status_code=429)
+
     raw_key = request.headers.get("X-API-Key", "")
     if not raw_key:
         return None, JSONResponse({"error": "unauthorized"}, status_code=401)
