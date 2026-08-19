@@ -510,6 +510,96 @@ body {
   text-align: center;
 }
 
+/* ---- "Your radios" (list + add/remove), inside #status-check-panel ------
+   Extends the existing setup-check box rather than being a panel of its
+   own -- same .join-panel-title/.join-panel-subtitle rhythm as the rest
+   of the page, just one level down in the DOM. */
+.status-radios {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #2a2a2a;
+}
+
+.radios-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+
+.radios-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--mw-page);
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-size: 0.8125rem;
+  color: #ddd;
+}
+.radios-item span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.radios-item button {
+  background: #2a1414;
+  color: #f08080;
+  border: 1px solid #663333;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.radios-item button:hover { background: #3a1a1a; }
+.radios-item button:disabled { opacity: 0.5; cursor: default; }
+
+.radios-empty {
+  list-style: none;
+  color: #888;
+  font-size: 0.8125rem;
+  margin: 0 0 12px;
+  padding: 0;
+}
+
+/* Compact inline row -- node ID, protocol, Add -- rather than the
+   stacked .join-field layout the main join flow uses; this form is
+   filled in repeatedly (one radio at a time) by someone who already
+   knows what they're doing, not a first-time step-by-step flow. */
+.add-radio-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+.add-radio-form .join-field {
+  flex: 1 1 160px;
+  margin: 0;
+}
+.add-radio-form select {
+  width: 100%;
+  background: var(--mw-page);
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.875rem;
+}
+.add-radio-form button {
+  background: #2a2a2a;
+  color: var(--mw-accent);
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 10px 14px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.add-radio-form button:hover { background: #333; }
+.add-radio-form button:disabled { opacity: 0.5; cursor: default; }
+
 
 /* -------------------------------------------------------------------------
 /* -------------------------------------------------------------------------

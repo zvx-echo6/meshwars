@@ -29,6 +29,7 @@ from .db import connect
 from .join_api import router as join_router
 from .mc_api import router as mc_router
 from .mc_ingest import hash_secret, log_raw_batch
+from .nodes_api import router as nodes_router
 from .seasons import (
     get_active_season,
     get_history,
@@ -723,6 +724,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(mc_router)
     app.include_router(join_router)
     app.include_router(admin_router)
+    app.include_router(nodes_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"

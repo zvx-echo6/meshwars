@@ -162,6 +162,16 @@ class Settings(BaseSettings):
     mc_status_rate_limit_attempts: int = 30
     mc_status_rate_limit_window_seconds: int = 60
 
+    # Rate limit on the key-authenticated node-management routes
+    # (GET/POST/DELETE /api/nodes, app/nodes_api.py), keyed per API key
+    # rather than per address -- the caller is already authenticated by
+    # the time this is checked, same as McIngestor.rate_limit_ok in
+    # app/mc_ingest.py, so limiting by key (not IP) is both simpler and
+    # more accurate. A player clicking "add radio" a handful of times
+    # in a sitting is nowhere near this ceiling.
+    node_api_rate_limit_attempts: int = 30
+    node_api_rate_limit_window_seconds: int = 60
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
