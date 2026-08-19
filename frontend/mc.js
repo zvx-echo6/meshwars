@@ -19,12 +19,15 @@
  *
  * The two boards use different endpoint families because the Meshtastic
  * routes were grandfathered in at the API root (/get-nodes, /scores,
- * /history, /cell/{id}, /teams, /team/{node_ref} -- see app/api.py)
- * while MeshCore's are namespaced under /api/mc/*, but both sides read
- * the exact same mc_season/mc_tile* tables underneath (app/mc_api.py's
- * protocol-parameterized helpers) -- see the PROTOCOLS table below for
- * the one-to-one mapping and the honest gaps where no Meshtastic
- * equivalent of an /api/mc/* route exists yet.
+ * /history, /cell/{id}, /teams, /team/{node_ref}, /find, /top, /season
+ * -- see app/api.py) while MeshCore's are namespaced under /api/mc/*,
+ * but both sides read the exact same mc_season/mc_tile* tables
+ * underneath, through app/mc_api.py's protocol-parameterized helpers
+ * (board_for, scores_for, history_for, cell_detail_for, find_for,
+ * top_for, winner_banner_for, ...) -- see the PROTOCOLS table below for
+ * the one-to-one mapping. Every one of those endpoint pairs now returns
+ * the identical shape; there is no longer a Meshtastic-only gap this
+ * module has to paper over or explain away.
  */
 
 // One place to change team colors. Chosen to be saturated and
@@ -118,8 +121,9 @@ function formatCountdown(secondsRemaining) {
 // between boards. The panel's structure, control order, and position
 // are identical regardless of which entry is active.
 //
-// Endpoint parity, and the two honest gaps this file does NOT paper
-// over with invented data:
+// Endpoint parity -- the full mapping between the two boards' routes,
+// all of which now return identical shapes (only the vocabulary and
+// the underlying data differ):
 //
 //  - Board cells:   MeshCore /api/mc/board (array) vs Meshtastic
 //                    /get-nodes (.coverage) -- both cell shapes match,
@@ -135,37 +139,31 @@ function formatCountdown(secondsRemaining) {
 //                    /teams ({teams:{TEAM:[{display_name,node_hex}]}})
 //                    -- different shape, both grouped into a common
 //                    Map<team, [{display_name}]> by fetchRoster below.
-//  - GAP -- player Find: /api/mc/find?name= looks a player up BY NAME
-//                    and returns a bounds box to zoom to. There is no
-//                    Meshtastic equivalent of that route -- the closest
-//                    is /team/{node_ref}, which looks a player up by
-//                    NODE REFERENCE instead of name and returns no
-//                    bounds at all. So on the Meshtastic board this
-//                    control searches by node ID instead of name, and
-//                    a successful search cannot zoom the map -- both
-//                    intentional, not bugs. See doPlayerFind.
-//  - GAP -- top-ranked players: /api/mc/top ranks players by capture
-//                    count in the active MeshCore season. No Meshtastic
-//                    route computes anything equivalent (nor could this
-//                    module derive it client-side: neither /get-nodes'
-//                    coverage cells nor /cell/{id} expose which player
-//                    owns a cell, only which TEAM does). The Meshtastic
-//                    "Top Operators" modal says so plainly rather than
-//                    showing invented or zeroed numbers. See openTopModal.
-//  - GAP -- cell popup feeders/repeaters: neither /cell/{id} nor
-//                    /api/mc/cell/{id} return anything about which
-//                    repeaters/feeders can hear a given cell -- the old
-//                    per-tile `rptr` list doesn't exist in the new
-//                    mc_tile-backed model. app/db.py's own comment on
-//                    the repeater_observation/repeater_identity tables
-//                    confirms this is deliberate for now ("nothing here
-//                    reads from these tables yet"). This module does
-//                    not reintroduce the old distance-guessed
-//                    repeater-per-tile heuristic to fake the gap --
-//                    that guess is exactly what those tables exist to
-//                    eventually replace with real observation data. See
-//                    the module docstring / final report for the
-//                    follow-up this needs on the backend.
+//  - Player Find:   /api/mc/find?name= vs /find?name= -- identical
+//                    shape (same find_for() helper on both sides).
+//                    Looks a player up BY NAME and returns a bounds box
+//                    to zoom to on both boards. See doPlayerFind.
+//                    (/team/{node_ref} still exists as a by-NODE-
+//                    REFERENCE lookup for anyone who wants it directly,
+//                    but the Find control on this panel uses /find on
+//                    both boards now, same as MeshCore always has.)
+//  - Top-ranked players: /api/mc/top vs /top -- identical shape (same
+//                    top_for() helper). Ranks players by capture count
+//                    in the active season for whichever board is
+//                    showing. See openTopModal.
+//  - Winner banner: /api/mc/season vs /season -- identical shape (same
+//                    winner_banner_for() helper), each `.winner_banner`
+//                    seven-team shaped. See refreshWinnerBanner.
+//  - Cell popup repeaters/feeders: /api/mc/cell/{id} and /cell/{id}
+//                    both now carry a `.repeaters` list (additive to
+//                    the existing cell_detail_for() shape) -- real rows
+//                    from app/db.py's repeater_observation table,
+//                    written by both boards' ingest paths. This module
+//                    does not reintroduce the old distance-guessed
+//                    repeater-per-tile heuristic: a cell with no
+//                    recorded observations gets no section in the
+//                    popup at all, never an invented one. See
+//                    buildCellPopupHtml.
 // =====================================================================
 const PROTOCOLS = {
   meshcore: {
@@ -175,6 +173,9 @@ const PROTOCOLS = {
     topModalTitle: 'Top Wardrivers',
     lookupPlaceholder: 'player name',
     lookupHelp: 'Search by player name.',
+    // "Repeaters" is MeshCore's own term for the mesh nodes a wardrive
+    // can hear -- see app/db.py's repeater_observation table.
+    repeaterLabel: 'Repeaters heard',
     boardEndpoint: '/api/mc/board',
     scoresEndpoint: '/api/mc/scores',
     cellEndpoint: (id) => `/api/mc/cell/${encodeURIComponent(id)}`,
@@ -182,6 +183,7 @@ const PROTOCOLS = {
     rosterEndpoint: '/api/mc/players',
     findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
     topEndpoint: '/api/mc/top',
+    seasonEndpoint: '/api/mc/season',
   },
   meshtastic: {
     protocol: 'mt',
@@ -192,15 +194,23 @@ const PROTOCOLS = {
     // -- "operator" -- fits better than reusing "wardriver" here.
     topButtonLabel: 'Top Operators',
     topModalTitle: 'Top Operators',
-    lookupPlaceholder: 'node ID (!a1b2c3d4)',
-    lookupHelp: 'Search by node ID -- Meshtastic players are looked up by radio, not by name.',
+    // Same by-name search as MeshCore now that /find exists for this
+    // board too (see app/api.py) -- no more of a node-ID-only Find box.
+    lookupPlaceholder: 'player name',
+    lookupHelp: 'Search by player name.',
+    // Meshtastic's own vocabulary for the same evidence -- packets are
+    // relayed onto MQTT by gateway nodes ("feeders"), not repeaters in
+    // the MeshCore sense, even though both write the same
+    // repeater_observation rows underneath (see app/ingest.py).
+    repeaterLabel: 'MQTT feeders heard',
     boardEndpoint: '/get-nodes',
     scoresEndpoint: '/scores',
     cellEndpoint: (id) => `/cell/${encodeURIComponent(id)}`,
     historyEndpoint: '/history',
     rosterEndpoint: '/teams',
-    findEndpoint: null, // no by-name lookup route -- see doPlayerFind
-    topEndpoint: null,  // no ranking route -- see openTopModal
+    findEndpoint: (q) => `/find?name=${encodeURIComponent(q)}`,
+    topEndpoint: '/top',
+    seasonEndpoint: '/season',
   },
 };
 
@@ -459,14 +469,10 @@ async function fetchRosterByTeam(c) {
 
 // ===== Player search (Find) =====
 //
-// MeshCore looks a player up by display name and gets back a bounds box
-// to zoom to (/api/mc/find). Meshtastic has no by-name route -- the
-// closest available is /team/{node_ref}, a by-NODE-REFERENCE lookup
-// that returns no bounds at all -- so on that board this searches by
-// node ID instead, and a hit reports team/tiles-owned as text without
-// moving the map. Both are real, working lookups against real routes;
-// neither fakes the other board's behavior. See PROTOCOLS' comment for
-// why. Every branch below sets textContent only, never innerHTML.
+// Both boards look a player up by display name and get back a bounds
+// box to zoom to (/api/mc/find vs /find -- identical shape, same
+// find_for() helper on the backend). One path for both boards now;
+// sets textContent only, never innerHTML.
 async function doPlayerFind(value) {
   const c = cfg();
   const resultEl = document.getElementById('mc-lookup-result');
@@ -475,46 +481,25 @@ async function doPlayerFind(value) {
   if (!query) { resultEl.textContent = ''; return; }
   resultEl.textContent = 'Searching...';
 
-  if (c.protocol === 'mc') {
-    try {
-      const res = await fetch(c.findEndpoint(query));
-      if (res.status === 404) {
-        resultEl.textContent = `Not found: ${query}`;
-        return;
-      }
-      if (!res.ok) {
-        resultEl.textContent = 'Search failed.';
-        return;
-      }
-      const data = await res.json();
-      if (!data.bounds || !data.tiles_held) {
-        resultEl.textContent = `${data.display_name} (${data.team}) holds no cells right now.`;
-        return;
-      }
-      const b = data.bounds;
-      if (map) map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [24, 24], maxZoom: MAX_FIT_ZOOM });
-      const plural = data.tiles_held === 1 ? '' : 's';
-      resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`;
-    } catch (err) {
-      resultEl.textContent = 'Search failed.';
-    }
-    return;
-  }
-
-  // Meshtastic: /team/{node_ref} -- by node reference, no bounds.
   try {
-    const res = await fetch(`/team/${encodeURIComponent(query)}`);
+    const res = await fetch(c.findEndpoint(query));
+    if (res.status === 404) {
+      resultEl.textContent = `Not found: ${query}`;
+      return;
+    }
     if (!res.ok) {
       resultEl.textContent = 'Search failed.';
       return;
     }
     const data = await res.json();
-    if (!data.found) {
-      resultEl.textContent = `Not found: ${query}`;
+    if (!data.bounds || !data.tiles_held) {
+      resultEl.textContent = `${data.display_name} (${data.team}) holds no cells right now.`;
       return;
     }
-    const plural = data.tiles_owned === 1 ? '' : 's';
-    resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_owned} cell${plural}.`;
+    const b = data.bounds;
+    if (map) map.fitBounds([[b.south, b.west], [b.north, b.east]], { padding: [24, 24], maxZoom: MAX_FIT_ZOOM });
+    const plural = data.tiles_held === 1 ? '' : 's';
+    resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`;
   } catch (err) {
     resultEl.textContent = 'Search failed.';
   }
@@ -634,19 +619,11 @@ async function openRosterModal() {
   }
 }
 
-// GAP: no Meshtastic route ranks players by squares held or captures
-// (see PROTOCOLS' comment) -- this says so honestly rather than
-// inventing or zeroing numbers. Real backend follow-up needed before
-// this can show real Meshtastic rankings.
+// Both boards rank players by capture-event count in the active season
+// (/api/mc/top vs /top -- identical shape, same top_for() helper).
 async function openTopModal() {
   const c = cfg();
   const body = openMcModal(c.topModalTitle);
-
-  if (!c.topEndpoint) {
-    showModalMessage(body, 'mc-modal-empty',
-      'Player rankings aren\'t available for the Meshtastic board yet -- check Roster for the full player list.');
-    return;
-  }
 
   try {
     const res = await fetch(c.topEndpoint);
@@ -676,11 +653,35 @@ async function openTopModal() {
 
 // ===== Board rendering =====
 
-// GAP: no field on either /cell/{id} or /api/mc/cell/{id} names which
-// repeaters/feeders can hear this cell -- see PROTOCOLS' comment above
-// for why this section deliberately does not exist here. Everything
-// below is otherwise identical for both boards.
-function buildCellPopupHtml(cellId, detail) {
+// Renders detail.repeaters (see PROTOCOLS' comment above, and
+// app/mc_api.py's _repeater_observations()) as its own popup section,
+// labeled per board (c.repeaterLabel: "Repeaters heard" on MeshCore,
+// "MQTT feeders heard" on Meshtastic). Returns '' -- no section at all,
+// not an empty-state message -- when the cell has no recorded
+// observations, per the owner's explicit call: this must never invent
+// or distance-guess a repeater/feeder that ingest never actually
+// logged hearing this square.
+function buildRepeaterSectionHtml(detail, c) {
+  const repeaters = Array.isArray(detail.repeaters) ? detail.repeaters : [];
+  if (repeaters.length === 0) return '';
+
+  const rows = repeaters.map((r) => {
+    const counts = [];
+    if (r.direct_count) counts.push(`${r.direct_count} direct`);
+    if (r.heard_count) counts.push(`${r.heard_count} heard`);
+    const countText = counts.length ? counts.join(', ') : 'no hits';
+    return `<div class="mc-popup-capture-row">
+        ${escapeHtml(r.repeater_id)} &mdash; ${escapeHtml(countText)}, last heard ${escapeHtml(formatTs(r.last_seen))}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="mc-popup-section-title">${escapeHtml(c.repeaterLabel)}</div>
+    ${rows}
+  `;
+}
+
+function buildCellPopupHtml(cellId, detail, c) {
   const scoreRows = TEAM_ORDER.map((team) => {
     const score = detail.scores && detail.scores[team] !== undefined ? detail.scores[team] : 0;
     return `<div class="mc-popup-score-row">
@@ -711,6 +712,7 @@ function buildCellPopupHtml(cellId, detail) {
       ${scoreRows}
       <div class="mc-popup-section-title">Recent captures</div>
       ${captureRows}
+      ${buildRepeaterSectionHtml(detail, c)}
     </div>
   `;
 }
@@ -730,7 +732,7 @@ function bindCellPopup(rect, cellId, c) {
         return;
       }
       const detail = await res.json();
-      e.popup.setContent(buildCellPopupHtml(cellId, detail));
+      e.popup.setContent(buildCellPopupHtml(cellId, detail, c));
     } catch (err) {
       console.warn('cell detail load failed:', err);
       e.popup.setContent('<div class="mc-popup-loading">Failed to load cell detail.</div>');
@@ -807,6 +809,74 @@ async function refreshScores() {
   }
 }
 
+// ===== Winner banner =====
+//
+// A separate top-center overlay on the map itself (#mc-winner-banner in
+// index.html), not part of the top-right territory panel -- same
+// element, same position, same behavior on both boards; only which
+// board's season it reports changes with mode. Reads
+// cfg().seasonEndpoint (/api/mc/season vs /season -- identical shape,
+// both built by app/mc_api.py's winner_banner_for()) and shows nothing
+// at all once the season's display window elapses, same as the backend
+// already decides via winner_banner_active/settings.winner_banner_hours
+// -- this never has its own separate opinion about when to hide it.
+function renderWinnerBanner(banner) {
+  const el = document.getElementById('mc-winner-banner');
+  if (!el) return;
+  if (!banner) {
+    el.style.display = 'none';
+    el.replaceChildren();
+    return;
+  }
+
+  el.replaceChildren();
+
+  const isTie = !banner.winner || banner.winner === 'TIE';
+  const tag = document.createElement('span');
+  tag.className = 'mc-winner-tag';
+  tag.style.background = isTie ? '#888' : (TEAM_COLORS[banner.winner] || '#888');
+  tag.textContent = isTie ? 'TIE' : `${banner.winner} WINS`;
+  el.appendChild(tag);
+
+  const counts = document.createElement('span');
+  counts.className = 'mc-winner-counts';
+  const teams = Array.isArray(banner.teams) ? banner.teams : [];
+  teams.forEach((t) => {
+    // Each team's dot+count as one flex item (not two separately-gapped
+    // ones) so `gap` on .mc-winner-counts spaces teams evenly instead of
+    // also prying a dot apart from its own number.
+    const entry = document.createElement('span');
+    entry.className = 'mc-winner-count-entry';
+    const dot = document.createElement('span');
+    dot.className = 'mc-dot';
+    dot.style.background = TEAM_COLORS[t.team] || '#888';
+    entry.appendChild(dot);
+    entry.appendChild(document.createTextNode(String(t.tiles ?? 0)));
+    counts.appendChild(entry);
+  });
+  el.appendChild(counts);
+
+  const dates = document.createElement('span');
+  dates.className = 'mc-winner-dates';
+  dates.textContent = `Season #${banner.season_id}`;
+  el.appendChild(dates);
+
+  el.style.display = 'flex';
+}
+
+async function refreshWinnerBanner() {
+  const c = cfg();
+  try {
+    const res = await fetch(c.seasonEndpoint);
+    if (!res.ok) { renderWinnerBanner(null); return; }
+    const data = await res.json();
+    renderWinnerBanner(data.winner_banner || null);
+  } catch (err) {
+    console.warn('winner banner refresh failed:', err);
+    renderWinnerBanner(null);
+  }
+}
+
 // ===== Mode switching =====
 
 function applyProtocolChrome() {
@@ -827,6 +897,7 @@ function setMode(newMode) {
   updateToggleButtons();
   refreshBoard(true);
   refreshScores();
+  refreshWinnerBanner();
 }
 
 // ===== Map bootstrap =====
@@ -920,6 +991,7 @@ async function boot() {
   refreshTimer = setInterval(() => {
     refreshBoard(false);
     refreshScores();
+    refreshWinnerBanner();
   }, REFRESH_INTERVAL_MS);
 
   setInterval(tickCountdown, 1000);

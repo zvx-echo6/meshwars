@@ -70,24 +70,16 @@ async def config() -> dict:
     conn = connect()
     try:
         active = mc_api.active_season(conn, MT_PROTOCOL)
-        closed = mc_api.latest_closed_season(conn, MT_PROTOCOL)
 
         # Derive map center from node_seen for the current season.
         center, zoom = _derive_map_center(conn, active["id"] if active else None)
         counts = team_tile_counts(conn, active["id"]) if active else {}
 
-        banner = None
-        if mc_api.winner_banner_active(closed, now_ts):
-            tallies = mc_api.season_team_tally(conn, closed["id"])
-            banner = {
-                "season_id": closed["id"],
-                "started_at": closed["started_at"],
-                "ends_at": closed["ends_at"],
-                "winner": closed["winner"],
-                "teams": [
-                    {"team": t, "tiles": tallies.get(t, 0)} for t in mc_api.team_list()
-                ],
-            }
+        # See mc_api.winner_banner_for() -- this used to build the banner
+        # dict inline here (the only caller that needed it, before /season
+        # below and mc_api's own /api/mc/season also needed the identical
+        # shape for the MeshCore board's winner banner).
+        banner = mc_api.winner_banner_for(conn, MT_PROTOCOL, now_ts)
     finally:
         conn.close()
 
@@ -333,6 +325,13 @@ async def history() -> dict:
 
 @router.get("/season")
 async def season_info() -> dict:
+    """Season status plus the winner banner for the Meshtastic board.
+    The counterpart of app/mc_api.py's /api/mc/season -- both call the
+    same winner_banner_for(), so the `winner_banner` shape is identical
+    on both boards. `winner_banner_active` (a plain bool, kept for any
+    existing caller that only wants that) is now redundant with
+    `winner_banner is not None`, but is not worth removing over.
+    """
     now_ts = int(time.time())
     conn = connect()
     try:
@@ -340,13 +339,14 @@ async def season_info() -> dict:
         active = dict(active) if active else None
         closed = mc_api.latest_closed_season(conn, MT_PROTOCOL)
         closed = dict(closed) if closed else None
-        banner = mc_api.winner_banner_active(closed, now_ts)
+        banner = mc_api.winner_banner_for(conn, MT_PROTOCOL, now_ts)
     finally:
         conn.close()
     return {
         "active": active,
         "latest_closed": closed,
-        "winner_banner_active": banner,
+        "winner_banner_active": banner is not None,
+        "winner_banner": banner,
         "now": now_ts,
     }
 
@@ -436,6 +436,31 @@ async def team_lookup(node_ref: str) -> dict:
         "team": row["team"],
         "tiles_owned": tiles_owned,
     }
+
+
+@router.get("/find")
+async def find_player(name: str):
+    """Case-insensitive exact match on a player's display name, scoped
+    to the active Meshtastic season -- the Meshtastic counterpart of
+    /api/mc/find, and (unlike /team/{node_ref} above) a lookup by NAME
+    that returns a bounds box the map can zoom to, same as MeshCore's.
+    See app/mc_api.py's find_for(); response shape is identical to
+    /api/mc/find's.
+    """
+    result = mc_api.find_for(MT_PROTOCOL, name)
+    if result is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return result
+
+
+@router.get("/top")
+async def top_players() -> list[dict]:
+    """Players ranked by capture-event count in the active Meshtastic
+    season -- the Meshtastic counterpart of /api/mc/top. See
+    app/mc_api.py's top_for(); response shape is identical to
+    /api/mc/top's.
+    """
+    return mc_api.top_for(MT_PROTOCOL)
 
 
 @router.get("/cell/{cell_id}")

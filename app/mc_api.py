@@ -18,8 +18,9 @@ guard no longer triggers -- it is kept because it is still correct and
 harmless, not because the race it was written for is still live.)
 
 Several of the functions below (active_season, board_for, scores_for,
-history_for, cell_detail_for, season_team_tally, winner_banner_active,
-latest_closed_season, team_list) take an explicit `protocol` argument
+history_for, cell_detail_for, find_for, top_for, season_team_tally,
+winner_banner_active, winner_banner_for, latest_closed_season,
+team_list) take an explicit `protocol` argument
 and are called from here with MC_PROTOCOL -- and, now that the
 Meshtastic board runs on this same mc_season/mc_tile* model, also
 called from app/api.py with 'mt', so the query logic for each pair of
@@ -250,6 +251,37 @@ def winner_banner_active(closed_season: sqlite3.Row | dict | None, now_ts: int) 
     return now_ts < closed_season["ends_at"] + settings.winner_banner_hours * 3600
 
 
+def winner_banner_for(conn, protocol: str, now_ts: int) -> dict | None:
+    """The full seven-team-shaped winner banner for `protocol`'s most
+    recently closed season, or None if there is no closed season yet or
+    its display window (winner_banner_active, settings.winner_banner_hours
+    after ends_at) has elapsed.
+
+    This is the same shape app/api.py's /config used to build inline for
+    the Meshtastic board only -- factored out here, and now called with
+    both protocols, so /config, this module's /api/mc/season, and
+    app/api.py's /season all build the identical banner instead of
+    hand-copied near-duplicates. Follows the same *_for() pattern as
+    board_for/scores_for/history_for/cell_detail_for/find_for/top_for
+    above, except this one also needs `now_ts` -- winner_banner_active()
+    already takes it as an explicit argument rather than reading the
+    clock itself (so its own callers can pass a stable ts across
+    multiple checks in one request), and this helper is layered
+    directly on top of it.
+    """
+    closed = latest_closed_season(conn, protocol)
+    if not winner_banner_active(closed, now_ts):
+        return None
+    tallies = season_team_tally(conn, closed["id"])
+    return {
+        "season_id": closed["id"],
+        "started_at": closed["started_at"],
+        "ends_at": closed["ends_at"],
+        "winner": closed["winner"],
+        "teams": [{"team": t, "tiles": tallies.get(t, 0)} for t in team_list()],
+    }
+
+
 def season_team_tally(conn, season_id: int) -> dict[str, int]:
     """team -> tiles for a season's final tally, from mc_season_team_tally
     (written once at season close, see mc_scoring.maybe_roll_season).
@@ -424,21 +456,67 @@ async def mc_history() -> list[dict]:
     return history_for(MC_PROTOCOL)
 
 
-@router.get("/api/mc/find")
-async def mc_find(name: str):
+@router.get("/api/mc/season")
+async def mc_season_info() -> dict:
+    """Active/closed season status plus the winner banner for the
+    MeshCore board -- the namespaced counterpart to app/api.py's
+    /season (which serves the same shape for Meshtastic, protocol='mt').
+
+    Did not exist before this change: the winner banner UI was dropped
+    when the map moved onto the unified renderer (see mc.js's module
+    docstring) because the old markup expected the retired two-team
+    red_tiles/blue_tiles/green_tiles shape. Rebuilding it seven-team
+    shaped needed a MeshCore-side season+banner route to sit alongside
+    the Meshtastic one that already existed, following the same
+    /api/mc/* vs bare-path split every other paired MeshCore/Meshtastic
+    route in this file already uses -- see winner_banner_for(), which
+    this and /season both call rather than duplicating the banner-build
+    logic a third time.
+    """
+    now_ts = int(time.time())
+    conn = connect()
+    try:
+        active = active_season(conn, MC_PROTOCOL)
+        active = dict(active) if active else None
+        closed = latest_closed_season(conn, MC_PROTOCOL)
+        closed = dict(closed) if closed else None
+        banner = winner_banner_for(conn, MC_PROTOCOL, now_ts)
+    finally:
+        conn.close()
+    return {
+        "active": active,
+        "latest_closed": closed,
+        "winner_banner_active": banner is not None,
+        "winner_banner": banner,
+        "now": now_ts,
+    }
+
+
+def find_for(protocol: str, name: str) -> dict | None:
     """Case-insensitive exact match on a player's display name.
 
     Returns their team and how many cells they currently hold as last
-    painter in the active season, plus the bounding box of those cells
-    so the map can zoom to them. 404s if no such player exists.
+    painter in `protocol`'s active season, plus the bounding box of
+    those cells so the map can zoom to them. None if no such player
+    exists at all -- mc_find() below turns that into a 404, same
+    contract cell_detail_for() uses for "no such cell". A player who
+    exists but holds nothing right now (no active season for this
+    protocol, or simply no cells) is not a None here: it's a normal
+    result with tiles_held=0 and bounds=None.
 
     The player table itself is not part of the mc_* landing-order race
-    described at the top of this module (it predates it), so that
-    lookup runs directly; only the season/mc_tile half -- which does
-    the actual "holds cells" answer -- is guarded against a missing
-    table, degrading to zero cells rather than a 500. A player who
-    exists but holds nothing right now (no active season, or simply no
-    cells) is a normal 200 with tiles_held=0 and bounds=null, not a 404.
+    described at the top of this module (it predates it, and a player
+    is not protocol-specific -- see app/db.py's player_node table: one
+    person can hold both an 'mc' and an 'mt' radio under the same
+    player row), so that lookup runs directly; only the season/mc_tile
+    half -- which does the actual "holds cells" answer, and which does
+    need the protocol filter -- is guarded against a missing table,
+    degrading to zero cells rather than a 500.
+
+    Factored out of mc_find() below so app/api.py's Meshtastic /find
+    route returns the exact same shape instead of a hand-copied
+    near-duplicate, following the same *_for() pattern as
+    board_for/scores_for/history_for/cell_detail_for above.
     """
     conn = connect()
     try:
@@ -448,11 +526,11 @@ async def mc_find(name: str):
             (name,),
         ).fetchone()
         if not player:
-            return JSONResponse({"error": "not found"}, status_code=404)
+            return None
 
         cell_ids: list[str] = []
         try:
-            season = active_season(conn, MC_PROTOCOL)
+            season = active_season(conn, protocol)
             if season:
                 rows = conn.execute(
                     "SELECT cell_id FROM mc_tile WHERE season_id = ? AND last_player_id = ?",
@@ -484,15 +562,33 @@ async def mc_find(name: str):
         conn.close()
 
 
-@router.get("/api/mc/top")
-async def mc_top() -> list[dict]:
-    """Players ranked by capture-event count in the active season,
-    from mc_tile_capture_log. Top 20, empty list if there's no data
-    (or no active season).
+@router.get("/api/mc/find")
+async def mc_find(name: str):
+    """Case-insensitive exact match on a player's display name, scoped
+    to the active MeshCore season. See find_for(). Request path,
+    request shape, and response shape are unchanged by the addition of
+    find_for()'s `protocol` argument -- this route still always passes
+    MC_PROTOCOL, same as before this module had a second caller.
+    """
+    result = find_for(MC_PROTOCOL, name)
+    if result is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return result
+
+
+def top_for(protocol: str) -> list[dict]:
+    """Players ranked by capture-event count in `protocol`'s active
+    season, from mc_tile_capture_log. Top 20, empty list if there's no
+    data (or no active season).
+
+    Factored out of mc_top() below so app/api.py's Meshtastic /top
+    route returns the exact same shape instead of a hand-copied
+    near-duplicate, following the same *_for() pattern as
+    board_for/scores_for/history_for/cell_detail_for/find_for above.
     """
 
     def run(conn):
-        season = active_season(conn, MC_PROTOCOL)
+        season = active_season(conn, protocol)
         if not season:
             return []
         rows = conn.execute(
@@ -513,6 +609,75 @@ async def mc_top() -> list[dict]:
 
     result = _safe_query(run)
     return result if result is not None else []
+
+
+@router.get("/api/mc/top")
+async def mc_top() -> list[dict]:
+    """Players ranked by capture-event count in the active MeshCore
+    season. See top_for(). Request path, request shape, and response
+    shape are unchanged by the addition of top_for()'s `protocol`
+    argument -- this route still always passes MC_PROTOCOL, same as
+    before this module had a second caller.
+    """
+    return top_for(MC_PROTOCOL)
+
+
+# Cap on how many repeater_observation rows cell_detail_for() returns
+# for one cell. A well-traveled square can accumulate a long tail of
+# barely-heard repeaters; the popup only has room for a handful, and
+# "most recently heard" is what a player actually wants to know ("what
+# can I reach from here right now"), not a complete historical list.
+_REPEATER_OBS_LIMIT = 10
+
+
+def _repeater_observations(conn, protocol: str, cell_id: str) -> list[dict]:
+    """Repeaters (MeshCore) or MQTT feeders (Meshtastic) observed as
+    audible from `cell_id`, most-recently-heard first, capped at
+    _REPEATER_OBS_LIMIT.
+
+    Reads app/db.py's repeater_observation table (keyed by protocol,
+    repeater_id, cell_id), left-joined against repeater_identity for
+    node_type where known -- public_key is deliberately not exposed
+    here, since this is an anonymous per-cell summary of what a square
+    can hear, not an identity lookup. Both ingest paths
+    (app/mc_ingest.py's record_repeater_observations(), called from
+    both app/mc_ingest.py and app/ingest.py) write these rows for every
+    ping that passes validation, independent of season and of whether
+    the paint even scores -- so this is not scoped to the active season
+    the way owner_team/scores/recent_captures above are; audibility
+    evidence outlives a season rollover even though ownership doesn't.
+
+    This is the ONLY source for this data -- it never falls back to
+    estimating from distance. A cell with no rows here returns an empty
+    list, which the frontend renders as no section at all rather than a
+    guess (see mc.js's buildCellPopupHtml/PROTOCOLS' history for why
+    that guess is exactly what these tables exist to replace).
+    """
+    rows = conn.execute(
+        "SELECT o.repeater_id, o.first_seen, o.last_seen, o.direct_count, "
+        "       o.heard_count, o.best_local_snr, o.best_remote_snr, "
+        "       o.best_heard_snr, i.node_type "
+        "  FROM repeater_observation o "
+        "  LEFT JOIN repeater_identity i "
+        "    ON i.protocol = o.protocol AND i.repeater_id = o.repeater_id "
+        " WHERE o.protocol = ? AND o.cell_id = ? "
+        " ORDER BY o.last_seen DESC LIMIT ?",
+        (protocol, cell_id, _REPEATER_OBS_LIMIT),
+    ).fetchall()
+    return [
+        {
+            "repeater_id": r["repeater_id"],
+            "node_type": r["node_type"],
+            "first_seen": r["first_seen"],
+            "last_seen": r["last_seen"],
+            "direct_count": r["direct_count"],
+            "heard_count": r["heard_count"],
+            "best_local_snr": r["best_local_snr"],
+            "best_remote_snr": r["best_remote_snr"],
+            "best_heard_snr": r["best_heard_snr"],
+        }
+        for r in rows
+    ]
 
 
 def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
@@ -585,6 +750,10 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
                 }
                 for r in log_rows
             ],
+            # Additive -- see _repeater_observations()'s docstring. Only
+            # ever the real rows ingest wrote for this cell, never a
+            # distance-based guess.
+            "repeaters": _repeater_observations(conn, protocol, cell_id),
         }
 
     return _safe_query(run)
