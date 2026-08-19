@@ -126,6 +126,39 @@
       padding: 1px 0;
     }
 
+    /* A raw key only ever appears here once -- same one-time treatment
+       frontend/join.js gives a key at signup. Styled like a warning, not
+       a plain result box (thicker red border, tinted background), since
+       missing it here means going back to this same button to mint yet
+       another one and revoke this one too. */
+    .admin-reissue-result {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #ccc;
+      background: #2a1414;
+      border: 2px solid #7a2b2b;
+      border-radius: 4px;
+      padding: 10px 12px;
+      display: none;
+    }
+    .admin-reissue-result strong {
+      display: block;
+      color: #ffb088;
+      margin-bottom: 6px;
+    }
+    .admin-reissue-key {
+      display: block;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #0a0a0a;
+      border: 1px solid #333;
+      border-radius: 3px;
+      padding: 6px 8px;
+      margin: 6px 0;
+      font-size: 12px;
+      color: #ffd6d6;
+      word-break: break-all;
+    }
+
     .admin-status {
       margin-top: 10px;
       font-size: 12px;
@@ -259,6 +292,7 @@
       <div class="admin-panel-title">Players</div>
       <div id="players"></div>
       <div id="delete-result" class="admin-delete-result"></div>
+      <div id="reissue-result" class="admin-reissue-result"></div>
     </section>
 
   </main>
@@ -276,6 +310,7 @@ var els = {
   status: document.getElementById('status'),
   players: document.getElementById('players'),
   deleteResult: document.getElementById('delete-result'),
+  reissueResult: document.getElementById('reissue-result'),
 };
 
 function setStatus(msg, isError) {
@@ -290,6 +325,15 @@ function fmtTs(ts) {
   } catch (e) {
     return String(ts);
   }
+}
+
+// player_node.node_ref is always stored bare lowercase 8-hex (see
+// app/node_ref.py) -- render it back in whichever form that radio's
+// own ecosystem uses, same as frontend/join.js's displayNodeRef():
+// '!a1b2c3d4' for Meshtastic, bare for MeshCore (how MeshMapper shows
+// a contact key). Display-only.
+function displayNodeRef(protocol, nodeRef) {
+  return protocol === 'mt' ? ('!' + nodeRef) : nodeRef;
 }
 
 // Small DOM-builder helper. Every dynamic value below goes through
@@ -398,6 +442,50 @@ function renderDeleteResult(displayName, counts) {
   container.style.display = 'block';
 }
 
+// Shown exactly once, same as a key at signup (frontend/join.js) --
+// this container is not cleared until the next reissue overwrites it,
+// so it stays visible after loadPlayers() re-renders the player cards
+// below it (that reload replaces #players entirely, but never touches
+// #reissue-result).
+function renderReissueResult(displayName, key, revokedCount) {
+  var container = els.reissueResult;
+  container.replaceChildren();
+  container.appendChild(el('strong', {
+    text: 'New key for ' + displayName + ' -- this is the only time it will be shown.',
+  }));
+  container.appendChild(el('span', { className: 'admin-reissue-key', text: key }));
+  container.appendChild(el('div', {
+    text: revokedCount > 0
+      ? ('Revoked ' + revokedCount + ' prior key(s) for this player -- those stop working immediately.')
+      : 'This player had no active keys before -- nothing else was revoked.',
+  }));
+  container.style.display = 'block';
+}
+
+async function reissuePlayer(player, btn) {
+  var typed = window.prompt(
+    'Type "' + player.display_name + '" exactly to reissue this player\'s key. ' +
+    'Every key they currently hold stops working the moment the new one is issued.'
+  );
+  if (typed === null) return; // cancelled
+  if (typed.length === 0) return; // nothing entered, do not send the request
+
+  btn.disabled = true;
+  try {
+    var result = await apiCall('/api/admin/player/reissue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_id: player.player_id, display_name: typed }),
+    });
+    setStatus('Reissued key for ' + player.display_name, false);
+    renderReissueResult(player.display_name, result.key, result.revoked_count);
+    await loadPlayers();
+  } catch (e) {
+    setStatus('Reissue failed: ' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
 async function deletePlayer(player, btn) {
   var typed = window.prompt(
     'Type "' + player.display_name + '" exactly to permanently delete this player. ' +
@@ -440,7 +528,7 @@ function renderPlayer(player) {
     radios.appendChild(document.createTextNode('radios: '));
     player.radios.forEach(function (r, i) {
       if (i > 0) radios.appendChild(document.createTextNode(', '));
-      radios.appendChild(el('span', { className: 'admin-key-hash', text: r.protocol + ':' + r.node_ref }));
+      radios.appendChild(el('span', { className: 'admin-key-hash', text: r.protocol + ':' + displayNodeRef(r.protocol, r.node_ref) }));
     });
     card.appendChild(radios);
   }
@@ -460,6 +548,13 @@ function renderPlayer(player) {
   toggleBtn.type = 'button';
   toggleBtn.addEventListener('click', function () { togglePlayer(player, toggleBtn); });
 
+  var reissueBtn = el('button', {
+    className: 'admin-btn admin-btn-danger',
+    text: 'Reissue key',
+  });
+  reissueBtn.type = 'button';
+  reissueBtn.addEventListener('click', function () { reissuePlayer(player, reissueBtn); });
+
   var deleteBtn = el('button', {
     className: 'admin-btn admin-btn-delete',
     text: 'Delete player',
@@ -469,6 +564,7 @@ function renderPlayer(player) {
 
   var actions = el('div', { className: 'admin-player-actions' });
   actions.appendChild(toggleBtn);
+  actions.appendChild(reissueBtn);
   actions.appendChild(deleteBtn);
   card.appendChild(actions);
 

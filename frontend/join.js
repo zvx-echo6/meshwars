@@ -68,6 +68,19 @@ const COUNTER_ZERO_ROW = COUNTER_LABELS.reduce((acc, [key]) => {
 // (player_node.protocol, app/nodes_api.py's _VALID_PROTOCOLS).
 const PROTOCOL_LABELS = { mt: 'Meshtastic', mc: 'MeshCore' };
 
+// Every node_ref the server sends back (GET/POST/DELETE /api/nodes,
+// POST /api/mc/status) is bare lowercase 8-hex -- that's player_node's
+// one canonical storage/lookup form (see app/node_ref.py's module
+// docstring), not a display form. Rendering it idiomatically per
+// protocol is this file's job, not the server's: Meshtastic writes a
+// node id as `!a1b2c3d4` everywhere in its own app/docs/ecosystem, so
+// that's what shows here; MeshCore's MeshMapper shows a contact key
+// bare, so that stays as-is. Display-only -- this value is never sent
+// back to the server; every request still uses the raw node_ref field.
+function displayNodeRef(protocol, nodeRef) {
+  return protocol === 'mt' ? `!${nodeRef}` : nodeRef;
+}
+
 let selectedTeam = null;
 
 function showError(message) {
@@ -513,7 +526,7 @@ function renderRadiosList(radios) {
     li.className = 'radios-item';
 
     const label = document.createElement('span');
-    label.textContent = `${PROTOCOL_LABELS[radio.protocol] || radio.protocol} ${radio.node_ref}`;
+    label.textContent = `${PROTOCOL_LABELS[radio.protocol] || radio.protocol} ${displayNodeRef(radio.protocol, radio.node_ref)}`;
     li.appendChild(label);
 
     const removeBtn = document.createElement('button');

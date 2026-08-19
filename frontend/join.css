@@ -295,6 +295,21 @@ body {
   margin-bottom: 2px;
 }
 
+/* The one truly unrecoverable moment on this page: once this key is
+   gone, it is gone -- there is no "forgot my key" flow, only a brand
+   new key from an admin (which retires whichever one this replaces).
+   Same warning-box language as the meshmapper:// caution above,
+   sized up -- thicker border, larger text -- so it reads as a
+   different order of consequence, not just another step's caution. */
+.key-warning-box {
+  border-width: 2px;
+  padding: 12px 14px;
+  font-size: 0.8125rem;
+}
+.key-warning-box strong {
+  font-size: 0.9375rem;
+}
+
 .copy-row {
   display: flex;
   gap: 6px;

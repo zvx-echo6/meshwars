@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import settings
 from .db import connect
+from .mc_ingest import hash_secret
 
 log = logging.getLogger("admin_api")
 
@@ -371,4 +372,111 @@ async def admin_player_delete(request: Request):
         "player_id": player_id,
         "display_name": display_name,
         "counts": counts,
+    }
+
+
+@router.post("/api/admin/player/reissue")
+async def admin_player_reissue(request: Request):
+    """Mint a fresh key for a player and revoke every key they currently
+    hold, in one operation.
+
+    api_key stores only key_hash (a SHA-256 digest) -- recovering a lost
+    raw key is impossible by design, and this route does not try. What
+    it does instead is give the player a working key again: a new one,
+    returned here exactly once, in this response body only, the same
+    one-time treatment app/join_api.py's join() gives a key at signup.
+
+    The old key(s) are revoked as part of the same operation, not left
+    alone for the operator to decide about separately. "I lost my key"
+    and "someone else has my key" look identical from here -- there is
+    no way to tell which one this is -- so the safe default in both
+    cases is that whatever key the player had before stops working the
+    moment a new one is issued, exactly like a password reset that
+    doesn't leave the old password valid.
+
+    Same confirmation guard as /api/admin/player/delete: the caller
+    must supply the player's current display_name exactly. This is
+    just as disruptive to the player's current setup as a delete
+    would be -- their MeshMapper config, or anything else holding the
+    old key, stops working the instant this runs -- so it earns the
+    same protection against a stale/mistyped player_id doing this to
+    the wrong person.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    player_id = body.get("player_id") if isinstance(body, dict) else None
+    display_name = body.get("display_name") if isinstance(body, dict) else None
+    if not isinstance(player_id, int) or isinstance(player_id, bool):
+        return JSONResponse({"error": "player_id is required"}, status_code=400)
+    if not isinstance(display_name, str) or not display_name:
+        return JSONResponse({"error": "display_name is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT display_name FROM player WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "player not found"}, status_code=404)
+        if row["display_name"] != display_name:
+            conn.execute("ROLLBACK")
+            return JSONResponse(
+                {"error": "display name does not match"}, status_code=409
+            )
+
+        # Revoke every key this player currently holds that isn't
+        # already revoked -- not just the newest one. A player can hold
+        # more than one active key (nothing here has ever prevented
+        # that), and leaving an older one live would defeat the point:
+        # "someone else has my key" doesn't tell us WHICH key they have.
+        revoked = conn.execute(
+            "UPDATE api_key SET revoked_at = ? WHERE player_id = ? AND revoked_at IS NULL",
+            (now, player_id),
+        )
+        revoked_count = revoked.rowcount
+
+        raw_key = secrets.token_urlsafe(32)
+        conn.execute(
+            "INSERT INTO api_key(key_hash, player_id, issued_at) VALUES (?, ?, ?)",
+            (hash_secret(raw_key), player_id, now),
+        )
+
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    # Same cache-staleness problem revoke/disable/delete already solve --
+    # without this, a just-revoked key could keep authenticating at the
+    # ingest endpoint until its cached entry expires
+    # (settings.mc_key_cache_seconds). invalidate_player drops every
+    # cached entry for this player_id in one call, covering all of the
+    # keys just revoked above, not only the newest one -- the same
+    # reason the admin door's disable/delete routes use invalidate_player
+    # instead of invalidate_key here.
+    ingestor = request.app.state.mc_ingestor
+    ingestor.invalidate_player(player_id)
+
+    log.info(
+        "admin: reissued key for player %d (%s), revoked %d prior key(s)",
+        player_id, display_name, revoked_count,
+    )
+    return {
+        "reissued": True,
+        "player_id": player_id,
+        "display_name": display_name,
+        "key": raw_key,
+        "issued_at": now,
+        "revoked_count": revoked_count,
     }

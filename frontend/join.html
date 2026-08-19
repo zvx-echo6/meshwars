@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/join.css?v=20260819" />
+  <link rel="stylesheet" href="/static/join.css?v=20260819-2" />
 </head>
 <body>
 
@@ -75,7 +75,7 @@
         </li>
 
         <li>
-          <p class="join-flow-label">Choose your protocol.</p>
+          <p class="join-flow-label">Pick which radio's setup steps to show first.</p>
           <div class="protocol-picker">
             <label class="protocol-choice">
               <input type="radio" name="protocol" value="mc" checked />
@@ -86,6 +86,7 @@
               <span>Meshtastic <span class="protocol-badge" id="mt-badge">Coming soon</span></span>
             </label>
           </div>
+          <p class="hint">This only picks which instructions show below -- it does not limit which radios you can register. Run both kinds? Pick either one now and add the other afterward from the setup-check panel at the bottom of this page, any time you like.</p>
           <p class="hint" id="mt-coming-soon-hint">Meshtastic registration isn't open yet. Once it is, it works the same way MeshCore's does here -- register, then add your node ID.</p>
 
           <div id="mc-instructions" class="protocol-block">
@@ -110,7 +111,11 @@
         </li>
 
         <li>
-          <p class="join-flow-label">Copy your API key &mdash; it is shown once and cannot be recovered.</p>
+          <p class="join-flow-label"><strong>Copy your API key now &mdash; this is the only time it will ever be shown.</strong></p>
+          <div class="join-warning-box key-warning-box">
+            <strong>Closing or reloading this page loses it for good.</strong>
+            MeshWars stores only a one-way hash of your key, never the key itself, so there is no way for anyone, including an admin, to look it back up. The only fix for a lost key is a brand new one from an admin, which retires this one. Copy it somewhere safe before you do anything else.
+          </div>
           <div id="key-slot" class="key-slot">
             <p class="key-slot-placeholder">Your key will appear here once you join.</p>
           </div>
@@ -282,6 +287,6 @@
 
   </main>
 
-  <script src="/static/join.js?v=20260819-2" type="module"></script>
+  <script src="/static/join.js?v=20260819-3" type="module"></script>
 </body>
 </html>
