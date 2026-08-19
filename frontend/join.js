@@ -112,6 +112,8 @@ function setupProtocolToggle() {
   const mtBlock = document.getElementById('mt-instructions');
   const workingMc = document.getElementById('working-check-mc');
   const workingMt = document.getElementById('working-check-mt');
+  const statusHintMc = document.getElementById('status-hint-mc');
+  const statusHintMt = document.getElementById('status-hint-mt');
   const stepsMc = document.querySelectorAll('.proto-step-mc');
   const stepsMt = document.querySelectorAll('.proto-step-mt');
   function apply() {
@@ -121,6 +123,8 @@ function setupProtocolToggle() {
     mtBlock.hidden = value !== 'mt';
     if (workingMc) workingMc.hidden = value !== 'mc';
     if (workingMt) workingMt.hidden = value !== 'mt';
+    if (statusHintMc) statusHintMc.hidden = value !== 'mc';
+    if (statusHintMt) statusHintMt.hidden = value !== 'mt';
     stepsMc.forEach((li) => { li.hidden = value !== 'mc'; });
     stepsMt.forEach((li) => { li.hidden = value !== 'mt'; });
   }

@@ -221,7 +221,14 @@
 
     <section id="status-check-panel" class="join-panel status-check-panel">
       <div class="join-panel-title">Already registered? Check your setup</div>
-      <p class="hint">Paste your API key to see whether MeshWars is receiving anything from your app.</p>
+
+      <!-- Protocol-aware, same toggle as the join-flow steps above
+           (join.js's setupProtocolToggle()) -- MeshCore's app pushes to
+           us, so "receiving from your app" is honest for it, but nothing
+           is ever sent to us from a Meshtastic node; we pull from
+           meshview instead, so that wording would be false for it. -->
+      <p id="status-hint-mc" class="hint">Paste your API key to see whether MeshWars is receiving anything from your app.</p>
+      <p id="status-hint-mt" class="hint" hidden>Paste your API key to see what MeshWars has picked up from meshview for your node — nothing is sent to us directly.</p>
 
       <form id="status-form" novalidate autocomplete="off">
         <div id="status-error" class="join-error" role="alert" hidden></div>
@@ -275,6 +282,6 @@
 
   </main>
 
-  <script src="/static/join.js?v=20260819" type="module"></script>
+  <script src="/static/join.js?v=20260819-2" type="module"></script>
 </body>
 </html>
