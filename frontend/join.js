@@ -83,6 +83,15 @@ function displayNodeRef(protocol, nodeRef) {
 
 let selectedTeam = null;
 
+// The full last-known /api/mc/status response for the currently
+// checked-out key, kept around so the radios list and the status
+// panel above it (name/team/MeshCore diagnosis/Meshtastic note/"no
+// radios yet" line) can never drift apart -- see applyRadiosUpdate()
+// below. Both panels render from this ONE object; there is no second,
+// independent notion of "what radios does this player have" anywhere
+// on the page.
+let lastStatusData = null;
+
 function showError(message) {
   const el = document.getElementById('join-error');
   el.textContent = message;
@@ -402,6 +411,12 @@ function buildLabel(text) {
 // commit/report for the follow-up it needs (a protocol-aware status
 // route) before real Meshtastic diagnostics can show here.
 function renderStatusResult(data) {
+  // Cache the full response -- applyRadiosUpdate() below reuses it (with
+  // just .radios swapped in) so an add/remove never has to render the
+  // radios list from a different, narrower object than the diagnostic
+  // text sitting above it.
+  lastStatusData = data;
+
   const panel = document.getElementById('status-result');
   panel.replaceChildren();
   panel.hidden = false;
@@ -477,6 +492,36 @@ function renderStatusResult(data) {
   clearRadiosError();
   renderRadiosList(data.radios);
   document.getElementById('status-radios').hidden = false;
+}
+
+// Every add/remove call (POST/DELETE /api/nodes) returns only
+// {radios, added} -- not the full name/team/diagnosis/counters shape
+// /api/mc/status returns -- so it used to just re-render the radios
+// list on its own, leaving whatever renderStatusResult() had already
+// written above it (in particular "You have no radios registered yet")
+// exactly as it was at the last full check. That text is only true at
+// the moment it's written; the instant an add/remove call succeeds it
+// can go stale while the radios list right below it shows otherwise --
+// two lines on the same panel disagreeing about the same fact. Nothing
+// else in data.diagnosis/data.today/etc. changes just because a
+// binding was added or removed (that only moves on real ingest
+// activity, which is what checking status again is for), so the fix
+// is not a second network round trip -- it's re-running the exact same
+// renderStatusResult() the initial check used, against the cached
+// response with only .radios swapped for the fresher array this call
+// just returned. hasMc/hasMt, the "no radios yet" line, and the
+// MeshCore/Meshtastic blocks all get recomputed from that single
+// object every time, so they can never point in different directions
+// again.
+function applyRadiosUpdate(radios) {
+  if (!lastStatusData) {
+    // Defensive only -- status-radios (and therefore this code path)
+    // is never shown before a successful status check has already run
+    // renderStatusResult() at least once.
+    renderRadiosList(radios);
+    return;
+  }
+  renderStatusResult(Object.assign({}, lastStatusData, { radios }));
 }
 
 // ---- Radio management (GET/POST/DELETE /api/nodes) -----------------------
@@ -586,7 +631,7 @@ async function handleRemoveRadio(protocol, nodeRef, button) {
     let data = null;
     try { data = await res.json(); } catch (err) { data = null; }
     if (handleRadiosApiError(res, data)) return;
-    renderRadiosList(data.radios);
+    applyRadiosUpdate(data.radios);
   } catch (err) {
     showRadiosError('Could not reach the server. Check your connection and try again.');
   } finally {
@@ -623,7 +668,7 @@ async function handleAddRadioSubmit(e) {
     let data = null;
     try { data = await res.json(); } catch (err) { data = null; }
     if (handleRadiosApiError(res, data)) return;
-    renderRadiosList(data.radios);
+    applyRadiosUpdate(data.radios);
     nodeRefInput.value = '';
   } catch (err) {
     showRadiosError('Could not reach the server. Check your connection and try again.');
