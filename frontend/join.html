@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/join.css?v=20260819-3" />
+  <link rel="stylesheet" href="/static/join.css?v=20260820-1" />
 </head>
 <body>
 
@@ -91,15 +91,86 @@
 
           <div id="mc-instructions" class="protocol-block">
             <p>This does NOT replace MeshMapper. Your coverage data, points and leaderboard standing there are unaffected. MeshWars receives a copy.</p>
+
+            <!-- Node picker: searches the SAME public directory
+                 (GET /api/checkin/mc/nodes) app/checkin.py's identity
+                 bridge already resolves check-ins against, so picking a
+                 node here is picking the exact contact a net check-in
+                 would already be matched to -- not a second, separate
+                 idea of "your node." MeshCore radios normally self-bind
+                 from a wardriving ping's contact key and never needed a
+                 field here at all; this exists only so a player who
+                 wants their pick recorded up front can do that, before
+                 their first wardrive -- see join.js's handleJoinClick()
+                 for how a picked/typed value here gets bound (a follow-up
+                 POST /api/nodes call using the key /api/join just
+                 issued, since /api/join itself never accepted an mc
+                 node_ref and still doesn't). Markup shared with the
+                 Meshtastic picker below -- see join.js's
+                 createNodePicker(). -->
+            <div class="node-picker" id="mc-node-picker" data-protocol="mc">
+              <div class="node-picker-search" id="mc-node-picker-search">
+                <label class="join-field">
+                  <span>Find your node (optional)</span>
+                  <input type="text" id="f-mc-node-search" placeholder="Type a name to search" autocomplete="off" />
+                </label>
+                <p class="hint">Matched against the <a href="https://mwmesh.com/" target="_blank" rel="noopener noreferrer">mwmesh.com</a> directory this board already uses to resolve check-ins. Don't see your node? <button type="button" class="link-btn" id="mc-node-manual-link">Enter its ID by hand instead.</button></p>
+                <ul class="node-picker-results" id="mc-node-picker-results" hidden></ul>
+                <p class="hint node-picker-status" id="mc-node-picker-status" hidden></p>
+              </div>
+              <div class="node-picker-selected" id="mc-node-picker-selected" hidden>
+                <div class="node-picker-selected-text">
+                  <span class="node-picker-selected-name" id="mc-node-picker-selected-name"></span>
+                  <span class="node-picker-selected-ref" id="mc-node-picker-selected-ref"></span>
+                </div>
+                <button type="button" class="node-picker-change-btn" id="mc-node-picker-change">Change</button>
+              </div>
+              <div class="node-picker-manual" id="mc-node-picker-manual" hidden>
+                <label class="join-field">
+                  <span>Node ID</span>
+                  <input type="text" id="f-mc-node-ref" placeholder="cddb2304" autocomplete="off" />
+                </label>
+                <p class="hint">Looks like <code>cddb2304</code>. <button type="button" class="link-btn" id="mc-node-search-link">Search instead.</button></p>
+              </div>
+            </div>
+            <p class="hint">Optional -- you can register with no node picked at all and add one (or several) afterward from the setup-check panel further down this page, or just start a wardriving session and let it self-bind on first contact.</p>
           </div>
 
           <div id="mt-instructions" class="protocol-block" hidden>
-            <label class="join-field">
-              <span>Node ID</span>
-              <input type="text" id="f-node-ref" placeholder="!a1b2c3d4" autocomplete="off" />
-            </label>
-            <p class="hint">Looks like <code>!a1b2c3d4</code>.</p>
-            <p>Optional here -- you can register with no radio at all and add this (or several) afterward from the setup-check panel at the bottom of this page. See the steps below for the radio settings that make sure MeshWars can actually see you.</p>
+            <div class="node-picker" id="mt-node-picker" data-protocol="mt">
+              <div class="node-picker-search" id="mt-node-picker-search">
+                <label class="join-field">
+                  <span>Find your node (optional)</span>
+                  <input type="text" id="f-mt-node-search" placeholder="Type a name to search" autocomplete="off" />
+                </label>
+                <p class="hint">Don't see your node? <button type="button" class="link-btn" id="mt-node-manual-link">Enter its ID by hand instead.</button></p>
+                <ul class="node-picker-results" id="mt-node-picker-results" hidden></ul>
+                <p class="hint node-picker-status" id="mt-node-picker-status" hidden></p>
+              </div>
+              <div class="node-picker-selected" id="mt-node-picker-selected" hidden>
+                <div class="node-picker-selected-text">
+                  <span class="node-picker-selected-name" id="mt-node-picker-selected-name"></span>
+                  <span class="node-picker-selected-ref" id="mt-node-picker-selected-ref"></span>
+                </div>
+                <button type="button" class="node-picker-change-btn" id="mt-node-picker-change">Change</button>
+              </div>
+              <div class="node-picker-manual" id="mt-node-picker-manual" hidden>
+                <label class="join-field">
+                  <span>Node ID</span>
+                  <input type="text" id="f-mt-node-ref" placeholder="!a1b2c3d4" autocomplete="off" />
+                </label>
+                <!-- The "find it in the app" guidance used to be its own
+                     later step (a person hit the Node ID field here
+                     before ever being told where a node ID comes from,
+                     three steps too early) -- folded in here instead,
+                     right where someone who chose manual entry actually
+                     needs it. Someone using the picker above never sees
+                     this at all, since they never have to go looking for
+                     a hex ID in the app in the first place. -->
+                <p class="hint">Looks like <code>!a1b2c3d4</code> &mdash; find it in the Meshtastic app. <button type="button" class="link-btn" id="mt-node-search-link">Search instead.</button></p>
+              </div>
+            </div>
+            <p class="hint">Optional here -- you can register with no radio at all and add this (or several) afterward from the setup-check panel further down this page. See the steps below for the radio settings that make sure MeshWars can actually see you.</p>
           </div>
         </li>
 
@@ -108,10 +179,29 @@
           <div id="join-error" class="join-error" role="alert" hidden></div>
           <button type="button" id="join-submit">Join</button>
           <p id="join-success" class="join-success" hidden></p>
+          <!-- Only ever shown for a MeshCore registration that had a
+               node picked or typed in above -- /api/join itself has no
+               mc node_ref field to fail on, so this is specifically the
+               follow-up POST /api/nodes call (see join.js's
+               handleJoinClick()) coming back with something other than
+               success. Registration itself already succeeded by the
+               time this can appear -- this never blocks or hides the
+               key below, it just says the pick didn't take and points
+               at where to retry it. -->
+          <div id="join-node-warning" class="join-warning-box" role="alert" hidden></div>
         </li>
 
         <li>
           <p class="join-flow-label"><strong>Copy your API key now &mdash; this is the only time it will ever be shown.</strong></p>
+          <!-- Registration itself finished the moment Join succeeded
+               above (that includes binding a picked node, on either
+               protocol -- see join.js's handleJoinClick()) -- nothing
+               past this point is required to complete anything. This
+               key is for RETURNING later: adding or changing radios, or
+               checking on things, both in the setup-check panel further
+               down this page. Said plainly here so nobody reads "copy
+               it now" as "you still need this to finish signing up." -->
+          <p class="hint">You're already registered &mdash; this key is only for coming back later, to add or change radios or check your setup.</p>
           <div class="join-warning-box key-warning-box">
             <strong>Closing or reloading this page loses it for good.</strong>
             MeshWars stores only a one-way hash of your key, never the key itself, so there is no way for anyone, including an admin, to look it back up. The only fix for a lost key is a brand new one from an admin, which retires this one. Copy it somewhere safe before you do anything else.
@@ -174,18 +264,27 @@
           <p class="join-flow-label">Start a wardriving session &mdash; nothing is sent without one.</p>
         </li>
 
+        <!-- No link to #status-check-panel here -- nothing in this
+             numbered flow sends anyone to the bottom of the page.
+             Adding a second radio later is real, but it's a plain
+             mention, not a step: the panel there is described, never
+             jumped to, mid-signup. -->
         <li class="proto-step-mc">
-          <p class="join-flow-label">Carrying a second radio, MeshCore or Meshtastic? Add it any time from the panel below (<a href="#status-check-panel">Check your setup</a>) &mdash; that panel is also where you go to add or remove radios later, not only to check on things.</p>
+          <p class="join-flow-label">Carrying a second radio, MeshCore or Meshtastic? The setup-check panel further down this page is also where you go to add or remove radios later, any time, not only to check on things.</p>
         </li>
 
-        <li class="proto-step-mt" hidden>
-          <p class="join-flow-label">Find your node ID in the Meshtastic app &mdash; it looks like <code>!a1b2c3d4</code>.</p>
-        </li>
-
-        <li class="proto-step-mt" hidden>
-          <p class="join-flow-label">Paste your key into the box at the bottom of this page (under <a href="#status-check-panel">Check your setup</a>) and add that node ID. You can add as many radios as you like, any time.</p>
-        </li>
-
+        <!-- The Meshtastic flow used to ask for a node ID at the
+             protocol step above (step 4) without ever explaining where
+             one comes from until a later step -- three steps too late
+             for the field that needed it. That guidance now lives
+             directly on the manual-entry fallback inside step 4's node
+             picker (see #mt-node-picker-manual above), which is also
+             the only path where a person still needs to go find a hex
+             ID themselves; the picker path never sends anyone looking.
+             Nothing stands here to replace it, and the "add a radio
+             later" note lives in step 4's own hint text rather than as
+             a separate step here -- same reasoning as the MeshCore step
+             just above: real information, not a numbered step. -->
         <li class="proto-step-mt" hidden>
           <p class="join-flow-label">In the Meshtastic app, under Radio Configuration &rarr; LoRa, turn on <strong>OK to MQTT</strong>. Without it no gateway will forward your packets and MeshWars will never see you.</p>
         </li>
@@ -202,10 +301,6 @@
         <li class="proto-step-mt" hidden>
           <!-- Owner TODO: confirm the FREQ51 wording/gateway name is still correct. -->
           <p class="join-flow-label">Make sure you are on FREQ51, so a gateway that feeds meshview can actually hear you.</p>
-        </li>
-
-        <li class="proto-step-mt" hidden>
-          <p class="join-flow-label">Carrying a second radio, Meshtastic or MeshCore? Add it any time from the panel below (<a href="#status-check-panel">Check your setup</a>) &mdash; that panel is also where you go to add or remove radios later, not only to check on things.</p>
         </li>
 
       </ol>
@@ -292,6 +387,39 @@
           </label>
           <button type="submit" id="add-radio-submit">Add radio</button>
         </form>
+
+        <!-- MeshCore check-in fallback name -- last-resort, key-authenticated
+             (GET/POST/DELETE /api/checkin/name, app/checkin_api.py) for a
+             player whose public key isn't in the mwmesh.com directory
+             app/checkin.py's identity bridge checks first (true for
+             roughly 4 in 10 of today's bound MeshCore contacts, per that
+             module's own docstring) -- without it, THOSE players' net
+             check-ins can't be resolved from their contact at all.
+             Whether a player's contact resolves fine has nothing to do
+             with whether they have a MeshCore radio registered at all, but
+             this control is useless to show before that -- join.js's
+             renderStatusResult() only unhides it once the status check
+             confirms hasMc, and native <details> keeps it collapsed even
+             then: this is an exception path, not a normal step, and
+             someone whose contact already resolves should never feel
+             steered toward setting one. -->
+        <details id="checkin-name-section" class="checkin-name-section" hidden>
+          <summary>Advanced: MeshCore check-in name isn't matching?</summary>
+          <p class="hint">Most players never need this. It only matters if your net check-ins aren't being credited because your radio's public key isn't yet in the <a href="https://mwmesh.com/" target="_blank" rel="noopener noreferrer">mwmesh.com</a> directory MeshWars checks first. If your contact already resolves there, setting a name here does nothing for you.</p>
+          <p class="hint">Type the exact name your radio posts under in the weekly-net channel (matching ignores case, nothing else).</p>
+          <div id="checkin-name-current" class="checkin-name-current" hidden>
+            <span id="checkin-name-current-text"></span>
+            <button type="button" id="checkin-name-remove">Remove</button>
+          </div>
+          <div id="checkin-name-error" class="join-error" role="alert" hidden></div>
+          <form id="checkin-name-form" class="checkin-name-form" novalidate autocomplete="off">
+            <label class="join-field">
+              <span>Check-in sender name</span>
+              <input type="text" id="f-checkin-name" autocomplete="off" />
+            </label>
+            <button type="submit" id="checkin-name-submit">Save</button>
+          </form>
+        </details>
       </div>
     </section>
 
@@ -302,6 +430,6 @@
 
   </main>
 
-  <script src="/static/join.js?v=20260819-6" type="module"></script>
+  <script src="/static/join.js?v=20260820-1" type="module"></script>
 </body>
 </html>
