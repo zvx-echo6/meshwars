@@ -108,6 +108,7 @@
 
     .admin-player-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       margin-top: 8px;
     }
@@ -262,6 +263,69 @@
       padding: 4px 10px;
     }
 
+    /* Issue extra key is the additive fix ("they lost it" -- every key
+       they already hold, including whatever their MeshMapper has saved,
+       keeps working). Green outline, same visual family as the
+       admin-badge-ok green -- deliberately the calmer of the two key
+       actions so it reads as "safe" next to Revoke & reissue's red. */
+    .admin-btn-safe {
+      color: #7fdc7f;
+      border-color: #2e5e2e;
+    }
+    .admin-btn-safe:hover {
+      background: #16241a;
+    }
+
+    /* Radio bindings, same row shape as .admin-key-row above (label
+       left, action button pinned right) -- a distinct class rather than
+       reusing admin-key-row, since a key row and a radio row will keep
+       diverging (radios carry a protocol, keys carry a revoked state)
+       even though today they happen to look identical. */
+    .admin-radios {
+      margin: 8px 0;
+    }
+    .admin-radio-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: #aaa;
+      padding: 4px 0;
+      border-top: 1px solid #222;
+    }
+    .admin-radio-row:first-child {
+      border-top: none;
+    }
+    .admin-radio-row .admin-btn {
+      margin-left: auto;
+      padding: 4px 10px;
+    }
+
+    /* Add-radio is its own small inline form per player card, not a
+       modal or a separate page -- the owner should be able to fix a
+       stuck player's radio without leaving the player list. */
+    .admin-add-radio-form {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .admin-add-radio-form input[type="text"],
+    .admin-add-radio-form select {
+      background: #0a0a0a;
+      color: #ddd;
+      border: 1px solid #333;
+      border-radius: 4px;
+      padding: 6px 8px;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    .admin-add-radio-form input[type="text"] {
+      width: 130px;
+    }
+
     .admin-empty {
       font-size: 13px;
       color: #888;
@@ -275,7 +339,7 @@
 
     <header class="admin-header">
       <h1>MeshWars Admin</h1>
-      <p class="admin-tagline">Revoke keys and disable players.</p>
+      <p class="admin-tagline">Revoke keys, disable players, and add or remove radios &mdash; all without needing a player's key.</p>
     </header>
 
     <section class="admin-panel">
@@ -462,10 +526,31 @@ function renderReissueResult(displayName, key, revokedCount) {
   container.style.display = 'block';
 }
 
+// Same one-time-display box as renderReissueResult, different copy --
+// this key is ADDITIVE (see /api/admin/player/issue_key's docstring in
+// app/admin_api.py), so unlike reissue's result there is no "N prior
+// key(s) revoked" line: nothing here was ever revoked, on purpose.
+function renderIssueKeyResult(displayName, key) {
+  var container = els.reissueResult;
+  container.replaceChildren();
+  container.appendChild(el('strong', {
+    text: 'Additional key for ' + displayName + ' -- this is the only time it will be shown.',
+  }));
+  container.appendChild(el('span', { className: 'admin-reissue-key', text: key }));
+  container.appendChild(el('div', {
+    text: 'Nothing else was touched -- every key this player already holds, including '
+      + 'whatever is saved in their MeshMapper config, keeps working.',
+  }));
+  container.style.display = 'block';
+}
+
 async function reissuePlayer(player, btn) {
   var typed = window.prompt(
-    'Type "' + player.display_name + '" exactly to reissue this player\'s key. ' +
-    'Every key they currently hold stops working the moment the new one is issued.'
+    'Type "' + player.display_name + '" exactly to revoke and reissue this player\'s key. ' +
+    'Use this ONLY if someone else has their key -- every key they currently hold stops ' +
+    'working the moment the new one is issued, including whatever is saved in their ' +
+    'MeshMapper config. If they just lost track of their own key, use "Issue extra key" ' +
+    'instead -- it does not break anything they already have.'
   );
   if (typed === null) return; // cancelled
   if (typed.length === 0) return; // nothing entered, do not send the request
@@ -482,6 +567,29 @@ async function reissuePlayer(player, btn) {
     await loadPlayers();
   } catch (e) {
     setStatus('Reissue failed: ' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
+// The additive counterpart to reissue above -- "they lost it" rather
+// than "someone else has it" (see /api/admin/player/issue_key's
+// docstring in app/admin_api.py). No confirmation prompt: unlike
+// reissue/delete, a wrong player_id here can't take anything away from
+// anyone, only hand a real player a spare working key they didn't ask
+// for -- the same reasoning togglePlayer() above uses to skip a prompt.
+async function issueKeyForPlayer(player, btn) {
+  btn.disabled = true;
+  try {
+    var result = await apiCall('/api/admin/player/issue_key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_id: player.player_id }),
+    });
+    setStatus('Issued an additional key for ' + player.display_name, false);
+    renderIssueKeyResult(player.display_name, result.key);
+    await loadPlayers();
+  } catch (e) {
+    setStatus('Issue failed: ' + e.message, true);
     btn.disabled = false;
   }
 }
@@ -510,6 +618,115 @@ async function deletePlayer(player, btn) {
   }
 }
 
+// Destructive -- see /api/admin/node/remove's docstring in
+// app/admin_api.py -- same player_id + display_name confirmation guard
+// as reissue/delete, for the same reason: this takes something away
+// from whoever holds player_id, and a stale/mistyped one must not be
+// able to do that silently.
+async function removeNode(player, radio, btn) {
+  var typed = window.prompt(
+    'Type "' + player.display_name + '" exactly to remove this radio (' +
+    radio.protocol + ':' + displayNodeRef(radio.protocol, radio.node_ref) +
+    ') from ' + player.display_name + '. Their key and other radios are unaffected.'
+  );
+  if (typed === null) return; // cancelled
+  if (typed.length === 0) return; // nothing entered, do not send the request
+
+  btn.disabled = true;
+  try {
+    await apiCall('/api/admin/node/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        player_id: player.player_id,
+        display_name: typed,
+        protocol: radio.protocol,
+        node_ref: radio.node_ref,
+      }),
+    });
+    setStatus('Removed radio from ' + player.display_name, false);
+    await loadPlayers();
+  } catch (e) {
+    setStatus('Remove radio failed: ' + e.message, true);
+    btn.disabled = false;
+  }
+}
+
+function renderRadio(player, radio) {
+  var row = el('div', { className: 'admin-radio-row' });
+  row.appendChild(el('span', {
+    className: 'admin-key-hash',
+    text: radio.protocol + ':' + displayNodeRef(radio.protocol, radio.node_ref),
+  }));
+  row.appendChild(el('span', { text: 'bound ' + fmtTs(radio.bound_at) }));
+  var btn = el('button', { className: 'admin-btn admin-btn-danger', text: 'Remove' });
+  btn.type = 'button';
+  btn.addEventListener('click', function () { removeNode(player, radio, btn); });
+  row.appendChild(btn);
+  return row;
+}
+
+// NOT destructive -- see /api/admin/node/add's docstring in
+// app/admin_api.py -- so no confirmation prompt, unlike removeNode()
+// above. Worst case for a typo here is a real radio bound to the wrong
+// (but real) player, which is visible immediately in that player's
+// card and undone with Remove right above.
+async function addNode(player, nodeRefInput, protocolSelect, btn) {
+  var nodeRef = nodeRefInput.value.trim();
+  if (!nodeRef) {
+    setStatus('Enter a node ID first.', true);
+    return;
+  }
+  btn.disabled = true;
+  try {
+    await apiCall('/api/admin/node/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        player_id: player.player_id,
+        protocol: protocolSelect.value,
+        node_ref: nodeRef,
+      }),
+    });
+    setStatus('Added radio to ' + player.display_name, false);
+    nodeRefInput.value = '';
+    await loadPlayers();
+  } catch (e) {
+    setStatus('Add radio failed: ' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// One small inline form per player card, not a modal or a separate
+// page -- this is meant for the exact moment the operator is already
+// looking at a stuck player's card.
+function buildAddRadioForm(player) {
+  var form = el('div', { className: 'admin-add-radio-form' });
+
+  var nodeRefInput = document.createElement('input');
+  nodeRefInput.type = 'text';
+  nodeRefInput.placeholder = '!a1b2c3d4 or a1b2c3d4';
+  nodeRefInput.autocomplete = 'off';
+
+  var protocolSelect = document.createElement('select');
+  [['mt', 'Meshtastic'], ['mc', 'MeshCore']].forEach(function (pair) {
+    var opt = document.createElement('option');
+    opt.value = pair[0];
+    opt.textContent = pair[1];
+    protocolSelect.appendChild(opt);
+  });
+
+  var addBtn = el('button', { className: 'admin-btn', text: 'Add radio' });
+  addBtn.type = 'button';
+  addBtn.addEventListener('click', function () { addNode(player, nodeRefInput, protocolSelect, addBtn); });
+
+  form.appendChild(nodeRefInput);
+  form.appendChild(protocolSelect);
+  form.appendChild(addBtn);
+  return form;
+}
+
 function renderPlayer(player) {
   var card = el('div', { className: 'admin-player-card' });
 
@@ -523,15 +740,14 @@ function renderPlayer(player) {
 
   card.appendChild(el('div', { className: 'admin-player-meta', text: 'joined ' + fmtTs(player.created_at) }));
 
-  if (player.radios && player.radios.length) {
-    var radios = el('div', { className: 'admin-player-meta' });
-    radios.appendChild(document.createTextNode('radios: '));
-    player.radios.forEach(function (r, i) {
-      if (i > 0) radios.appendChild(document.createTextNode(', '));
-      radios.appendChild(el('span', { className: 'admin-key-hash', text: r.protocol + ':' + displayNodeRef(r.protocol, r.node_ref) }));
-    });
-    card.appendChild(radios);
+  var radiosWrap = el('div', { className: 'admin-radios' });
+  if (!player.radios || player.radios.length === 0) {
+    radiosWrap.appendChild(el('div', { className: 'admin-player-meta', text: 'no radios' }));
+  } else {
+    player.radios.forEach(function (r) { radiosWrap.appendChild(renderRadio(player, r)); });
   }
+  radiosWrap.appendChild(buildAddRadioForm(player));
+  card.appendChild(radiosWrap);
 
   var keysWrap = el('div', { className: 'admin-keys' });
   if (!player.keys || player.keys.length === 0) {
@@ -548,9 +764,23 @@ function renderPlayer(player) {
   toggleBtn.type = 'button';
   toggleBtn.addEventListener('click', function () { togglePlayer(player, toggleBtn); });
 
+  // Two distinct fixes for "player is locked out of their key," styled
+  // and worded to be told apart at a glance -- see /api/admin/player/
+  // issue_key's and /api/admin/player/reissue's docstrings in
+  // app/admin_api.py for the full reasoning. Issue extra key is the
+  // calm green one for "they lost it" (nothing they hold stops
+  // working); Revoke & reissue is the red one for "someone else has
+  // it" (everything they hold stops working the instant this runs).
+  var issueKeyBtn = el('button', {
+    className: 'admin-btn admin-btn-safe',
+    text: 'Issue extra key (they lost it)',
+  });
+  issueKeyBtn.type = 'button';
+  issueKeyBtn.addEventListener('click', function () { issueKeyForPlayer(player, issueKeyBtn); });
+
   var reissueBtn = el('button', {
     className: 'admin-btn admin-btn-danger',
-    text: 'Reissue key',
+    text: 'Revoke & reissue (someone else has it)',
   });
   reissueBtn.type = 'button';
   reissueBtn.addEventListener('click', function () { reissuePlayer(player, reissueBtn); });
@@ -564,6 +794,7 @@ function renderPlayer(player) {
 
   var actions = el('div', { className: 'admin-player-actions' });
   actions.appendChild(toggleBtn);
+  actions.appendChild(issueKeyBtn);
   actions.appendChild(reissueBtn);
   actions.appendChild(deleteBtn);
   card.appendChild(actions);

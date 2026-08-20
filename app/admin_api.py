@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from .config import settings
 from .db import connect
 from .mc_ingest import hash_secret
+from .node_ref import normalize_node_ref
 
 log = logging.getLogger("admin_api")
 
@@ -38,6 +39,11 @@ _TOKEN_HEADER = "X-Admin-Token"
 # one key by chance once there are enough players -- refuse it outright
 # rather than resolving an ambiguous match by guessing.
 _MIN_PREFIX_LEN = 4
+
+# Same two protocol values app/nodes_api.py and app/join_api.py accept --
+# duplicated here rather than imported, since nodes_api's is a private
+# (leading-underscore) module constant, not meant for cross-module reuse.
+_VALID_PROTOCOLS = ("mt", "mc")
 
 
 def _api_guard(request: Request) -> JSONResponse | None:
@@ -189,6 +195,219 @@ async def admin_revoke(request: Request):
         "revoked_at": now,
         "already_revoked": already_revoked,
     }
+
+
+def _player_radios(conn, player_id: int) -> list[dict]:
+    """Same shape app/nodes_api.py's _radios_out() returns. Duplicated
+    rather than imported for the same reason _VALID_PROTOCOLS above is:
+    that one is a private helper in a different module, not meant to be
+    shared across files.
+    """
+    rows = conn.execute(
+        "SELECT protocol, node_ref, bound_at FROM player_node "
+        " WHERE player_id = ? ORDER BY bound_at",
+        (player_id,),
+    ).fetchall()
+    return [
+        {"protocol": r["protocol"], "node_ref": r["node_ref"], "bound_at": r["bound_at"]}
+        for r in rows
+    ]
+
+
+@router.post("/api/admin/node/add")
+async def admin_node_add(request: Request):
+    """Bind a radio to a player with no key involved at all -- the
+    reason this branch exists. A MeshCore player's key already lives in
+    their MeshMapper config; a Meshtastic player has no such fallback.
+    Either way, the owner should be able to fix "this radio isn't
+    registered" without touching keys or asking the player for
+    anything. This does exactly what the player-facing POST /api/nodes
+    does (app/nodes_api.py's add_node()) -- same normalize_node_ref(),
+    same check-then-act conflict check -- just authenticated by the
+    admin token instead of a player's key.
+
+    NOT destructive, unlike remove right below: it only ever creates a
+    binding nobody held before, or confirms one this same player
+    already has. A wrong player_id here binds a real radio to the
+    wrong (but real) player -- visible immediately in the admin list
+    and reversible with the remove route below -- it never takes
+    anything away from anyone. So this route gets only _api_guard(),
+    not the player_id + display_name confirmation guard remove/delete/
+    reissue require.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    player_id = body.get("player_id")
+    if not isinstance(player_id, int) or isinstance(player_id, bool):
+        return JSONResponse({"error": "player_id is required"}, status_code=400)
+
+    protocol = body.get("protocol")
+    if protocol not in _VALID_PROTOCOLS:
+        return JSONResponse(
+            {"error": "protocol must be one of: " + ", ".join(_VALID_PROTOCOLS)},
+            status_code=400,
+        )
+
+    # normalize_node_ref() is the one place both protocols' writers and
+    # readers funnel through (see app/node_ref.py's module docstring) --
+    # this branch exists partly because a second, hand-rolled
+    # normalization once wrote a different format here and silently
+    # broke binding. Do not reimplement it.
+    node_ref = normalize_node_ref(body.get("node_ref"))
+    if node_ref is None:
+        return JSONResponse(
+            {"error": "node_ref is required and must be 8 hex characters, "
+                      "with or without a leading !"},
+            status_code=400,
+        )
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        player = conn.execute(
+            "SELECT player_id FROM player WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        if player is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "player not found"}, status_code=404)
+
+        # Check-then-act, same shape as app/nodes_api.py's add_node():
+        # the (protocol, node_ref) primary key on player_node would
+        # raise an IntegrityError on a cross-player conflict too, but
+        # looking first means a clear 409 instead of a raw sqlite3
+        # exception surfaced as a 500.
+        existing = conn.execute(
+            "SELECT player_id FROM player_node WHERE protocol = ? AND node_ref = ?",
+            (protocol, node_ref),
+        ).fetchone()
+        if existing is not None:
+            conn.execute("ROLLBACK")
+            if existing["player_id"] == player_id:
+                # Already bound to this same player -- not an error,
+                # same reasoning as add_node(): a retried request should
+                # just succeed.
+                radios = _player_radios(conn, player_id)
+                return JSONResponse({"radios": radios, "added": False}, status_code=200)
+            return JSONResponse(
+                {"error": "that node is already registered to another player"},
+                status_code=409,
+            )
+
+        conn.execute(
+            "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) "
+            "VALUES (?, ?, ?, ?)",
+            (protocol, node_ref, player_id, now),
+        )
+        conn.execute("COMMIT")
+        radios = _player_radios(conn, player_id)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    # No ingestor.invalidate_*() call: those exist only to flush a
+    # cached API-key lookup, and this route never touches api_key at
+    # all -- player_node lookups (see app/mc_ingest.py's ingest path
+    # and app/ingest.py's registered-node map) are never cached, so
+    # there is nothing stale for this to fix.
+    log.info("admin: bound %s:%s to player %d", protocol, node_ref, player_id)
+    return JSONResponse({"radios": radios, "added": True}, status_code=201)
+
+
+@router.post("/api/admin/node/remove")
+async def admin_node_remove(request: Request):
+    """Unbind a radio from a player.
+
+    Destructive -- it silently takes away MeshWars' ability to
+    recognize this specific radio as this player's, exactly the kind
+    of consequence delete/reissue already guard against. Same
+    player_id + matching display_name confirmation guard as those two,
+    for the same reason: a stale or mistyped player_id here would take
+    a radio away from someone who never asked for that.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    player_id = body.get("player_id")
+    display_name = body.get("display_name")
+    if not isinstance(player_id, int) or isinstance(player_id, bool):
+        return JSONResponse({"error": "player_id is required"}, status_code=400)
+    if not isinstance(display_name, str) or not display_name:
+        return JSONResponse({"error": "display_name is required"}, status_code=400)
+
+    protocol = body.get("protocol")
+    if protocol not in _VALID_PROTOCOLS:
+        return JSONResponse(
+            {"error": "protocol must be one of: " + ", ".join(_VALID_PROTOCOLS)},
+            status_code=400,
+        )
+
+    node_ref = normalize_node_ref(body.get("node_ref"))
+    if node_ref is None:
+        return JSONResponse(
+            {"error": "node_ref is required and must be 8 hex characters, "
+                      "with or without a leading !"},
+            status_code=400,
+        )
+
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT display_name FROM player WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "player not found"}, status_code=404)
+        if row["display_name"] != display_name:
+            conn.execute("ROLLBACK")
+            return JSONResponse(
+                {"error": "display name does not match"}, status_code=409
+            )
+
+        # Scoped to player_id in the WHERE clause itself, same as the
+        # player-facing DELETE /api/nodes/{node_ref} -- a node_ref that
+        # exists but belongs to someone else and one that doesn't exist
+        # at all both delete zero rows here.
+        cur = conn.execute(
+            "DELETE FROM player_node WHERE protocol = ? AND node_ref = ? AND player_id = ?",
+            (protocol, node_ref, player_id),
+        )
+        removed = cur.rowcount > 0
+        conn.execute("COMMIT")
+        radios = _player_radios(conn, player_id)
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    # Same reasoning as add above: nothing about player_node is ever
+    # cached, so there is no ingestor.invalidate_*() call to make here.
+    log.info(
+        "admin: unbound %s:%s from player %d (%s), removed=%s",
+        protocol, node_ref, player_id, display_name, removed,
+    )
+    return JSONResponse({"radios": radios, "removed": removed}, status_code=200)
 
 
 async def _set_player_disabled(request: Request, disable: bool):
@@ -372,6 +591,91 @@ async def admin_player_delete(request: Request):
         "player_id": player_id,
         "display_name": display_name,
         "counts": counts,
+    }
+
+
+@router.post("/api/admin/player/issue_key")
+async def admin_player_issue_key(request: Request):
+    """Mint an ADDITIONAL key for a player. Does not touch any key they
+    already hold -- api_key has never enforced one-key-per-player (see
+    /api/admin/player/reissue's docstring just below, "nothing here has
+    ever prevented that"), so this simply exercises that: insert a new
+    row, leave every existing row exactly as it was.
+
+    This is the fix for "I lost my key" -- as distinct from "someone
+    else has my key", which is what /api/admin/player/reissue right
+    below is for. Use THIS route when the player's own setup (their
+    MeshMapper config, in particular) is still fine and must keep
+    working untouched; reach for reissue only when the old key has to
+    stop working immediately. Reaching for reissue here instead would
+    silently break a MeshCore player's MeshMapper the next time it
+    sends a batch with the now-revoked key -- exactly the outage this
+    branch exists to stop causing. The admin UI labels the two
+    differently and keeps this one visually lighter for the same
+    reason: a tired operator reaching for the wrong one at the wrong
+    moment causes an outage for that player.
+
+    No display_name confirmation guard, unlike delete/reissue: those
+    guard against a stale/mistyped player_id taking something away
+    from the wrong person. This route can't do that -- the worst case
+    for a wrong player_id is a real player getting an extra working
+    key they didn't ask for, nobody loses access -- so it gets the
+    same light guard disable/enable use (player_id only), not the
+    heavier one delete/reissue need.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    player_id = body.get("player_id") if isinstance(body, dict) else None
+    if not isinstance(player_id, int) or isinstance(player_id, bool):
+        return JSONResponse({"error": "player_id is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT display_name FROM player WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "player not found"}, status_code=404)
+
+        raw_key = secrets.token_urlsafe(32)
+        conn.execute(
+            "INSERT INTO api_key(key_hash, player_id, issued_at) VALUES (?, ?, ?)",
+            (hash_secret(raw_key), player_id, now),
+        )
+        conn.execute("COMMIT")
+        display_name = row["display_name"]
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    # Deliberately no ingestor.invalidate_*() call here, unlike revoke/
+    # disable/delete/reissue below. Those all exist to force an auth
+    # cache entry for a key that just became invalid to stop being
+    # honored before its TTL expires -- this route never invalidates
+    # anything, so there is no stale cache entry for it to fix. A brand
+    # new key was never looked up before (nothing has cached a result
+    # for it, positive or negative), so it authenticates correctly the
+    # very first time it's used with no help needed here. Do not add an
+    # invalidate call to "match" the other routes below -- it would be
+    # a no-op dressed up as symmetry, and its absence is intentional.
+    log.info("admin: issued additional key for player %d (%s)", player_id, display_name)
+    return {
+        "issued": True,
+        "player_id": player_id,
+        "display_name": display_name,
+        "key": raw_key,
+        "issued_at": now,
     }
 
 
