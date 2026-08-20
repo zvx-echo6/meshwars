@@ -202,6 +202,24 @@ class Settings(BaseSettings):
     checkin_net_end_hour: int = 23
     checkin_net_timezone: str = "America/Boise"
 
+    # Lower bound on which net a check-in can be awarded for, as a local
+    # YYYY-MM-DD net date -- compared against the value net_date_for_ts()
+    # returns, never the raw message timestamp, since those two differ
+    # for a message sent late in the net window. Both check-in feeds
+    # carry history (live.mwmesh.com's weekly-net channel returns its
+    # newest 100 messages regardless of age; meshview keeps its own
+    # backlog), so the first poll after this feature goes live would
+    # otherwise retroactively award every past net still visible
+    # upstream -- for whichever players happen to be registered today,
+    # never for anyone else who was actually at those same nets. Empty
+    # is deliberately treated as "block every net" (see
+    # net_date_for_ts), not "no lower bound" -- the same contract
+    # mc_checkin_base_url and join_invite_code already use for "empty
+    # means off, never open," extended here because an unset bound must
+    # never silently become an unbounded one. Set this to the date of
+    # the first net that should actually count before relying on it.
+    checkin_net_start_date: str = ""
+
     # MeshCore weekly-net feed: a live.mwmesh.com channel-messages
     # endpoint, entirely separate from the wardriving ingest path in
     # app/mc_ingest.py. Empty disables this half of check-ins even when

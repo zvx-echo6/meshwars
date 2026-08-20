@@ -124,7 +124,8 @@ def net_date_for_ts(ts: int) -> str | None:
     window -- settings.checkin_net_weekday, from
     settings.checkin_net_start_hour through
     settings.checkin_net_end_hour:59:59, local to
-    settings.checkin_net_timezone -- otherwise None.
+    settings.checkin_net_timezone -- and on or after
+    settings.checkin_net_start_date, otherwise None.
 
     A real IANA zone via zoneinfo, not a fixed UTC offset: America/Boise
     is UTC-7 in winter and UTC-6 in summer, and a message near either
@@ -133,13 +134,29 @@ def net_date_for_ts(ts: int) -> str | None:
     that spills past local midnight into Thursday has a different
     LOCAL weekday, not just a different hour -- the weekday check above
     is what rejects it, not the hour check.
+
+    The start-date gate compares against the NET date computed here, not
+    against `ts` -- a message posted at 23:30 local on a Wednesday
+    belongs to that Wednesday's net date, which is what a start date of
+    that same Wednesday must include. Both are YYYY-MM-DD strings, so a
+    plain string comparison sorts correctly with no extra parsing.
+    checkin_net_start_date empty means block every net, never "no lower
+    bound" -- see its comment in config.py for why. This runs on every
+    message on every poll forever (both feeds hand back history on
+    every request), so it has to stay a cheap comparison with no log
+    line -- a poll finding the same handful of too-old messages, week
+    after week, is the expected steady state, not something worth a log
+    line each time.
     """
     local = datetime.fromtimestamp(ts, tz=ZoneInfo(settings.checkin_net_timezone))
     if local.weekday() != settings.checkin_net_weekday:
         return None
     if not (settings.checkin_net_start_hour <= local.hour <= settings.checkin_net_end_hour):
         return None
-    return local.date().isoformat()
+    net_date = local.date().isoformat()
+    if not settings.checkin_net_start_date or net_date < settings.checkin_net_start_date:
+        return None
+    return net_date
 
 
 def _award_checkin(

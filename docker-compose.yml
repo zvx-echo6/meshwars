@@ -32,6 +32,7 @@ services:
       MT_MAX_POINTS_PER_PING: "${MT_MAX_POINTS_PER_PING:-1.0}"
       CHECKIN_ENABLED: "${CHECKIN_ENABLED:-false}"
       CHECKIN_POINTS: "${CHECKIN_POINTS:-25.0}"
+      CHECKIN_NET_START_DATE: "${CHECKIN_NET_START_DATE:-}"
       MC_CHECKIN_BASE_URL: "${MC_CHECKIN_BASE_URL:-}"
     volumes:
       - meshwars-data:/data
