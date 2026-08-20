@@ -416,6 +416,48 @@ MIGRATIONS = [
     # clause matches nothing, so every later run is a no-op rather than
     # an error.
     "UPDATE player_node SET node_ref = lower(node_ref) WHERE node_ref <> lower(node_ref)",
+    # Canonical-form fixup, same idea as the lower() entry just above:
+    # this branch's app/node_ref.py makes bare lowercase 8-hex the
+    # canonical form for BOTH protocols. MeshCore has written bare since
+    # before that module existed, so this never touches an 'mc' row in
+    # practice -- but every Meshtastic row written by the OLD (pre-branch)
+    # join/admin code carries a literal leading "!" (matching what
+    # app/ingest.py's old _node_hex()-keyed lookup expected), and that
+    # code is exactly what production has been running. Once this branch
+    # deploys, app/ingest.py's registered-player lookup switches to
+    # _bare_node_ref() (bare, no "!"), so any row still carrying the old
+    # "!" prefix would silently stop matching -- an existing, currently-
+    # scoring node going dark on deploy day with no error anywhere. This
+    # strips that one leading "!" so every row already agrees with the
+    # new lookup before the new code ever runs a query.
+    #
+    # Collision guard: player_node's primary key is (protocol, node_ref),
+    # so if a bare row already exists for the same protocol and node --
+    # not possible today (MeshCore has only ever written bare, and every
+    # live Meshtastic row still carries its original "!"), but not
+    # provably impossible on some other deployment's data either -- a
+    # blind UPDATE would hit a PRIMARY KEY constraint violation and take
+    # the whole migration down with it. The NOT EXISTS guard below skips
+    # a row in exactly that situation instead: it is left carrying its
+    # "!" for a human to sort out, rather than this migration silently
+    # deleting or overwriting somebody's existing binding just to make
+    # itself succeed. Same reasoning the capture_log backfill just below
+    # uses to leave an ambiguous row alone rather than guess at it.
+    #
+    # Idempotent: once a row's "!" is stripped, `node_ref LIKE '!%'` no
+    # longer matches it, so a second run is a no-op for it -- and a row
+    # skipped by the collision guard stays skipped (same NOT EXISTS
+    # result) rather than erroring, on every later run too.
+    """
+    UPDATE player_node
+       SET node_ref = substr(node_ref, 2)
+     WHERE node_ref LIKE '!%'
+       AND NOT EXISTS (
+             SELECT 1 FROM player_node AS existing
+              WHERE existing.protocol = player_node.protocol
+                AND existing.node_ref = substr(player_node.node_ref, 2)
+           )
+    """,
     # Backfill: mc_tile_capture_log was never written for a square's
     # first claim (only flips were logged) until the fix above, so two
     # real captures already on the board have no log row even though
