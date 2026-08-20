@@ -134,6 +134,19 @@ class Settings(BaseSettings):
     join_rate_limit_window_seconds: int = 600
     public_host: str = "meshwars.com"   # used to build the config link
 
+    # Google Search Console site-ownership token: rendered as
+    # <meta name="google-site-verification" content="..."> in the head of
+    # every public page (see app/api.py's _inject_head/_templated_html_page)
+    # when set, and omitted entirely when empty -- an empty tag with no content is
+    # not a safe stand-in for "not verifying," so empty must mean the
+    # meta tag is absent from the page, not present with nothing in it.
+    # Same off-by-default reasoning as join_invite_code/admin_token
+    # above: a fresh install has not been claimed in Search Console and
+    # must not emit a verification tag nobody asked for. Set from Search
+    # Console's own HTML-tag verification method and requires no rebuild
+    # to take effect, just an .env edit and a restart.
+    google_site_verification: str = ""
+
     # Registering a Meshtastic node (protocol "mt") is what puts it on the
     # Meshtastic board -- a node nobody has registered is read by the
     # meshview poller and discarded, the same way an unregistered MeshCore

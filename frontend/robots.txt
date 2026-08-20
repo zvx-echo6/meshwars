@@ -1,0 +1,14 @@
+# MeshWars: public pages are open to crawl. /admin is operator-only
+# (also marked noindex,nofollow in its own <meta name="robots"> tag --
+# this is belt-and-suspenders, not a substitute for that) and /api/ is
+# machine-to-machine (ingest, join, admin, node-management endpoints),
+# neither has anything worth indexing. Same hardcoded meshwars.com the
+# pages' own og:url/canonical tags already use -- see frontend/*.html.
+User-agent: *
+Allow: /
+Allow: /about
+Allow: /join
+Disallow: /admin
+Disallow: /api/
+
+Sitemap: https://meshwars.com/sitemap.xml

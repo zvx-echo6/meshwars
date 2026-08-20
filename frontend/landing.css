@@ -524,12 +524,37 @@ body {
 .mw-nav-links a:hover { background: #262626; color: var(--mw-accent); }
 .mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
 
+/* GitHub mark: deliberately understated per the owner ("faded into the
+   background so its visible but not prominent") -- low opacity at rest,
+   full opacity on hover/focus. Lives inside .mw-nav-links (not a third
+   flex child of .mw-nav) so the existing brand/links space-between
+   layout is untouched -- it's just one more item in the links row. */
+.mw-nav-github {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  color: #999;
+  opacity: 0.35;
+  text-decoration: none;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-nav-github svg { display: block; }
+.mw-nav-github:hover,
+.mw-nav-github:focus-visible {
+  opacity: 1;
+  color: var(--mw-accent);
+}
+
 @media (max-width: 600px) {
   .mw-nav { padding: 0 8px; gap: 6px; }
   .mw-nav-brand { font-size: 12px; gap: 6px; }
   .mw-nav-crest { height: 22px; }
   .mw-nav-links { gap: 3px; }
   .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
+  .mw-nav-github { padding: 4px; }
+  .mw-nav-github svg { width: 14px; height: 14px; }
 }
 
 @media (max-width: 480px) {

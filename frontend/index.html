@@ -5,10 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0C0B0A" />
   <title>MeshWars — Live Territory Map</title>
+  <meta name="description" content="MeshWars is a live mesh map: a real-world capture-the-flag game where seven teams claim ground on Meshtastic and MeshCore mesh coverage.">
+  <link rel="canonical" href="https://meshwars.com/">
 
+  <!-- Google reads a site's search-results favicon from the home page
+       specifically, and documents it must be square and a multiple of
+       48px (48/96/144/192...) -- it is unreliable about anything smaller,
+       so the 16/32px pair below is for browser tabs only. 48x48 and
+       192x192 are already on disk (see frontend/assets/favicon/) and
+       declared here for Google; do not remove the smaller sizes, browsers
+       still use those. -->
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
   <link rel="manifest" href="/static/assets/site.webmanifest">
 
@@ -25,6 +36,29 @@
   <meta name="twitter:description" content="Watch seven teams compete for real-world territory over mesh radio, live on the map.">
   <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
 
+  <!-- Truthful and minimal: describes the game and links to the actual
+       open-source repo it runs from. No invented ratings, prices,
+       authorship, or organization -- none of those exist for this
+       project. Same content (page-specific "url") on all three public
+       pages; see frontend/about.html and frontend/join.html. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Game",
+    "name": "MeshWars",
+    "url": "https://meshwars.com/",
+    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+    "genre": ["Location-based game", "Capture the flag"],
+    "isBasedOn": {
+      "@type": "SoftwareSourceCode",
+      "name": "MeshWars",
+      "codeRepository": "https://github.com/zvx-echo6/meshwars",
+      "programmingLanguage": "Python",
+      "license": "https://opensource.org/licenses/MIT"
+    }
+  }
+  </script>
+
   <!-- Cache-busting: /static assets are served cacheable while these HTML
        pages are no-cache. Without a version string, a returning visitor can get
        fresh HTML paired with a stale cached stylesheet/script. Bump v=20260820-1 on
@@ -35,7 +69,7 @@
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
         crossorigin="anonymous" />
-  <link rel="stylesheet" href="/static/coverage.css?v=20260819" />
+  <link rel="stylesheet" href="/static/coverage.css?v=20260820-1" />
   <link rel="stylesheet" href="/static/mc.css?v=20260820-1" />
 </head>
 <body>
@@ -46,8 +80,24 @@
       <a href="/" class="active">Map</a>
       <a href="/about">About</a>
       <a href="/join">Join</a>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
     </div>
   </nav>
+
+  <!-- This page is a Leaflet map with essentially no indexable text --
+       with JavaScript off (a crawler, or a person who disabled it) this
+       is the only content anyone gets. Genuinely descriptive, not
+       cloaking: it says exactly what the page shows when JS is running.
+       See .mw-noscript in coverage.css for why it needs position:fixed
+       and a z-index above #loading-overlay's -- that overlay never
+       fades without mc.js running to add its .fade-out class. -->
+  <noscript>
+    <div class="mw-noscript">
+      <p>MeshWars is a real-world capture-the-flag game played over mesh radio. Seven teams claim roughly 300 meter map squares by reaching Meshtastic or MeshCore mesh coverage from them; this page normally shows a live map of who holds what. Enable JavaScript to see it, or read more on the <a href="/about">About page</a>.</p>
+    </div>
+  </noscript>
 
   <!-- Built once here (not by mc.js at runtime, unlike the History/Roster/
        Top modal -- this has no interactive chrome to wire up, just content

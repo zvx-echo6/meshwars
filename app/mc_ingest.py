@@ -239,13 +239,13 @@ def record_repeater_observations(
     Called for every ping that reaches this point in _process_one_ping --
     i.e. every ping that has already passed coordinate validation, the
     play-area check, the contact-key check, and the duplicate check --
-    INCLUDING pings that mc_scoring.apply_paint() will go on to reject
-    for the repaint cooldown. A cooldown means "this paint doesn't score
-    again yet," not "nothing was heard here" -- the square's audibility
-    is real evidence either way, so it must not be gated on the scoring
-    outcome. Caller already holds app.db's write lock and an open write
-    transaction on `conn`, same as mc_scoring.apply_paint -- this
-    function opens no connection and takes no lock of its own.
+    INCLUDING pings whose repeaters mc_scoring.apply_paint() will go on
+    to reject for the cooldown. A cooldown means "this repeater doesn't
+    score again yet," not "nothing was heard here" -- the square's
+    audibility is real evidence either way, so it must not be gated on
+    the scoring outcome. Caller already holds app.db's write lock and an
+    open write transaction on `conn`, same as mc_scoring.apply_paint --
+    this function opens no connection and takes no lock of its own.
 
     `entries` is whatever parse_repeaters(ping) returned for this ping --
     direct_count/heard_count below come straight from each entry's
@@ -673,11 +673,13 @@ class McIngestor:
         # Recorded for every ping that reaches this line, i.e. every ping
         # that has passed coordinate validation, the play-area check, the
         # contact-key check, and the duplicate check above -- INCLUDING a
-        # ping that mc_scoring.apply_paint() (step 10, below) will go on
-        # to reject for the repaint cooldown. A cooldown blocks scoring,
-        # not what this square can actually hear -- that's still real
-        # evidence, so it is recorded before scoring even runs, and
-        # regardless of what scoring later decides.
+        # ping whose repeaters mc_scoring.apply_paint() (step 10, below)
+        # will go on to reject for the cooldown (every repeater it named
+        # already credited to this player on this cell, or the visit cap
+        # already reached). A cooldown blocks scoring, not what this
+        # square can actually hear -- that's still real evidence, so it
+        # is recorded before scoring even runs, and regardless of what
+        # scoring later decides.
         entries = parse_repeaters(ping)
         record_repeater_observations(conn, PROTOCOL, cell, entries, ts)
 
@@ -724,18 +726,18 @@ class McIngestor:
         # 8. Accepted
         counters["pings_accepted"] += 1
 
-        # 9. Repeaters heard -> points. A ping that reached zero repeaters
-        # earns zero points -- it is still counted above as accepted (it
-        # was a valid ping) but flagged here separately so a player can be
-        # told why it isn't scoring. `entries` was already parsed in step
-        # 5b (and its observations already recorded there); the count
-        # used for scoring is derived from that same list, never a second
-        # parse of the ping.
-        points = min(
-            len(entries) * settings.mc_points_per_repeater,
-            settings.mc_max_points_per_ping,
-        )
-        if points <= 0:
+        # 9. Repeaters heard -> candidate scoring input. A ping that
+        # named zero repeaters reached no one -- it is still counted
+        # above as accepted (it was a valid ping) but flagged here
+        # separately so a player can be told why it isn't scoring.
+        # `entries` was already parsed in step 5b (and its observations
+        # already recorded there); the repeater ids used for scoring are
+        # derived from that same list, never a second parse of the ping.
+        # Which of these actually earn points -- some may already be
+        # credited to this player on this cell within the cooldown
+        # window -- is decided inside apply_paint(), not here.
+        repeater_ids = [e.repeater_id for e in entries]
+        if not repeater_ids:
             counters["pings_no_repeaters"] += 1
 
         # 10. MeshCore scoring, inside the same write transaction as the
@@ -744,7 +746,11 @@ class McIngestor:
         # batch -- log it and keep going.
         if team is not None:
             try:
-                mc_scoring.apply_paint(conn, season_id, player_id, team, cell, ts, points, PROTOCOL)
+                mc_scoring.apply_paint(
+                    conn, season_id, player_id, team, cell, ts, repeater_ids,
+                    settings.mc_points_per_repeater, settings.mc_max_points_per_ping,
+                    PROTOCOL, received_at,
+                )
             except Exception:
                 log.exception(
                     "mc scoring: apply_paint failed for player %d cell %s",
@@ -759,11 +765,11 @@ class McIngestor:
             return
         self._last_housekeeping = now
         async with _WRITE_LOCK:
-            removed_pings, removed_stats = await asyncio.to_thread(self._housekeeping_sync)
+            removed_pings, removed_stats, removed_credits = await asyncio.to_thread(self._housekeeping_sync)
         log.info(
             "mc ingest housekeeping: removed %d stale player_cell_ping rows, "
-            "%d stale player_ingest_stat rows",
-            removed_pings, removed_stats,
+            "%d stale player_ingest_stat rows, %d stale player_cell_repeater_credit rows",
+            removed_pings, removed_stats, removed_credits,
         )
 
     def _housekeeping_sync(self) -> tuple:
@@ -784,13 +790,23 @@ class McIngestor:
                 "DELETE FROM player_ingest_stat WHERE day < ?", (stat_cutoff_day,)
             )
             removed_stats = cur2.rowcount
+            # Same retention window as player_cell_ping above -- this
+            # table is the cooldown's bookkeeping, same role player_cell_ping
+            # used to play alone, so a row past the ping retention window
+            # is exactly as stale as a player_cell_ping row past it (the
+            # cooldown window itself, mc_cooldown_seconds, is minutes; the
+            # retention window is days, ample margin either way).
+            cur3 = conn.execute(
+                "DELETE FROM player_cell_repeater_credit WHERE seen_at < ?", (ping_cutoff,)
+            )
+            removed_credits = cur3.rowcount
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
         finally:
             conn.close()
-        return removed_pings, removed_stats
+        return removed_pings, removed_stats, removed_credits
 
 
 # ---- raw batch diagnostic log ---------------------------------------------

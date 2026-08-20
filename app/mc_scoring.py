@@ -6,11 +6,14 @@ radios, and supporting any number of teams instead of a fixed two.
 
 Each team has an independent score per cell that:
 - Increases, per qualifying paint, by the number of distinct repeaters
-  that ping heard times settings.mc_points_per_repeater, capped at
-  settings.mc_max_points_per_ping -- a ping that heard no repeaters
-  reached no one and earns nothing (see app/mc_ingest.py for where the
-  repeater count is parsed and turned into points before it reaches
-  apply_paint here)
+  that ping named which this player has NOT already been credited for on
+  this cell within settings.mc_cooldown_seconds, times
+  settings.mc_points_per_repeater, capped at settings.mc_max_points_per_ping
+  for the whole cooldown window -- a ping that named no repeaters reached
+  no one and earns nothing, and a ping naming only repeaters already
+  credited in the window earns nothing either (see apply_paint()'s
+  docstring below for why the cooldown is scoped to the repeater, not the
+  ping)
 - Increases by settings.mc_score_per_unique_player the first time a given
   PLAYER from that team paints there (once per player, not per radio --
   a player may own more than one MeshCore radio), but only on a paint
@@ -65,8 +68,16 @@ SECONDS_PER_DAY = 86400.0
 @dataclass(frozen=True)
 class PaintResult:
     """Outcome of apply_paint(). outcome is one of:
-    "cooldown"   -- same player repainted the same cell too soon; nothing changed.
-    "no_signal"  -- the ping heard zero repeaters, so it earned zero points;
+    "cooldown"   -- every repeater this ping named had already been credited
+                    to this player on this cell within the cooldown window,
+                    or the visit's point cap was already used up by earlier
+                    credits in that window; nothing changed. This is the
+                    spam case mc_cooldown_seconds exists for -- a player
+                    parked in one spot re-pinging the same repeater(s) over
+                    and over. A ping naming a repeater not yet credited on
+                    this cell still scores even if it lands a second after
+                    the last one -- see apply_paint()'s body for why.
+    "no_signal"  -- the ping named zero repeaters, so it earned zero points;
                     nothing painted, nothing captured, no scores touched.
     "reinforced" -- the painting team already owned the cell; ownership unchanged.
     "captured"   -- the cell had no owner yet and this paint took it.
@@ -162,33 +173,58 @@ def is_first_paint_for_player(
     return True
 
 
-def recently_painted(
+def _credited_repeaters(
     conn: sqlite3.Connection,
     player_id: int,
+    protocol: str,
     cell_id: str,
     ts: int,
     window: int,
-    protocol: str,
-) -> bool:
-    """True if this player already painted this EXACT cell within `window`
-    seconds before ts. Read from player_cell_ping (player_id, protocol,
-    cell_id) with an exact cell_id match -- MeshCore cells are flat grid
-    ids, not geohash prefixes, so the Meshtastic prefix-matching trick does
-    not apply here.
+) -> set[str]:
+    """Repeater ids this player has already been credited scoring points
+    for, on this cell, within `window` seconds before ts. Read from
+    player_cell_repeater_credit (see app/db.py) -- a row's `ts` is bumped
+    forward every time that repeater earns fresh credit there, so a row
+    older than `window` means this repeater's credit has lapsed and it is
+    free to score again.
 
-    `protocol` filters player_cell_ping the same way it will eventually
-    filter mc_season -- a cooldown is per-board, so a Meshtastic paint on
-    a cell must never suppress a MeshCore paint on the cell that happens
-    to share the same cell_id, and vice versa.
+    `protocol` scopes this the same way it scoped player_cell_ping before
+    it -- a cooldown is per-board, so a Meshtastic paint on a cell must
+    never suppress a MeshCore paint on the cell that happens to share the
+    same cell_id, and vice versa.
     """
-    row = conn.execute(
-        "SELECT 1 FROM player_cell_ping"
-        " WHERE player_id = ? AND protocol = ? AND cell_id = ?"
-        "   AND ts < ? AND ts >= ?"
-        " LIMIT 1",
-        (player_id, protocol, cell_id, ts, ts - window),
-    ).fetchone()
-    return row is not None
+    rows = conn.execute(
+        "SELECT repeater_id FROM player_cell_repeater_credit"
+        " WHERE player_id = ? AND protocol = ? AND cell_id = ? AND ts >= ?",
+        (player_id, protocol, cell_id, ts - window),
+    ).fetchall()
+    return {r["repeater_id"] for r in rows}
+
+
+def _record_repeater_credit(
+    conn: sqlite3.Connection,
+    player_id: int,
+    protocol: str,
+    cell_id: str,
+    repeater_id: str,
+    ts: int,
+    seen_at: int,
+) -> None:
+    """Stamp `repeater_id` as credited to this player on this cell right
+    now. Upsert, not insert -- a repeater that scores again after its
+    previous credit has aged out of the cooldown window reuses the same
+    row (matching the natural key), just with `ts`/`seen_at` pushed
+    forward, rather than accumulating a full history of every credit ever
+    earned here.
+    """
+    conn.execute(
+        "INSERT INTO player_cell_repeater_credit"
+        "(player_id, protocol, cell_id, repeater_id, ts, seen_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(player_id, protocol, cell_id, repeater_id) DO UPDATE SET "
+        "  ts = excluded.ts, seen_at = excluded.seen_at",
+        (player_id, protocol, cell_id, repeater_id, ts, seen_at),
+    )
 
 
 def in_defense_window(
@@ -233,35 +269,86 @@ def apply_paint(
     team: str,
     cell_id: str,
     ts: int,
-    points: float,
+    repeater_ids: list[str],
+    points_per_repeater: float,
+    max_points_per_ping: float,
     protocol: str,
+    received_at: int,
 ) -> PaintResult:
     """Score one accepted ping against a cell and resolve ownership.
 
-    `points` is the score this specific ping earned -- repeaters heard
-    times settings.mc_points_per_repeater, capped at
-    settings.mc_max_points_per_ping, computed by the caller in
-    app/mc_ingest.py from the ping's repeater fields. A ping that heard
-    no repeaters reached no one, so points <= 0 here paints nothing,
-    captures nothing, and touches no scores at all.
+    `repeater_ids` is the distinct repeaters (MeshCore) / feeders
+    (Meshtastic) this specific ping named -- app/mc_ingest.py and
+    app/ingest.py both parse this from the same RepeaterEntry list that
+    record_repeater_observations() logs as evidence, so the two can never
+    drift apart. `points_per_repeater` and `max_points_per_ping` are the
+    caller's board-specific settings (settings.mc_points_per_repeater /
+    settings.mc_max_points_per_ping for MeshCore, the mt_ equivalents for
+    Meshtastic) -- passed in rather than looked up here so this function
+    stays board-agnostic, same as everything else in this module.
 
-    `protocol` only reaches recently_painted() below -- everything else
+    Scoring is gated per REPEATER, not per ping. mc_cooldown_seconds
+    exists to stop a player parked in one spot from spamming pings to run
+    up a score -- it does not exist to stop a player being credited for
+    genuinely different repeaters heard on the same pass. MeshMapper
+    sends one ping per repeater contact, often a second apart, so a
+    single visit to a square routinely produces several pings in a row,
+    each naming a different repeater; gating the whole ping on "was this
+    cell painted recently" (the original reading of this rule) discarded
+    every one of those pings after the first, crediting a player for one
+    repeater when they had actually heard several. Here, a repeater
+    already credited to this player on this cell within the cooldown
+    window earns nothing again (the spam case); a repeater not yet
+    credited still scores, however soon it arrives after the last ping.
+    The per-visit cap (`max_points_per_ping`) still holds across the
+    whole window -- it counts what has already been credited before
+    adding more, so no number of pings or repeaters can push one cell
+    past it in one visit. A ping naming zero repeaters reached no one and
+    always earns nothing, cooldown aside.
+
+    `protocol` and `received_at` reach the repeater-credit bookkeeping
+    (player_cell_repeater_credit, see app/db.py) below -- everything else
     in this function (ownership, scoring, decay, the unique-player bonus)
     is scoped by season_id alone, and season_id is already
-    protocol-specific by construction (see ensure_active_season). It is
-    threaded through as an explicit argument rather than re-derived from
-    season_id here so the caller -- which already knows which board it
-    is ingesting for -- states it once, instead of this function having
-    to look the season back up just to read its protocol column.
+    protocol-specific by construction (see ensure_active_season).
+    `received_at` is the server's own receipt time, distinct from `ts`
+    (the ping's own, attacker-controlled clock) for the same reason
+    player_cell_ping keeps the two separate: it is what retention
+    housekeeping keys off, not the cooldown-window comparison itself.
 
     Caller must already hold app.db's write lock and have an open write
     transaction on `conn` -- this function does neither itself.
     """
-    if recently_painted(conn, player_id, cell_id, ts, settings.mc_cooldown_seconds, protocol):
+    if not repeater_ids:
+        return PaintResult("no_signal", cell_id, team)
+
+    already_credited = _credited_repeaters(conn, player_id, protocol, cell_id, ts, settings.mc_cooldown_seconds)
+    new_ids = [r for r in dict.fromkeys(repeater_ids) if r not in already_credited]
+    if not new_ids:
+        # Every repeater this ping named has already been credited to
+        # this player on this cell within the window -- the spam case
+        # the cooldown exists to block.
         return PaintResult("cooldown", cell_id, team)
 
-    if points <= 0:
-        return PaintResult("no_signal", cell_id, team)
+    # The per-visit cap applies across the whole cooldown window, not
+    # just this one ping -- count what earlier pings in the window have
+    # already been credited before deciding how much of this ping fits.
+    already_points = min(len(already_credited) * points_per_repeater, max_points_per_ping)
+    remaining = max_points_per_ping - already_points
+    if remaining <= 0:
+        # New repeaters were named, but this visit already hit the cap
+        # from earlier credits in the window -- same spam protection,
+        # just triggered by the cap rather than an all-repeated ping.
+        return PaintResult("cooldown", cell_id, team)
+
+    slots = int(remaining / points_per_repeater + 1e-9) if points_per_repeater > 0 else 0
+    credit_ids = new_ids[:slots]
+    if not credit_ids:
+        return PaintResult("cooldown", cell_id, team)
+
+    for repeater_id in credit_ids:
+        _record_repeater_credit(conn, player_id, protocol, cell_id, repeater_id, ts, received_at)
+    points = min(len(credit_ids) * points_per_repeater, remaining)
 
     # Effort score for this paint, plus the one-time unique-player bonus
     # the first time this player has painted this cell for this team.

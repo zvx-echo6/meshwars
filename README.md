@@ -1,3 +1,5 @@
+**About this project.** MeshWars was built with [Claude](https://claude.ai). The game is inspired by [MeshMapper](https://meshmapper.net) — the board is deliberately aligned to MeshMapper's own wardriving grid, so a square here and a square there describe the same ground — and by [FREQ51](https://freq51.net) and [Mountain West Mesh](https://mwmesh.com), where it's played.
+
 # MeshWars
 
 A territory control game played over mesh radio. Seven teams claim roughly 300 meter squares of ground by reaching the mesh from them.
@@ -82,6 +84,18 @@ Open `http://localhost:8090`.
 ## Configuration
 
 All settings live in `.env`. See `.env.example` for the full list. `MESHVIEW_BASE_URL` is the only setting with no default, so it is required to start the process at all — even on a deployment that only cares about the MeshCore board. Everything else, including whether MeshCore registration is open at all, has a safe default and can be left as-is. See `.env.example`'s comments for what each setting does.
+
+## Thanks
+
+Special thanks to **Hunter** and **Littleaton** for creative ideas and for help with the back-end connections.
+
+Thanks to everyone sending feedback while this is being built, and to every player past, present and future.
+
+And to the mesh networks this runs on and across:
+
+- [FREQ51](https://freq51.net)
+- [Mountain West Mesh](https://mwmesh.com)
+- [Idaho Mesh](https://idahomesh.com)
 
 ## License
 
