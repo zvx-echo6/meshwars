@@ -172,6 +172,62 @@ class Settings(BaseSettings):
     node_api_rate_limit_attempts: int = 30
     node_api_rate_limit_window_seconds: int = 60
 
+    # Net check-ins (app/checkin.py): a second way to earn points,
+    # alongside squares held. A weekly net runs Wednesday evenings;
+    # checking in on either board's feed earns a registered player's
+    # team checkin_points once per player per net. Off by default -- a
+    # fresh install has not configured either upstream feed and must
+    # not start polling a third-party service (live.mwmesh.com,
+    # meshview) it was never told about.
+    checkin_enabled: bool = False
+    checkin_points: float = 25.0              # points a check-in earns; stored on the award row itself, so a later change here never rewrites history
+    checkin_poll_interval_seconds: int = 30   # tight -- MeshCore's feed returns only its newest 100 messages, no pagination, and a busy net can approach that
+
+    # The net window. Weekday follows Python's datetime.weekday()
+    # (Monday=0 .. Sunday=6), so Wednesday=2. Hours are LOCAL to
+    # checkin_net_timezone and inclusive at both ends (checked as
+    # start_hour <= local_hour <= end_hour), so the defaults 17..23
+    # cover 17:00:00 through 23:59:59. checkin_net_timezone must be a
+    # real IANA zone name, resolved through zoneinfo at call time, never
+    # a fixed UTC offset -- a fixed offset would drift an hour off the
+    # intended local window every time America/Boise crosses a
+    # daylight-saving transition.
+    checkin_net_weekday: int = 2
+    checkin_net_start_hour: int = 17
+    checkin_net_end_hour: int = 23
+    checkin_net_timezone: str = "America/Boise"
+
+    # MeshCore weekly-net feed: a live.mwmesh.com channel-messages
+    # endpoint, entirely separate from the wardriving ingest path in
+    # app/mc_ingest.py. Empty disables this half of check-ins even when
+    # checkin_enabled is true -- empty means off, never open, same
+    # contract as join_invite_code.
+    mc_checkin_base_url: str = ""
+    mc_checkin_channel: str = "#weekly-net"
+
+    # Meshtastic check-in feed reuses meshview_base_url (the SAME
+    # meshview instance app/ingest.py already polls for position
+    # packets) with portnum=1 (text) instead of 3 (position), filtered
+    # by this hashtag -- there is only one meshview instance configured
+    # for this deployment, so no separate base URL setting is needed.
+    mt_checkin_hashtag: str = "#freq51"
+
+    # MeshCore public-key directory bridge (live.mwmesh.com/api/nodes):
+    # resolves a player's already-bound MeshCore radio contact (the
+    # first 8 hex characters of its public key -- see app/mc_ingest.py's
+    # auto-bind, or app/nodes_api.py) to that radio's current display
+    # name in the directory, so a player who has never typed a check-in
+    # registration command can still earn credit under whatever name
+    # their own radio currently advertises. See app/checkin.py's module
+    # docstring for why this is trusted (it starts from a public key we
+    # already know independently, not from the name) and for the
+    # ambiguity rules that make it refuse rather than guess. The
+    # directory changes slowly -- radios don't rename themselves often
+    # -- and a net only produces a few dozen messages, so it is cached
+    # and refreshed on its own interval, never fetched per message.
+    mc_checkin_directory_limit: int = 5000
+    mc_checkin_directory_refresh_seconds: int = 900
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

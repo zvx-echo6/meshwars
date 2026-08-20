@@ -39,3 +39,33 @@ def normalize_node_ref(raw: object) -> str | None:
     if not _NODE_REF_RE.match(bare):
         return None
     return bare.lower()
+
+
+def normalize_sender_name(raw: object) -> str | None:
+    """Canonical form of a MeshCore check-in sender/display name, for
+    matching against both app/checkin.py's explicit mc_checkin_binding
+    table and its public-key directory bridge. Lives here (rather than
+    in app/checkin.py itself) for the same reason normalize_node_ref
+    does: app/checkin_api.py (the binding endpoint) and app/checkin.py
+    (the poller that matches incoming messages) both need this, and a
+    table whose primary key is a literal string compare on the name
+    must never have two independent ideas of what "the same name" means
+    -- and this module has no imports of its own, so it is a safe place
+    for both of those (and anything else that ever needs it) to share
+    it without risking an import cycle.
+
+    Strips leading/trailing whitespace and folds case -- nothing else.
+    Real MeshCore hardware sends names with trailing spaces and with
+    emoji in them; trimming and case-folding are only meant to absorb
+    "the same person typed a trailing space" or "two apps disagree on
+    capitalization," not to guess that two visually different names are
+    the same person, so emoji and internal whitespace are left exactly
+    as sent. Returns None for anything that isn't a non-empty string
+    once trimmed.
+    """
+    if not isinstance(raw, str):
+        return None
+    name = raw.strip()
+    if not name:
+        return None
+    return name.casefold()

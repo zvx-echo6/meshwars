@@ -394,6 +394,83 @@ CREATE TABLE IF NOT EXISTS repeater_identity (
     last_seen   INTEGER NOT NULL,
     PRIMARY KEY (protocol, repeater_id)
 );
+
+-- ---------------------------------------------------------------------
+-- Net check-ins (app/checkin.py): a second way to earn points, alongside
+-- squares held. A weekly net runs Wednesday evenings; checking in on
+-- either board's feed during that window earns a registered player's
+-- team settings.checkin_points once per player per net. Both tables
+-- below are brand new, so CREATE TABLE IF NOT EXISTS here is sufficient
+-- on its own -- same reasoning as repeater_observation/repeater_identity
+-- above: there is no existing, already-deployed shape to ALTER, which
+-- is the only reason an entry would need to go in MIGRATIONS instead.
+-- ---------------------------------------------------------------------
+
+-- Explicit MeshCore display-name -> player binding. This is the
+-- LAST-RESORT fallback in app/checkin.py's identity resolution for
+-- MeshCore check-ins -- the primary, normal-case path resolves a
+-- player's already-bound radio contact (player_node, protocol='mc',
+-- however it got bound: MeshMapper's wardriving auto-bind, typed into
+-- POST /api/nodes by hand, or picked from app/checkin_api.py's
+-- directory picker -- all three write the identical row shape and this
+-- table plays no part in any of them) through the live.mwmesh.com
+-- public-key directory automatically. A row here only matters for a
+-- player whose public key has never shown up in that directory at all
+-- -- key-based resolution wins wherever it produces an answer, so a
+-- binding here is IGNORED, not consulted, the moment the bridge
+-- resolves that player some other way. See app/checkin.py's module
+-- docstring for the full priority story.
+--
+-- Same first-claim-wins conflict semantics as player_node's radio
+-- binding, but keyed on a free-text display name instead of an 8-hex
+-- node reference -- player_node.node_ref is validated as exactly that
+-- (app/node_ref.py) and a MeshCore display name has no fixed shape at
+-- all, so it cannot live in that table. UNIQUE on player_id (which
+-- player_node does NOT have on player_id) because unlike radios -- a
+-- player can own several -- a player has at most one checked-in name
+-- here; app/checkin_api.py's POST is "set", not "add", enforced by
+-- this constraint.
+CREATE TABLE IF NOT EXISTS mc_checkin_binding (
+    sender_name  TEXT NOT NULL,
+    player_id    INTEGER NOT NULL UNIQUE,
+    bound_at     INTEGER NOT NULL,
+    PRIMARY KEY (sender_name)
+);
+CREATE INDEX IF NOT EXISTS idx_mc_checkin_binding_player ON mc_checkin_binding(player_id);
+
+-- One row per (season, player, local net date) that has earned a
+-- check-in award -- that triple IS the natural key: neither feed has a
+-- session concept, and a player who posts several times in one net
+-- (MeshCore senders routinely do) must still only be credited once.
+-- `points` is copied from settings.checkin_points at award time, not
+-- read live at every scoring query, so a later config change can never
+-- rewrite the value of a check-in that already happened -- same reason
+-- mc_tile_score stores a number instead of a formula.
+CREATE TABLE IF NOT EXISTS mc_checkin_award (
+    season_id   INTEGER NOT NULL,
+    player_id   INTEGER NOT NULL,
+    net_date    TEXT NOT NULL,     -- local net date, e.g. "2026-08-19" (see app/checkin.py's net_date_for_ts)
+    points      REAL NOT NULL,
+    protocol    TEXT NOT NULL,     -- 'mc' | 'mt' -- which feed earned it; informational, season_id already implies it (see mc_season.protocol)
+    message_id  TEXT NOT NULL,     -- source message/packet id, audit only
+    awarded_at  INTEGER NOT NULL,
+    PRIMARY KEY (season_id, player_id, net_date)
+);
+CREATE INDEX IF NOT EXISTS idx_mc_checkin_award_season ON mc_checkin_award(season_id);
+
+-- Dedup for the MeshCore weekly-net poller, same role
+-- app/db.py's processed_packet table plays for Meshtastic polling (the
+-- Meshtastic check-in poller reuses that existing table directly, since
+-- meshview packet ids are already globally unique regardless of
+-- portnum -- see app/checkin.py). MeshCore's feed has no equivalent
+-- shared table to reuse, so this is its own: one row per weekly-net
+-- packetId ever seen, so re-fetching the same message on a later poll
+-- (the feed returns its newest 100 messages with no pagination) is a
+-- no-op rather than a re-processed message.
+CREATE TABLE IF NOT EXISTS mc_checkin_seen_message (
+    packet_id  INTEGER PRIMARY KEY,
+    seen_at    INTEGER NOT NULL
+);
 """
 
 
@@ -483,6 +560,17 @@ MIGRATIONS = [
               WHERE l.season_id = tc.season_id AND l.cell_id = tc.cell_id
            )
     """,
+    # Net check-ins (app/checkin.py) add a second, separate figure to a
+    # team's season standing -- mc_season_team_tally already exists in
+    # production holding only `tiles`, so the new column has to be an
+    # ALTER, unlike mc_checkin_binding/mc_checkin_award/
+    # mc_checkin_seen_message above (those are brand new tables, so
+    # CREATE TABLE IF NOT EXISTS in SCHEMA already covers them). Kept as
+    # its own column rather than folded into `tiles` so a closed
+    # season's history can still show where a team's combined total
+    # came from -- see mc_scoring.team_totals() for the combined figure
+    # itself, which is what decides the winner.
+    "ALTER TABLE mc_season_team_tally ADD COLUMN checkin_points REAL NOT NULL DEFAULT 0",
 ]
 
 PRAGMAS = [
