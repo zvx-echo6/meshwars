@@ -184,6 +184,47 @@ def _award_checkin(
         )
 
 
+def _mark_mc_seen(conn, packet_id: int, seen_at: int) -> None:
+    """Record that this MeshCore message has been SETTLED -- a decision
+    was reached, so no later poll needs to look at it again.
+
+    Settled is not the same as "looked at," and the difference is the
+    whole point of this function existing separately from the read that
+    guards _process_mc_message. A message is settled when it was
+    awarded, or when nothing about it could ever make it awardable: an
+    unparseable timestamp, a timestamp outside the net window
+    (net_date_for_ts is a pure function of that timestamp, so its answer
+    cannot change), or a sender string that normalizes to nothing.
+
+    A message whose sender simply did not resolve to a player is NOT
+    settled and is not passed here -- that outcome depends on the
+    live.mwmesh.com directory and on mc_checkin_binding, both of which
+    change independently of the message, so it is retried instead.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO mc_checkin_seen_message(packet_id, seen_at) VALUES (?, ?)",
+        (packet_id, seen_at),
+    )
+
+
+def _mark_mt_seen(conn, packet_id: int, seen_at: int) -> None:
+    """The Meshtastic counterpart of _mark_mc_seen, against the
+    processed_packet table app/ingest.py's position poller already
+    shares (see _process_mt_packet for why sharing it is safe).
+
+    Same settled-vs-looked-at rule: a text packet carrying no check-in
+    hashtag, no usable import timestamp, a timestamp outside the net
+    window, or no sender node id can never become awardable, so it is
+    settled here. A packet from a node that is simply not registered to
+    a player yet is left unsettled and retried, since registering a
+    radio is exactly the thing that changes that answer.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO processed_packet(packet_id, processed_at) VALUES (?, ?)",
+        (packet_id, seen_at),
+    )
+
+
 # ---- MeshCore: feed client -------------------------------------------
 
 
@@ -698,32 +739,52 @@ class CheckinPoller:
         if not isinstance(packet_id, int):
             return
 
-        # Dedup on the message's own id, unconditionally -- whether or
-        # not it turns out to be in-window or attributable, a message
-        # already looked at on an earlier poll is never re-examined.
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO mc_checkin_seen_message(packet_id, seen_at) VALUES (?, ?)",
-            (packet_id, received_at),
-        )
-        if cur.rowcount == 0:
+        # Settled on an earlier poll -- READ first, rather than letting
+        # an INSERT OR IGNORE claim the id up front. Marking a message
+        # seen before trying to attribute it is what silently cost two
+        # players their 2026-08-19 award: their radios were bound
+        # correctly, but live.mwmesh.com's directory had not yet seen
+        # those public keys when the first poll swallowed the whole
+        # 100-message backlog, so the bridge resolved them to nobody --
+        # and the message was already marked seen, so no later poll ever
+        # looked at it again. See _mark_mc_seen for what now counts as
+        # settled and what is deliberately left for a retry.
+        if conn.execute(
+            "SELECT 1 FROM mc_checkin_seen_message WHERE packet_id = ?", (packet_id,)
+        ).fetchone():
             return
 
         ts = _parse_iso_ts(m.get("timestamp"))
         if ts is None:
+            _mark_mc_seen(conn, packet_id, received_at)
             return
         net_date = net_date_for_ts(ts)
         if net_date is None:
+            _mark_mc_seen(conn, packet_id, received_at)
             return
 
         normalized = normalize_sender_name(m.get("sender"))
         if normalized is None:
+            _mark_mc_seen(conn, packet_id, received_at)
             return
 
         player_id = resolved.get(normalized)
         if player_id is None:
-            return  # unregistered (or unresolved) sender -- earns nothing
+            # Deliberately NOT marked seen: unlike every branch above,
+            # this one can change without the message changing. The
+            # sender may be someone who simply is not playing -- or a
+            # real player whose bound contact has not reached the
+            # directory yet, or who has not registered their fallback
+            # name yet. Leaving it unsettled costs one dict lookup per
+            # poll against a feed that only ever returns its newest 100
+            # messages, and buys back the award the moment they resolve.
+            return
 
         _award_checkin(conn, season_id, player_id, net_date, MC_PROTOCOL, str(packet_id), received_at)
+        # Only now: an awarded message must never be re-examined, or a
+        # season roll would let the same message earn again under the
+        # new season_id (mc_checkin_award's key is per season).
+        _mark_mc_seen(conn, packet_id, received_at)
 
     async def _poll_mt(self) -> None:
         packets = await self._mt_client.packets(portnum=1, limit=100)
@@ -751,26 +812,34 @@ class CheckinPoller:
         # collide with a portnum=3 (position) id -- reusing the table is
         # safe, and simpler than a parallel table that would only ever
         # differ by which portnum wrote each row.
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO processed_packet(packet_id, processed_at) VALUES (?, ?)",
-            (pid, received_at),
-        )
-        if cur.rowcount == 0:
+        #
+        # READ first rather than claiming the id with an INSERT OR
+        # IGNORE, for the same reason _process_mc_message does -- see
+        # _mark_mt_seen. Leaving an unattributable text packet unsettled
+        # is invisible to the position poller either way: that path only
+        # ever fetches portnum=3, so it never sees this id at all.
+        if conn.execute(
+            "SELECT 1 FROM processed_packet WHERE packet_id = ?", (pid,)
+        ).fetchone():
             return
 
         payload = pkt.get("payload")
         if not isinstance(payload, str) or settings.mt_checkin_hashtag.lower() not in payload.lower():
+            _mark_mt_seen(conn, pid, received_at)
             return
 
         import_us = pkt.get("import_time_us")
         if not isinstance(import_us, (int, float)):
+            _mark_mt_seen(conn, pid, received_at)
             return
         net_date = net_date_for_ts(int(import_us / 1_000_000))
         if net_date is None:
+            _mark_mt_seen(conn, pid, received_at)
             return
 
         sender_id = pkt.get("from_node_id")
         if not isinstance(sender_id, int):
+            _mark_mt_seen(conn, pid, received_at)
             return
         # Local import: see app/ingest.py's _bare_node_ref docstring for
         # the exact form (bare lowercase 8-hex, matching
@@ -785,6 +854,10 @@ class CheckinPoller:
         node_ref = _bare_node_ref(sender_id)
         player_id = registered.get(node_ref)
         if player_id is None:
+            # Not settled -- see _mark_mt_seen. A radio that isn't bound
+            # to a player today may be bound tomorrow, and that is the
+            # one outcome here that changes without the packet changing.
             return
 
         _award_checkin(conn, season_id, player_id, net_date, MT_PROTOCOL, str(pid), received_at)
+        _mark_mt_seen(conn, pid, received_at)
