@@ -109,8 +109,9 @@ import httpx
 from . import mc_scoring
 from .config import settings
 from .db import WriteSession
+from .mc_api import active_season
 from .meshview_client import MeshviewClient
-from .node_ref import normalize_sender_name
+from .node_ref import format_node_ref, normalize_sender_name
 
 log = logging.getLogger("checkin")
 
@@ -391,26 +392,40 @@ def _resolve_mc_identities(conn, directory_nodes: list[dict]) -> dict[str, int]:
 
 def companion_directory_entries(directory_nodes: list[dict]) -> list[dict]:
     """Shape the cached live.mwmesh.com directory into the "people only"
-    picker list app/checkin_api.py's node-picker endpoint serves --
-    filters to role == "companion" (repeaters and room servers are
-    infrastructure and must never be offered as a person to pick), and
-    reduces each entry to exactly what a player needs to recognise their
-    own node and what the UI needs to disambiguate two companions
-    sharing a name: the display name, the 8-hex public-key prefix that
-    would actually be bound (the SAME value MeshMapper auto-binds and
-    app/nodes_api.py accepts typed in by hand -- picking from this list
-    is a third way to arrive at the exact same contact, never a
-    different kind of identity), and whatever presence/location fields
-    the directory happens to carry.
+    picker list app/checkin_api.py's MeshCore node-picker endpoint
+    serves -- filters to role == "companion" (repeaters and room
+    servers are infrastructure and must never be offered as a person to
+    pick), and reduces each entry to exactly what a player needs to
+    recognise their own node and what the UI needs to disambiguate two
+    companions sharing a name.
+
+    Same entry shape as mt_roster_entries() below (name, short_name,
+    node_ref, last_seen, lat, lon) so a shared picker UI can render both
+    protocols identically -- short_name is always None here, not
+    invented and not derived by truncating the name: the MeshCore
+    directory has no short-name concept at all, unlike node_seen's real
+    (if nullable) short_name column. node_ref is the bare lowercase
+    8-hex public-key prefix that would actually be bound (the SAME
+    value MeshMapper auto-binds and app/nodes_api.py accepts typed in by
+    hand -- picking from this list is a third way to arrive at the exact
+    same contact, never a different kind of identity) -- deliberately
+    NOT "!"-prefixed the way a Meshtastic reference displays; that
+    convention is protocol-specific display formatting the UI already
+    owns elsewhere (the join page's radio list, the admin portal), not
+    something this endpoint bakes in, and MeshCore contacts are never
+    shown with a leading "!" in any of those existing places.
 
     Deliberately does NOT deduplicate by name -- the directory carries
     real duplicate names (3 in production today), and collapsing them
     would let the UI silently offer the wrong node. Every companion
     entry is returned as its own row, distinguished by its prefix;
     picking between duplicates is left entirely to the person looking at
-    them. Whether a given entry is already bound, and to whom, is a
-    separate per-caller concern the endpoint itself layers on -- this
-    function has no database access and does not know who is asking.
+    them. This function has no database access and does not know who is
+    asking -- whether a given entry is already bound is deliberately NOT
+    part of this shape at all: app/checkin_api.py's picker endpoint is
+    public, and exposing that would leak which nodes belong to
+    registered players to anyone who asks. POST /api/nodes' existing
+    conflict check is where that enforcement belongs.
     """
     out = []
     for node in directory_nodes:
@@ -422,10 +437,80 @@ def companion_directory_entries(directory_nodes: list[dict]) -> list[dict]:
             continue
         out.append({
             "name": name,
-            "contact": pubkey[:8].lower(),
+            "short_name": None,
+            "node_ref": pubkey[:8].lower(),
             "last_seen": node.get("last_seen"),
             "lat": node.get("lat"),
             "lon": node.get("lon"),
+        })
+    return out
+
+
+def mt_roster_entries(conn) -> list[dict]:
+    """Shape node_seen into the same "people to pick from" list
+    companion_directory_entries() builds for MeshCore -- same entry
+    shape (name, short_name, node_ref, last_seen, lat, lon), different
+    source and different exclusion rule. node_seen is populated every
+    poll cycle by app/ingest.py's Ingestor._refresh_roster() from
+    meshview's /api/nodes -- this is a read against data the app
+    already keeps on hand for the live board's own node markers, not a
+    new upstream call, scoped to the currently active Meshtastic season
+    the same way that roster is scoped everywhere else it's read.
+
+    Filtered by settings.excluded_roles_set -- the SAME roles the live
+    Meshtastic board already treats as infrastructure rather than
+    players (ROUTER, ROUTER_LATE, CLIENT_BASE by default), reused
+    rather than a second list so "what counts as a person" never has
+    two different answers in this codebase. A row with no role at all
+    is not excluded by this filter -- an unknown role is not
+    infrastructure by default.
+
+    Ordered most-recently-seen first: node_seen runs to roughly a
+    thousand rows, and the radio someone is actually holding right now
+    was almost certainly heard recently -- this just keeps that node
+    from being buried at the bottom of an otherwise unordered list.
+
+    short_name is normalized to None when absent -- node_seen's column
+    is nullable in the schema, but real rows from
+    Ingestor._refresh_roster() commonly carry an empty string instead
+    of a true NULL (meshview's own "no short name" signal isn't
+    consistently absent-vs-empty either), so a plain pass-through would
+    leave the UI rendering an empty "()" for most nodes instead of
+    dropping the parenthetical entirely as intended -- both falsy forms
+    are folded to None here, once, so nothing downstream has to
+    special-case "" separately from null. node_ref is the bare
+    lowercase 8-hex form (app/node_ref.py's format_node_ref) -- the
+    same canonical value player_node stores and POST /api/nodes
+    accepts, deliberately not "!"-prefixed here for the same reason
+    companion_directory_entries() gives above: protocol-specific
+    display formatting belongs to the UI that already owns it
+    elsewhere (the join page's radio list, the admin portal), not this
+    endpoint.
+    """
+    season = active_season(conn, "mt")
+    if not season:
+        return []
+    rows = conn.execute(
+        "SELECT node_id, name, short_name, last_seen, lat, lon, role "
+        "  FROM node_seen WHERE season_id = ? ORDER BY last_seen DESC",
+        (season["id"],),
+    ).fetchall()
+    excluded = settings.excluded_roles_set
+    out = []
+    for r in rows:
+        role = r["role"]
+        if isinstance(role, str) and role.strip().upper() in excluded:
+            continue
+        name = r["name"]
+        if not isinstance(name, str) or not name:
+            continue
+        out.append({
+            "name": name,
+            "short_name": r["short_name"] or None,
+            "node_ref": format_node_ref(r["node_id"]),
+            "last_seen": r["last_seen"],
+            "lat": r["lat"],
+            "lon": r["lon"],
         })
     return out
 

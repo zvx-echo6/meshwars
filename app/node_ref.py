@@ -69,3 +69,26 @@ def normalize_sender_name(raw: object) -> str | None:
     if not name:
         return None
     return name.casefold()
+
+
+def format_node_ref(node_id: int) -> str:
+    """Bare lowercase 8-hex form of a Meshtastic node id -- the exact
+    form player_node.node_ref is canonically stored and looked up in
+    (see this module's docstring). The formatting inverse of
+    normalize_node_ref() above for the case where the input is already
+    a known-good integer node id (e.g. meshview's from_node_id,
+    node_seen.node_id) rather than untrusted text -- there is nothing
+    to validate here, only to format, so this is deliberately a
+    separate, simpler function rather than routing an int through
+    normalize_node_ref()'s string-shaped validation.
+
+    app/checkin_api.py's Meshtastic node picker uses this directly; it
+    is the same one-line format app/ingest.py's own _bare_node_ref
+    computes for the check-in award path (kept as its own private
+    helper there rather than migrated to call this, to avoid touching
+    that module's tested position-ingest/scoring code for a purely
+    cosmetic dedup) -- both compute the identical value from the
+    identical formatting rule, so the two can never drift in practice
+    even though they are, today, two call sites.
+    """
+    return f"{node_id:08x}"
