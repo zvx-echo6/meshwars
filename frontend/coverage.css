@@ -34,6 +34,39 @@ html, body {
 }
 
 /* -------------------------------------------------------------------------
+   No-JS fallback (see the <noscript> block in index.html). #loading-
+   overlay (z-index: 5000, inset: 0) never gets its .fade-out class
+   without mc.js running to add it, so without JS it sits fully opaque
+   over the ENTIRE viewport forever, .mw-nav (z-index: 1000) included --
+   a no-JS visitor stuck looking at "Loading map..." with no nav
+   visible either way, whether this rule exists or not. Covering the
+   full viewport here too (not just the area below the nav) rather than
+   leaving a dead 48px strip at the top where the nav is already hidden
+   behind that overlay regardless -- one clean takeover screen instead
+   of a floating paragraph over a blank band.
+   ------------------------------------------------------------------------- */
+.mw-noscript {
+  position: fixed;
+  inset: 0;
+  z-index: 6000;
+  background: var(--mw-page);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.mw-noscript p {
+  max-width: 480px;
+  margin: 0;
+  color: #ddd;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: center;
+}
+.mw-noscript a { color: var(--mw-accent); }
+
+/* -------------------------------------------------------------------------
    Loading overlay (faded out by mc.js once the initial board fetch finishes)
    ------------------------------------------------------------------------- */
 #loading-overlay {

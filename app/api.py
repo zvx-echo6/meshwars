@@ -616,6 +616,66 @@ def _html_page(request: Request, path: Path, missing_message: str) -> Response:
     )
 
 
+def _inject_head(html: str) -> str:
+    """Insert settings-driven <head> content shared by every public page.
+
+    Currently just the Search Console ownership tag
+    (settings.google_site_verification) -- present only when the setting
+    is non-empty. An empty content="" tag is not the same thing to
+    Search Console as no tag at all, so "unset" has to mean the tag is
+    absent from the markup, not present with nothing in it. Any future
+    settings-driven head content belongs here too, rather than
+    duplicated across index.html/about.html/join.html.
+    """
+    if not settings.google_site_verification:
+        return html
+    tag = f'  <meta name="google-site-verification" content="{settings.google_site_verification}">\n'
+    return html.replace("</head>", tag + "</head>", 1)
+
+
+def _templated_html_page(request: Request, path: Path, missing_message: str) -> Response:
+    """Like _html_page, for a top-level page that also needs _inject_head()
+    run over it (the map, /join, /about -- everywhere the verification
+    tag can appear).
+
+    Reads and transforms the file instead of handing it to FileResponse,
+    which means the ETag can no longer be _file_etag's mtime+size
+    shortcut: flipping GOOGLE_SITE_VERIFICATION in .env and restarting
+    changes what this returns without touching the HTML file on disk at
+    all, and an mtime-based ETag would then hand a returning browser a
+    304 for a page whose actual content changed. Hashing the rendered
+    bytes instead keeps the ETag honest about what was actually sent,
+    at the cost of reading the (small) file on every request rather than
+    streaming it -- the same no-cache/If-None-Match/304 contract as
+    _html_page otherwise.
+    """
+    if not path.exists():
+        return HTMLResponse(f"<h1>meshwars</h1><p>{missing_message}</p>", status_code=404)
+
+    content = _inject_head(path.read_text(encoding="utf-8")).encode("utf-8")
+    last_modified = formatdate(path.stat().st_mtime, usegmt=True)
+    etag = f'"{hashlib.md5(content, usedforsecurity=False).hexdigest()}"'
+
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Last-Modified": last_modified,
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    return HTMLResponse(
+        content,
+        headers={
+            "Cache-Control": "no-cache",
+            "ETag": etag,
+            "Last-Modified": last_modified,
+        },
+    )
+
+
 def mount(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(mc_router)
@@ -631,12 +691,27 @@ def mount(app: FastAPI) -> None:
 
         @app.get("/", response_class=HTMLResponse, include_in_schema=False)
         async def index(request: Request):
-            return _html_page(request, frontend_dir / "index.html", "map page not bundled")
+            return _templated_html_page(request, frontend_dir / "index.html", "map page not bundled")
 
         @app.get("/join", response_class=HTMLResponse, include_in_schema=False)
         async def join_page(request: Request):
-            return _html_page(request, frontend_dir / "join.html", "join page not bundled")
+            return _templated_html_page(request, frontend_dir / "join.html", "join page not bundled")
 
         @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
         async def about_page(request: Request):
-            return _html_page(request, frontend_dir / "about.html", "about page not bundled")
+            return _templated_html_page(request, frontend_dir / "about.html", "about page not bundled")
+
+        # robots.txt / sitemap.xml: plain static files, same explicit
+        # top-level-route pattern as the three pages above (not folded
+        # into the /static mount, which is cache-friendly but lives
+        # under a /static/ prefix -- both of these have to answer at the
+        # bare site root for a crawler to find them at all) and the same
+        # _html_page no-cache/ETag handling. Neither needs _inject_head
+        # -- there's no settings-driven content in either one.
+        @app.get("/robots.txt", include_in_schema=False)
+        async def robots_txt(request: Request):
+            return _html_page(request, frontend_dir / "robots.txt", "robots.txt not bundled")
+
+        @app.get("/sitemap.xml", include_in_schema=False)
+        async def sitemap_xml(request: Request):
+            return _html_page(request, frontend_dir / "sitemap.xml", "sitemap.xml not bundled")

@@ -5,10 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0C0B0A" />
   <title>MeshWars — Live Territory Map</title>
+  <meta name="description" content="MeshWars is a live mesh map: a real-world capture-the-flag game where seven teams claim ground on Meshtastic and MeshCore mesh coverage.">
+  <link rel="canonical" href="https://meshwars.com/">
 
+  <!-- Google reads a site's search-results favicon from the home page
+       specifically, and documents it must be square and a multiple of
+       48px (48/96/144/192...) -- it is unreliable about anything smaller,
+       so the 16/32px pair below is for browser tabs only. 48x48 and
+       192x192 are already on disk (see frontend/assets/favicon/) and
+       declared here for Google; do not remove the smaller sizes, browsers
+       still use those. -->
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
   <link rel="manifest" href="/static/assets/site.webmanifest">
 
@@ -24,6 +35,29 @@
   <meta name="twitter:title" content="MeshWars — Live Territory Map">
   <meta name="twitter:description" content="Watch seven teams compete for real-world territory over mesh radio, live on the map.">
   <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
+
+  <!-- Truthful and minimal: describes the game and links to the actual
+       open-source repo it runs from. No invented ratings, prices,
+       authorship, or organization -- none of those exist for this
+       project. Same content (page-specific "url") on all three public
+       pages; see frontend/about.html and frontend/join.html. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Game",
+    "name": "MeshWars",
+    "url": "https://meshwars.com/",
+    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+    "genre": ["Location-based game", "Capture the flag"],
+    "isBasedOn": {
+      "@type": "SoftwareSourceCode",
+      "name": "MeshWars",
+      "codeRepository": "https://github.com/zvx-echo6/meshwars",
+      "programmingLanguage": "Python",
+      "license": "https://opensource.org/licenses/MIT"
+    }
+  }
+  </script>
 
   <!-- Cache-busting: /static assets are served cacheable while these HTML
        pages are no-cache. Without a version string, a returning visitor can get
@@ -51,6 +85,19 @@
       </a>
     </div>
   </nav>
+
+  <!-- This page is a Leaflet map with essentially no indexable text --
+       with JavaScript off (a crawler, or a person who disabled it) this
+       is the only content anyone gets. Genuinely descriptive, not
+       cloaking: it says exactly what the page shows when JS is running.
+       See .mw-noscript in coverage.css for why it needs position:fixed
+       and a z-index above #loading-overlay's -- that overlay never
+       fades without mc.js running to add its .fade-out class. -->
+  <noscript>
+    <div class="mw-noscript">
+      <p>MeshWars is a real-world capture-the-flag game played over mesh radio. Seven teams claim roughly 300 meter map squares by reaching Meshtastic or MeshCore mesh coverage from them; this page normally shows a live map of who holds what. Enable JavaScript to see it, or read more on the <a href="/about">About page</a>.</p>
+    </div>
+  </noscript>
 
   <!-- Built once here (not by mc.js at runtime, unlike the History/Roster/
        Top modal -- this has no interactive chrome to wire up, just content

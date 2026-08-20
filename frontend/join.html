@@ -5,10 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0C0B0A" />
   <title>MeshWars — Join the Game</title>
+  <meta name="description" content="Join MeshWars: register your Meshtastic or MeshCore radio, pick a team, and start claiming ground in this mesh capture-the-flag game.">
+  <link rel="canonical" href="https://meshwars.com/join">
 
+  <!-- See index.html's matching comment: Google reads a site's
+       search-results favicon from the home page specifically, but these
+       declarations are kept identical across all three pages so the
+       <head> stays consistent site-wide. -->
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
-  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
   <link rel="manifest" href="/static/assets/site.webmanifest">
 
@@ -24,6 +32,26 @@
   <meta name="twitter:title" content="MeshWars — Join the Game">
   <meta name="twitter:description" content="Register your mesh radio node, pick a team, and start claiming territory in MeshWars.">
   <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
+
+  <!-- See index.html's matching comment for what this describes and why
+       it's minimal. Same content, this page's own "url". -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Game",
+    "name": "MeshWars",
+    "url": "https://meshwars.com/join",
+    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+    "genre": ["Location-based game", "Capture the flag"],
+    "isBasedOn": {
+      "@type": "SoftwareSourceCode",
+      "name": "MeshWars",
+      "codeRepository": "https://github.com/zvx-echo6/meshwars",
+      "programmingLanguage": "Python",
+      "license": "https://opensource.org/licenses/MIT"
+    }
+  }
+  </script>
 
   <!-- Cache-busting: /static assets are served cacheable while these HTML
        pages are no-cache. Without a version string, a returning visitor can get
