@@ -10,11 +10,11 @@ MeshWars turns a mesh radio network into a live map game. Players carry a radio,
 
 ## Two boards, two protocols
 
-MeshWars currently runs two separate games side by side, one per radio protocol, because they get position data in very different ways.
+MeshWars runs the same game on both radio protocols: seven teams, registered players, the same flat grid of squares. The two boards differ only in how position reaches the server, because MeshCore and Meshtastic hand us that data in very different ways.
 
-**MeshCore is the live one.** Position comes from [MeshMapper](https://meshmapper.net), a wardriving app MeshCore players already use to map repeater coverage. Players configure MeshMapper to forward a copy of its wardrive to MeshWars alongside whatever it already does. There is no pull API on the MeshCore side and none is attempted — MeshWars only receives what MeshMapper chooses to forward. That forward is a documented feature of the app, and it is additive: turning it on for MeshWars does not change what MeshMapper does for the player, and a player's coverage and standing there are unaffected either way.
+**MeshCore is pushed.** Position comes from [MeshMapper](https://meshmapper.net), a wardriving app MeshCore players already use to map repeater coverage. Players configure MeshMapper to forward a copy of its wardrive to MeshWars alongside whatever it already does. There is no pull API on the MeshCore side and none is attempted — MeshWars only receives what MeshMapper chooses to forward. That forward is a documented feature of the app, and it is additive: turning it on for MeshWars does not change what MeshMapper does for the player, and a player's coverage and standing there are unaffected either way.
 
-**Meshtastic still runs the older system.** It polls a public [meshview](https://github.com/armooo/meshview) instance and picks up node positions automatically as they broadcast — no registration needed, snake-draft team balancing, geohash tiles. It is being migrated to the same player-registration model and flat grid the MeshCore board uses. Until that migration lands, registering a Meshtastic node at `/join` binds the radio and gets it ready for the change, but does not yet affect standing on that board; it still runs on its own separate rules underneath.
+**Meshtastic is pulled.** MeshWars polls a public [meshview](https://github.com/armooo/meshview) instance and picks up node positions as they broadcast, but only scores them for a registered player — a packet from a node nobody has registered at `/join` is read by the poller and discarded, the same way a MeshCore contact nobody registered never reaches a square. Registering a node at `/join` is what puts it on the board at all.
 
 ## How scoring works
 
@@ -25,6 +25,16 @@ The first time a given player paints a square for their team, that paint also ea
 An unclaimed square goes to whichever team paints it first. Once a square is captured it cannot be flipped for fifteen minutes, no matter the score — a fresh capture gets a defended window. After that, the square falls to any team that out-scores the current holder, but only the holder: with seven teams in play there is no single rival, so a challenger is only ever measured against whoever holds the square right now, not against every other team's score there.
 
 Scores decay a quarter point a day, so an abandoned square gets easier to take the longer nobody defends it. The same player cannot repaint the exact same square within five minutes, which stops one person sitting still from running the score up by spamming pings.
+
+## Net check-ins
+
+Alongside squares, a second activity earns points: checking in on the weekly net, held Wednesday evenings. A qualifying check-in earns a registered player's team `CHECKIN_POINTS` (25 by default) once per player per net — posting several times in one net does not multiply the award, it is credited exactly once, same as everyone else's single check-in.
+
+Check-in points add to a team's total alongside its square count; they do not replace it. Wardriving and checking in are two ways to contribute, not two classes of player — the same player can do both and shows up in both counts.
+
+To be credited, a check-in has to resolve to a registered player's radio. On Meshtastic that's the registered node ID. On MeshCore it's the registered contact, which [MeshMapper](https://meshmapper.net) binds automatically the first time a player wardrives, or a player can pick their node from a searchable list on the join page at registration instead. A MeshCore player whose public key has never shown up in the directory MeshWars checks first has a last-resort fallback: a self-declared check-in name, set from the join page's setup-check panel.
+
+Off by default — a fresh install has not configured either upstream feed and must not start polling a third-party service it was never told about. See `.env.example`'s `CHECKIN_*` and `MC_CHECKIN_*`/`MT_CHECKIN_*` settings to turn it on.
 
 ## The grid
 
@@ -50,7 +60,7 @@ Configuration lives in `.env`. It runs as a single Docker container via `docker 
 
 ## Project status
 
-The MeshCore board is live and in beta with real players. The Meshtastic migration to the same player model and grid is planned but not started. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
+The MeshCore board is live and in beta with real players. The Meshtastic board now runs the same player model and grid, differing only in how position reaches it: pulled from a public meshview instance and scored only for registered nodes. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
 
 ![About page](docs/img/about.png)
 

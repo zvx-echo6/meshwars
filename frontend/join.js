@@ -103,6 +103,214 @@ function displayNodeRef(protocol, nodeRef) {
   return protocol === 'mt' ? `!${nodeRef}` : nodeRef;
 }
 
+// ---- Node picker (protocol step of the join form) ------------------------
+//
+// Searchable pickers over GET /api/checkin/mc/nodes and
+// GET /api/checkin/mt/nodes (app/checkin_api.py) -- both public, no key
+// required, so a node picked here travels straight into the join form
+// itself: for Meshtastic it becomes /api/join's own optional node_ref
+// field (unchanged), and for MeshCore -- which /api/join has never
+// accepted a node_ref for, since a MeshCore radio normally self-binds
+// from a wardriving ping's contact key -- it becomes a follow-up
+// POST /api/nodes call in handleJoinClick() below, using the key
+// /api/join just returned. Either way the player never has to paste a
+// key of their own just to make a pick.
+//
+// Replaces free-text node ID entry because the lists are genuinely long
+// (800+ Meshtastic entries) and, on both protocols, can contain more
+// than one node sharing the same name -- NODE_PICKER_MAX_RESULTS below
+// caps how many of a broad search's matches render at once, but never
+// collapses or hides a duplicate; distinguishing two same-named entries
+// by their node_ref is left to the person looking at them, same as
+// app/checkin.py's own directory bridge refuses to guess between them.
+//
+// Fetched at most ONCE per protocol per page load, on first focus of
+// the search box -- not polled, not re-fetched per keystroke. Filtering
+// after that is entirely client-side against the cached list, which is
+// why there is no debounce here: there is never a request in flight to
+// debounce against.
+const NODE_PICKER_ENDPOINTS = { mc: '/api/checkin/mc/nodes', mt: '/api/checkin/mt/nodes' };
+const NODE_PICKER_MAX_RESULTS = 40;
+
+// Precomputed once per node when the list is fetched, not per
+// keystroke: name, short name, the bare node_ref, and the
+// protocol-appropriate display form, so typing the leading "!"
+// Meshtastic shows still matches a Meshtastic entry.
+function nodePickerHaystack(protocol, node) {
+  return [
+    node.name || '',
+    node.short_name || '',
+    node.node_ref || '',
+    displayNodeRef(protocol, node.node_ref || ''),
+  ].join(' ').toLowerCase();
+}
+
+// Owner-specified two-line entry format: "Node Long Name (Short Name)"
+// over the node ID. short_name is already normalized to null (never
+// empty string) by both app/checkin.py shaping functions, so a plain
+// truthiness check is enough to decide whether to render the
+// parenthetical at all -- never "Name ()" for a node with no short name.
+function nodePickerEntryLabel(node) {
+  return node.short_name ? `${node.name} (${node.short_name})` : node.name;
+}
+
+function createNodePicker(protocol) {
+  const els = {
+    searchWrap: document.getElementById(`${protocol}-node-picker-search`),
+    searchInput: document.getElementById(`f-${protocol}-node-search`),
+    manualLink: document.getElementById(`${protocol}-node-manual-link`),
+    results: document.getElementById(`${protocol}-node-picker-results`),
+    status: document.getElementById(`${protocol}-node-picker-status`),
+    selectedWrap: document.getElementById(`${protocol}-node-picker-selected`),
+    selectedName: document.getElementById(`${protocol}-node-picker-selected-name`),
+    selectedRef: document.getElementById(`${protocol}-node-picker-selected-ref`),
+    changeBtn: document.getElementById(`${protocol}-node-picker-change`),
+    manualWrap: document.getElementById(`${protocol}-node-picker-manual`),
+    manualInput: document.getElementById(`f-${protocol}-node-ref`),
+    searchLink: document.getElementById(`${protocol}-node-search-link`),
+  };
+  // Defensive only -- both protocol blocks always carry this markup
+  // today, but a picker instance for a block that isn't on the page
+  // should degrade to "nothing picked" rather than throw.
+  if (!els.searchWrap || !els.selectedWrap || !els.manualWrap) {
+    return { getValue: () => null };
+  }
+
+  let nodes = null; // null = not fetched yet; [] = fetched empty, or fetch failed
+  let fetching = null; // in-flight fetch promise, so a fast re-focus can't double-fire it
+  let selectedNode = null;
+  let mode = 'search'; // 'search' | 'selected' | 'manual'
+
+  function setMode(next) {
+    mode = next;
+    els.searchWrap.hidden = mode !== 'search';
+    els.selectedWrap.hidden = mode !== 'selected';
+    els.manualWrap.hidden = mode !== 'manual';
+  }
+
+  function renderResults(query) {
+    els.results.replaceChildren();
+    const trimmed = query.trim().toLowerCase();
+    if (!trimmed) {
+      // Nothing typed yet -- stay quiet rather than dumping the entire
+      // roster (800+ entries on Meshtastic) into the page unfiltered.
+      els.results.hidden = true;
+      els.status.hidden = true;
+      return;
+    }
+    if (nodes === null) {
+      els.results.hidden = true;
+      els.status.textContent = 'Loading nodes…';
+      els.status.hidden = false;
+      return;
+    }
+    const matches = nodes.filter((n) => n._haystack.includes(trimmed));
+    if (matches.length === 0) {
+      els.results.hidden = true;
+      els.status.textContent = nodes.length === 0
+        ? "Couldn't load the node list right now."
+        : 'No matches for that search.';
+      els.status.hidden = false;
+      return;
+    }
+    const shown = matches.slice(0, NODE_PICKER_MAX_RESULTS);
+    shown.forEach((node) => {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'node-picker-result';
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'node-picker-result-name';
+      nameSpan.textContent = nodePickerEntryLabel(node);
+      const refSpan = document.createElement('span');
+      refSpan.className = 'node-picker-result-ref';
+      refSpan.textContent = displayNodeRef(protocol, node.node_ref);
+      btn.appendChild(nameSpan);
+      btn.appendChild(refSpan);
+      btn.addEventListener('click', () => select(node));
+      li.appendChild(btn);
+      els.results.appendChild(li);
+    });
+    els.results.hidden = false;
+    if (matches.length > NODE_PICKER_MAX_RESULTS) {
+      els.status.textContent = `Showing ${NODE_PICKER_MAX_RESULTS} of ${matches.length} matches — keep typing to narrow it down.`;
+      els.status.hidden = false;
+    } else {
+      els.status.hidden = true;
+    }
+  }
+
+  function select(node) {
+    selectedNode = node;
+    els.selectedName.textContent = nodePickerEntryLabel(node);
+    els.selectedRef.textContent = displayNodeRef(protocol, node.node_ref);
+    setMode('selected');
+  }
+
+  function ensureFetched() {
+    if (nodes !== null || fetching) return fetching;
+    fetching = fetch(NODE_PICKER_ENDPOINTS[protocol])
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
+      .then((data) => {
+        const list = Array.isArray(data && data.nodes) ? data.nodes : [];
+        list.forEach((n) => { n._haystack = nodePickerHaystack(protocol, n); });
+        nodes = list;
+      })
+      .catch(() => {
+        // Rate limited, offline, upstream down -- whatever it is, the
+        // picker just comes up empty. Manual entry (always available,
+        // see els.manualLink) is never blocked by this.
+        nodes = [];
+      })
+      .finally(() => {
+        fetching = null;
+        renderResults(els.searchInput.value);
+      });
+    return fetching;
+  }
+
+  els.searchInput.addEventListener('focus', ensureFetched);
+  els.searchInput.addEventListener('input', () => {
+    ensureFetched();
+    renderResults(els.searchInput.value);
+  });
+  els.manualLink.addEventListener('click', () => setMode('manual'));
+  els.changeBtn.addEventListener('click', () => {
+    selectedNode = null;
+    els.searchInput.value = '';
+    setMode('search');
+    renderResults('');
+    els.searchInput.focus();
+  });
+  if (els.searchLink) {
+    els.searchLink.addEventListener('click', () => {
+      els.manualInput.value = '';
+      setMode('search');
+      els.searchInput.focus();
+    });
+  }
+
+  return {
+    // The value handleJoinClick() actually submits: the picked node's
+    // canonical node_ref in 'selected' mode, the raw typed value in
+    // 'manual' mode (server-side normalize_node_ref validates it same
+    // as always), or null in 'search' mode -- an in-progress, uncommitted
+    // search is never treated as a value, so registering with no radio
+    // at all still works exactly as before.
+    getValue() {
+      if (mode === 'selected' && selectedNode) return selectedNode.node_ref;
+      if (mode === 'manual') {
+        const v = els.manualInput.value.trim();
+        return v ? v : null;
+      }
+      return null;
+    },
+  };
+}
+
+let mcPicker = null;
+let mtPicker = null;
+
 let selectedTeam = null;
 
 // The full last-known /api/mc/status response for the currently
@@ -295,14 +503,71 @@ function showJoinSuccess(data) {
   el.hidden = false;
 }
 
+function showNodeWarning(message) {
+  const el = document.getElementById('join-node-warning');
+  if (!el) return;
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function hideNodeWarning() {
+  const el = document.getElementById('join-node-warning');
+  if (!el) return;
+  el.hidden = true;
+  el.textContent = '';
+}
+
+// /api/join has never taken a node_ref for protocol 'mc' -- a MeshCore
+// radio normally self-binds from its first wardriving ping's contact
+// key, so there was never a field for one here before the node picker
+// added one. Binding a pick/manual entry from that picker is therefore
+// a second call, using the key /api/join's own response just returned
+// -- the exact same POST /api/nodes app/nodes_api.py's key-authenticated
+// radio management already exposes, called here automatically as part
+// of the SAME "press Join" action, so registering and attaching the
+// radio read as one thing to the person doing it, not a second errand
+// with their own key. Registration itself has already succeeded by the
+// time this runs, so a failure here is never reported as a failed
+// registration -- see handleJoinClick()'s call site for how the message
+// below is shown without touching join-error or the key display: the
+// account exists and the key on screen is still exactly what fixes
+// this, so nothing about that key's visibility or the success state
+// above it may be hidden or thrown away over a bind failure.
+async function bindPickedMcNode(key, nodeRef) {
+  try {
+    const res = await fetch('/api/nodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+      body: JSON.stringify({ node_ref: nodeRef, protocol: 'mc' }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      const detail = (data && typeof data.error === 'string') ? data.error : `status ${res.status}`;
+      return {
+        ok: false,
+        message: `Your account was created. The radio you picked was NOT attached to it (${detail}). Your key above still works -- paste it into the setup-check panel further down this page to add the radio there.`,
+      };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      message: "Your account was created. The radio you picked was NOT attached to it -- the server couldn't be reached to do it. Your key above still works -- paste it into the setup-check panel further down this page to add the radio there.",
+    };
+  }
+}
+
 async function handleJoinClick() {
   clearError();
+  hideNodeWarning();
 
   const invite = document.getElementById('f-invite').value;
   const name = document.getElementById('f-name').value;
   const checkedProtocol = document.querySelector('input[name="protocol"]:checked');
   const protocol = checkedProtocol ? checkedProtocol.value : 'mc';
-  const nodeRef = document.getElementById('f-node-ref').value;
+  const mtNodeRef = mtPicker ? mtPicker.getValue() : null;
+  const mcNodeRef = mcPicker ? mcPicker.getValue() : null;
 
   if (!selectedTeam) {
     showError('Choose a team.');
@@ -315,8 +580,8 @@ async function handleJoinClick() {
     team: selectedTeam,
     protocol,
   };
-  if (protocol === 'mt') {
-    body.node_ref = nodeRef;
+  if (protocol === 'mt' && mtNodeRef) {
+    body.node_ref = mtNodeRef;
   }
 
   const submitBtn = document.getElementById('join-submit');
@@ -339,6 +604,13 @@ async function handleJoinClick() {
     }
     showJoinSuccess(data);
     fillKeySlots(data.key);
+
+    if (protocol === 'mc' && mcNodeRef) {
+      const bindResult = await bindPickedMcNode(data.key, mcNodeRef);
+      if (!bindResult.ok) {
+        showNodeWarning(bindResult.message);
+      }
+    }
     // Registration is one-time -- leave the button disabled rather than
     // re-enabling it, so a second click can't try to join again.
   } catch (err) {
@@ -543,6 +815,20 @@ function renderStatusResult(data) {
   clearRadiosError();
   renderRadiosList(data.radios);
   document.getElementById('status-radios').hidden = false;
+
+  // The check-in fallback-name control only ever means anything for a
+  // player who actually has a MeshCore radio -- see
+  // #checkin-name-section's comment in join.html for why this is an
+  // exception path, gated on hasMc rather than shown to everyone.
+  // Re-evaluated on every status check (including the ones
+  // applyRadiosUpdate() re-runs after an add/remove), so adding a first
+  // MeshCore radio and then re-checking status reveals it without a
+  // page reload, and removing one hides it again.
+  const checkinNameSection = document.getElementById('checkin-name-section');
+  if (checkinNameSection) {
+    checkinNameSection.hidden = !hasMc;
+    if (hasMc) loadCheckinName();
+  }
 }
 
 // Every add/remove call (POST/DELETE /api/nodes) returns only
@@ -573,6 +859,149 @@ function applyRadiosUpdate(radios) {
     return;
   }
   renderStatusResult(Object.assign({}, lastStatusData, { radios }));
+}
+
+// ---- MeshCore check-in fallback name (advanced, key-authenticated) -------
+//
+// GET/POST/DELETE /api/checkin/name (app/checkin_api.py) -- a
+// last-resort path for a MeshCore player whose public key isn't in the
+// mwmesh.com directory app/checkin.py's identity bridge checks first
+// (roughly 4 in 10 of today's bound contacts, per that module's own
+// docstring), so their net check-ins can't be resolved from their
+// contact automatically. Only ever wired up/shown once renderStatusResult()
+// has confirmed the player has a MeshCore radio -- see the hasMc check
+// there and #checkin-name-section's own comment in join.html for why
+// this is an exception path, not a normal one.
+//
+// Reads the key fresh from #f-status-key on every call, same reasoning
+// as the radio management functions below: there is exactly one place
+// this key lives on the page, and every authenticated call reads it
+// from there rather than caching it anywhere else.
+
+function showCheckinNameError(message) {
+  const el = document.getElementById('checkin-name-error');
+  if (!el) return;
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearCheckinNameError() {
+  const el = document.getElementById('checkin-name-error');
+  if (!el) return;
+  el.textContent = '';
+  el.hidden = true;
+}
+
+// Toggles between the "nothing set" state (just the form) and the
+// "something set" state (the current name + Remove button, form still
+// there underneath for changing it) -- sender_name is null in the
+// former case, a string in the latter, matching GET/POST/DELETE
+// /api/checkin/name's own {sender_name: ...} response shape exactly.
+function renderCheckinNameCurrent(senderName) {
+  const current = document.getElementById('checkin-name-current');
+  const currentText = document.getElementById('checkin-name-current-text');
+  const input = document.getElementById('f-checkin-name');
+  if (!current || !currentText) return;
+  if (senderName) {
+    currentText.textContent = `Currently set: ${senderName}`;
+    current.hidden = false;
+    if (input) input.value = '';
+  } else {
+    current.hidden = true;
+  }
+}
+
+// Runs once, right after renderStatusResult() reveals the section for
+// a MeshCore player -- fills in whatever is already set (or nothing)
+// without waiting for the player to open the <details> first. Quiet on
+// failure: this is an advanced, optional control, not worth a visible
+// error for a background fetch nobody asked for directly.
+async function loadCheckinName() {
+  const key = statusKeyValue();
+  if (!key) return;
+  try {
+    const res = await fetch('/api/checkin/name', { headers: { 'X-API-Key': key } });
+    if (!res.ok) return;
+    const data = await res.json();
+    renderCheckinNameCurrent(data && data.sender_name);
+  } catch (err) {
+    // Leave whatever was last rendered -- see comment above.
+  }
+}
+
+async function handleCheckinNameSubmit(e) {
+  e.preventDefault();
+  clearCheckinNameError();
+
+  const key = statusKeyValue();
+  if (!key) {
+    showCheckinNameError('Enter your API key above first.');
+    return;
+  }
+
+  const input = document.getElementById('f-checkin-name');
+  const name = input.value.trim();
+  if (!name) {
+    showCheckinNameError('Enter the name your radio posts under in the weekly-net channel.');
+    return;
+  }
+
+  const submitBtn = document.getElementById('checkin-name-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/checkin/name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+      body: JSON.stringify({ sender_name: name }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      const message = (data && typeof data.error === 'string')
+        ? data.error
+        : 'Something went wrong. Try again in a moment.';
+      showCheckinNameError(message);
+      return;
+    }
+    renderCheckinNameCurrent(data.sender_name);
+  } catch (err) {
+    showCheckinNameError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function handleCheckinNameRemove() {
+  clearCheckinNameError();
+
+  const key = statusKeyValue();
+  if (!key) {
+    showCheckinNameError('Enter your API key above first.');
+    return;
+  }
+
+  const removeBtn = document.getElementById('checkin-name-remove');
+  removeBtn.disabled = true;
+  try {
+    const res = await fetch('/api/checkin/name', {
+      method: 'DELETE',
+      headers: { 'X-API-Key': key },
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      const message = (data && typeof data.error === 'string')
+        ? data.error
+        : 'Something went wrong. Try again in a moment.';
+      showCheckinNameError(message);
+      return;
+    }
+    renderCheckinNameCurrent(null);
+  } catch (err) {
+    showCheckinNameError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    removeBtn.disabled = false;
+  }
 }
 
 // ---- Radio management (GET/POST/DELETE /api/nodes) -----------------------
@@ -787,6 +1216,8 @@ function setupStatusKeyToggle() {
 
 function boot() {
   buildTeamPicker();
+  mcPicker = createNodePicker('mc');
+  mtPicker = createNodePicker('mt');
   setupProtocolToggle();
   applyMeshtasticAvailability();
   applyInviteCodeHint();
@@ -795,6 +1226,8 @@ function boot() {
   document.getElementById('join-submit').addEventListener('click', handleJoinClick);
   document.getElementById('status-form').addEventListener('submit', handleStatusSubmit);
   document.getElementById('add-radio-form').addEventListener('submit', handleAddRadioSubmit);
+  document.getElementById('checkin-name-form').addEventListener('submit', handleCheckinNameSubmit);
+  document.getElementById('checkin-name-remove').addEventListener('click', handleCheckinNameRemove);
 }
 
 boot();

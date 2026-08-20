@@ -35,12 +35,13 @@ from sse_starlette.sse import EventSourceResponse
 
 from . import mc_api
 from .admin_api import router as admin_router
+from .checkin_api import router as checkin_router
 from .config import settings
 from .db import connect
 from .join_api import router as join_router
 from .mc_api import router as mc_router
 from .mc_ingest import hash_secret, log_raw_batch
-from .mc_scoring import team_tile_counts
+from .mc_scoring import team_checkin_points, team_tile_counts
 from .node_ref import normalize_node_ref
 from .nodes_api import router as nodes_router
 
@@ -74,6 +75,7 @@ async def config() -> dict:
         # Derive map center from node_seen for the current season.
         center, zoom = _derive_map_center(conn, active["id"] if active else None)
         counts = team_tile_counts(conn, active["id"]) if active else {}
+        checkin_points = team_checkin_points(conn, active["id"]) if active else {}
 
         # See mc_api.winner_banner_for() -- this used to build the banner
         # dict inline here (the only caller that needed it, before /season
@@ -102,12 +104,23 @@ async def config() -> dict:
             "ends_at": active["ends_at"] if active else None,
         },
         "winner_banner": banner,
-        # Seven-team shaped, same list-of-{team,tiles} shape
+        # Seven-team shaped, same list-of-{team,tiles,...} shape
         # /api/mc/scores and /scores below use -- not the old fixed
         # red/blue/green keys, which only ever made sense for the
-        # retired two-team geohash game.
+        # retired two-team geohash game. `total` (tiles + check-in
+        # points, app/mc_scoring.py's team_totals()) is the combined
+        # figure that actually decides a season's winner -- see that
+        # function's docstring.
         "scoreboard": {
-            "teams": [{"team": t, "tiles": counts.get(t, 0)} for t in mc_api.team_list()],
+            "teams": [
+                {
+                    "team": t,
+                    "tiles": counts.get(t, 0),
+                    "checkin_points": checkin_points.get(t, 0.0),
+                    "total": counts.get(t, 0) + checkin_points.get(t, 0.0),
+                }
+                for t in mc_api.team_list()
+            ],
         },
         "now": now_ts,
     }
@@ -463,6 +476,16 @@ async def top_players() -> list[dict]:
     return mc_api.top_for(MT_PROTOCOL)
 
 
+@router.get("/top-checkins")
+async def top_checkin_players() -> list[dict]:
+    """Players ranked by check-in points in the active Meshtastic
+    season -- the Meshtastic counterpart of /api/mc/top-checkins. See
+    app/mc_api.py's top_checkin_for(); response shape is identical to
+    /api/mc/top-checkins'.
+    """
+    return mc_api.top_checkin_for(MT_PROTOCOL)
+
+
 @router.get("/cell/{cell_id}")
 async def cell_detail(cell_id: str):
     """Rich popup data for a single grid cell -- the cell-keyed
@@ -599,6 +622,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(join_router)
     app.include_router(admin_router)
     app.include_router(nodes_router)
+    app.include_router(checkin_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"

@@ -30,6 +30,10 @@ services:
       MC_RAW_LOG_PATH: "${MC_RAW_LOG_PATH:-/data/mc_raw.log}"
       MT_POINTS_PER_FEEDER: "${MT_POINTS_PER_FEEDER:-0.1}"
       MT_MAX_POINTS_PER_PING: "${MT_MAX_POINTS_PER_PING:-1.0}"
+      CHECKIN_ENABLED: "${CHECKIN_ENABLED:-false}"
+      CHECKIN_POINTS: "${CHECKIN_POINTS:-25.0}"
+      CHECKIN_NET_START_DATE: "${CHECKIN_NET_START_DATE:-}"
+      MC_CHECKIN_BASE_URL: "${MC_CHECKIN_BASE_URL:-}"
     volumes:
       - meshwars-data:/data
 

@@ -37,6 +37,12 @@ up to "now" on the fly; every write first re-reads the decayed value,
 adds to it, and stores that as the new baseline with last_update reset to
 "now" -- decay then resumes counting down from there.
 
+A team's SEASON standing is a separate concept from a cell's score
+above, and is no longer squares alone: app/checkin.py adds net check-in
+points on top of squares held. team_totals() near the bottom of this
+file is the combined figure and the one every standing/winner decision
+reads -- see its docstring.
+
 All functions here are synchronous and take an already-open connection
 that the caller is expected to hold the write lock for. Nothing in this
 module opens its own connection or acquires app.db's write lock -- the
@@ -339,14 +345,62 @@ def apply_paint(
 
 
 def team_tile_counts(conn: sqlite3.Connection, season_id: int) -> dict[str, int]:
-    """Tile count per team for a season, used by the API and by season
-    rollover to compute the winner.
+    """Tile count per team for a season -- squares held only, no
+    check-in points folded in. Used by the API wherever the raw square
+    count is shown on its own, and internally by team_totals() below.
+    Not "the" team score by itself any more -- see team_totals().
     """
     rows = conn.execute(
         "SELECT owner_team, COUNT(*) AS c FROM mc_tile WHERE season_id = ? GROUP BY owner_team",
         (season_id,),
     ).fetchall()
     return {r["owner_team"]: r["c"] for r in rows}
+
+
+def team_checkin_points(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
+    """Net check-in points (app/checkin.py) earned per team for a
+    season, summed by each awarded player's CURRENT team -- player.team
+    is a permanent attribute (see app/join_api.py), not season-scoped,
+    so this always reflects who a player plays for now, the same choice
+    team_tile_counts() makes by reading mc_tile.owner_team live rather
+    than a frozen roster.
+
+    Never "the" team score on its own -- see team_totals() below, which
+    is what every caller that needs "how is this team doing" should
+    read instead. Note: mc_checkin_award has no protocol filter in this
+    query -- season_id already IS protocol-specific by construction
+    (see ensure_active_season), so a MeshCore season's id and a
+    Meshtastic season's id never collide and never need a second filter
+    here, matching every other season-scoped query in this module.
+    """
+    rows = conn.execute(
+        "SELECT p.team AS team, SUM(a.points) AS pts "
+        "  FROM mc_checkin_award a JOIN player p ON p.player_id = a.player_id "
+        " WHERE a.season_id = ? GROUP BY p.team",
+        (season_id,),
+    ).fetchall()
+    return {r["team"]: (r["pts"] or 0.0) for r in rows}
+
+
+def team_totals(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
+    """A team's full standing for a season: squares held
+    (team_tile_counts) plus net check-in points earned
+    (team_checkin_points). This is THE number for "how is this team
+    doing" -- every place that decides a season standing or a season
+    winner (maybe_roll_season below, and the live scoreboard routes in
+    app/mc_api.py / app/api.py) reads this, not team_tile_counts()
+    alone, so squares and check-ins are never silently only half
+    counted somewhere -- a team's number has to mean the same thing
+    everywhere it appears. The two component functions still exist and
+    are still read on their own wherever the two figures need to be
+    shown or stored separately (see mc_season_team_tally's
+    tiles/checkin_points columns); this is their sum, not a replacement
+    for either.
+    """
+    tiles = team_tile_counts(conn, season_id)
+    points = team_checkin_points(conn, season_id)
+    teams = set(tiles) | set(points)
+    return {t: tiles.get(t, 0) + points.get(t, 0.0) for t in teams}
 
 
 def ensure_active_season(conn: sqlite3.Connection, now: int, protocol: str) -> int:
@@ -386,10 +440,12 @@ def maybe_roll_season(conn: sqlite3.Connection, now: int, protocol: str) -> bool
     """If the active season for `protocol` has expired, close it and open
     a fresh one for the same protocol. Returns True if a roll happened.
 
-    On close: tally each team's tile count into mc_season_team_tally and
-    set the closing season's winner to whichever team holds the most
-    tiles, or 'TIE' if there is no unique leader (including the case
-    where nobody holds any tiles at all).
+    On close: tally each team's tile count AND check-in points into
+    mc_season_team_tally and set the closing season's winner to
+    whichever team has the highest COMBINED total (team_totals() --
+    squares plus check-in points, see that function's docstring for
+    why), or 'TIE' if there is no unique leader (including the case
+    where nobody holds any tiles or points at all).
 
     Pruning of old MeshCore season data (tile/score/capture rows) is
     deferred for now -- nothing is deleted on rollover, matching how the
@@ -404,19 +460,28 @@ def maybe_roll_season(conn: sqlite3.Connection, now: int, protocol: str) -> bool
         return False
 
     season_id = row["id"]
-    counts = team_tile_counts(conn, season_id)
+    tile_counts = team_tile_counts(conn, season_id)
+    checkin_points = team_checkin_points(conn, season_id)
+    totals = team_totals(conn, season_id)
 
-    all_teams = set(settings.teams_list) | set(counts.keys())
+    all_teams = set(settings.teams_list) | set(tile_counts.keys()) | set(checkin_points.keys())
     for team in all_teams:
-        tiles = counts.get(team, 0)
+        tiles = tile_counts.get(team, 0)
+        pts = checkin_points.get(team, 0.0)
         conn.execute(
-            "INSERT INTO mc_season_team_tally(season_id, team, tiles) VALUES (?, ?, ?) "
-            "ON CONFLICT(season_id, team) DO UPDATE SET tiles = excluded.tiles",
-            (season_id, team, tiles),
+            "INSERT INTO mc_season_team_tally(season_id, team, tiles, checkin_points) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(season_id, team) DO UPDATE SET "
+            "  tiles = excluded.tiles, checkin_points = excluded.checkin_points",
+            (season_id, team, tiles, pts),
         )
 
-    max_tiles = max(counts.values()) if counts else 0
-    leaders = [t for t, c in counts.items() if c == max_tiles and max_tiles > 0]
+    # Winner is decided on the COMBINED figure, not tiles alone -- see
+    # team_totals()'s docstring. tiles/checkin_points are still stored
+    # split above so a closed season's history can show where a team's
+    # total came from.
+    max_total = max(totals.values()) if totals else 0.0
+    leaders = [t for t, v in totals.items() if v == max_total and max_total > 0]
     winner = leaders[0] if len(leaders) == 1 else "TIE"
 
     conn.execute(
@@ -424,8 +489,8 @@ def maybe_roll_season(conn: sqlite3.Connection, now: int, protocol: str) -> bool
         (winner, season_id),
     )
     log.info(
-        "mc scoring: closed season %d winner=%s counts=%s",
-        season_id, winner, counts,
+        "mc scoring: closed season %d winner=%s totals=%s",
+        season_id, winner, totals,
     )
 
     ends_at = now + settings.mc_season_days * 86400

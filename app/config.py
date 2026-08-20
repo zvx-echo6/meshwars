@@ -79,9 +79,12 @@ class Settings(BaseSettings):
     mc_raw_log_max_bytes: int = 10_000_000     # rotate after this many bytes
     mc_raw_log_backups: int = 3                # rotated files kept, beyond the active one
 
-    # MeshCore scoring: a separate scoreboard from the Meshtastic fortress
-    # game above, keyed on flat grid cells and players instead of
-    # geohashes and radios. Up to seven teams instead of two.
+    # Team roster: shared by both boards now that Meshtastic runs on the
+    # same player model as MeshCore, keyed on flat grid cells and players
+    # rather than the retired geohashes-and-radios game. mc_season_days
+    # and the MeshCore-specific ping-scoring settings below it are
+    # board-scoped (see the mt_* settings further down for Meshtastic's
+    # equivalents) -- the roster itself is not.
     teams: str = "RED,GREEN,BLUE,PURPLE,YELLOW,ORANGE,PINK"
     mc_season_days: int = 30
     # Points per repeater a ping heard, and the cap on points a single
@@ -138,12 +141,14 @@ class Settings(BaseSettings):
     join_rate_limit_window_seconds: int = 600
     public_host: str = "meshwars.com"   # used to build the config link
 
-    # Registering a Meshtastic node (protocol "mt") binds the radio but
-    # cannot affect the Meshtastic board -- that board still picks nodes
-    # up automatically rather than from player registrations. Offering it
-    # as a working choice would mislead people, so it is disabled until
-    # the Meshtastic board moves onto the player model. Setting this true
-    # re-enables it with no code change.
+    # Registering a Meshtastic node (protocol "mt") is what puts it on the
+    # Meshtastic board -- a node nobody has registered is read by the
+    # meshview poller and discarded, the same way an unregistered MeshCore
+    # contact never reaches a square. This flag opens or closes that
+    # registration path for a deployment. It defaults to false so a fresh
+    # install doesn't open Meshtastic registration until it decides to run
+    # that board -- the same deliberate per-deployment choice as
+    # join_invite_code_public above, not a stale placeholder.
     join_meshtastic_enabled: bool = False
 
     # Admin door (/admin, /api/admin/*): lists players and keys, and can
@@ -171,6 +176,80 @@ class Settings(BaseSettings):
     # in a sitting is nowhere near this ceiling.
     node_api_rate_limit_attempts: int = 30
     node_api_rate_limit_window_seconds: int = 60
+
+    # Net check-ins (app/checkin.py): a second way to earn points,
+    # alongside squares held. A weekly net runs Wednesday evenings;
+    # checking in on either board's feed earns a registered player's
+    # team checkin_points once per player per net. Off by default -- a
+    # fresh install has not configured either upstream feed and must
+    # not start polling a third-party service (live.mwmesh.com,
+    # meshview) it was never told about.
+    checkin_enabled: bool = False
+    checkin_points: float = 25.0              # points a check-in earns; stored on the award row itself, so a later change here never rewrites history
+    checkin_poll_interval_seconds: int = 30   # tight -- MeshCore's feed returns only its newest 100 messages, no pagination, and a busy net can approach that
+
+    # The net window. Weekday follows Python's datetime.weekday()
+    # (Monday=0 .. Sunday=6), so Wednesday=2. Hours are LOCAL to
+    # checkin_net_timezone and inclusive at both ends (checked as
+    # start_hour <= local_hour <= end_hour), so the defaults 17..23
+    # cover 17:00:00 through 23:59:59. checkin_net_timezone must be a
+    # real IANA zone name, resolved through zoneinfo at call time, never
+    # a fixed UTC offset -- a fixed offset would drift an hour off the
+    # intended local window every time America/Boise crosses a
+    # daylight-saving transition.
+    checkin_net_weekday: int = 2
+    checkin_net_start_hour: int = 17
+    checkin_net_end_hour: int = 23
+    checkin_net_timezone: str = "America/Boise"
+
+    # Lower bound on which net a check-in can be awarded for, as a local
+    # YYYY-MM-DD net date -- compared against the value net_date_for_ts()
+    # returns, never the raw message timestamp, since those two differ
+    # for a message sent late in the net window. Both check-in feeds
+    # carry history (live.mwmesh.com's weekly-net channel returns its
+    # newest 100 messages regardless of age; meshview keeps its own
+    # backlog), so the first poll after this feature goes live would
+    # otherwise retroactively award every past net still visible
+    # upstream -- for whichever players happen to be registered today,
+    # never for anyone else who was actually at those same nets. Empty
+    # is deliberately treated as "block every net" (see
+    # net_date_for_ts), not "no lower bound" -- the same contract
+    # mc_checkin_base_url and join_invite_code already use for "empty
+    # means off, never open," extended here because an unset bound must
+    # never silently become an unbounded one. Set this to the date of
+    # the first net that should actually count before relying on it.
+    checkin_net_start_date: str = ""
+
+    # MeshCore weekly-net feed: a live.mwmesh.com channel-messages
+    # endpoint, entirely separate from the wardriving ingest path in
+    # app/mc_ingest.py. Empty disables this half of check-ins even when
+    # checkin_enabled is true -- empty means off, never open, same
+    # contract as join_invite_code.
+    mc_checkin_base_url: str = ""
+    mc_checkin_channel: str = "#weekly-net"
+
+    # Meshtastic check-in feed reuses meshview_base_url (the SAME
+    # meshview instance app/ingest.py already polls for position
+    # packets) with portnum=1 (text) instead of 3 (position), filtered
+    # by this hashtag -- there is only one meshview instance configured
+    # for this deployment, so no separate base URL setting is needed.
+    mt_checkin_hashtag: str = "#freq51"
+
+    # MeshCore public-key directory bridge (live.mwmesh.com/api/nodes):
+    # resolves a player's already-bound MeshCore radio contact (the
+    # first 8 hex characters of its public key -- see app/mc_ingest.py's
+    # auto-bind, or app/nodes_api.py) to that radio's current display
+    # name in the directory, so a player who has never typed a check-in
+    # registration command can still earn credit under whatever name
+    # their own radio currently advertises. See app/checkin.py's module
+    # docstring for why this is trusted (it starts from a public key we
+    # already know independently, not from the name) and for the
+    # ambiguity rules that make it refuse rather than guess. The
+    # directory changes slowly -- radios don't rename themselves often
+    # -- and a net only produces a few dozen messages, so it is cached
+    # and refreshed on its own interval, never fetched per message.
+    mc_checkin_directory_limit: int = 5000
+    mc_checkin_directory_refresh_seconds: int = 900
 
     @property
     def teams_list(self) -> list[str]:

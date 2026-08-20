@@ -18,9 +18,9 @@ guard no longer triggers -- it is kept because it is still correct and
 harmless, not because the race it was written for is still live.)
 
 Several of the functions below (active_season, board_for, scores_for,
-history_for, cell_detail_for, find_for, top_for, season_team_tally,
-winner_banner_active, winner_banner_for, latest_closed_season,
-team_list) take an explicit `protocol` argument
+history_for, cell_detail_for, find_for, top_for, top_checkin_for,
+season_team_tally, winner_banner_active, winner_banner_for,
+latest_closed_season, team_list) take an explicit `protocol` argument
 and are called from here with MC_PROTOCOL -- and, now that the
 Meshtastic board runs on this same mc_season/mc_tile* model, also
 called from app/api.py with 'mt', so the query logic for each pair of
@@ -41,7 +41,7 @@ from .config import settings
 from .db import connect
 from .grid import cell_bounds
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
-from .mc_scoring import team_tile_counts
+from .mc_scoring import team_checkin_points, team_tile_counts
 
 router = APIRouter()
 
@@ -346,18 +346,30 @@ def winner_banner_for(conn, protocol: str, now_ts: int) -> dict | None:
     if not winner_banner_active(closed, now_ts):
         return None
     tallies = season_team_tally(conn, closed["id"])
+    checkin_tallies = season_team_checkin_points(conn, closed["id"])
     return {
         "season_id": closed["id"],
         "started_at": closed["started_at"],
         "ends_at": closed["ends_at"],
         "winner": closed["winner"],
-        "teams": [{"team": t, "tiles": tallies.get(t, 0)} for t in team_list()],
+        "teams": [
+            {
+                "team": t,
+                "tiles": tallies.get(t, 0),
+                "checkin_points": checkin_tallies.get(t, 0.0),
+                "total": tallies.get(t, 0) + checkin_tallies.get(t, 0.0),
+            }
+            for t in team_list()
+        ],
     }
 
 
 def season_team_tally(conn, season_id: int) -> dict[str, int]:
     """team -> tiles for a season's final tally, from mc_season_team_tally
     (written once at season close, see mc_scoring.maybe_roll_season).
+    Squares only -- see season_team_checkin_points() for the check-in
+    half of a closed season's standing, and combine the two (as every
+    caller below does) for the figure that actually decided the winner.
     Shared by mc_history() below and app/api.py's /config winner banner,
     which both need a closed season's per-team standings.
     """
@@ -366,6 +378,20 @@ def season_team_tally(conn, season_id: int) -> dict[str, int]:
         (season_id,),
     ).fetchall()
     return {r["team"]: r["tiles"] for r in rows}
+
+
+def season_team_checkin_points(conn, season_id: int) -> dict[str, float]:
+    """team -> check-in points for a season's final tally, from the
+    checkin_points column mc_scoring.maybe_roll_season writes alongside
+    tiles at season close. Sibling of season_team_tally() above -- same
+    source table, same "written once at close" contract, split out
+    because the two figures are shown separately as well as combined.
+    """
+    rows = conn.execute(
+        "SELECT team, checkin_points FROM mc_season_team_tally WHERE season_id = ?",
+        (season_id,),
+    ).fetchall()
+    return {r["team"]: r["checkin_points"] for r in rows}
 
 
 def board_for(protocol: str) -> list[dict]:
@@ -430,17 +456,27 @@ def scores_for(protocol: str) -> dict:
         # Live counts, not the season-close tally: mc_season_team_tally is
         # only populated by maybe_roll_season() when a season CLOSES, so it
         # stays empty/stale for the entire span of an active season. Count
-        # current ownership straight from mc_tile via the same helper
+        # current ownership straight from mc_tile, and current check-in
+        # points straight from mc_checkin_award, via the same helpers
         # season rollover itself uses, so this always matches the live
         # board. mc_season_team_tally is still the correct source for
         # historical (closed) season standings -- leave it alone, don't
         # wire it back in here.
-        counts = team_tile_counts(conn, season["id"])
+        tile_counts = team_tile_counts(conn, season["id"])
+        checkin_points = team_checkin_points(conn, season["id"])
         return {
             "season_id": season["id"],
             "started_at": season["started_at"],
             "ends_at": season["ends_at"],
-            "teams": [{"team": t, "tiles": counts.get(t, 0)} for t in team_list()],
+            "teams": [
+                {
+                    "team": t,
+                    "tiles": tile_counts.get(t, 0),
+                    "checkin_points": checkin_points.get(t, 0.0),
+                    "total": tile_counts.get(t, 0) + checkin_points.get(t, 0.0),
+                }
+                for t in team_list()
+            ],
         }
 
     result = _safe_query(run)
@@ -450,7 +486,7 @@ def scores_for(protocol: str) -> dict:
         "season_id": None,
         "started_at": None,
         "ends_at": None,
-        "teams": [{"team": t, "tiles": 0} for t in team_list()],
+        "teams": [{"team": t, "tiles": 0, "checkin_points": 0.0, "total": 0.0} for t in team_list()],
     }
 
 
@@ -509,12 +545,21 @@ def history_for(protocol: str) -> list[dict]:
         out = []
         for s in seasons:
             tallies = season_team_tally(conn, s["id"])
+            checkin_tallies = season_team_checkin_points(conn, s["id"])
             out.append({
                 "id": s["id"],
                 "started_at": s["started_at"],
                 "ends_at": s["ends_at"],
                 "winner": s["winner"],
-                "teams": [{"team": t, "tiles": tallies.get(t, 0)} for t in team_list()],
+                "teams": [
+                    {
+                        "team": t,
+                        "tiles": tallies.get(t, 0),
+                        "checkin_points": checkin_tallies.get(t, 0.0),
+                        "total": tallies.get(t, 0) + checkin_tallies.get(t, 0.0),
+                    }
+                    for t in team_list()
+                ],
             })
         return out
 
@@ -693,6 +738,60 @@ async def mc_top() -> list[dict]:
     before this module had a second caller.
     """
     return top_for(MC_PROTOCOL)
+
+
+def top_checkin_for(protocol: str) -> list[dict]:
+    """Players ranked by check-in points earned in `protocol`'s active
+    season, from mc_checkin_award. Top 20, empty list if there's no
+    data (or no active season) -- the "Netrunners" counterpart of
+    top_for() above (see app/checkin.py's module docstring for the
+    Wardrivers/Netrunners theming; both are ACTIVITIES on the same
+    player model, so a player who does both shows up in both rankings).
+
+    Follows the exact same *_for() pattern as
+    board_for/scores_for/history_for/cell_detail_for/find_for/top_for,
+    so app/api.py's Meshtastic route calls this directly instead of
+    duplicating the query. Ranks by SUM(points), not award count, since
+    an award's points value is copied from settings.checkin_points at
+    the moment it was earned (see app/db.py's mc_checkin_award) rather
+    than read live -- summing is also what mc_scoring.team_checkin_points()
+    already does against this same table, so a player's rank here and
+    their team's total there always agree on what "check-in points"
+    means.
+    """
+
+    def run(conn):
+        season = active_season(conn, protocol)
+        if not season:
+            return []
+        rows = conn.execute(
+            "SELECT p.display_name AS display_name, p.team AS team, "
+            "       SUM(a.points) AS points "
+            "  FROM mc_checkin_award a "
+            "  JOIN player p ON p.player_id = a.player_id "
+            " WHERE a.season_id = ? "
+            " GROUP BY a.player_id "
+            " ORDER BY points DESC "
+            " LIMIT 20",
+            (season["id"],),
+        ).fetchall()
+        return [
+            {"display_name": r["display_name"], "team": r["team"], "points": r["points"]}
+            for r in rows
+        ]
+
+    result = _safe_query(run)
+    return result if result is not None else []
+
+
+@router.get("/api/mc/top-checkins")
+async def mc_top_checkins() -> list[dict]:
+    """Players ranked by check-in points in the active MeshCore season.
+    See top_checkin_for(). New route -- every existing /api/mc/* route's
+    request path, request shape, and response shape is unchanged by
+    this addition.
+    """
+    return top_checkin_for(MC_PROTOCOL)
 
 
 # Cap on how many repeater_observation rows cell_detail_for() returns
