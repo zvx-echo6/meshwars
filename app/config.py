@@ -41,13 +41,6 @@ class Settings(BaseSettings):
     def excluded_roles_set(self) -> set[str]:
         return {r.strip().upper() for r in self.excluded_roles.split(",") if r.strip()}
 
-
-    # Fortress scoring constants
-    score_per_packet: float = 0.5          # effort bonus per qualifying paint
-    score_per_unique_node: float = 1.0     # one-time bonus per new painter
-    score_decay_per_day: float = 0.25      # decay rate, applied to all scores
-    defense_window_seconds: int = 900      # 15 minutes after capture, no flip
-
     # MeshCore ingest: wardriving batches pushed by the MeshMapper app
     mc_ingest_enabled: bool = True
     mc_queue_max: int = 10000

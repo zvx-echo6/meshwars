@@ -34,7 +34,7 @@ Check-in points add to a team's total alongside its square count; they do not re
 
 To be credited, a check-in has to resolve to a registered player's radio. On Meshtastic that's the registered node ID. On MeshCore it's the registered contact, which [MeshMapper](https://meshmapper.net) binds automatically the first time a player wardrives, or a player can pick their node from a searchable list on the join page at registration instead. A MeshCore player whose public key has never shown up in the directory MeshWars checks first has a last-resort fallback: a self-declared check-in name, set from the join page's setup-check panel.
 
-Off by default — a fresh install has not configured either upstream feed and must not start polling a third-party service it was never told about. See `.env.example`'s `CHECKIN_*` and `MC_CHECKIN_*`/`MT_CHECKIN_*` settings to turn it on.
+Off by default — a fresh install has not configured either upstream feed and must not start polling a third-party service it was never told about. See `.env.example`'s `CHECKIN_*` and `MC_CHECKIN_*`/`MT_CHECKIN_*` settings to turn it on. Setting `CHECKIN_ENABLED=true` is not enough by itself: `CHECKIN_NET_START_DATE` also has to be set to the date of the first net that should count. It defaults to empty, and empty means block every net, not "no lower bound" — leave it unset and check-ins run with no visible error but award nothing at all, because every net still in the feed is older than the (missing) start date.
 
 ## The grid
 
@@ -46,7 +46,7 @@ Registration is at `/join` and requires an invite code. The code is off by defau
 
 ![Join page](docs/img/join.png)
 
-A successful registration shows an API key once, and the page walks a MeshCore player through configuring MeshMapper to forward to MeshWars, including a link that page can hand straight to the app. Because that key is shown exactly once, the join page also has a self-service setup check: paste the key back in and it reports when MeshWars last heard from that player and, if something's wrong, what.
+A successful registration shows an API key once, and the page walks a MeshCore player through configuring MeshMapper to forward to MeshWars, including a link that page can hand straight to the app. Because that key is shown exactly once, the join page also has a self-service setup check: paste the key back in and it reports when MeshWars last heard from that player and, if something's wrong, what. That same panel is also where radios get managed after the fact — add or remove one, on either protocol, any time, using nothing but the key. That covers a MeshCore contact's three routes into the player registry: MeshMapper auto-binds it on first wardrive, a player can pick it from a searchable list at registration, or add it later from this panel. A Meshtastic node, which cannot self-bind at all, always goes through the last two.
 
 ## Privacy
 
@@ -56,7 +56,9 @@ There is an opt-in raw batch log for diagnosing MeshMapper's payloads while tuni
 
 ## Operating it
 
-Configuration lives in `.env`. It runs as a single Docker container via `docker compose`, backed by SQLite — no external services required. An administrative interface exists for revoking keys and managing players; it is disabled entirely unless a token is explicitly configured.
+Configuration lives in `.env`. It runs as a single Docker container via `docker compose`, backed by SQLite — no external services required. An administrative interface exists at `/admin`; it is disabled entirely unless `ADMIN_TOKEN` is explicitly configured, since that token is the only authentication this application has anywhere.
+
+From there an operator can revoke a key, disable or delete a player, and add or remove a player's radios directly — fixing someone's setup never requires their key at all. A key is a SHA-256 hash in storage; the raw value is shown exactly once, at issuance, and is never recoverable after that, by anyone, including an admin. There are two separate remedies for that, not one, because "I lost my key" and "someone else has my key" call for opposite responses: issuing an *additional* key leaves every existing key working, for a player who just mislaid theirs and whose MeshMapper config should keep running untouched; reissuing revokes every key the player currently holds and replaces them with one new one, for a key that actually leaked, at the cost of breaking that player's setup until they reconfigure it with the new key.
 
 ## Project status
 
@@ -79,7 +81,7 @@ Open `http://localhost:8090`.
 
 ## Configuration
 
-All settings live in `.env`. See `.env.example` for the full list. `MESHVIEW_BASE_URL` is required for the Meshtastic board to have anything to poll; everything else, including whether MeshCore registration is open at all, has a safe default and can be left as-is. See `.env.example`'s comments for what each setting does.
+All settings live in `.env`. See `.env.example` for the full list. `MESHVIEW_BASE_URL` is the only setting with no default, so it is required to start the process at all — even on a deployment that only cares about the MeshCore board. Everything else, including whether MeshCore registration is open at all, has a safe default and can be left as-is. See `.env.example`'s comments for what each setting does.
 
 ## License
 
