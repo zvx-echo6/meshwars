@@ -246,22 +246,22 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
 );
 
 -- ---------------------------------------------------------------------
--- MeshCore scoring tables. This is a SEPARATE scoreboard from the
--- Meshtastic tile/tile_score tables above -- flat grid cells and players
--- instead of geohashes and radios. Kept fully independent so the live
--- Meshtastic game is unaffected; a later cutover will move Meshtastic
--- onto this model.
+-- MeshCore-model scoring tables. Both boards run on this model now,
+-- flat grid cells and players instead of the retired geohash tile/
+-- tile_score tables above. Those legacy tables are kept, unwritten,
+-- purely so their three completed seasons of history stay readable --
+-- see app/api.py's module docstring for the full story of the cutover.
 -- ---------------------------------------------------------------------
 
 -- One MeshCore season at a time; mirrors `season` above but tallies teams
 -- (there can be more than two) instead of fixed red/blue/green columns.
 --
 -- `protocol` is the ONLY column that separates the MeshCore board from
--- the Meshtastic board once Meshtastic is moved onto this model ('mc' /
--- 'mt'). Deliberately placed here and nowhere else: every other mc_*
--- table keys off season_id, so as long as a season's protocol never
--- changes and every lookup filters on it, the two boards stay fully
--- independent without needing a protocol column on the tile tables too.
+-- the Meshtastic board on this shared model ('mc' / 'mt'). Deliberately
+-- placed here and nowhere else: every other mc_* table keys off
+-- season_id, so as long as a season's protocol never changes and every
+-- lookup filters on it, the two boards stay fully independent without
+-- needing a protocol column on the tile tables too.
 CREATE TABLE IF NOT EXISTS mc_season (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     protocol    TEXT NOT NULL DEFAULT 'mc',  -- 'mc' | 'mt'

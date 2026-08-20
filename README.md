@@ -60,7 +60,7 @@ Configuration lives in `.env`. It runs as a single Docker container via `docker 
 
 ## Project status
 
-The MeshCore board is live and in beta with real players. The Meshtastic migration to the same player model and grid is planned but not started. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
+The MeshCore board is live and in beta with real players. The Meshtastic board now runs the same player model and grid, differing only in how position reaches it: pulled from a public meshview instance and scored only for registered nodes. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
 
 ![About page](docs/img/about.png)
 

@@ -492,8 +492,7 @@
 
 
 /* Roster modal -- responsive per-team sections rather than a fixed
-   two-column grid, since MeshCore can have up to seven teams (versus
-   Meshtastic's fixed Red/Blue). */
+   two-column grid, since both boards can have up to seven teams now. */
 .mc-roster-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

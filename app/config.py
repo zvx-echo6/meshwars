@@ -79,9 +79,12 @@ class Settings(BaseSettings):
     mc_raw_log_max_bytes: int = 10_000_000     # rotate after this many bytes
     mc_raw_log_backups: int = 3                # rotated files kept, beyond the active one
 
-    # MeshCore scoring: a separate scoreboard from the Meshtastic fortress
-    # game above, keyed on flat grid cells and players instead of
-    # geohashes and radios. Up to seven teams instead of two.
+    # Team roster: shared by both boards now that Meshtastic runs on the
+    # same player model as MeshCore, keyed on flat grid cells and players
+    # rather than the retired geohashes-and-radios game. mc_season_days
+    # and the MeshCore-specific ping-scoring settings below it are
+    # board-scoped (see the mt_* settings further down for Meshtastic's
+    # equivalents) -- the roster itself is not.
     teams: str = "RED,GREEN,BLUE,PURPLE,YELLOW,ORANGE,PINK"
     mc_season_days: int = 30
     # Points per repeater a ping heard, and the cap on points a single
@@ -138,12 +141,14 @@ class Settings(BaseSettings):
     join_rate_limit_window_seconds: int = 600
     public_host: str = "meshwars.com"   # used to build the config link
 
-    # Registering a Meshtastic node (protocol "mt") binds the radio but
-    # cannot affect the Meshtastic board -- that board still picks nodes
-    # up automatically rather than from player registrations. Offering it
-    # as a working choice would mislead people, so it is disabled until
-    # the Meshtastic board moves onto the player model. Setting this true
-    # re-enables it with no code change.
+    # Registering a Meshtastic node (protocol "mt") is what puts it on the
+    # Meshtastic board -- a node nobody has registered is read by the
+    # meshview poller and discarded, the same way an unregistered MeshCore
+    # contact never reaches a square. This flag opens or closes that
+    # registration path for a deployment. It defaults to false so a fresh
+    # install doesn't open Meshtastic registration until it decides to run
+    # that board -- the same deliberate per-deployment choice as
+    # join_invite_code_public above, not a stale placeholder.
     join_meshtastic_enabled: bool = False
 
     # Admin door (/admin, /api/admin/*): lists players and keys, and can
