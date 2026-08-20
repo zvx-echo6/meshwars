@@ -216,8 +216,12 @@ CREATE TABLE IF NOT EXISTS player_last_fix (
     PRIMARY KEY (player_id, protocol)
 );
 
--- One row per accepted ping; serves both duplicate detection and the
--- per-cell cooldown.
+-- One row per accepted ping; serves exact-duplicate detection (the same
+-- player/cell/ts arriving twice). Used to also gate the per-cell scoring
+-- cooldown on its own, but that blocked the whole ping rather than just
+-- re-earning for a repeater already credited -- see
+-- player_cell_repeater_credit below, which is what the cooldown reads
+-- now (app/mc_scoring.py's apply_paint()).
 CREATE TABLE IF NOT EXISTS player_cell_ping (
     player_id  INTEGER NOT NULL,
     protocol   TEXT NOT NULL,
@@ -227,6 +231,51 @@ CREATE TABLE IF NOT EXISTS player_cell_ping (
     PRIMARY KEY (player_id, protocol, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_ping_seen ON player_cell_ping(seen_at);
+
+-- Which repeaters (MeshCore) / feeders (Meshtastic -- both are just
+-- RepeaterEntry.repeater_id, see app/mc_ingest.py) a player has already
+-- been credited scoring points for, on a given cell, and when.
+--
+-- This exists because mc_cooldown_seconds' actual job is stopping
+-- someone parked in one spot from spamming pings to run up a score --
+-- not stopping a player from being credited for genuinely different
+-- repeaters heard on the same pass. MeshMapper sends one ping per
+-- repeater contact, often a second apart, so a single visit to a square
+-- routinely produces several pings in a row, each naming a different
+-- repeater. Gating the cooldown on player_cell_ping (any repaint of the
+-- same cell, regardless of which repeater) discarded every one of those
+-- pings after the first, crediting a player for one repeater when they
+-- had actually heard several -- see apply_paint()'s docstring in
+-- app/mc_scoring.py for the full story. This table lets the cooldown
+-- block re-earning per REPEATER already credited on this cell instead of
+-- per ping: `ts` is bumped forward every time a repeater earns fresh
+-- credit here, so a row older than mc_cooldown_seconds means that
+-- repeater's credit has lapsed and it is free to score again, while a
+-- row still inside the window means it is not.
+--
+-- Brand new table, no existing deployed shape to ALTER, so CREATE TABLE
+-- IF NOT EXISTS here is sufficient on its own -- same reasoning as
+-- repeater_observation/repeater_identity above; no MIGRATIONS entry
+-- needed.
+--
+-- `ts` is the credited ping's own (attacker-controlled) timestamp --
+-- used for the cooldown-window comparison itself, same field
+-- recently_painted() used to read from player_cell_ping. `seen_at` is
+-- the server receipt time, kept separate for the same reason
+-- player_cell_ping keeps the same two columns distinct: retention
+-- housekeeping (_housekeeping_sync in app/mc_ingest.py) needs a time
+-- base a client can't manipulate to keep a row alive indefinitely or
+-- vanish it early.
+CREATE TABLE IF NOT EXISTS player_cell_repeater_credit (
+    player_id    INTEGER NOT NULL,
+    protocol     TEXT NOT NULL,
+    cell_id      TEXT NOT NULL,
+    repeater_id  TEXT NOT NULL,
+    ts           INTEGER NOT NULL,
+    seen_at      INTEGER NOT NULL,
+    PRIMARY KEY (player_id, protocol, cell_id, repeater_id)
+);
+CREATE INDEX IF NOT EXISTS idx_player_cell_repeater_credit_seen ON player_cell_repeater_credit(seen_at);
 
 -- Per-player per-day counters, so we can tell a player why they are not
 -- scoring.

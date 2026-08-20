@@ -571,10 +571,11 @@ class Ingestor:
                 return False
 
             # player_cell_ping is written BEFORE scoring, same as
-            # app/mc_ingest.py -- it is both the exact-duplicate check
-            # (this packet_id could theoretically resend an identical
-            # sender/cell/ts) and the row mc_scoring.apply_paint's
-            # cooldown check (recently_painted()) reads.
+            # app/mc_ingest.py -- it is the exact-duplicate check (this
+            # packet_id could theoretically resend an identical
+            # sender/cell/ts). The scoring cooldown itself no longer
+            # reads this table -- see mc_scoring.apply_paint(), which now
+            # gates per feeder credited, not per ping painted.
             cur = conn.execute(
                 "INSERT OR IGNORE INTO player_cell_ping"
                 "(player_id, protocol, cell_id, ts, seen_at) VALUES (?, ?, ?, ?, ?)",
@@ -590,9 +591,9 @@ class Ingestor:
 
             # Coverage evidence: which feeders can hear this cell, at
             # cell granularity only -- recorded for every ping that
-            # reaches this point, including one apply_paint will go on to
-            # reject for the cooldown (a cooldown blocks scoring, not
-            # what this cell can actually reach).
+            # reaches this point, including one whose feeders apply_paint
+            # will go on to reject for the cooldown (a cooldown blocks
+            # scoring, not what this cell can actually reach).
             record_repeater_observations(conn, PROTOCOL, cell, entries, ts)
 
             # Last known cell, monotonic on ts, same as MeshCore.
@@ -613,17 +614,18 @@ class Ingestor:
                     (cell, ts, player_id, PROTOCOL),
                 )
 
-            # Distinct feeders heard -> points, mirroring how
-            # app/mc_ingest.py turns a distinct-repeater count into
-            # points, inverted (see the module docstring). A packet no
-            # feeder heard within the hop limit earns zero points here --
-            # still a valid, accepted ping (counted below), just one that
-            # paints nothing when it reaches apply_paint.
-            points = min(
-                len(entries) * settings.mt_points_per_feeder,
-                settings.mt_max_points_per_ping,
-            )
-            no_repeaters = 1 if points <= 0 else 0
+            # Distinct feeders heard -> candidate scoring input, mirroring
+            # how app/mc_ingest.py turns a distinct-repeater list into
+            # scoring input, inverted (see the module docstring). A
+            # packet no feeder heard within the hop limit earns zero
+            # points here -- still a valid, accepted ping (counted
+            # below), just one that paints nothing when it reaches
+            # apply_paint. Which feeders actually earn points -- some may
+            # already be credited to this player on this cell within the
+            # cooldown window -- is decided inside apply_paint(), not
+            # here.
+            feeder_ids = [e.repeater_id for e in entries]
+            no_repeaters = 1 if not feeder_ids else 0
             _bump_player_stat(conn, player_id, day, pings_accepted=1, pings_no_repeaters=no_repeaters)
 
             # Meshtastic scoring, through the same shared path MeshCore
@@ -631,7 +633,11 @@ class Ingestor:
             # already recorded above or abort the rest of this packet's
             # bookkeeping -- log it and keep going.
             try:
-                mc_scoring.apply_paint(conn, mt_season_id, player_id, team, cell, ts, points, PROTOCOL)
+                mc_scoring.apply_paint(
+                    conn, mt_season_id, player_id, team, cell, ts, feeder_ids,
+                    settings.mt_points_per_feeder, settings.mt_max_points_per_ping,
+                    PROTOCOL, int(time.time()),
+                )
             except Exception:
                 log.exception(
                     "mt scoring: apply_paint failed for player %d cell %s",
