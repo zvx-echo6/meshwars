@@ -45,6 +45,15 @@ from .mc_scoring import team_tile_counts
 
 router = APIRouter()
 
+# Bare literal, not `from .ingest import PROTOCOL as MT_PROTOCOL` the way
+# MC_PROTOCOL above is imported from app/mc_ingest.py: app/ingest.py
+# imports app/api.py (for _node_hex), and app/api.py imports this module
+# to mount its router, so importing app/ingest.py from here would close
+# a cycle (mc_api -> ingest -> api -> mc_api). 'mt' is exactly as fixed a
+# value as MC_PROTOCOL stands in for 'mc' -- app/ingest.py's own PROTOCOL
+# constant is this same string.
+MT_PROTOCOL = "mt"
+
 # ---- status-check rate limiting ---------------------------------------
 #
 # Bounded per-address tracking, same pattern as app/join_api.py's
@@ -187,6 +196,70 @@ def _diagnose(alltime: dict, squares_held: int, last_batch_at: int | None, now_t
     when = _relative_time(now_ts, last_batch_at) if last_batch_at else "never"
     square_word = "square" if squares_held == 1 else "squares"
     return "ok", f"Working. Last heard {when}. You hold {squares_held} {square_word}."
+
+
+def _diagnose_mt(alltime: dict, squares_held: int, last_heard_at: int | None, now_ts: int) -> tuple[str, str]:
+    """The Meshtastic equivalent of _diagnose() above -- same
+    first-match-wins shape over the player's all-time totals, but
+    different failure modes, because Meshtastic is pulled from meshview
+    instead of pushed by a wardriving app (see app/ingest.py's module
+    docstring). There is no MeshMapper on this side, so none of that
+    app's advice belongs in these messages.
+
+    Several genuinely different real-world causes -- the node isn't
+    broadcasting a position at all, its OK to MQTT setting is off so no
+    gateway ever forwards what it does send, or the node ID registered
+    here doesn't match the radio actually transmitting -- are
+    indistinguishable from this side: every one of them looks exactly
+    like "we have never picked up a single packet for this player", and
+    there is no server-side signal that tells them apart from data that,
+    by definition, was never received. So the first branch below names
+    all of them rather than falsely diagnosing just one.
+    """
+    total = (
+        alltime["pings_accepted"] + alltime["pings_duplicate"]
+        + alltime["pings_bad_coord"] + alltime["pings_out_of_area"]
+    )
+
+    if total == 0:
+        return "mt_never_seen", (
+            "MeshWars has never picked up a position packet from this node. "
+            "Check that the node ID registered here matches the radio "
+            "you're actually using, that OK to MQTT is turned on under "
+            "Radio Configuration → LoRa, that the node has a GPS fix "
+            "and is broadcasting its position, and that you're within "
+            "range of a FREQ51 gateway feeder."
+        )
+
+    if alltime["pings_out_of_area"] == total:
+        return "mt_out_of_area", (
+            "Your positions are outside the play area, which is Southern "
+            "Idaho and Northern Utah."
+        )
+
+    if alltime["pings_bad_coord"] == total:
+        return "mt_bad_position", (
+            "MeshWars is picking up packets from this node, but without a "
+            "usable position. Check that it has a GPS fix, and that "
+            "position precision on your channel isn't reduced to the "
+            "point coordinates are stripped out."
+        )
+
+    if (
+        alltime["pings_accepted"] > 0
+        and alltime["pings_no_repeaters"] == alltime["pings_accepted"]
+        and squares_held == 0
+    ):
+        return "mt_no_feeder", (
+            "Everything is working. Your positions are arriving, but no "
+            "FREQ51 gateway feeder is hearing this node, so no squares "
+            "were claimed. That means you are out of range of a feeder, "
+            "not misconfigured."
+        )
+
+    when = _relative_time(now_ts, last_heard_at) if last_heard_at else "never"
+    square_word = "square" if squares_held == 1 else "squares"
+    return "mt_ok", f"Working. Last heard {when}. You hold {squares_held} {square_word}."
 
 
 def _safe_query(fn):
@@ -793,6 +866,32 @@ def _counters_out(row) -> dict:
     }
 
 
+# Meshtastic counterpart of _STAT_ZERO_ROW/_counters_out above, missing
+# batches/no_contact/wrong_owner on purpose: those three are structurally
+# always 0 for protocol='mt' (see app/ingest.py's _STAT_COLUMNS
+# docstring -- no batch-submission concept, no way to attribute an
+# unregistered packet to a player, and player_node's (protocol, node_ref)
+# primary key already makes ownership 1:1 at registration time). Reading
+# player_ingest_stat and reporting them anyway would show a Meshtastic
+# player a column of counters that can never be anything but zero -- the
+# exact thing this endpoint update exists to stop doing -- so they are
+# left out of the shape entirely rather than zero-filled.
+_STAT_ZERO_ROW_MT = {
+    "pings_accepted": 0, "pings_duplicate": 0, "pings_bad_coord": 0,
+    "pings_out_of_area": 0, "pings_no_repeaters": 0,
+}
+
+
+def _counters_out_mt(row) -> dict:
+    return {
+        "accepted": row["pings_accepted"],
+        "duplicate": row["pings_duplicate"],
+        "bad_coord": row["pings_bad_coord"],
+        "out_of_area": row["pings_out_of_area"],
+        "no_repeaters": row["pings_no_repeaters"],
+    }
+
+
 @router.post("/api/mc/status")
 async def mc_status(request: Request) -> JSONResponse:
     """Lets a player check whether their wardriving app is actually
@@ -806,6 +905,23 @@ async def mc_status(request: Request) -> JSONResponse:
     the URL, where it can land in a server access log, browser history,
     or a Referer header. Checking status is deliberately not usage --
     this never touches api_key.last_seen_at.
+
+    Despite the /api/mc/ URL, this now reports BOTH protocols a player
+    might have radios for -- the top-level fields below (last_batch_at,
+    today, last_7_days, squares_held, diagnosis) are unchanged and stay
+    MeshCore-scoped, exactly as every existing caller already expects;
+    everything Meshtastic-specific is additive, under the new "mt" key.
+    They cannot share a shape: MeshCore is pushed to us in batches (see
+    api_key.last_seen_at, player_ingest_stat.batches), Meshtastic is
+    pulled from meshview one packet at a time with no batch concept at
+    all (see app/ingest.py's module docstring) -- and reusing this
+    module's own MC_PROTOCOL-scoped helpers (active_season, _diagnose,
+    _counters_out, and friends) for a second protocol would silently mix
+    the two boards together, the exact bug active_season()'s docstring
+    warns an unfiltered query would cause. So "mt" is built from its own
+    parallel queries and its own _diagnose_mt()/_counters_out_mt() below,
+    filtered to MT_PROTOCOL throughout, never MC_PROTOCOL's helpers
+    reused past what they were already filtering for.
     """
     ip = _client_ip(request)
     if _status_rate_limited(ip):
@@ -895,6 +1011,75 @@ async def mc_status(request: Request) -> JSONResponse:
             if "no such table" not in str(e).lower():
                 raise
             squares_held = 0
+
+        # ---- Meshtastic side, additive (see mc_status()'s docstring). ----
+        #
+        # last_heard_at_mt: MeshCore's last_batch_at reads api_key --
+        # there's no equivalent MeshCore concept here, because nothing is
+        # ever pushed to us on this side. The pull equivalent is the most
+        # recent moment MeshWars picked this player's node up from
+        # meshview -- that's player_cell_ping.seen_at (app/ingest.py
+        # writes it as int(time.time()) at the moment it processes a
+        # packet, not the packet's own reported timestamp), not
+        # player_last_fix (which exists only for the implausible-speed
+        # check and is keyed on the packet's own ts, a different fact).
+        last_heard_at_mt = conn.execute(
+            "SELECT MAX(seen_at) AS ts FROM player_cell_ping "
+            " WHERE player_id = ? AND protocol = ?",
+            (player_id, MT_PROTOCOL),
+        ).fetchone()["ts"]
+
+        today_row_mt = conn.execute(
+            f"SELECT {_STAT_COLUMNS} FROM player_ingest_stat "
+            " WHERE player_id = ? AND protocol = ? AND day = ?",
+            (player_id, MT_PROTOCOL, today),
+        ).fetchone()
+
+        week_row_mt = conn.execute(
+            "SELECT COALESCE(SUM(batches),0) AS batches, "
+            "       COALESCE(SUM(pings_accepted),0) AS pings_accepted, "
+            "       COALESCE(SUM(pings_no_contact),0) AS pings_no_contact, "
+            "       COALESCE(SUM(pings_wrong_owner),0) AS pings_wrong_owner, "
+            "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
+            "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
+            "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ? "
+            "    AND day BETWEEN ? AND ?",
+            (player_id, MT_PROTOCOL, week_start, today),
+        ).fetchone()
+
+        alltime_row_mt = conn.execute(
+            "SELECT COALESCE(SUM(batches),0) AS batches, "
+            "       COALESCE(SUM(pings_accepted),0) AS pings_accepted, "
+            "       COALESCE(SUM(pings_no_contact),0) AS pings_no_contact, "
+            "       COALESCE(SUM(pings_wrong_owner),0) AS pings_wrong_owner, "
+            "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
+            "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
+            "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ?",
+            (player_id, MT_PROTOCOL),
+        ).fetchone()
+
+        # squares held: mirrors the MeshCore block above exactly, just
+        # filtered to MT_PROTOCOL -- "held" has to mean the same thing on
+        # both boards (same mc_tile.last_player_id ownership check), or
+        # the two counts on this one page would quietly disagree about
+        # what "holding a square" even means.
+        squares_held_mt = 0
+        try:
+            season_mt = active_season(conn, MT_PROTOCOL)
+            if season_mt:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM mc_tile WHERE season_id = ? AND last_player_id = ?",
+                    (season_mt["id"], player_id),
+                ).fetchone()
+                squares_held_mt = row["n"]
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e).lower():
+                raise
+            squares_held_mt = 0
     finally:
         conn.close()
 
@@ -912,6 +1097,17 @@ async def mc_status(request: Request) -> JSONResponse:
     }
     code, message = _diagnose(alltime, squares_held, last_batch_at, now_ts)
 
+    today_out_mt = _counters_out_mt(today_row_mt) if today_row_mt else _counters_out_mt(_STAT_ZERO_ROW_MT)
+
+    alltime_mt = {
+        "pings_accepted": alltime_row_mt["pings_accepted"],
+        "pings_duplicate": alltime_row_mt["pings_duplicate"],
+        "pings_bad_coord": alltime_row_mt["pings_bad_coord"],
+        "pings_out_of_area": alltime_row_mt["pings_out_of_area"],
+        "pings_no_repeaters": alltime_row_mt["pings_no_repeaters"],
+    }
+    code_mt, message_mt = _diagnose_mt(alltime_mt, squares_held_mt, last_heard_at_mt, now_ts)
+
     return {
         "display_name": player["display_name"],
         "team": player["team"],
@@ -923,4 +1119,14 @@ async def mc_status(request: Request) -> JSONResponse:
         "last_7_days": _counters_out(week_row),
         "squares_held": squares_held,
         "diagnosis": {"code": code, "message": message},
+        # Additive -- see mc_status()'s docstring. Existing callers that
+        # only ever read the MeshCore-scoped fields above are unaffected
+        # by a new top-level key showing up alongside them.
+        "mt": {
+            "last_heard_at": last_heard_at_mt,
+            "today": today_out_mt,
+            "last_7_days": _counters_out_mt(week_row_mt),
+            "squares_held": squares_held_mt,
+            "diagnosis": {"code": code_mt, "message": message_mt},
+        },
     }

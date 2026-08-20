@@ -31,7 +31,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260818" />
-  <link rel="stylesheet" href="/static/join.css?v=20260819" />
+  <link rel="stylesheet" href="/static/join.css?v=20260819-3" />
 </head>
 <body>
 
@@ -46,7 +46,7 @@
 
   <main class="join-wrap">
 
-    <p class="join-check-teaser">Already registered? <a href="#status-check-panel">Check your setup</a>.</p>
+    <p class="join-check-teaser">Already registered and want to add a radio, or check your setup? <a href="#status-check-panel">Jump down here</a>.</p>
 
     <section id="join-flow-panel" class="join-panel">
       <div class="join-panel-title">Join MeshWars</div>
@@ -75,7 +75,7 @@
         </li>
 
         <li>
-          <p class="join-flow-label">Choose your protocol.</p>
+          <p class="join-flow-label">Pick which radio's setup steps to show first.</p>
           <div class="protocol-picker">
             <label class="protocol-choice">
               <input type="radio" name="protocol" value="mc" checked />
@@ -86,6 +86,7 @@
               <span>Meshtastic <span class="protocol-badge" id="mt-badge">Coming soon</span></span>
             </label>
           </div>
+          <p class="hint">This only picks which instructions show below -- it does not limit which radios you can register. Run both kinds? Pick either one now and add the other afterward from the setup-check panel at the bottom of this page, any time you like.</p>
           <p class="hint" id="mt-coming-soon-hint">Meshtastic registration isn't open yet. Once it is, it works the same way MeshCore's does here -- register, then add your node ID.</p>
 
           <div id="mc-instructions" class="protocol-block">
@@ -110,7 +111,11 @@
         </li>
 
         <li>
-          <p class="join-flow-label">Copy your API key &mdash; it is shown once and cannot be recovered.</p>
+          <p class="join-flow-label"><strong>Copy your API key now &mdash; this is the only time it will ever be shown.</strong></p>
+          <div class="join-warning-box key-warning-box">
+            <strong>Closing or reloading this page loses it for good.</strong>
+            MeshWars stores only a one-way hash of your key, never the key itself, so there is no way for anyone, including an admin, to look it back up. The only fix for a lost key is a brand new one from an admin, which retires this one. Copy it somewhere safe before you do anything else.
+          </div>
           <div id="key-slot" class="key-slot">
             <p class="key-slot-placeholder">Your key will appear here once you join.</p>
           </div>
@@ -169,6 +174,10 @@
           <p class="join-flow-label">Start a wardriving session &mdash; nothing is sent without one.</p>
         </li>
 
+        <li class="proto-step-mc">
+          <p class="join-flow-label">Carrying a second radio, MeshCore or Meshtastic? Add it any time from the panel below (<a href="#status-check-panel">Check your setup</a>) &mdash; that panel is also where you go to add or remove radios later, not only to check on things.</p>
+        </li>
+
         <li class="proto-step-mt" hidden>
           <p class="join-flow-label">Find your node ID in the Meshtastic app &mdash; it looks like <code>!a1b2c3d4</code>.</p>
         </li>
@@ -195,6 +204,10 @@
           <p class="join-flow-label">Make sure you are on FREQ51, so a gateway that feeds meshview can actually hear you.</p>
         </li>
 
+        <li class="proto-step-mt" hidden>
+          <p class="join-flow-label">Carrying a second radio, Meshtastic or MeshCore? Add it any time from the panel below (<a href="#status-check-panel">Check your setup</a>) &mdash; that panel is also where you go to add or remove radios later, not only to check on things.</p>
+        </li>
+
       </ol>
     </section>
 
@@ -210,25 +223,32 @@
         <p>MeshMapper sends a batch every fifteen to thirty seconds while a wardriving session is running. Nothing is sent between sessions.</p>
         <p>Squares are only claimed where your radio hears a repeater. Driving through an area with no mesh coverage logs your position and claims nothing — that is normal, not a fault.</p>
         <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last heard from you and what is wrong if anything is.</p>
+        <p>Lost your key? It's still sitting in MeshMapper &mdash; open Settings, then API Endpoints, and read it back out of the API Key field.</p>
       </div>
 
       <div id="working-check-mt" class="protocol-block" hidden>
         <p>Nothing is pushed to MeshWars at all. MeshWars polls meshview every 45 seconds and picks you up whenever your node broadcasts a position that a feeder hears — there is no session to start or batch to send.</p>
         <p>Squares are only claimed where a feeder hears your node's position. If you're somewhere with no feeder coverage, your position is never reported to meshview in the first place, so nothing gets claimed — that is normal, not a fault.</p>
-        <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you your registered radios and how many squares you currently hold.</p>
+        <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last picked up your node from meshview, how many squares you hold, and what is wrong if anything is.</p>
+        <p>Lost your key? Nothing on a Meshtastic radio or in the Meshtastic app ever stores it &mdash; ask an operator for a new one.</p>
       </div>
     </section>
 
     <section id="status-check-panel" class="join-panel status-check-panel">
-      <div class="join-panel-title">Already registered? Check your setup</div>
+      <div class="join-panel-title">Already registered? Check your setup, or add a radio</div>
+      <p class="hint">Paste your API key below to check your setup, add another radio to your account, or remove one &mdash; any time, not just once at signup.</p>
 
       <!-- Protocol-aware, same toggle as the join-flow steps above
            (join.js's setupProtocolToggle()) -- MeshCore's app pushes to
            us, so "receiving from your app" is honest for it, but nothing
            is ever sent to us from a Meshtastic node; we pull from
-           meshview instead, so that wording would be false for it. -->
-      <p id="status-hint-mc" class="hint">Paste your API key to see whether MeshWars is receiving anything from your app.</p>
-      <p id="status-hint-mt" class="hint" hidden>Paste your API key to see what MeshWars has picked up from meshview for your node — nothing is sent to us directly.</p>
+           meshview instead, so that wording would be false for it. Each
+           also ends with where to find a lost key -- MeshCore's lives in
+           MeshMapper and can be read back; Meshtastic has no such
+           fallback, so that copy is honest about needing an operator
+           instead, never a pointer to MeshMapper it doesn't run. -->
+      <p id="status-hint-mc" class="hint">Paste your API key to see whether MeshWars is receiving anything from your app. Lost it? It's saved in MeshMapper under Settings &rarr; API Endpoints &rarr; API Key.</p>
+      <p id="status-hint-mt" class="hint" hidden>Paste your API key to see when MeshWars last picked up your node from meshview, how many squares you hold, and what is wrong if anything is — nothing is sent to us directly. Lost it? Nothing on your radio ever stored it — ask an operator for a new one.</p>
 
       <form id="status-form" novalidate autocomplete="off">
         <div id="status-error" class="join-error" role="alert" hidden></div>
@@ -282,6 +302,6 @@
 
   </main>
 
-  <script src="/static/join.js?v=20260819-2" type="module"></script>
+  <script src="/static/join.js?v=20260819-6" type="module"></script>
 </body>
 </html>

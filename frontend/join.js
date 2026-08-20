@@ -48,7 +48,7 @@ const TEAM_ORDER = Object.keys(TEAM_COLORS);
 // Labels for the /api/mc/status counters table -- key order here is
 // display order, matching the field names _counters_out() in
 // app/mc_api.py returns.
-const COUNTER_LABELS = [
+const MC_COUNTER_LABELS = [
   ['batches', 'Batches received'],
   ['accepted', 'Accepted'],
   ['no_contact', 'No contact key'],
@@ -58,7 +58,29 @@ const COUNTER_LABELS = [
   ['out_of_area', 'Outside play area'],
   ['no_repeaters', 'No repeaters heard'],
 ];
-const COUNTER_ZERO_ROW = COUNTER_LABELS.reduce((acc, [key]) => {
+const MC_COUNTER_ZERO_ROW = MC_COUNTER_LABELS.reduce((acc, [key]) => {
+  acc[key] = 0;
+  return acc;
+}, {});
+
+// Same idea for data.mt.today/last_7_days, matching _counters_out_mt()
+// in app/mc_api.py -- deliberately a shorter list than MC_COUNTER_LABELS
+// above. There is no Meshtastic "batches received" (no batch concept at
+// all), "no contact key" (nothing to attribute here to begin with), or
+// "wrong owner" (player_node's (protocol, node_ref) key already makes
+// ownership 1:1) -- the backend omits those three from data.mt for the
+// same reason: rendering them would just be a column of counters that
+// can never be anything but zero, which is the exact problem this whole
+// panel update exists to remove. Do not add them back here without also
+// adding them back on the backend.
+const MT_COUNTER_LABELS = [
+  ['accepted', 'Accepted'],
+  ['duplicate', 'Duplicate'],
+  ['bad_coord', 'Bad position'],
+  ['out_of_area', 'Outside play area'],
+  ['no_repeaters', 'No feeder heard'],
+];
+const MT_COUNTER_ZERO_ROW = MT_COUNTER_LABELS.reduce((acc, [key]) => {
   acc[key] = 0;
   return acc;
 }, {});
@@ -68,7 +90,29 @@ const COUNTER_ZERO_ROW = COUNTER_LABELS.reduce((acc, [key]) => {
 // (player_node.protocol, app/nodes_api.py's _VALID_PROTOCOLS).
 const PROTOCOL_LABELS = { mt: 'Meshtastic', mc: 'MeshCore' };
 
+// Every node_ref the server sends back (GET/POST/DELETE /api/nodes,
+// POST /api/mc/status) is bare lowercase 8-hex -- that's player_node's
+// one canonical storage/lookup form (see app/node_ref.py's module
+// docstring), not a display form. Rendering it idiomatically per
+// protocol is this file's job, not the server's: Meshtastic writes a
+// node id as `!a1b2c3d4` everywhere in its own app/docs/ecosystem, so
+// that's what shows here; MeshCore's MeshMapper shows a contact key
+// bare, so that stays as-is. Display-only -- this value is never sent
+// back to the server; every request still uses the raw node_ref field.
+function displayNodeRef(protocol, nodeRef) {
+  return protocol === 'mt' ? `!${nodeRef}` : nodeRef;
+}
+
 let selectedTeam = null;
+
+// The full last-known /api/mc/status response for the currently
+// checked-out key, kept around so the radios list and the status
+// panel above it (name/team/MeshCore diagnosis/Meshtastic note/"no
+// radios yet" line) can never drift apart -- see applyRadiosUpdate()
+// below. Both panels render from this ONE object; there is no second,
+// independent notion of "what radios does this player have" anywhere
+// on the page.
+let lastStatusData = null;
 
 function showError(message) {
   const el = document.getElementById('join-error');
@@ -332,7 +376,7 @@ function relativeTimeFromEpoch(ts) {
   return `${days} day${days !== 1 ? 's' : ''} ago`;
 }
 
-function buildCountersTable(today, week) {
+function buildCountersTable(today, week, labels) {
   const table = document.createElement('table');
   table.className = 'status-table';
 
@@ -347,7 +391,7 @@ function buildCountersTable(today, week) {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  COUNTER_LABELS.forEach(([key, label]) => {
+  labels.forEach(([key, label]) => {
     const tr = document.createElement('tr');
     const rowHead = document.createElement('th');
     rowHead.scope = 'row';
@@ -371,24 +415,26 @@ function buildLabel(text) {
   return label;
 }
 
-// /api/mc/status (app/mc_api.py) is, despite its now-generic-sounding
-// name, entirely MeshCore-scoped under the hood: every counter, the
-// diagnosis, last_batch_at, and squares_held all read player_ingest_stat/
-// mc_tile filtered to protocol='mc' specifically -- there is no
-// equivalent status endpoint for Meshtastic (Meshtastic's own ingest
-// loop, app/ingest.py, writes real protocol='mt' rows to the same
-// player_ingest_stat table, but nothing serves them back out yet). For
-// a player with no MeshCore radio those fields are not just empty, they
-// are actively misleading: batches stays 0 forever so the diagnosis
-// always claims "MeshWars has never received anything from your app...
-// check that Custom API Endpoint is switched on in MeshMapper" to
-// someone who has never opened MeshMapper. This function decides what
-// to show from data.radios (which protocols this player actually has
-// registered) rather than rendering that response at face value --
-// this is a real backend gap, not a styling choice; see the
-// commit/report for the follow-up it needs (a protocol-aware status
-// route) before real Meshtastic diagnostics can show here.
+// /api/mc/status (app/mc_api.py) reports both protocols now: the
+// top-level fields (last_batch_at, today, last_7_days, squares_held,
+// diagnosis) stay MeshCore-scoped exactly as before, and everything
+// Meshtastic-specific lives under the additive data.mt key, built from
+// its own protocol='mt' queries and its own _diagnose_mt() -- see that
+// function's docstring in app/mc_api.py for why the two boards can't
+// share one diagnosis (pushed batches vs. polled packets, genuinely
+// different failure modes). This function still decides what to show
+// from data.radios (which protocols this player actually has
+// registered), not from whether the fields are present -- the server
+// always returns both blocks, so a MeshCore-only player would otherwise
+// see a Meshtastic section reporting "never picked up a position packet"
+// for a radio they don't own.
 function renderStatusResult(data) {
+  // Cache the full response -- applyRadiosUpdate() below reuses it (with
+  // just .radios swapped in) so an add/remove never has to render the
+  // radios list from a different, narrower object than the diagnostic
+  // text sitting above it.
+  lastStatusData = data;
+
   const panel = document.getElementById('status-result');
   panel.replaceChildren();
   panel.hidden = false;
@@ -437,18 +483,51 @@ function renderStatusResult(data) {
     panel.appendChild(squaresLine);
 
     panel.appendChild(buildLabel('MeshCore batches: today and last 7 days'));
-    panel.appendChild(buildCountersTable(data.today || COUNTER_ZERO_ROW, data.last_7_days || COUNTER_ZERO_ROW));
+    panel.appendChild(buildCountersTable(data.today || MC_COUNTER_ZERO_ROW, data.last_7_days || MC_COUNTER_ZERO_ROW, MC_COUNTER_LABELS));
   }
 
   if (hasMt) {
-    const mtNote = document.createElement('p');
-    mtNote.className = 'hint';
-    mtNote.textContent = hasMc
-      // Has both: the MeshCore section above is real and accurate for
-      // that radio, but does not cover the Meshtastic one too.
-      ? 'The MeshCore activity above does not cover your Meshtastic radio -- there is no live status check for Meshtastic yet. Use the map\'s player search (search by node ID) to see your current Meshtastic squares.'
-      : 'There is no live status check for Meshtastic yet. MeshWars polls meshview every 45 seconds and picks up your node whenever it broadcasts a position a feeder hears -- use the map\'s player search (search by node ID) to see your current Meshtastic squares.';
-    panel.appendChild(mtNote);
+    // Real per-protocol data now (see app/mc_api.py's mc_status()
+    // docstring) -- data.mt, not a note apologizing that it doesn't
+    // exist. Sits in its own block, clearly labeled, so a player who
+    // holds both kinds of radio (the whole reason this branch exists)
+    // can tell at a glance which numbers below belong to which radio,
+    // the same way the MeshCore block above is already labeled.
+    const mt = data.mt || {};
+
+    if (hasMc) {
+      // Both protocols on one player: separate the two sections instead
+      // of letting the Meshtastic numbers read as a continuation of the
+      // MeshCore ones just above them.
+      const divider = document.createElement('hr');
+      divider.className = 'status-protocol-divider';
+      panel.appendChild(divider);
+    }
+
+    panel.appendChild(buildLabel('Meshtastic'));
+
+    const lastHeardLine = document.createElement('p');
+    lastHeardLine.appendChild(document.createTextNode('Last picked up from meshview: '));
+    const lastHeardStrong = document.createElement('strong');
+    lastHeardStrong.textContent = relativeTimeFromEpoch(mt.last_heard_at);
+    lastHeardLine.appendChild(lastHeardStrong);
+    panel.appendChild(lastHeardLine);
+
+    const mtCode = mt.diagnosis && mt.diagnosis.code;
+    const mtDiagnosis = document.createElement('div');
+    mtDiagnosis.className = 'status-diagnosis ' + (mtCode === 'mt_ok' ? 'status-diagnosis-ok' : 'status-diagnosis-attention');
+    mtDiagnosis.textContent = (mt.diagnosis && mt.diagnosis.message) || '';
+    panel.appendChild(mtDiagnosis);
+
+    const mtSquaresLine = document.createElement('p');
+    mtSquaresLine.appendChild(document.createTextNode('Meshtastic squares held: '));
+    const mtSquaresStrong = document.createElement('strong');
+    mtSquaresStrong.textContent = String(mt.squares_held ?? 0);
+    mtSquaresLine.appendChild(mtSquaresStrong);
+    panel.appendChild(mtSquaresLine);
+
+    panel.appendChild(buildLabel('Meshtastic pings: today and last 7 days'));
+    panel.appendChild(buildCountersTable(mt.today || MT_COUNTER_ZERO_ROW, mt.last_7_days || MT_COUNTER_ZERO_ROW, MT_COUNTER_LABELS));
   }
 
   if (!hasMc && !hasMt) {
@@ -464,6 +543,36 @@ function renderStatusResult(data) {
   clearRadiosError();
   renderRadiosList(data.radios);
   document.getElementById('status-radios').hidden = false;
+}
+
+// Every add/remove call (POST/DELETE /api/nodes) returns only
+// {radios, added} -- not the full name/team/diagnosis/counters shape
+// /api/mc/status returns -- so it used to just re-render the radios
+// list on its own, leaving whatever renderStatusResult() had already
+// written above it (in particular "You have no radios registered yet")
+// exactly as it was at the last full check. That text is only true at
+// the moment it's written; the instant an add/remove call succeeds it
+// can go stale while the radios list right below it shows otherwise --
+// two lines on the same panel disagreeing about the same fact. Nothing
+// else in data.diagnosis/data.today/etc. changes just because a
+// binding was added or removed (that only moves on real ingest
+// activity, which is what checking status again is for), so the fix
+// is not a second network round trip -- it's re-running the exact same
+// renderStatusResult() the initial check used, against the cached
+// response with only .radios swapped for the fresher array this call
+// just returned. hasMc/hasMt, the "no radios yet" line, and the
+// MeshCore/Meshtastic blocks all get recomputed from that single
+// object every time, so they can never point in different directions
+// again.
+function applyRadiosUpdate(radios) {
+  if (!lastStatusData) {
+    // Defensive only -- status-radios (and therefore this code path)
+    // is never shown before a successful status check has already run
+    // renderStatusResult() at least once.
+    renderRadiosList(radios);
+    return;
+  }
+  renderStatusResult(Object.assign({}, lastStatusData, { radios }));
 }
 
 // ---- Radio management (GET/POST/DELETE /api/nodes) -----------------------
@@ -513,7 +622,7 @@ function renderRadiosList(radios) {
     li.className = 'radios-item';
 
     const label = document.createElement('span');
-    label.textContent = `${PROTOCOL_LABELS[radio.protocol] || radio.protocol} ${radio.node_ref}`;
+    label.textContent = `${PROTOCOL_LABELS[radio.protocol] || radio.protocol} ${displayNodeRef(radio.protocol, radio.node_ref)}`;
     li.appendChild(label);
 
     const removeBtn = document.createElement('button');
@@ -573,7 +682,7 @@ async function handleRemoveRadio(protocol, nodeRef, button) {
     let data = null;
     try { data = await res.json(); } catch (err) { data = null; }
     if (handleRadiosApiError(res, data)) return;
-    renderRadiosList(data.radios);
+    applyRadiosUpdate(data.radios);
   } catch (err) {
     showRadiosError('Could not reach the server. Check your connection and try again.');
   } finally {
@@ -610,7 +719,7 @@ async function handleAddRadioSubmit(e) {
     let data = null;
     try { data = await res.json(); } catch (err) { data = null; }
     if (handleRadiosApiError(res, data)) return;
-    renderRadiosList(data.radios);
+    applyRadiosUpdate(data.radios);
     nodeRefInput.value = '';
   } catch (err) {
     showRadiosError('Could not reach the server. Check your connection and try again.');

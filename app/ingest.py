@@ -233,8 +233,10 @@ class Ingestor:
         log.info("roster refreshed: %d nodes", len(nodes))
 
     def _load_registered_players(self, conn) -> dict[str, tuple[int, str]]:
-        """node_ref ('!xxxxxxxx' lowercase, app.api._node_hex's format) ->
-        (player_id, team) for every active Meshtastic player.
+        """node_ref (bare lowercase 8-hex, player_node's canonical form --
+        see app/node_ref.py's module docstring; NOT app.api._node_hex's
+        '!'-prefixed display form) -> (player_id, team) for every active
+        Meshtastic player.
 
         Loaded once per poll/backfill cycle, not once per packet: a
         meshview poll returns on the order of a hundred packets from
@@ -442,7 +444,15 @@ class Ingestor:
         # they still have to be marked processed -- otherwise every
         # unregistered node on the network gets refetched forever -- but
         # nothing about them is ever written anywhere else.
-        node_ref = _node_hex(sender_id)
+        #
+        # _bare_node_ref(), not _node_hex(): this is a player_node lookup
+        # key, and player_node.node_ref's canonical form is bare lowercase
+        # 8-hex (see app/node_ref.py), not _node_hex()'s '!'-prefixed
+        # display form. _node_hex() is still exactly right a few lines
+        # down for repeater_id (record_repeater_observations below) --
+        # that is a different column, with its own existing data, and is
+        # deliberately left alone here.
+        node_ref = _bare_node_ref(sender_id)
         entry = registered.get(node_ref)
         if entry is None:
             await self._mark_processed(packet_id)
@@ -640,6 +650,18 @@ class Ingestor:
                 "INSERT OR IGNORE INTO processed_packet(packet_id, processed_at) VALUES (?, ?)",
                 (packet_id, int(time.time())),
             )
+
+
+def _bare_node_ref(node_id: int) -> str:
+    """Bare lowercase 8-hex form of a Meshtastic node id -- the exact
+    form player_node.node_ref is canonically stored and looked up in
+    (see app/node_ref.py's module docstring). Deliberately NOT
+    _node_hex() (app/api.py), which returns the '!'-prefixed form used
+    for repeater_id and for the /get-nodes "id" field a human reads;
+    those are separate uses with their own existing data/conventions
+    that this function must not touch.
+    """
+    return f"{node_id:08x}"
 
 
 def _node_id_from_dict(n: dict) -> int | None:

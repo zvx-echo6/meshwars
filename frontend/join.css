@@ -295,6 +295,21 @@ body {
   margin-bottom: 2px;
 }
 
+/* The one truly unrecoverable moment on this page: once this key is
+   gone, it is gone -- there is no "forgot my key" flow, only a brand
+   new key from an admin (which retires whichever one this replaces).
+   Same warning-box language as the meshmapper:// caution above,
+   sized up -- thicker border, larger text -- so it reads as a
+   different order of consequence, not just another step's caution. */
+.key-warning-box {
+  border-width: 2px;
+  padding: 12px 14px;
+  font-size: 0.8125rem;
+}
+.key-warning-box strong {
+  font-size: 0.9375rem;
+}
+
 .copy-row {
   display: flex;
   gap: 6px;
@@ -519,6 +534,19 @@ body {
 }
 .status-table td {
   text-align: center;
+}
+
+/* Separates the MeshCore and Meshtastic sections in #status-result for a
+   player who holds both kinds of radio -- without it the Meshtastic
+   numbers read as a continuation of the MeshCore ones just above them,
+   which is exactly the "which fact belongs to which radio" confusion
+   this panel exists to avoid. Only ever inserted when both sections are
+   present (see renderStatusResult() in join.js); a single-protocol
+   player never sees it. */
+.status-protocol-divider {
+  border: none;
+  border-top: 1px solid #2a2a2a;
+  margin: 16px 0 12px;
 }
 
 /* ---- "Your radios" (list + add/remove), inside #status-check-panel ------
