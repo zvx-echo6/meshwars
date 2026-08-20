@@ -151,6 +151,14 @@ function formatCountdown(secondsRemaining) {
 //                    top_for() helper). Ranks players by capture count
 //                    in the active season for whichever board is
 //                    showing. See openTopModal.
+//  - Top check-in earners: /api/mc/top-checkins vs /top-checkins --
+//                    identical shape (same top_checkin_for() helper).
+//                    Ranks players by check-in points ("Netrunners",
+//                    see app/checkin.py) in the active season. This is
+//                    a SECOND ranking behind the SAME top-players
+//                    button/modal as captures above, not a second
+//                    button in a new spot on the panel -- see
+//                    openTopModal's own comment for why.
 //  - Winner banner: /api/mc/season vs /season -- identical shape (same
 //                    winner_banner_for() helper), each `.winner_banner`
 //                    seven-team shaped. See refreshWinnerBanner.
@@ -170,7 +178,15 @@ const PROTOCOLS = {
     protocol: 'mc',
     boardTitle: 'MeshCore Territory',
     topButtonLabel: 'Top Wardrivers',
-    topModalTitle: 'Top Wardrivers',
+    // Tab labels inside the top-players modal (see openTopModal) --
+    // "Wardrivers" for the capture ranking, matching topButtonLabel's
+    // own vocabulary for this board. "Netrunners" (the check-in
+    // ranking's theme, app/checkin.py) is not board-specific -- net
+    // check-ins are the same activity on both boards, so this label is
+    // identical in both PROTOCOLS entries rather than reworded per
+    // board the way the capture-ranking vocabulary is.
+    topCaptureLabel: 'Wardrivers',
+    topCheckinLabel: 'Netrunners',
     lookupPlaceholder: 'player name',
     lookupHelp: 'Search by player name.',
     // "Repeaters" is MeshCore's own term for the mesh nodes a wardrive
@@ -183,6 +199,7 @@ const PROTOCOLS = {
     rosterEndpoint: '/api/mc/players',
     findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
     topEndpoint: '/api/mc/top',
+    topCheckinEndpoint: '/api/mc/top-checkins',
     seasonEndpoint: '/api/mc/season',
   },
   meshtastic: {
@@ -193,7 +210,8 @@ const PROTOCOLS = {
     // own position, so the community term for the person behind a node
     // -- "operator" -- fits better than reusing "wardriver" here.
     topButtonLabel: 'Top Operators',
-    topModalTitle: 'Top Operators',
+    topCaptureLabel: 'Operators',
+    topCheckinLabel: 'Netrunners',
     // Same by-name search as MeshCore now that /find exists for this
     // board too (see app/api.py) -- no more of a node-ID-only Find box.
     lookupPlaceholder: 'player name',
@@ -210,6 +228,7 @@ const PROTOCOLS = {
     rosterEndpoint: '/teams',
     findEndpoint: (q) => `/find?name=${encodeURIComponent(q)}`,
     topEndpoint: '/top',
+    topCheckinEndpoint: '/top-checkins',
     seasonEndpoint: '/season',
   },
 };
@@ -352,15 +371,87 @@ function buildScoreboardControl() {
   return control;
 }
 
-// Picks whichever team currently holds the most cells, for the
-// collapsed-header summary ("TEAM count") on phones -- the scores
-// endpoint's teams array is in fixed TEAM_ORDER, not sorted by tile
-// count, so this has to be computed client-side rather than just
-// taking teams[0].
+// A team's number, wherever it's shown: squares held PLUS check-in
+// points (app/mc_scoring.py's team_totals()) -- the combined figure
+// that actually decides the season now, not squares alone. Every
+// display below reads this instead of entry.tiles directly, so a
+// team's number means the same thing on the scoreboard, the collapsed
+// summary, the history modal, and the winner banner. Falls back to
+// tiles-only for the all-zero seed row renderScores(null) hands out
+// before the first real fetch (see boot()), which has no
+// checkin_points/total fields at all yet.
+function teamTotal(t) {
+  if (typeof t.total === 'number') return t.total;
+  return t.tiles ?? 0;
+}
+
+// Human-readable breakdown of teamTotal() above, for the "on demand"
+// disclosure (a title/tooltip, not a permanent extra line -- see
+// renderScores) of where a team's combined number came from. Always
+// states both components, even when check-in points are zero, so
+// "mysterious" never means "silently rounds to squares" -- the owner's
+// explicit ask is that the split stays legible, not merely available
+// when non-zero.
+function teamBreakdown(t) {
+  const tiles = t.tiles ?? 0;
+  const pts = t.checkin_points ?? 0;
+  const squareWord = tiles === 1 ? 'square' : 'squares';
+  const pointWord = pts === 1 ? 'point' : 'points';
+  return `${tiles} ${squareWord} + ${pts} check-in ${pointWord}`;
+}
+
+// Short form of teamBreakdown() above, for the actual on-tap/on-click
+// swap (see attachBreakdownToggle) rather than the `title` tooltip --
+// this has to fit inside one cell of the scoreboard's two-column grid
+// alongside a team's dot and label, where the full sentence would
+// overflow into the neighboring column. "squares+points", no words, in
+// that order to match teamTotal()'s own tiles-then-points composition.
+function teamBreakdownCompact(t) {
+  const tiles = t.tiles ?? 0;
+  const pts = t.checkin_points ?? 0;
+  return `${tiles}+${pts}`;
+}
+
+// Wires the click-to-reveal half of the "on demand" breakdown -- `title`
+// alone (a native browser tooltip) is not something a person can get to
+// on a touch screen, and isn't something a screenshot can ever prove
+// shows the right numbers either, so the actual disclosure mechanism is
+// a tap/click that swaps the element's own text between the total and
+// teamBreakdownCompact()'s split, toggling back on a second tap. `title`
+// is kept alongside this as a same-information hover bonus on desktop,
+// never the only way to reach the split.
+function bindBreakdownToggle(el) {
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const showingBreakdown = el.classList.toggle('mc-showing-breakdown');
+    el.textContent = showingBreakdown ? el.dataset.compact : el.dataset.total;
+  });
+}
+
+// For DOM-built elements (scoreboard rows, winner banner) that don't
+// already carry data-total/data-compact from an HTML string -- sets
+// them, seeds the visible text, and wires the same click handler
+// bindBreakdownToggle() gives an already-marked-up element (see the
+// history modal's .mc-tally-count spans, built from a template string
+// instead of appendChild).
+function attachBreakdownToggle(el, totalText, compactText) {
+  el.dataset.total = totalText;
+  el.dataset.compact = compactText;
+  el.textContent = totalText;
+  bindBreakdownToggle(el);
+}
+
+// Picks whichever team currently has the highest combined total, for
+// the collapsed-header summary ("TEAM count") on phones -- the scores
+// endpoint's teams array is in fixed TEAM_ORDER, not sorted by total,
+// so this has to be computed client-side rather than just taking
+// teams[0]. Reads teamTotal(), not tiles alone, for the same reason
+// every other display on this page does -- see that function's
+// docstring.
 function leadingTeam(teams) {
   let best = null;
   teams.forEach((t) => {
-    if (!best || (t.tiles ?? 0) > (best.tiles ?? 0)) best = t;
+    if (!best || teamTotal(t) > teamTotal(best)) best = t;
   });
   return best;
 }
@@ -383,7 +474,7 @@ function renderScores(data) {
 
   if (scoreboardSummaryEl) {
     const lead = leadingTeam(teams);
-    scoreboardSummaryEl.textContent = lead ? `${lead.team} ${lead.tiles ?? 0}` : '';
+    scoreboardSummaryEl.textContent = lead ? `${lead.team} ${teamTotal(lead)}` : '';
   }
 
   teams.forEach((entry) => {
@@ -400,9 +491,17 @@ function renderScores(data) {
     label.textContent = `${entry.team}: `;
     row.appendChild(label);
 
+    // The combined total is the number shown -- squares alone would be
+    // misleading now that check-in points can decide a season (see
+    // teamTotal()'s docstring). Where that number came from is still
+    // one tap away (attachBreakdownToggle), rather than a permanent
+    // second line -- with seven teams already in this panel, printing
+    // both components on every row every time was the "cluttered"
+    // option the owner explicitly asked to avoid.
     const count = document.createElement('span');
     count.className = 'mc-team-count';
-    count.textContent = String(entry.tiles ?? 0);
+    count.title = teamBreakdown(entry);
+    attachBreakdownToggle(count, String(teamTotal(entry)), teamBreakdownCompact(entry));
     row.appendChild(count);
 
     scoreboardBody.appendChild(row);
@@ -571,10 +670,19 @@ async function openHistoryModal() {
     const rows = seasons.map((s) => {
       const started = s.started_at ? new Date(s.started_at * 1000).toLocaleDateString() : '?';
       const ended = s.ends_at ? new Date(s.ends_at * 1000).toLocaleDateString() : '?';
+      // Same combined figure as the live scoreboard (teamTotal()) -- a
+      // closed season's final standings have to mean the same thing as
+      // its live ones did, or "who was actually ahead" would read
+      // differently here than it did while the season was still open.
+      // Each tally's count is a .mc-tally-count span carrying
+      // data-total/data-compact (teamBreakdownCompact()) plus a `title`
+      // -- bound to the same click-to-reveal handler as the scoreboard
+      // (bindBreakdownToggle, wired up below once this HTML is in the
+      // DOM), same on-demand disclosure as the live scoreboard rows.
       const teams = Array.isArray(s.teams) ? s.teams : [];
       const tallyText = teams
-        .filter((t) => (t.tiles ?? 0) > 0)
-        .map((t) => `${escapeHtml(t.team)} ${escapeHtml(t.tiles)}`)
+        .filter((t) => teamTotal(t) > 0)
+        .map((t) => `${escapeHtml(t.team)} <span class="mc-tally-count" data-total="${escapeHtml(teamTotal(t))}" data-compact="${escapeHtml(teamBreakdownCompact(t))}" title="${escapeHtml(teamBreakdown(t))}">${escapeHtml(teamTotal(t))}</span>`)
         .join(', ') || 'no tiles recorded';
       return `<tr>
         <td>#${escapeHtml(s.id)}</td>
@@ -587,6 +695,7 @@ async function openHistoryModal() {
       <thead><tr><th>Season</th><th>Dates</th><th>Winner</th><th>Final tallies</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+    body.querySelectorAll('.mc-tally-count').forEach(bindBreakdownToggle);
   } catch (err) {
     showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
   }
@@ -619,18 +728,53 @@ async function openRosterModal() {
   }
 }
 
-// Both boards rank players by capture-event count in the active season
-// (/api/mc/top vs /top -- identical shape, same top_for() helper).
-async function openTopModal() {
-  const c = cfg();
-  const body = openMcModal(c.topModalTitle);
+// Two rankings, one button. The owner's explicit requirement is that
+// the panel stays identical between boards -- same controls, same
+// positions -- so adding a second ranking (check-in points, alongside
+// the existing capture count) cannot mean a second button in a new
+// spot. Instead both rankings live behind the SAME mc-top-btn, as two
+// tabs inside the one modal it already opened: clicking the button
+// never moves or resizes anything on the panel itself, only the modal
+// content changes. See PROTOCOLS' topCaptureLabel/topCheckinLabel for
+// the tab wording, and top_for()/top_checkin_for() in app/mc_api.py for
+// the two backend queries these tabs read.
+let topModalTab = 'captures';
+
+function topTabSpecs(c) {
+  return {
+    captures: {
+      label: c.topCaptureLabel,
+      endpoint: c.topEndpoint,
+      valueKey: 'captures',
+      valueHeader: 'Captures',
+      emptyText: 'No capture activity yet.',
+    },
+    checkins: {
+      label: c.topCheckinLabel,
+      endpoint: c.topCheckinEndpoint,
+      valueKey: 'points',
+      valueHeader: 'Points',
+      emptyText: 'No check-in activity yet.',
+    },
+  };
+}
+
+async function renderTopModalTab(c) {
+  const tabBody = mcModalBodyEl.querySelector('#mc-top-tab-body');
+  if (!tabBody) return;
+  const spec = topTabSpecs(c)[topModalTab];
+  tabBody.innerHTML = '<div class="mc-modal-loading">Loading...</div>';
 
   try {
-    const res = await fetch(c.topEndpoint);
+    const res = await fetch(spec.endpoint);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const rows = await res.json();
     if (!Array.isArray(rows) || rows.length === 0) {
-      showModalMessage(body, 'mc-modal-empty', 'No capture activity yet.');
+      tabBody.innerHTML = '';
+      const el = document.createElement('div');
+      el.className = 'mc-modal-empty';
+      el.textContent = spec.emptyText;
+      tabBody.appendChild(el);
       return;
     }
     const trs = rows.map((r, i) => {
@@ -639,16 +783,43 @@ async function openTopModal() {
         <td>${i + 1}</td>
         <td>${escapeHtml(r.display_name)}</td>
         <td><span class="mc-dot" style="background:${color}"></span>${escapeHtml(r.team)}</td>
-        <td>${escapeHtml(r.captures)}</td>
+        <td>${escapeHtml(r[spec.valueKey])}</td>
       </tr>`;
     }).join('');
-    body.innerHTML = `<table class="mc-history-table">
-      <thead><tr><th>#</th><th>Player</th><th>Team</th><th>Captures</th></tr></thead>
+    tabBody.innerHTML = `<table class="mc-history-table">
+      <thead><tr><th>#</th><th>Player</th><th>Team</th><th>${escapeHtml(spec.valueHeader)}</th></tr></thead>
       <tbody>${trs}</tbody>
     </table>`;
   } catch (err) {
-    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+    tabBody.innerHTML = '';
+    const el = document.createElement('div');
+    el.className = 'mc-modal-error';
+    el.textContent = `Failed to load: ${err.message}`;
+    tabBody.appendChild(el);
   }
+}
+
+async function openTopModal() {
+  const c = cfg();
+  const specs = topTabSpecs(c);
+  topModalTab = 'captures'; // always reopen on the capture ranking
+  const body = openMcModal('Season Rankings');
+  body.innerHTML = `
+    <div class="mc-modal-tabs">
+      <button type="button" class="mc-modal-tab active" data-tab="captures">${escapeHtml(specs.captures.label)}</button>
+      <button type="button" class="mc-modal-tab" data-tab="checkins">${escapeHtml(specs.checkins.label)}</button>
+    </div>
+    <div id="mc-top-tab-body"></div>
+  `;
+  body.querySelectorAll('.mc-modal-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.tab === topModalTab) return;
+      topModalTab = btn.dataset.tab;
+      body.querySelectorAll('.mc-modal-tab').forEach((b) => b.classList.toggle('active', b === btn));
+      renderTopModalTab(c);
+    });
+  });
+  await renderTopModalTab(c);
 }
 
 // ===== Board rendering =====
@@ -844,14 +1015,24 @@ function renderWinnerBanner(banner) {
   teams.forEach((t) => {
     // Each team's dot+count as one flex item (not two separately-gapped
     // ones) so `gap` on .mc-winner-counts spaces teams evenly instead of
-    // also prying a dot apart from its own number.
+    // also prying a dot apart from its own number. The count itself is
+    // the combined total (teamTotal()) -- the same figure that decided
+    // this winner (see app/mc_scoring.py's maybe_roll_season) -- with
+    // its split one tap away (attachBreakdownToggle on the count span
+    // specifically, not the whole entry, so tapping the dot doesn't
+    // also trigger it), same on-demand disclosure as the scoreboard and
+    // history modal.
     const entry = document.createElement('span');
     entry.className = 'mc-winner-count-entry';
     const dot = document.createElement('span');
     dot.className = 'mc-dot';
     dot.style.background = TEAM_COLORS[t.team] || '#888';
     entry.appendChild(dot);
-    entry.appendChild(document.createTextNode(String(t.tiles ?? 0)));
+    const countSpan = document.createElement('span');
+    countSpan.className = 'mc-winner-count';
+    countSpan.title = teamBreakdown(t);
+    attachBreakdownToggle(countSpan, String(teamTotal(t)), teamBreakdownCompact(t));
+    entry.appendChild(countSpan);
     counts.appendChild(entry);
   });
   el.appendChild(counts);

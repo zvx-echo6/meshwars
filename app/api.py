@@ -476,6 +476,16 @@ async def top_players() -> list[dict]:
     return mc_api.top_for(MT_PROTOCOL)
 
 
+@router.get("/top-checkins")
+async def top_checkin_players() -> list[dict]:
+    """Players ranked by check-in points in the active Meshtastic
+    season -- the Meshtastic counterpart of /api/mc/top-checkins. See
+    app/mc_api.py's top_checkin_for(); response shape is identical to
+    /api/mc/top-checkins'.
+    """
+    return mc_api.top_checkin_for(MT_PROTOCOL)
+
+
 @router.get("/cell/{cell_id}")
 async def cell_detail(cell_id: str):
     """Rich popup data for a single grid cell -- the cell-keyed

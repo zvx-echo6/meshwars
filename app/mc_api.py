@@ -18,9 +18,9 @@ guard no longer triggers -- it is kept because it is still correct and
 harmless, not because the race it was written for is still live.)
 
 Several of the functions below (active_season, board_for, scores_for,
-history_for, cell_detail_for, find_for, top_for, season_team_tally,
-winner_banner_active, winner_banner_for, latest_closed_season,
-team_list) take an explicit `protocol` argument
+history_for, cell_detail_for, find_for, top_for, top_checkin_for,
+season_team_tally, winner_banner_active, winner_banner_for,
+latest_closed_season, team_list) take an explicit `protocol` argument
 and are called from here with MC_PROTOCOL -- and, now that the
 Meshtastic board runs on this same mc_season/mc_tile* model, also
 called from app/api.py with 'mt', so the query logic for each pair of
@@ -738,6 +738,60 @@ async def mc_top() -> list[dict]:
     before this module had a second caller.
     """
     return top_for(MC_PROTOCOL)
+
+
+def top_checkin_for(protocol: str) -> list[dict]:
+    """Players ranked by check-in points earned in `protocol`'s active
+    season, from mc_checkin_award. Top 20, empty list if there's no
+    data (or no active season) -- the "Netrunners" counterpart of
+    top_for() above (see app/checkin.py's module docstring for the
+    Wardrivers/Netrunners theming; both are ACTIVITIES on the same
+    player model, so a player who does both shows up in both rankings).
+
+    Follows the exact same *_for() pattern as
+    board_for/scores_for/history_for/cell_detail_for/find_for/top_for,
+    so app/api.py's Meshtastic route calls this directly instead of
+    duplicating the query. Ranks by SUM(points), not award count, since
+    an award's points value is copied from settings.checkin_points at
+    the moment it was earned (see app/db.py's mc_checkin_award) rather
+    than read live -- summing is also what mc_scoring.team_checkin_points()
+    already does against this same table, so a player's rank here and
+    their team's total there always agree on what "check-in points"
+    means.
+    """
+
+    def run(conn):
+        season = active_season(conn, protocol)
+        if not season:
+            return []
+        rows = conn.execute(
+            "SELECT p.display_name AS display_name, p.team AS team, "
+            "       SUM(a.points) AS points "
+            "  FROM mc_checkin_award a "
+            "  JOIN player p ON p.player_id = a.player_id "
+            " WHERE a.season_id = ? "
+            " GROUP BY a.player_id "
+            " ORDER BY points DESC "
+            " LIMIT 20",
+            (season["id"],),
+        ).fetchall()
+        return [
+            {"display_name": r["display_name"], "team": r["team"], "points": r["points"]}
+            for r in rows
+        ]
+
+    result = _safe_query(run)
+    return result if result is not None else []
+
+
+@router.get("/api/mc/top-checkins")
+async def mc_top_checkins() -> list[dict]:
+    """Players ranked by check-in points in the active MeshCore season.
+    See top_checkin_for(). New route -- every existing /api/mc/* route's
+    request path, request shape, and response shape is unchanged by
+    this addition.
+    """
+    return top_checkin_for(MC_PROTOCOL)
 
 
 # Cap on how many repeater_observation rows cell_detail_for() returns

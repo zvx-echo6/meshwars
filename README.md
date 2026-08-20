@@ -10,11 +10,11 @@ MeshWars turns a mesh radio network into a live map game. Players carry a radio,
 
 ## Two boards, two protocols
 
-MeshWars currently runs two separate games side by side, one per radio protocol, because they get position data in very different ways.
+MeshWars runs the same game on both radio protocols: seven teams, registered players, the same flat grid of squares. The two boards differ only in how position reaches the server, because MeshCore and Meshtastic hand us that data in very different ways.
 
-**MeshCore is the live one.** Position comes from [MeshMapper](https://meshmapper.net), a wardriving app MeshCore players already use to map repeater coverage. Players configure MeshMapper to forward a copy of its wardrive to MeshWars alongside whatever it already does. There is no pull API on the MeshCore side and none is attempted — MeshWars only receives what MeshMapper chooses to forward. That forward is a documented feature of the app, and it is additive: turning it on for MeshWars does not change what MeshMapper does for the player, and a player's coverage and standing there are unaffected either way.
+**MeshCore is pushed.** Position comes from [MeshMapper](https://meshmapper.net), a wardriving app MeshCore players already use to map repeater coverage. Players configure MeshMapper to forward a copy of its wardrive to MeshWars alongside whatever it already does. There is no pull API on the MeshCore side and none is attempted — MeshWars only receives what MeshMapper chooses to forward. That forward is a documented feature of the app, and it is additive: turning it on for MeshWars does not change what MeshMapper does for the player, and a player's coverage and standing there are unaffected either way.
 
-**Meshtastic still runs the older system.** It polls a public [meshview](https://github.com/armooo/meshview) instance and picks up node positions automatically as they broadcast — no registration needed, snake-draft team balancing, geohash tiles. It is being migrated to the same player-registration model and flat grid the MeshCore board uses. Until that migration lands, registering a Meshtastic node at `/join` binds the radio and gets it ready for the change, but does not yet affect standing on that board; it still runs on its own separate rules underneath.
+**Meshtastic is pulled.** MeshWars polls a public [meshview](https://github.com/armooo/meshview) instance and picks up node positions as they broadcast, but only scores them for a registered player — a packet from a node nobody has registered at `/join` is read by the poller and discarded, the same way a MeshCore contact nobody registered never reaches a square. Registering a node at `/join` is what puts it on the board at all.
 
 ## How scoring works
 
