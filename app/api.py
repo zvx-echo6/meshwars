@@ -216,9 +216,14 @@ def _mt_node_teams(conn) -> dict[int, str]:
     return out
 
 
-@router.get("/get-nodes")
-async def get_nodes() -> dict:
-    """The map's main data route.
+def _build_get_nodes() -> dict:
+    """Build the map's main data payload.
+
+    Split from the route below so it can be served through
+    mc_api.cached_json_response -- every open Meshtastic map tab
+    re-fetches this on a timer, and without the cache each viewer pays
+    for its own query, enrichment pass and serialization of identical
+    bytes. See that helper for why the cache is time-based only.
 
     `coverage` is grid cells straight from mc_tile/mc_tile_score/
     mc_tile_capture (owner team, per-team scores, capture time) --
@@ -278,6 +283,12 @@ async def get_nodes() -> dict:
         conn.close()
 
     return {"coverage": coverage, "repeaters": repeaters}
+
+
+@router.get("/get-nodes")
+async def get_nodes() -> Response:
+    """The map's main data route. See _build_get_nodes() above."""
+    return mc_api.cached_json_response("mt_board", _build_get_nodes)
 
 
 @router.get("/get-samples")

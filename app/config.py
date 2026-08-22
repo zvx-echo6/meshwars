@@ -43,6 +43,15 @@ class Settings(BaseSettings):
 
     # MeshCore ingest: wardriving batches pushed by the MeshMapper app
     mc_ingest_enabled: bool = True
+    # How long a serialized board response is reused before it is built
+    # again (0 disables the cache entirely). The board only changes when
+    # a ping paints a square, and every open map tab re-fetches it on
+    # its own 30s timer -- without this, N viewers cost N queries, N
+    # bounds passes and N JSON serializations of the same bytes. The map
+    # is already up to 30s stale by design, so a few seconds more costs
+    # a reader nothing and takes viewer load off the box entirely.
+    board_cache_seconds: int = 10
+
     mc_queue_max: int = 10000
     mc_max_batch_pings: int = 50
     mc_key_cache_seconds: int = 60
