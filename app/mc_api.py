@@ -30,12 +30,13 @@ MC_PROTOCOL explicitly, same as before this module had a second caller.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .config import settings
 from .db import connect
@@ -394,6 +395,45 @@ def season_team_checkin_points(conn, season_id: int) -> dict[str, float]:
     return {r["team"]: r["checkin_points"] for r in rows}
 
 
+# ---- board response cache ---------------------------------------------
+
+# key -> (built_at_monotonic, serialized JSON bytes). Small and bounded:
+# one entry per cached route, never per request or per caller.
+_BOARD_CACHE: dict[str, tuple[float, bytes]] = {}
+
+
+def cached_json_response(key: str, build) -> Response:
+    """Serve `build()`'s result as JSON, reusing the bytes for up to
+    settings.board_cache_seconds.
+
+    Caches the SERIALIZED bytes, not the Python object, deliberately:
+    the expensive part of a board request is not just the query, it is
+    walking several thousand rows through cell_bounds() and then
+    serializing the result -- caching the object would still repeat the
+    serialization for every viewer. Bytes also cannot be mutated by a
+    caller the way a shared list of dicts could.
+
+    Time-based only, with no invalidation hook on the ingest path. The
+    board is already up to a full client refresh interval stale in every
+    browser showing it, so a few seconds of server-side staleness is
+    invisible; an explicit invalidation would couple the scoring path to
+    this cache for no gain a reader could ever perceive.
+
+    settings.board_cache_seconds = 0 disables it and rebuilds every time.
+    """
+    ttl = settings.board_cache_seconds
+    now = time.monotonic()
+    if ttl > 0:
+        hit = _BOARD_CACHE.get(key)
+        if hit is not None and now - hit[0] < ttl:
+            return Response(content=hit[1], media_type="application/json")
+
+    body = json.dumps(build(), separators=(",", ":")).encode()
+    if ttl > 0:
+        _BOARD_CACHE[key] = (now, body)
+    return Response(content=body, media_type="application/json")
+
+
 def board_for(protocol: str) -> list[dict]:
     """Every owned cell in the active season for `protocol`, with bounds
     computed server-side so the browser never has to reimplement the
@@ -434,9 +474,14 @@ def board_for(protocol: str) -> list[dict]:
 
 
 @router.get("/api/mc/board")
-async def mc_board() -> list[dict]:
-    """Every owned cell in the active MeshCore season. See board_for()."""
-    return board_for(MC_PROTOCOL)
+async def mc_board() -> Response:
+    """Every owned cell in the active MeshCore season. See board_for().
+
+    The heaviest route on the site by an order of magnitude, and the one
+    every open map tab re-fetches on a timer -- served through
+    cached_json_response so viewers share one build.
+    """
+    return cached_json_response("mc_board", lambda: board_for(MC_PROTOCOL))
 
 
 def scores_for(protocol: str) -> dict:

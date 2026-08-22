@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 
 from .api import mount
 from .checkin import CheckinPoller
@@ -74,6 +75,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="meshwars", lifespan=lifespan)
+
+# The board routes return highly repetitive JSON -- thousands of cell
+# records sharing the same handful of keys and team names -- and every
+# open map tab re-fetches them on a timer. Compressing costs a little
+# CPU per response and saves an order of magnitude on the wire, which is
+# the right trade for the one route that dominates this site's traffic.
+# minimum_size skips the small routes (/scores, /config, /season), where
+# the header overhead would not pay for itself.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 mount(app)
 
 
