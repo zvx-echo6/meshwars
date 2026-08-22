@@ -214,6 +214,17 @@ class Settings(BaseSettings):
     # meshview) it was never told about.
     checkin_enabled: bool = False
     checkin_points: float = 25.0              # points a check-in earns; stored on the award row itself, so a later change here never rewrites history
+
+    # Streak bonus: turning up to the net every week is worth more than
+    # turning up once. Paid from the SECOND consecutive net onward --
+    # bonus = min(streak_bonus * (streak - 1), streak_bonus_max) -- so a
+    # first check-in is still worth exactly checkin_points and there is
+    # no such thing as a bonused streak of one. With the defaults that
+    # runs 25/30/35/40/45/50 and caps from the sixth net on. Like
+    # checkin_points, the total is copied onto the award row when it is
+    # earned, so changing these never rewrites what someone already won.
+    checkin_streak_bonus: float = 5.0
+    checkin_streak_bonus_max: float = 25.0
     checkin_poll_interval_seconds: int = 30   # tight -- MeshCore's feed returns only its newest 100 messages, no pagination, and a busy net can approach that
 
     # The net window. Weekday follows Python's datetime.weekday()

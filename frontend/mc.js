@@ -767,6 +767,11 @@ function topTabSpecs(c) {
       valueKey: 'points',
       valueHeader: 'Points',
       emptyText: 'No check-in activity yet.',
+      // Only this tab has a second number worth showing. Declared per
+      // tab rather than always rendered, so the capture ranking keeps
+      // its three columns instead of growing an empty fourth.
+      extraKey: 'streak',
+      extraHeader: 'Streak',
     },
   };
 }
@@ -791,15 +796,22 @@ async function renderTopModalTab(c) {
     }
     const trs = rows.map((r, i) => {
       const color = TEAM_COLORS[r.team] || '#888';
+      // A null streak is an award written before streaks existed -- show
+      // a dash, never a fabricated 1.
+      const extra = spec.extraKey
+        ? `<td>${escapeHtml(r[spec.extraKey] == null ? '\u2014' : `${r[spec.extraKey]}x`)}</td>`
+        : '';
       return `<tr>
         <td>${i + 1}</td>
         <td>${escapeHtml(r.display_name)}</td>
         <td><span class="mc-dot" style="background:${color}"></span>${escapeHtml(r.team)}</td>
         <td>${escapeHtml(r[spec.valueKey])}</td>
+        ${extra}
       </tr>`;
     }).join('');
+    const extraHead = spec.extraHeader ? `<th>${escapeHtml(spec.extraHeader)}</th>` : '';
     tabBody.innerHTML = `<table class="mc-history-table">
-      <thead><tr><th>#</th><th>Player</th><th>Team</th><th>${escapeHtml(spec.valueHeader)}</th></tr></thead>
+      <thead><tr><th>#</th><th>Player</th><th>Team</th><th>${escapeHtml(spec.valueHeader)}</th>${extraHead}</tr></thead>
       <tbody>${trs}</tbody>
     </table>`;
   } catch (err) {
