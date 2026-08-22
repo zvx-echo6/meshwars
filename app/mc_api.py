@@ -811,7 +811,15 @@ def top_checkin_for(protocol: str) -> list[dict]:
             return []
         rows = conn.execute(
             "SELECT p.display_name AS display_name, p.team AS team, "
-            "       SUM(a.points) AS points "
+            "       SUM(a.points) AS points, "
+            # The streak on the player's MOST RECENT award, not a count
+            # or a max: it is the run they are currently carrying, which
+            # is the number that tells them what their next check-in is
+            # worth. A player whose streak broke shows the shorter run
+            # they have rebuilt since, not the longer one they lost.
+            "       (SELECT a2.streak FROM mc_checkin_award a2 "
+            "         WHERE a2.season_id = a.season_id AND a2.player_id = a.player_id "
+            "         ORDER BY a2.net_date DESC LIMIT 1) AS streak "
             "  FROM mc_checkin_award a "
             "  JOIN player p ON p.player_id = a.player_id "
             " WHERE a.season_id = ? "
@@ -821,7 +829,10 @@ def top_checkin_for(protocol: str) -> list[dict]:
             (season["id"],),
         ).fetchall()
         return [
-            {"display_name": r["display_name"], "team": r["team"], "points": r["points"]}
+            {"display_name": r["display_name"], "team": r["team"], "points": r["points"],
+             # Null for any award written before streaks existed; the
+             # frontend shows a dash rather than inventing a 1.
+             "streak": r["streak"]}
             for r in rows
         ]
 

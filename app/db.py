@@ -532,9 +532,11 @@ MIGRATIONS = [
     # columns existed genuinely has no value to backfill. message_ts is
     # not recoverable at all -- the check-in feed only serves its newest
     # 100 messages, so a net that passed without this column can never
-    # have its posting times reconstructed. streak COULD be derived from
-    # net_date history, but is left null rather than invented so a row
-    # always says whether the value was recorded or inferred.
+    # have its posting times reconstructed. streak IS recoverable, since
+    # app/checkin.py's checkin_streak() derives it from net_date history
+    # alone; it is added null here and filled by a one-time backfill
+    # running that same function, so a backfilled row and an awarded one
+    # can never disagree about what a streak means.
     "ALTER TABLE mc_checkin_award ADD COLUMN message_ts INTEGER",
     "ALTER TABLE mc_checkin_award ADD COLUMN streak INTEGER",
     # Defaults to 0 (not aircraft), which is the correct value for every

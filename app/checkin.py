@@ -159,6 +159,67 @@ def net_date_for_ts(ts: int) -> str | None:
     return net_date
 
 
+def checkin_streak(conn, player_id: int, protocol: str, net_date: str) -> int:
+    """How many consecutive nets this player has now attended, counting
+    the one on `net_date` as the most recent.
+
+    Scoped by PROTOCOL, not by season. A streak is a record of turning up
+    rather than a score, so it survives a season boundary the way the
+    points it earned deliberately do not -- but it stays per board,
+    because a player who only ever wardrives MeshCore should not inherit
+    a streak from the Meshtastic net.
+
+    The subtle part is what counts as a MISSED net. There is no table of
+    nets that happened -- a net is simply a Wednesday, and if nobody
+    posted on one, nothing anywhere records that it took place. So the
+    set of real nets is derived: a date is a net if ANY player earned an
+    award on it. A Wednesday nobody attended (a holiday, a week the net
+    was skipped) never appears in that set, so it cannot silently break
+    everybody's streak for a week they could not have shown up to.
+
+    Deterministic, and computed from committed history rather than
+    carried forward on the previous award row: only dates strictly
+    BEFORE net_date are consulted, so the order in which a poll happens
+    to award several players for the same net cannot change any of their
+    streaks. Re-running it for an award that already exists produces the
+    same number.
+    """
+    nets = [
+        r["net_date"] for r in conn.execute(
+            "SELECT DISTINCT net_date FROM mc_checkin_award "
+            " WHERE protocol = ? AND net_date < ? ORDER BY net_date DESC",
+            (protocol, net_date),
+        )
+    ]
+    if not nets:
+        return 1
+
+    attended = {
+        r["net_date"] for r in conn.execute(
+            "SELECT net_date FROM mc_checkin_award "
+            " WHERE protocol = ? AND player_id = ? AND net_date < ?",
+            (protocol, player_id, net_date),
+        )
+    }
+
+    streak = 1
+    for nd in nets:
+        if nd not in attended:
+            break
+        streak += 1
+    return streak
+
+
+def streak_points(streak: int) -> float:
+    """Total points a check-in is worth at this streak length -- the base
+    plus the bonus described in settings.checkin_streak_bonus."""
+    bonus = min(
+        settings.checkin_streak_bonus * max(streak - 1, 0),
+        settings.checkin_streak_bonus_max,
+    )
+    return settings.checkin_points + bonus
+
+
 def _award_checkin(
     conn, season_id: int, player_id: int, net_date: str, protocol: str,
     message_id: str, awarded_at: int, message_ts: int | None = None,
@@ -168,8 +229,12 @@ def _award_checkin(
     triple, enforced by mc_checkin_award's PRIMARY KEY, is what actually
     makes this idempotent no matter how many qualifying messages a
     player posted in the net or how many times a poll re-examines them.
-    `points` is copied from settings.checkin_points now, not read live
-    later, so a config change afterward can never rewrite this award.
+    `points` is the base plus whatever the player's streak is worth
+    (checkin_streak/streak_points above), computed and copied onto the
+    row now rather than read live later, so a config change afterward
+    can never rewrite this award. The streak itself is stored alongside
+    it, so the number is auditable rather than something that has to be
+    re-derived to be explained.
 
     `message_ts` is when the player actually POSTED, taken from the
     message itself -- distinct from `awarded_at`, which is only when a
@@ -180,17 +245,21 @@ def _award_checkin(
     posting times gone for good. Nothing reads it yet -- it exists so
     that when something does, there is history to read.
     """
+    streak = checkin_streak(conn, player_id, protocol, net_date)
+    points = streak_points(streak)
     cur = conn.execute(
         "INSERT OR IGNORE INTO mc_checkin_award"
-        "(season_id, player_id, net_date, points, protocol, message_id, awarded_at, message_ts) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (season_id, player_id, net_date, settings.checkin_points, protocol, message_id,
-         awarded_at, message_ts),
+        "(season_id, player_id, net_date, points, protocol, message_id, awarded_at, "
+        " message_ts, streak) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (season_id, player_id, net_date, points, protocol, message_id,
+         awarded_at, message_ts, streak),
     )
     if cur.rowcount:
         log.info(
-            "checkin: awarded %.2f points to player %d for %s net %s (season %d, message %s)",
-            settings.checkin_points, player_id, protocol, net_date, season_id, message_id,
+            "checkin: awarded %.2f points to player %d for %s net %s "
+            "(season %d, message %s, streak %d)",
+            points, player_id, protocol, net_date, season_id, message_id, streak,
         )
 
 
