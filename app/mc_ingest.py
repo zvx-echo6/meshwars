@@ -53,6 +53,16 @@ _RATE_LIMIT_MAX_TRACKED = 10000
 # could carry an enormous string and burn CPU parsing it.
 _MAX_PARSED_REPEATERS = 64
 
+# Upper bound on a speed that can still be read as an aircraft. Above
+# this (roughly 900 mph) a "speed" between two fixes is a GPS jump, not
+# a vehicle -- a stale fix, a cold start, or a phone resolving its
+# position from a cell tower in the next county. Marking those by_air
+# would quietly disqualify a legitimate remote claim from the very
+# awards it should win, so anything this fast is treated as a bad fix
+# and left unmarked. settings.mc_max_speed_mps is the LOWER edge of the
+# aircraft band; this is the upper one.
+_GLITCH_SPEED_MPS = 400.0
+
 
 @dataclass(frozen=True)
 class RepeaterEntry:
@@ -683,8 +693,11 @@ class McIngestor:
         entries = parse_repeaters(ping)
         record_repeater_observations(conn, PROTOCOL, cell, entries, ts)
 
-        # 6. Sanity gates -- log only, never reject; these need real data
-        # to tune.
+        # 6. Sanity gates -- these still never REJECT a ping. The speed
+        # between consecutive fixes now also decides by_air, which the
+        # exploration awards read; it changes nothing about scoring or
+        # ownership. See settings.mc_max_speed_mps and _GLITCH_SPEED_MPS.
+        by_air = False
         last_fix = conn.execute(
             "SELECT cell_id, ts FROM player_last_fix WHERE player_id = ? AND protocol = ?",
             (player_id, PROTOCOL),
@@ -696,9 +709,10 @@ class McIngestor:
             cur_lat, cur_lon = cell_center(cell)
             speed = distance_m(prev_lat, prev_lon, cur_lat, cur_lon) / elapsed
             if speed > settings.mc_max_speed_mps:
+                by_air = speed <= _GLITCH_SPEED_MPS
                 log.warning(
-                    "mc ingest: implausible speed for player %d: %.1f m/s over %ds",
-                    player_id, speed, elapsed,
+                    "mc ingest: implausible speed for player %d: %.1f m/s over %ds (by_air=%s)",
+                    player_id, speed, elapsed, by_air,
                 )
 
         skew = abs(ts - received_at)
@@ -749,7 +763,7 @@ class McIngestor:
                 mc_scoring.apply_paint(
                     conn, season_id, player_id, team, cell, ts, repeater_ids,
                     settings.mc_points_per_repeater, settings.mc_max_points_per_ping,
-                    PROTOCOL, received_at,
+                    PROTOCOL, received_at, by_air,
                 )
             except Exception:
                 log.exception(

@@ -161,7 +161,7 @@ def net_date_for_ts(ts: int) -> str | None:
 
 def _award_checkin(
     conn, season_id: int, player_id: int, net_date: str, protocol: str,
-    message_id: str, awarded_at: int,
+    message_id: str, awarded_at: int, message_ts: int | None = None,
 ) -> None:
     """Credit one check-in, if this (season, player, net_date) hasn't
     already been credited -- see the module docstring for why that
@@ -170,12 +170,22 @@ def _award_checkin(
     player posted in the net or how many times a poll re-examines them.
     `points` is copied from settings.checkin_points now, not read live
     later, so a config change afterward can never rewrite this award.
+
+    `message_ts` is when the player actually POSTED, taken from the
+    message itself -- distinct from `awarded_at`, which is only when a
+    poll happened to look at it and is therefore up to a full poll
+    interval late and quantised to when the poller ran. Recorded because
+    nothing else can recover it: both feeds hand back a fixed window of
+    recent messages, so a net that passes without this stored has its
+    posting times gone for good. Nothing reads it yet -- it exists so
+    that when something does, there is history to read.
     """
     cur = conn.execute(
         "INSERT OR IGNORE INTO mc_checkin_award"
-        "(season_id, player_id, net_date, points, protocol, message_id, awarded_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (season_id, player_id, net_date, settings.checkin_points, protocol, message_id, awarded_at),
+        "(season_id, player_id, net_date, points, protocol, message_id, awarded_at, message_ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (season_id, player_id, net_date, settings.checkin_points, protocol, message_id,
+         awarded_at, message_ts),
     )
     if cur.rowcount:
         log.info(
@@ -780,7 +790,8 @@ class CheckinPoller:
             # messages, and buys back the award the moment they resolve.
             return
 
-        _award_checkin(conn, season_id, player_id, net_date, MC_PROTOCOL, str(packet_id), received_at)
+        _award_checkin(conn, season_id, player_id, net_date, MC_PROTOCOL, str(packet_id),
+                       received_at, ts)
         # Only now: an awarded message must never be re-examined, or a
         # season roll would let the same message earn again under the
         # new season_id (mc_checkin_award's key is per season).
@@ -832,7 +843,8 @@ class CheckinPoller:
         if not isinstance(import_us, (int, float)):
             _mark_mt_seen(conn, pid, received_at)
             return
-        net_date = net_date_for_ts(int(import_us / 1_000_000))
+        message_ts = int(import_us / 1_000_000)
+        net_date = net_date_for_ts(message_ts)
         if net_date is None:
             _mark_mt_seen(conn, pid, received_at)
             return
@@ -859,5 +871,6 @@ class CheckinPoller:
             # one outcome here that changes without the packet changing.
             return
 
-        _award_checkin(conn, season_id, player_id, net_date, MT_PROTOCOL, str(pid), received_at)
+        _award_checkin(conn, season_id, player_id, net_date, MT_PROTOCOL, str(pid),
+                       received_at, message_ts)
         _mark_mt_seen(conn, pid, received_at)
