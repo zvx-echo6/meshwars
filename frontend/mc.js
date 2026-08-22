@@ -477,7 +477,19 @@ function renderScores(data) {
     scoreboardSummaryEl.textContent = lead ? `${lead.team} ${teamTotal(lead)}` : '';
   }
 
-  teams.forEach((entry) => {
+  // Leader first. The API zero-fills all seven teams so a team appearing
+  // on the board never shifts the panel (see scores_for()) -- ordering by
+  // score deliberately reintroduces movement, because a scoreboard that
+  // never reorders makes you read all seven rows to find who is winning.
+  // TEAM_ORDER breaks ties so the teams sitting on the same score (often
+  // several on zero early in a season) hold a stable position instead of
+  // swapping places on every 30s refresh.
+  const ordered = teams.slice().sort((a, b) => (
+    teamTotal(b) - teamTotal(a) ||
+    TEAM_ORDER.indexOf(a.team) - TEAM_ORDER.indexOf(b.team)
+  ));
+
+  ordered.forEach((entry) => {
     const row = document.createElement('div');
     row.className = 'mc-row';
 

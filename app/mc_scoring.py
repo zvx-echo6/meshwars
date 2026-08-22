@@ -274,6 +274,7 @@ def apply_paint(
     max_points_per_ping: float,
     protocol: str,
     received_at: int,
+    by_air: bool = False,
 ) -> PaintResult:
     """Score one accepted ping against a cell and resolve ownership.
 
@@ -305,6 +306,15 @@ def apply_paint(
     adding more, so no number of pings or repeaters can push one cell
     past it in one visit. A ping naming zero repeaters reached no one and
     always earns nothing, cooldown aside.
+
+    `by_air` marks this claim as made while moving at aircraft speed
+    (app/mc_ingest.py decides, from the distance between consecutive
+    fixes). It is recorded on the capture log and nowhere else: it does
+    NOT affect scoring, ownership or any cooldown, because the radio
+    genuinely reached the repeater and that is what territory measures.
+    It exists so the exploration awards, which are about reach and
+    effort rather than reception, can exclude ground claimed from a
+    plane.
 
     `protocol` and `received_at` reach the repeater-credit bookkeeping
     (player_cell_repeater_credit, see app/db.py) below -- everything else
@@ -376,9 +386,9 @@ def apply_paint(
         # so it belongs in the same audit log a flip writes to. There is
         # no previous owner, so from_team is null here.
         conn.execute(
-            "INSERT INTO mc_tile_capture_log(season_id, cell_id, ts, by_player_id, by_team, from_team) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (season_id, cell_id, ts, player_id, team, None),
+            "INSERT INTO mc_tile_capture_log(season_id, cell_id, ts, by_player_id, by_team, from_team, by_air) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (season_id, cell_id, ts, player_id, team, None, 1 if by_air else 0),
         )
         log.info("mc scoring: cell %s captured by %s (first paint)", cell_id, team)
         return PaintResult("captured", cell_id, team, score=new_score)
@@ -420,9 +430,9 @@ def apply_paint(
     )
     record_capture(conn, season_id, cell_id, team, ts)
     conn.execute(
-        "INSERT INTO mc_tile_capture_log(season_id, cell_id, ts, by_player_id, by_team, from_team) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (season_id, cell_id, ts, player_id, team, owner_team),
+        "INSERT INTO mc_tile_capture_log(season_id, cell_id, ts, by_player_id, by_team, from_team, by_air) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (season_id, cell_id, ts, player_id, team, owner_team, 1 if by_air else 0),
     )
     log.info(
         "mc scoring: cell %s flipped %s -> %s by player %d",

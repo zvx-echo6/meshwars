@@ -381,6 +381,7 @@ CREATE TABLE IF NOT EXISTS mc_tile_capture_log (
     by_player_id INTEGER NOT NULL,
     by_team      TEXT NOT NULL,
     from_team    TEXT,
+    by_air       INTEGER NOT NULL DEFAULT 0,  -- claimed while moving at aircraft speed (see app/mc_ingest.py)
     PRIMARY KEY (season_id, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_mc_capture_log_cell ON mc_tile_capture_log(season_id, cell_id);
@@ -503,6 +504,8 @@ CREATE TABLE IF NOT EXISTS mc_checkin_award (
     protocol    TEXT NOT NULL,     -- 'mc' | 'mt' -- which feed earned it; informational, season_id already implies it (see mc_season.protocol)
     message_id  TEXT NOT NULL,     -- source message/packet id, audit only
     awarded_at  INTEGER NOT NULL,
+    message_ts  INTEGER,            -- when the player actually POSTED, not when the poller saw it; null on rows written before this column existed
+    streak      INTEGER,            -- consecutive nets including this one; null on rows written before streaks existed
     PRIMARY KEY (season_id, player_id, net_date)
 );
 CREATE INDEX IF NOT EXISTS idx_mc_checkin_award_season ON mc_checkin_award(season_id);
@@ -525,6 +528,21 @@ CREATE TABLE IF NOT EXISTS mc_checkin_seen_message (
 
 
 MIGRATIONS = [
+    # Nullable on purpose, both of them: every award written before these
+    # columns existed genuinely has no value to backfill. message_ts is
+    # not recoverable at all -- the check-in feed only serves its newest
+    # 100 messages, so a net that passed without this column can never
+    # have its posting times reconstructed. streak COULD be derived from
+    # net_date history, but is left null rather than invented so a row
+    # always says whether the value was recorded or inferred.
+    "ALTER TABLE mc_checkin_award ADD COLUMN message_ts INTEGER",
+    "ALTER TABLE mc_checkin_award ADD COLUMN streak INTEGER",
+    # Defaults to 0 (not aircraft), which is the correct value for every
+    # capture recorded before the check existed: nothing was flying that
+    # we know of, and treating unknown as "on the ground" keeps old
+    # captures eligible for the exploration awards rather than silently
+    # disqualifying history.
+    "ALTER TABLE mc_tile_capture_log ADD COLUMN by_air INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE tile ADD COLUMN last_packet_id INTEGER",
     "ALTER TABLE tile_unique_painter ADD COLUMN paint_count INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_out_of_area INTEGER NOT NULL DEFAULT 0",

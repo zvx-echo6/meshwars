@@ -17,7 +17,13 @@ class Settings(BaseSettings):
     upstream_concurrency: int = 5  # max concurrent packets_seen fetches
 
     # Game timing
-    season_days: int = 30
+    # Six months. Long enough that ground is worth building on, and the
+    # reason it can be this long is that score decay already stops a
+    # season calcifying -- a square painted once and never revisited
+    # falls to zero within weeks, so held territory always means
+    # recently active. A monthly result (see the /results page) provides
+    # the recognition a short season used to, without the wipe.
+    season_days: int = 180
     winner_banner_hours: int = 72
     history_max: int = 12
 
@@ -55,7 +61,14 @@ class Settings(BaseSettings):
     mc_queue_max: int = 10000
     mc_max_batch_pings: int = 50
     mc_key_cache_seconds: int = 60
-    mc_max_speed_mps: float = 89.0          # about 200 mph
+    # About 100 mph. Two jobs: it logs an implausible-speed warning, and
+    # it is the line above which a claim is marked by_air and stops
+    # counting toward the exploration awards (Explorer/Frontier) -- those
+    # reward reach and effort, and a plane trivialises both. Was 200 mph,
+    # which a light aircraft at cruise sails straight under; an interstate
+    # at 90 mph is only 40 m/s, so this separates the two cleanly.
+    # Territory is NOT affected -- the radio really did hear the repeater.
+    mc_max_speed_mps: float = 45.0
     mc_max_clock_skew_seconds: int = 3600
     mc_ping_retention_hours: int = 48
     mc_stat_retention_days: int = 30
@@ -88,7 +101,7 @@ class Settings(BaseSettings):
     # board-scoped (see the mt_* settings further down for Meshtastic's
     # equivalents) -- the roster itself is not.
     teams: str = "RED,GREEN,BLUE,PURPLE,YELLOW,ORANGE,PINK"
-    mc_season_days: int = 30
+    mc_season_days: int = 180   # see season_days above
     # Points per repeater a ping heard, and the cap on points a single
     # ping can earn -- see app/mc_scoring.py and app/mc_ingest.py for how
     # these turn a heard-repeater count into points.
