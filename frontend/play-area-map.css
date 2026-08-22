@@ -1,0 +1,47 @@
+/* Styles for the "Where it's played" illustration -- paired with
+   frontend/play-area-map.js the same way mc.css pairs with mc.js.
+
+   Its own file rather than a block in landing.css and a hand-copied
+   twin in join.css: the About and Join pages load different stylesheets
+   but render the identical component, and two copies of these rules is
+   exactly how they drift. Both pages load this one alongside their own.
+
+   Colours come from theme.css's tokens. The rectangle itself is painted
+   by Leaflet onto a canvas, so its gold is set in the JS -- that is the
+   one place the token is repeated as a literal, and it is commented
+   there. */
+
+#play-area-map {
+  height: 260px;
+  width: 100%;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: var(--mw-page);
+  /* Leaflet stacks panes/controls with z-index; give the container its
+     own stacking context so none of that can escape the panel and land
+     on top of the fixed site nav bar. */
+  isolation: isolate;
+  z-index: 0;
+}
+
+/* Leaflet's default attribution is white-on-light; these pages are dark. */
+#play-area-map .leaflet-control-attribution {
+  background: rgba(12, 11, 10, 0.75);
+  color: #8a8378;
+  font-size: 0.6875rem;
+}
+
+#play-area-map .leaflet-control-attribution a {
+  color: var(--mw-gold);
+}
+
+/* The map is decorative, so it sits under the sentence rather than
+   above it, and the link back to the real board sits under the map. */
+.mw-play-area-note {
+  margin: 10px 0 0;
+  font-size: 0.875rem;
+}
+
+@media (max-width: 560px) {
+  #play-area-map { height: 200px; }
+}
