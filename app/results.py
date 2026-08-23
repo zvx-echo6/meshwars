@@ -296,11 +296,18 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
         add(_award("team_defender", *(_top(per_team_retakes.get(team, {})) or (None, 0)),
                    names=names, scope=team, team=team))
 
-    # ---- frontier: one square, the furthest that qualifies ------------
-    # A single winner rather than a count: twenty miles past any town is
-    # where mesh coverage runs out, so this is a trip somebody makes on
-    # purpose, not something to grind. Expect months with no winner.
-    best_cell, best_miles = None, 0.0
+    # ---- frontier: how much ground you claimed out past the towns -----
+    # Counted, not measured. The furthest single square rewarded one
+    # lucky turn-off; a count rewards actually working the back country,
+    # and reads the same way Explorer does so the two stack cleanly --
+    # every Frontier square is beyond a town's edge and therefore also a
+    # virgin claim, so it counts toward both.
+    #
+    # Still expect empty months: twenty miles past a town is where mesh
+    # coverage runs out, and a square out there has to hear a repeater
+    # to have been claimed at all.
+    frontier: dict[int, int] = {}
+    furthest: dict[int, float] = {}
     for c in caps:
         if c["from_team"] is not None or c["by_air"]:
             continue
@@ -309,11 +316,14 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
         if d is None:
             continue  # place data unavailable -- skip, never guess
         miles = d / places.MILE_M
-        if miles > settings.frontier_miles and miles > best_miles:
-            best_cell, best_miles = c, miles
-    if best_cell is not None:
-        add(_award("frontier", best_cell["player_id"], round(best_miles, 1), names,
-                   detail="%s, %.0f mi out" % (best_cell["cell_id"], best_miles)))
+        if miles > settings.frontier_miles:
+            pid = c["player_id"]
+            frontier[pid] = frontier.get(pid, 0) + 1
+            furthest[pid] = max(furthest.get(pid, 0.0), miles)
+    won = _top(frontier)
+    if won is not None:
+        add(_award("frontier", won[0], won[1], names,
+                   detail="furthest %.0f mi out" % furthest[won[0]]))
 
     # ---- check-in awards ----------------------------------------------
     points: dict[int, float] = {}
