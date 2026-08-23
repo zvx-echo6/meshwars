@@ -59,6 +59,22 @@ PER_TEAM_AWARDS = [
 ]
 AWARD_LABELS = dict(TEAM_AWARDS + PLAYER_AWARDS + PER_TEAM_AWARDS)
 
+# Display order. compute_month() emits awards in this order naturally,
+# but a frozen month is read back out of a table with no inherent order,
+# and SQLite returned them alphabetised -- Explorer above Month Winner.
+# Both paths sort through this so a finished month reads the same as the
+# month it was.
+_AWARD_RANK = {key: i for i, (key, _) in enumerate(TEAM_AWARDS + PLAYER_AWARDS + PER_TEAM_AWARDS)}
+
+
+def _award_sort_key(a: dict) -> tuple:
+    teams = settings.teams_list
+    scope = a.get("scope") or ""
+    return (
+        _AWARD_RANK.get(a["award"], len(_AWARD_RANK)),
+        teams.index(scope) if scope in teams else len(teams),
+    )
+
 
 # ---- month arithmetic --------------------------------------------------
 
@@ -459,6 +475,7 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
         names = _names(conn)
         for a in awards:
             a["player"] = names.get(a["player_id"], (None, None))[0] if a["player_id"] else None
+        awards.sort(key=_award_sort_key)
         out.append({"month": month, "protocol": protocol, "standings": standings,
                     "awards": awards})
     return {
