@@ -5,7 +5,7 @@ app/results.py). Nothing on the scoring or ingest path reads this --
 territory does not care where it is, only whether the radio reached a
 repeater.
 
-The data is app/data/places.csv, derived from the US Census 2024
+The data is app/reference/places.csv, derived from the US Census 2024
 Gazetteer places file and filtered to the play area plus a degree of
 margin (a town just outside the box still matters to a square inside
 it). Each row is a place's interior point plus an EFFECTIVE RADIUS:
@@ -36,7 +36,13 @@ from .grid import distance_m
 
 log = logging.getLogger("places")
 
-_DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "places.csv")
+# Not app/data/: .gitignore excludes "data/" for the runtime Docker
+# volume, which silently swallowed this file the first time it lived
+# there -- the image built without it and the exploration awards skipped
+# themselves with only a log line to say so. "reference" is also the
+# truer name: this is static data shipped with the code, not the
+# mutable /data the container mounts.
+_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places.csv")
 
 # Places are bucketed into whole-degree cells so a lookup scans its own
 # bucket and the eight around it rather than all thirteen thousand rows.
