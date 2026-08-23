@@ -905,10 +905,19 @@ body {
   text-decoration: none;
   white-space: nowrap;
 }
+/* A background rather than an <img src>, so the mark follows
+   --mw-crest the way every colour follows its token. The element keeps
+   an aria-label and role="img" since a background carries no alternative
+   text of its own. */
 .mw-nav-crest {
   display: block;
   height: 28px;
-  width: auto;
+  width: 28px;
+  flex: none;
+  background-image: var(--mw-crest);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 .mw-nav-links {
   display: flex;

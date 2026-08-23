@@ -56,6 +56,25 @@
   --mw-accent-wash-line: #4a3f1a;  /* its border */
   --mw-accent-deep:      #2a1a10;  /* a deeper tint of the same idea */
   --mw-accent-active:    #3a2f12;  /* a control that is currently selected */
+
+  /* The marks, as tokens for the same reason the colours are: a skin
+     swaps them by redefining a value rather than by any page knowing
+     which theme is on. Rendered as backgrounds (see .mw-nav-crest), so
+     an <img src> would defeat the point.
+
+     The favicon is NOT here and cannot be: it is a <link>, out of CSS's
+     reach, and a tab icon that changes under a reader is worse than one
+     that does not match. Same for the social images, which render where
+     no theme exists. */
+  --mw-crest: url("/static/assets/favicon/favicon-64x64.png");
+
+  /* No --mw-logo token yet, deliberately. The About hero is the full
+     horizontal lockup, and its lettering is custom artwork -- there is
+     no honest way to redraw it in another palette here, so the hero
+     stays one image on both skins and keeps its <picture> element,
+     alt text and dimensions. When a neon lockup exists, it becomes a
+     token exactly like the crest above; a token nothing reads today
+     would only be a promise the code does not keep. */
 }
 
 /* -------------------------------------------------------------------------
@@ -114,4 +133,11 @@
   --mw-accent-wash-line: #14424F;
   --mw-accent-deep:      #08202B;
   --mw-accent-active:    #0F3B47;
+
+  /* Drawn rather than recoloured: the gold crest is a painted heraldic
+     mark and a cyan trace of it would read as a worse copy, so the neon
+     crest is the same idea (shield, mesh, one node lit) drawn the way
+     this skin talks. The horizontal lockup is still the gold artwork --
+     its lettering is custom and cannot honestly be redrawn here. */
+  --mw-crest: url("/static/assets/logo/crest-neon.svg");
 }
