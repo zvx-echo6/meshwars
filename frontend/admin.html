@@ -5,93 +5,125 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0C0B0A" />
   <title>MeshWars Admin</title>
-  <!-- Operator-only, and nothing here should ever reach a search
-       result. robots.txt excludes /admin as well; this is the copy that
-       does not depend on a crawler reading that file first. -->
+  <!-- Operator-only. robots.txt excludes /admin too; this is the copy
+       that does not depend on a crawler reading that file first. -->
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
-  <link rel="stylesheet" href="/static/theme.css?v=20260823-15" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260823-15" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260823-16" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260823-16" />
 </head>
 <body>
-  <div class="adm-wrap">
 
-    <header class="adm-head">
-      <h1 class="adm-title">MeshWars Admin</h1>
-      <p class="adm-sub">What is wrong right now, and everything needed to fix it.</p>
-    </header>
-
-    <div class="adm-tokenbar">
-      <input type="password" id="token-input" autocomplete="off" placeholder="paste admin token" />
-      <button type="button" id="load-btn" class="adm-btn">Load</button>
-      <div id="status" class="adm-status">Paste the admin token to begin.</div>
-    </div>
-
-    <section class="adm-panel">
-      <div class="adm-panel-title">
-        Needs attention
-        <span class="adm-count" id="attention-count"></span>
-      </div>
-      <div id="tiles" class="adm-tiles"></div>
-      <div id="attention"></div>
-    </section>
-
-    <section class="adm-panel">
-      <div class="adm-panel-title">Players <span class="adm-count" id="players-count"></span></div>
-      <input type="text" id="player-search" class="adm-search" autocomplete="off"
-             placeholder="search by name or team" />
-      <div id="players"></div>
-    </section>
-
-    <section class="adm-panel">
-      <div class="adm-panel-title">Check-ins</div>
-      <p class="adm-hint">Credit a check-in somebody earned but did not receive. Points and streak are worked out exactly as the poller would have on the night, so this is worth what it should be &mdash; the monthly honors read these rows and cannot tell it was added by hand.</p>
-      <div class="adm-form">
-        <input type="text" id="ci-player" autocomplete="off" placeholder="player name, exactly" />
-        <input type="text" id="ci-date" autocomplete="off" placeholder="2026-08-19" />
-        <select id="ci-proto">
-          <option value="mc">MeshCore</option>
-          <option value="mt">Meshtastic</option>
-        </select>
-        <button type="button" id="ci-award" class="adm-btn">Credit check-in</button>
-      </div>
-      <div id="ci-result" class="adm-result"></div>
-    </section>
-
-    <section class="adm-panel">
-      <div class="adm-panel-title">Seasons</div>
-      <p class="adm-hint">Changing the season length in config only affects the <em>next</em> season. This changes the one being played.</p>
-      <div id="seasons"></div>
-    </section>
-
-    <section class="adm-panel">
-      <div class="adm-panel-title">Months</div>
-      <p class="adm-hint">Months close on their own from ordinary traffic. Use this only to recompute one that closed while history was wrong, or to close one the service was down for. A month still being played is refused.</p>
-      <div class="adm-form">
-        <input type="text" id="mo-month" autocomplete="off" placeholder="2026-08" />
-        <select id="mo-proto">
-          <option value="mc">MeshCore</option>
-          <option value="mt">Meshtastic</option>
-        </select>
-        <button type="button" id="mo-freeze" class="adm-btn">Recompute and freeze</button>
-      </div>
-      <div id="mo-result" class="adm-result"></div>
-    </section>
-
-    <section class="adm-panel">
-      <div class="adm-panel-title">Read-API keys</div>
-      <p class="adm-hint">Keys for the public read API at <code>/api/v1</code> &mdash; one per integration, so a misbehaving bot can be revoked on its own. Read-only: these cannot post wardriving data.</p>
-      <div class="adm-form">
-        <input type="text" id="apikey-label" autocomplete="off" maxlength="80"
-               placeholder="what is it for, e.g. freq51 discord bot" />
-        <button type="button" id="apikey-create" class="adm-btn">Issue key</button>
-      </div>
-      <div id="apikey-result" class="adm-result"></div>
-      <div id="apikeys"></div>
-    </section>
-
+  <!-- Sign in. A view of its own rather than a field wedged above the
+       panels: until the token is accepted there is nothing to show, and
+       a page full of empty sections behind a text box does not tell
+       anyone that. -->
+  <div id="login" class="adm-login">
+    <form class="adm-login-card" id="login-form">
+      <div class="adm-login-crest" role="img" aria-label="MeshWars crest"></div>
+      <h1 class="adm-login-title">MeshWars Admin</h1>
+      <p class="adm-login-sub">Operator access</p>
+      <label class="adm-login-label" for="token-input">Admin token</label>
+      <input type="password" id="token-input" autocomplete="off" autofocus />
+      <button type="submit" id="login-btn" class="adm-btn adm-btn-wide">Sign in</button>
+      <p class="adm-login-err" id="login-err"></p>
+      <p class="adm-login-note">Held in this page for this session only &mdash; never stored, never sent anywhere but here.</p>
+    </form>
   </div>
 
-  <script src="/static/admin.js?v=20260823-15"></script>
+  <!-- The panel proper. Hidden until sign in succeeds. -->
+  <div id="app" class="adm-app" hidden>
+
+    <header class="adm-topbar">
+      <span class="adm-topbar-crest" role="img" aria-label="MeshWars crest"></span>
+      <span class="adm-topbar-title">MeshWars Admin</span>
+      <span class="adm-topbar-status" id="status"></span>
+      <button type="button" id="refresh-btn" class="adm-btn adm-btn-quiet">Refresh</button>
+      <button type="button" id="signout-btn" class="adm-btn adm-btn-quiet">Sign out</button>
+    </header>
+
+    <div class="adm-body">
+      <nav class="adm-nav" aria-label="Sections">
+        <button type="button" class="adm-nav-item active" data-section="overview">
+          Overview <span class="adm-nav-badge" id="nav-attention"></span>
+        </button>
+        <button type="button" class="adm-nav-item" data-section="players">
+          Players <span class="adm-nav-badge" id="nav-players"></span>
+        </button>
+        <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
+        <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
+        <button type="button" class="adm-nav-item" data-section="months">Months</button>
+        <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
+      </nav>
+
+      <main class="adm-main">
+
+        <section class="adm-section" data-section="overview">
+          <h2 class="adm-h2">Overview</h2>
+          <div id="tiles" class="adm-tiles"></div>
+          <p class="adm-hint" id="health-line"></p>
+          <h3 class="adm-h3">Needs attention <span class="adm-count" id="attention-count"></span></h3>
+          <div id="attention"></div>
+        </section>
+
+        <section class="adm-section" data-section="players" hidden>
+          <h2 class="adm-h2">Players <span class="adm-count" id="players-count"></span></h2>
+          <input type="text" id="player-search" class="adm-search" autocomplete="off"
+                 placeholder="search by name or team" />
+          <div id="players"></div>
+        </section>
+
+        <section class="adm-section" data-section="checkins" hidden>
+          <h2 class="adm-h2">Check-ins</h2>
+          <p class="adm-hint">Credit a check-in somebody earned but did not receive. Points and streak are worked out exactly as the poller would have on the night, so it is worth what it should be &mdash; the monthly honors read these rows and cannot tell it was added by hand.</p>
+          <div class="adm-form">
+            <input type="text" id="ci-player" autocomplete="off" placeholder="player name, exactly" />
+            <input type="text" id="ci-date" autocomplete="off" placeholder="2026-08-19" />
+            <select id="ci-proto">
+              <option value="mc">MeshCore</option>
+              <option value="mt">Meshtastic</option>
+            </select>
+            <button type="button" id="ci-award" class="adm-btn">Credit check-in</button>
+          </div>
+          <div id="ci-result" class="adm-result"></div>
+        </section>
+
+        <section class="adm-section" data-section="seasons" hidden>
+          <h2 class="adm-h2">Seasons</h2>
+          <p class="adm-hint">Changing the season length in config only affects the <em>next</em> season. This changes the one being played.</p>
+          <div id="seasons"></div>
+        </section>
+
+        <section class="adm-section" data-section="months" hidden>
+          <h2 class="adm-h2">Months</h2>
+          <p class="adm-hint">Months close on their own from ordinary traffic. Use this only to recompute one that closed while history was wrong, or to close one the service was down for. A month still being played is refused.</p>
+          <div class="adm-form">
+            <input type="text" id="mo-month" autocomplete="off" placeholder="2026-08" />
+            <select id="mo-proto">
+              <option value="mc">MeshCore</option>
+              <option value="mt">Meshtastic</option>
+            </select>
+            <button type="button" id="mo-freeze" class="adm-btn">Recompute and freeze</button>
+          </div>
+          <div id="mo-result" class="adm-result"></div>
+        </section>
+
+        <section class="adm-section" data-section="keys" hidden>
+          <h2 class="adm-h2">API keys</h2>
+          <p class="adm-hint">Keys for the public read API at <code>/api/v1</code> &mdash; one per integration, so a misbehaving bot can be revoked on its own. Read-only: these cannot post wardriving data.</p>
+          <div class="adm-form">
+            <input type="text" id="apikey-label" autocomplete="off" maxlength="80"
+                   placeholder="what is it for, e.g. freq51 discord bot" />
+            <button type="button" id="apikey-create" class="adm-btn">Issue key</button>
+          </div>
+          <div id="apikey-result" class="adm-result"></div>
+          <div id="apikeys"></div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/admin.js?v=20260823-16"></script>
 </body>
 </html>

@@ -7,6 +7,13 @@
    collapsed, because thirty players expanded is nine thousand pixels of
    scrolling past people who are fine. */
 
+/* The `hidden` attribute is only a user-agent `display: none`, so any
+   author rule that sets `display` on the same element silently beats it
+   -- which is what left the sign-in card on screen after a successful
+   sign-in, with the app shell rendered behind it. This makes hidden mean
+   hidden regardless of what else an element's own rules say. */
+[hidden] { display: none !important; }
+
 :root {
   --ok:   #4caf50;
   --warn: #d9a441;
@@ -25,90 +32,193 @@ body {
 
 .adm-wrap { max-width: 1080px; margin: 0 auto; }
 
-/* ---- header and the token bar --------------------------------------- */
-.adm-head { padding: 28px 0 16px; }
-
-.adm-title {
-  font-size: 1.75rem;
-  font-weight: 800;
-  color: var(--mw-gold-light);
-  margin: 0 0 4px;
-  letter-spacing: 0.01em;
+/* ---- sign in --------------------------------------------------------
+   Its own view. Until the token is accepted there is nothing to show,
+   and a page of empty panels behind a text box does not communicate
+   that -- it just looks broken. */
+.adm-login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
 }
 
-.adm-sub { color: var(--mw-text-6); font-size: 0.875rem; margin: 0; }
+.adm-login-card {
+  width: 100%;
+  max-width: 340px;
+  background: var(--mw-panel);
+  border: 1px solid var(--mw-line);
+  border-radius: 10px;
+  padding: 28px 26px 22px;
+  text-align: center;
+}
 
-/* Sticky, because every panel below is gated on it and scrolling back
-   up to re-enter a token is the sort of thing that makes a tool feel
-   hostile. */
-.adm-tokenbar {
+.adm-login-crest {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 12px;
+  background-image: var(--mw-crest);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.adm-login-title {
+  font-size: 1.125rem;
+  font-weight: 800;
+  color: var(--mw-gold-light);
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+
+.adm-login-sub {
+  font-size: 0.75rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+  margin: 2px 0 20px;
+}
+
+.adm-login-label {
+  display: block;
+  text-align: left;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+  margin-bottom: 5px;
+}
+
+.adm-login-card input { width: 100%; margin-bottom: 12px; }
+.adm-btn-wide { width: 100%; justify-content: center; padding: 9px; }
+
+.adm-login-err {
+  color: var(--bad);
+  font-size: 0.8125rem;
+  margin: 10px 0 0;
+  min-height: 1em;
+}
+
+.adm-login-note {
+  color: var(--mw-text-6);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  margin: 14px 0 0;
+}
+
+/* ---- the app shell --------------------------------------------------- */
+.adm-topbar {
   position: sticky;
   top: 0;
   z-index: 20;
   display: flex;
-  gap: 8px;
   align-items: center;
-  flex-wrap: wrap;
-  padding: 12px 0;
-  margin-bottom: 20px;
-  background: var(--mw-page);
+  gap: 10px;
+  padding: 10px 18px;
+  background: var(--mw-panel);
   border-bottom: 1px solid var(--mw-line);
 }
 
-.adm-tokenbar input { flex: 1 1 260px; }
-.adm-tokenbar .adm-status { flex: 1 1 100%; font-size: 0.8125rem; }
+.adm-topbar-crest {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  background-image: var(--mw-crest);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+}
 
-input, select {
+.adm-topbar-title {
+  font-weight: 800;
+  color: var(--mw-gold-light);
+  letter-spacing: 0.02em;
+}
+
+/* Takes the slack, so the two buttons stay pinned right and the status
+   line has room to say something useful rather than being clipped. */
+.adm-topbar-status {
+  flex: 1;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+  text-align: right;
+  margin-right: 6px;
+}
+
+.adm-body {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 0;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.adm-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 18px 10px 40px;
+  border-right: 1px solid var(--mw-line);
+  position: sticky;
+  top: 43px;
+  align-self: start;
+  max-height: calc(100vh - 43px);
+  overflow-y: auto;
+}
+
+.adm-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font: inherit;
   font-size: 0.875rem;
+  text-align: left;
   padding: 7px 10px;
-  color: var(--mw-text-1);
-  background: var(--mw-ink);
-  border: 1px solid var(--mw-line-strong);
-  border-radius: 4px;
-}
-
-input:focus-visible, select:focus-visible {
-  outline: 2px solid var(--mw-gold);
-  outline-offset: -1px;
-}
-
-.adm-btn {
-  font: inherit;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  padding: 7px 12px;
-  color: var(--mw-gold-light);
-  background: var(--mw-accent-active);
-  border: 1px solid var(--mw-gold);
-  border-radius: 4px;
+  color: var(--mw-text-4);
+  background: none;
+  border: 0;
+  border-radius: 5px;
   cursor: pointer;
-  white-space: nowrap;
 }
 
-.adm-btn:hover { background: var(--mw-bronze); }
-.adm-btn:disabled { opacity: 0.45; cursor: default; }
-.adm-btn-quiet { color: var(--mw-text-3); background: none; border-color: var(--mw-line-strong); }
-.adm-btn-quiet:hover { background: var(--mw-raised); }
-.adm-btn-danger { color: #f0c0a8; background: #3a1a1a; border-color: #663333; }
-.adm-btn-danger:hover { background: #4a2020; }
+.adm-nav-item:hover { background: var(--mw-raised); color: var(--mw-text-1); }
 
-/* ---- panels ---------------------------------------------------------- */
-.adm-panel {
-  background: var(--mw-panel);
-  border: 1px solid var(--mw-line);
-  border-radius: 8px;
-  padding: 16px 18px;
-  margin-bottom: 18px;
+.adm-nav-item.active {
+  background: var(--mw-accent-active);
+  color: var(--mw-gold-light);
+  font-weight: 700;
 }
 
-.adm-panel-title {
+.adm-nav-badge {
+  margin-left: auto;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: var(--mw-text-6);
+  font-variant-numeric: tabular-nums;
+}
+
+.adm-nav-item.active .adm-nav-badge { color: var(--mw-gold); }
+.adm-nav-badge.adm-nav-badge-bad { color: var(--bad); }
+
+.adm-main { padding: 18px 22px 80px; }
+
+.adm-h2 {
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: var(--mw-gold-light);
+  margin: 0 0 14px;
+  letter-spacing: 0.01em;
+}
+
+.adm-h3 {
   font-size: 0.75rem;
   font-weight: 800;
   letter-spacing: 0.11em;
   text-transform: uppercase;
   color: var(--mw-gold);
-  margin-bottom: 12px;
+  margin: 26px 0 10px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--mw-line);
   display: flex;
@@ -123,9 +233,22 @@ input:focus-visible, select:focus-visible {
   color: var(--mw-text-6);
 }
 
-.adm-hint { color: var(--mw-text-6); font-size: 0.8125rem; margin: 0 0 10px; }
-.adm-status { color: var(--mw-text-4); font-size: 0.8125rem; }
+.adm-hint { color: var(--mw-text-6); font-size: 0.8125rem; margin: 0 0 14px; line-height: 1.5; }
 .adm-status-bad { color: var(--bad); }
+
+@media (max-width: 720px) {
+  .adm-body { grid-template-columns: 1fr; }
+  .adm-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: 0;
+    border-bottom: 1px solid var(--mw-line);
+    position: static;
+    max-height: none;
+    padding: 10px;
+  }
+  .adm-main { padding: 16px 14px 60px; }
+}
 
 /* ---- health tiles ---------------------------------------------------- */
 .adm-tiles {
@@ -163,23 +286,45 @@ input:focus-visible, select:focus-visible {
 .adm-tile-bad  .adm-tile-value { color: var(--bad); }
 
 /* ---- needs attention ------------------------------------------------- */
-/* Every row is its own grid, so an `auto` name column sizes to that row
-   alone and each line starts somewhere different. A fixed name column
-   makes the list read as a column instead of as ragged prose. */
-.adm-att {
-  display: grid;
-  grid-template-columns: 8px 11rem 1fr;
-  gap: 2px 12px;
-  align-items: baseline;
-  padding: 9px 0;
-  border-bottom: 1px solid var(--mw-line);
+/* Grouped by PROBLEM. Fourteen people with the same unreachable radio
+   was fourteen identical rows repeating the same sentence and the same
+   fix, which is most of why this page read as a wall. */
+.adm-group { border-bottom: 1px solid var(--mw-line); }
+.adm-group:last-child { border-bottom: 0; }
+
+.adm-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  cursor: pointer;
+  user-select: none;
 }
 
-/* A long display name wraps inside its column rather than widening it
-   and pushing this one row out of step with the rest. */
-.adm-att-who { overflow-wrap: anywhere; }
+.adm-group-head:hover .adm-group-title { color: var(--mw-gold-light); }
 
-.adm-att:last-child { border-bottom: 0; }
+.adm-group-n {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--mw-text-1);
+  min-width: 1.4rem;
+}
+
+.adm-group-title { color: var(--mw-text-1); font-weight: 600; }
+
+/* The names, dimmed and clipped to one line: enough to recognise who
+   without the row becoming a paragraph. */
+.adm-group-who {
+  margin-left: auto;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+
+.adm-group-body { padding: 0 0 12px 30px; }
 
 .adm-dot {
   width: 8px;
@@ -192,18 +337,7 @@ input:focus-visible, select:focus-visible {
 .adm-dot-warn { background: var(--warn); }
 .adm-dot-info { background: var(--mw-text-6); }
 
-.adm-att-who { font-weight: 700; color: var(--mw-text-1); }
-.adm-att-what { color: var(--mw-text-2); font-size: 0.9375rem; }
 
-/* The fix, in words. Spans the row under it so it reads as a sentence
-   rather than a fourth column of shrapnel. */
-.adm-att-fix {
-  grid-column: 3;
-  color: var(--mw-text-6);
-  font-size: 0.8125rem;
-}
-
-.adm-att-actions { grid-column: 3; margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* ---- players --------------------------------------------------------- */
 .adm-search { width: 100%; margin-bottom: 10px; }
@@ -305,7 +439,5 @@ input:focus-visible, select:focus-visible {
 .adm-form input { flex: 1 1 180px; }
 
 @media (max-width: 620px) {
-  .adm-att { grid-template-columns: auto 1fr; }
-  .adm-att-what, .adm-att-fix, .adm-att-actions { grid-column: 2; }
   .adm-player-meta { margin-left: 0; width: 100%; }
 }
