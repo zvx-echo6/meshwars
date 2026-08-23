@@ -75,15 +75,6 @@
   border-bottom: 2px solid var(--mw-gold);
 }
 
-.rs-badge {
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  padding: 2px 8px;
-  border: 1px solid var(--mw-gold);
-  border-radius: 3px;
-  color: var(--mw-gold);
-}
 
 .rs-sub {
   font-size: 0.8125rem;
@@ -176,6 +167,18 @@
   color: #8a8378;
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
+}
+
+/* The one line about the month still being played. Sits above the
+   finished months and reads as a note, not as a result -- no card, no
+   panel, nothing that looks like a standing. */
+.rs-open {
+  color: var(--mw-gold-light);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  margin: 0 0 22px;
+  padding-left: 12px;
+  border-left: 2px solid var(--mw-gold);
 }
 
 .rs-empty, .rs-loading {

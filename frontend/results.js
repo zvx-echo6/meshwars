@@ -7,9 +7,11 @@
 // every other page uses.
 //
 // The endpoints differ in shape not at all -- /api/mc/results and
-// /api/results both return the same list, newest month first, with the
-// month in progress flagged. Everything below is written against that
-// one shape, so neither board gets special-cased anywhere.
+// /api/results both return the same object: finished months, newest
+// first, plus when the month in progress closes. Everything below is
+// written against that one shape, so neither board is special-cased.
+//
+// The open month is never rendered as a result. See app/results.py.
 // =====================================================================
 
 // Duplicated from mc.js rather than imported: these are gameplay
@@ -108,14 +110,26 @@ function renderHonors(awards) {
 }
 
 function renderMonth(m) {
-  const badge = m.in_progress ? '<span class="rs-badge">In progress</span>' : '';
   return `<section class="rs-month">
-    <h2 class="rs-month-title">${escapeHtml(monthTitle(m.month))}${badge}</h2>
+    <h2 class="rs-month-title">${escapeHtml(monthTitle(m.month))}</h2>
     <h3 class="rs-sub">Standings</h3>
     ${renderStandings(m.standings || [])}
     <h3 class="rs-sub">Honors</h3>
     ${renderHonors(m.awards || [])}
   </section>`;
+}
+
+// The month in progress is never rendered -- see app/results.py for why.
+// All this says is when it closes, so the page is not silent about the
+// month everyone is currently playing.
+function renderOpenMonth(data) {
+  if (!data.open_month || !data.open_month_closes_at) return '';
+  const left = data.open_month_closes_at * 1000 - Date.now();
+  if (left <= 0) return '';
+  const days = Math.ceil(left / 86400000);
+  const when = days === 1 ? 'today' : `in ${days} days`;
+  return `<p class="rs-open">${escapeHtml(monthTitle(data.open_month))} is still being played
+    &mdash; it closes ${when}, and its result is judged then.</p>`;
 }
 
 async function load(board) {
@@ -124,12 +138,12 @@ async function load(board) {
   try {
     const res = await fetch(spec.endpoint);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const months = await res.json();
-    if (!Array.isArray(months) || !months.length) {
-      monthsEl.innerHTML = '<p class="rs-empty">Nothing to report yet.</p>';
-      return;
-    }
-    monthsEl.innerHTML = months.map(renderMonth).join('');
+    const data = await res.json();
+    const months = Array.isArray(data.months) ? data.months : [];
+    const open = renderOpenMonth(data);
+    monthsEl.innerHTML = months.length
+      ? open + months.map(renderMonth).join('')
+      : open + '<p class="rs-empty">No month has finished yet. The first result lands when this one does.</p>';
   } catch (err) {
     monthsEl.innerHTML = `<p class="rs-empty">Couldn't load results: ${escapeHtml(err.message)}</p>`;
   }
