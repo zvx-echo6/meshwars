@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <title>MeshWars — Staging Map (MapLibre)</title>
+  <meta name="robots" content="noindex, nofollow">
+
+  <link rel="stylesheet"
+        href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+        crossorigin="anonymous" />
+  <link rel="stylesheet" href="/static/map2.css?v=1" />
+</head>
+<body>
+
+  <div id="map"></div>
+
+  <div id="mw-scores" class="mw-scores">
+    <div class="mw-scores-title">Territory</div>
+    <ul id="mw-scores-list" class="mw-scores-list"></ul>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+          crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
+          crossorigin="anonymous"></script>
+
+  <script src="/static/map2.js?v=1" type="module"></script>
+</body>
+</html>

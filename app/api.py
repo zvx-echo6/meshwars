@@ -736,6 +736,14 @@ def mount(app: FastAPI) -> None:
         async def rules_page(request: Request):
             return _templated_html_page(request, frontend_dir / "rules.html", "rules page not bundled")
 
+        # Staging-only MapLibre renderer proof, evaluated on a private
+        # tailnet instance -- see frontend/map2.js's module docstring.
+        # Parallel to / (frontend/index.html + mc.js), never linked from
+        # the nav bar, and not meant to reach production traffic.
+        @app.get("/map2", response_class=HTMLResponse, include_in_schema=False)
+        async def map2_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "map2.html", "map2 page not bundled")
+
         # Not in the nav bar on purpose -- this is a reference for the
         # handful of people building against the API, linked from the
         # foot of /about rather than offered to every visitor.
