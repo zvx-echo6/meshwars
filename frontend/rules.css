@@ -261,3 +261,20 @@
   .rules-table { display: block; overflow-x: auto; white-space: normal; }
   .rules-table tbody th { width: 45%; }
 }
+
+/* The pointer to /api at the foot of the rulebook. Same idea as the one
+   on /about: this page is the human version of numbers a bot can also
+   fetch, and the people who want the machine-readable one should be
+   told where it is without it competing with the rules themselves. */
+.rules-footnote {
+  margin: 32px 0 0;
+  padding-top: 20px;
+  border-top: 1px solid var(--mw-line);
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  max-width: 68ch;
+}
+
+.rules-footnote a { color: var(--mw-gold); font-weight: 600; text-decoration: none; }
+.rules-footnote a:hover { text-decoration: underline; }
