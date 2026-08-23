@@ -403,9 +403,17 @@ async function main() {
     // Board source/layers are created empty and filled in once the
     // fetch resolves, so 'board-fill' exists immediately as a stable
     // beforeId for the overlay layers below.
+    // MapLibre tiles a GeoJSON source and simplifies it before drawing,
+    // and at low zoom that simplification dropped every 300-metre square
+    // entirely -- the board vanished rather than merely shrinking.
+    // tolerance: 0 disables the simplification so the squares hold their
+    // colour at every zoom, the way the Leaflet map does: Leaflet draws
+    // rectangles straight to the canvas and never tiles them, so it never
+    // had this problem.
     map.addSource('board', {
       type: 'geojson',
       data: { type: 'FeatureCollection', features: [] },
+      tolerance: 0,
     });
     map.addLayer({
       id: 'board-fill',
