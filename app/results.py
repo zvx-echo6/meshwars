@@ -42,7 +42,6 @@ log = logging.getLogger("results")
 # month_award.award; the label is what a reader sees.
 TEAM_AWARDS = [
     ("month_winner", "Month Winner"),
-    ("team_of_month", "Team of the Month"),
 ]
 PLAYER_AWARDS = [
     ("top_attacker", "Top Attacker"),
@@ -261,8 +260,11 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
             awards.append(a)
 
     # ---- team awards --------------------------------------------------
+    # One team award, not two. A "most captures" award alongside this one
+    # names the same team almost every month -- captures dominate the
+    # points total -- and two team titles that usually agree is a thing to
+    # explain rather than a thing to win.
     add(_award("month_winner", *(_top({s["team"]: s["points"] for s in standings}, 0.001) or (None, 0)), names=names))
-    add(_award("team_of_month", *(_top({s["team"]: s["captures"] for s in standings}) or (None, 0)), names=names))
 
     # ---- attack and defence -------------------------------------------
     attacks: dict[int, int] = {}
