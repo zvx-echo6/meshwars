@@ -308,14 +308,19 @@ async def mt_roster_picker(request: Request) -> JSONResponse:
     ordering.
 
     Same entry shape as the MeshCore picker (name, short_name, node_ref,
-    last_seen, lat, lon) -- short_name here is node_seen's real
-    (nullable) column, passed through as-is, never invented. node_ref is
-    bare lowercase 8-hex, not "!"-prefixed, for the same reason the
-    MeshCore picker's is bare: this endpoint returns the canonical
-    storage/binding form, and protocol-specific display (Meshtastic gets
-    a leading "!" where it's shown, MeshCore doesn't) is the UI's job,
-    already handled elsewhere (the join page's radio list, the admin
-    portal) -- not something this endpoint bakes in.
+    last_seen, lat, lon), plus one Meshtastic-only field: public_key,
+    filled in from mt_node_key when exactly one distinct key is on
+    record for that node_ref, otherwise null (see mt_roster_entries()
+    in app/checkin.py) -- so the join page can pre-fill the key field
+    the moment someone picks a node we already recognize. short_name
+    here is node_seen's real (nullable) column, passed through as-is,
+    never invented. node_ref is bare lowercase 8-hex, not "!"-prefixed,
+    for the same reason the MeshCore picker's is bare: this endpoint
+    returns the canonical storage/binding form, and protocol-specific
+    display (Meshtastic gets a leading "!" where it's shown, MeshCore
+    doesn't) is the UI's job, already handled elsewhere (the join page's
+    radio list, the admin portal) -- not something this endpoint bakes
+    in.
     """
     ip = _client_ip(request)
     if _addr_rate_limited(ip):

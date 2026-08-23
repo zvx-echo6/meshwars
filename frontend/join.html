@@ -70,13 +70,13 @@
        fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
-  <link rel="stylesheet" href="/static/theme.css?v=20260823-18" />
-  <link rel="stylesheet" href="/static/join.css?v=20260823-18" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260823-19" />
+  <link rel="stylesheet" href="/static/join.css?v=20260823-19" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
         crossorigin="anonymous" />
-  <link rel="stylesheet" href="/static/play-area-map.css?v=20260823-18" />
+  <link rel="stylesheet" href="/static/play-area-map.css?v=20260823-19" />
 </head>
 <body>
 
@@ -223,6 +223,11 @@
                 <p class="hint">Looks like <code>!a1b2c3d4</code> &mdash; find it in the Meshtastic app. <button type="button" class="link-btn" id="mt-node-search-link">Search instead.</button></p>
               </div>
             </div>
+            <label class="join-field">
+              <span>Public key (optional)</span>
+              <input type="text" id="f-mt-public-key" placeholder="64 hex characters — leave blank and we'll fill it in when we see it" autocomplete="off" />
+            </label>
+            <p class="hint">Meshtastic node IDs can change; the key is what lets us keep following your radio when one does.</p>
             <p class="hint">Optional here -- you can register with no radio at all and add this (or several) afterward from the setup-check panel further down this page. See the steps below for the radio settings that make sure MeshWars can actually see you.</p>
           </div>
         </li>
@@ -488,8 +493,8 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
-  <script src="/static/play-area-map.js?v=20260823-18"></script>
-  <script src="/static/join.js?v=20260823-18" type="module"></script>
-  <script src="/static/theme-toggle.js?v=20260823-18" type="module"></script>
+  <script src="/static/play-area-map.js?v=20260823-19"></script>
+  <script src="/static/join.js?v=20260823-19" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260823-19" type="module"></script>
 </body>
 </html>

@@ -27,7 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from .config import settings
 from .db import connect
 from .mc_ingest import hash_secret
-from .node_ref import normalize_node_ref
+from .node_ref import normalize_node_ref, normalize_public_key
 
 log = logging.getLogger("admin_api")
 
@@ -214,6 +214,39 @@ def _player_radios(conn, player_id: int) -> list[dict]:
     ]
 
 
+def _resolve_public_key(conn, protocol: str, node_ref: str, raw_public_key: object) -> tuple[str | None, JSONResponse | None]:
+    """Same rule as app/nodes_api.py's _resolve_public_key(). Duplicated
+    rather than imported for the same reason _player_radios above is:
+    that one is a private helper in a different module. Supplied and
+    invalid -> 400. Supplied and valid -> use it. Not supplied -> for a
+    Meshtastic node, auto-fill from mt_node_key only when exactly one
+    distinct key is on record for it; zero means never heard yet, more
+    than one is the drift/collision case that table exists to catch, and
+    guessing which key is current would be inventing an answer -- both
+    store NULL. MeshCore's node_ref is already a key prefix, so it is
+    left alone entirely.
+    """
+    if raw_public_key is not None:
+        normalized = normalize_public_key(raw_public_key)
+        if normalized is None:
+            return None, JSONResponse(
+                {"error": "public_key must be 64 hex characters"},
+                status_code=400,
+            )
+        return normalized, None
+
+    if protocol != "mt":
+        return None, None
+
+    rows = conn.execute(
+        "SELECT DISTINCT public_key FROM mt_node_key WHERE node_ref = ?",
+        (node_ref,),
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0]["public_key"], None
+    return None, None
+
+
 @router.post("/api/admin/node/add")
 async def admin_node_add(request: Request):
     """Bind a radio to a player with no key involved at all -- the
@@ -273,6 +306,10 @@ async def admin_node_add(request: Request):
     now = int(time.time())
     conn = connect()
     try:
+        public_key, err = _resolve_public_key(conn, protocol, node_ref, body.get("public_key"))
+        if err is not None:
+            return err
+
         conn.execute("BEGIN IMMEDIATE")
         player = conn.execute(
             "SELECT player_id FROM player WHERE player_id = ?", (player_id,)
@@ -304,9 +341,9 @@ async def admin_node_add(request: Request):
             )
 
         conn.execute(
-            "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) "
-            "VALUES (?, ?, ?, ?)",
-            (protocol, node_ref, player_id, now),
+            "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (protocol, node_ref, player_id, now, public_key),
         )
         conn.execute("COMMIT")
         radios = _player_radios(conn, player_id)
