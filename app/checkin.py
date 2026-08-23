@@ -4,7 +4,7 @@ A weekly net runs Wednesday evenings. Checking in during the net window
 earns a registered, non-disabled player's team settings.checkin_points,
 once per player per net -- on top of, never instead of, the squares
 their team holds (see app/mc_scoring.py's team_totals()). Theme only:
-square-holders are "Wardrivers," check-in earners are "Phreaks," but
+square-holders are "Wardrivers," check-in earners are "NetOps," but
 these are two ACTIVITIES on the same player model, not two kinds of
 player -- the same person can do both and shows up in both rankings.
 There is no class or mode anywhere in this schema.

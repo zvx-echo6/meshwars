@@ -153,7 +153,7 @@ function formatCountdown(secondsRemaining) {
 //                    showing. See openTopModal.
 //  - Top check-in earners: /api/mc/top-checkins vs /top-checkins --
 //                    identical shape (same top_checkin_for() helper).
-//                    Ranks players by check-in points ("Phreaks",
+//                    Ranks players by check-in points ("NetOps",
 //                    see app/checkin.py) in the active season. This is
 //                    a SECOND ranking behind the SAME top-players
 //                    button/modal as captures above, not a second
@@ -185,7 +185,7 @@ const PROTOCOLS = {
     // renames itself when you flip protocol.
     topButtonLabel: 'Top Operators',
     topCaptureLabel: 'Wardrivers',
-    topCheckinLabel: 'Phreaks',
+    topCheckinLabel: 'NetOps',
     lookupPlaceholder: 'player name',
     lookupHelp: 'Search by player name.',
     // "Repeaters" is MeshCore's own term for the mesh nodes a wardrive
@@ -213,7 +213,7 @@ const PROTOCOLS = {
     // activities, not have to learn a second set of words for them.
     topButtonLabel: 'Top Operators',
     topCaptureLabel: 'Wardrivers',
-    topCheckinLabel: 'Phreaks',
+    topCheckinLabel: 'NetOps',
     // Same by-name search as MeshCore now that /find exists for this
     // board too (see app/api.py) -- no more of a node-ID-only Find box.
     lookupPlaceholder: 'player name',
