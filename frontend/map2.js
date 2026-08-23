@@ -277,13 +277,47 @@ async function loadScores() {
   }
 }
 
+const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+
+// Read from /config rather than written down here, same reasoning as
+// frontend/play-area-map.js: the play area is an operator setting that
+// has moved before, and a hardcoded copy in this file would silently
+// disagree with the server a month later. If /config is unreachable or
+// the numbers are missing/non-finite, return null so the map is built
+// with no maxBounds rather than an invented box -- a wrong boundary is
+// worse than none, and the server is the authority on where play
+// happens.
+async function fetchPlayAreaBounds() {
+  try {
+    const res = await fetch('/config');
+    if (!res.ok) return null;
+    const cfg = await res.json();
+    const pa = cfg && cfg.play_area;
+    if (!pa || !finite(pa.north) || !finite(pa.south) ||
+        !finite(pa.west) || !finite(pa.east)) {
+      return null;
+    }
+    // MapLibre bounds are [lng, lat] pairs, southwest first.
+    return [[pa.west, pa.south], [pa.east, pa.north]];
+  } catch {
+    return null;
+  }
+}
+
 async function main() {
   const bootTheme = currentTheme();
+  const playAreaBounds = await fetchPlayAreaBounds();
+  if (!playAreaBounds) {
+    console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
+  }
 
   const map = new maplibregl.Map({
     container: 'map',
     center: [-116.10, 43.76],
     zoom: 10,
+    minZoom: 4,   // roughly the whole play area in view
+    maxZoom: 17,  // well past the 300 m grid; squares stay legible
+    ...(playAreaBounds ? { maxBounds: playAreaBounds } : {}),
     // Pitching made the hillshade render with holes -- the DEM tiles are
     // not all there once the camera tilts, with nothing erroring to say
     // so -- and it took bandwidth from 8 MB to 32 MB for a worse picture.
@@ -336,6 +370,16 @@ async function main() {
           id: HILLSHADE_ID,
           type: 'hillshade',
           source: 'dem',
+          // The DEM source itself only reaches z12 (that correctly
+          // describes the data, left alone above). Above z12 MapLibre
+          // was reusing whichever z12 parent tiles happened to already
+          // be cached, stretched, and never fetching the rest -- so the
+          // hillshade teared along tile seams with nothing erroring to
+          // say so. Cutting the LAYER off at 13 makes that predictable
+          // (uniformly gone instead of half-there), and hillshade is
+          // meaningless at street zoom anyway: the whole view sits
+          // inside one elevation sample by then.
+          maxzoom: 13,
           paint: {
             'hillshade-exaggeration': HILLSHADE_EXAGGERATION[bootTheme],
           },
