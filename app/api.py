@@ -396,12 +396,14 @@ async def teams_list() -> dict:
     every season, keyed by season_id), a player's team in the new model
     is a permanent attribute of the player row (see app/join_api.py) --
     there is no seasonal reassignment any more, so this reads the player
-    roster directly and is not scoped to a season at all.
+    roster directly and is not scoped to a season at all. Returns one
+    entry per player, not per radio -- a player may hold several nodes,
+    and the roster is a list of people, not of radios.
     """
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT p.player_id, p.display_name, p.team, pn.node_ref "
+            "SELECT DISTINCT p.player_id, p.display_name, p.team "
             "  FROM player p "
             "  JOIN player_node pn ON pn.player_id = p.player_id AND pn.protocol = ? "
             " WHERE p.disabled_at IS NULL "
@@ -416,7 +418,6 @@ async def teams_list() -> dict:
         teams.setdefault(r["team"], []).append({
             "player_id": r["player_id"],
             "display_name": r["display_name"],
-            "node_hex": r["node_ref"],
         })
     return {"teams": teams}
 
