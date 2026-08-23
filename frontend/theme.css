@@ -67,14 +67,14 @@
      that does not match. Same for the social images, which render where
      no theme exists. */
   --mw-crest: url("/static/assets/favicon/favicon-64x64.png");
+  --mw-logo:  url("/static/assets/logo/meshwars-horizontal.webp");
 
-  /* No --mw-logo token yet, deliberately. The About hero is the full
-     horizontal lockup, and its lettering is custom artwork -- there is
-     no honest way to redraw it in another palette here, so the hero
-     stays one image on both skins and keeps its <picture> element,
-     alt text and dimensions. When a neon lockup exists, it becomes a
-     token exactly like the crest above; a token nothing reads today
-     would only be a promise the code does not keep. */
+  /* The scrim over the hero's topographic plate. A token because it is
+     the ground colour at two opacities, and a literal rgba() cannot
+     follow --mw-ink -- the neon hero was still being darkened toward
+     warm black under a cyan lockup. Holding the whole gradient keeps it
+     to one value per skin instead of four channels. */
+  --mw-hero-scrim: linear-gradient(180deg, rgba(12, 11, 10, 0.80) 0%, rgba(12, 11, 10, 0.92) 100%);
 }
 
 /* -------------------------------------------------------------------------
@@ -134,10 +134,13 @@
   --mw-accent-deep:      #08202B;
   --mw-accent-active:    #0F3B47;
 
-  /* Drawn rather than recoloured: the gold crest is a painted heraldic
-     mark and a cyan trace of it would read as a worse copy, so the neon
-     crest is the same idea (shield, mesh, one node lit) drawn the way
-     this skin talks. The horizontal lockup is still the gold artwork --
-     its lettering is custom and cannot honestly be redrawn here. */
+  /* The crest is drawn rather than recoloured -- the gold one is a
+     painted heraldic mark and a cyan trace of it would read as a worse
+     copy -- so it is the same idea (shield, mesh, one node lit) in this
+     skin's own language. The lockup is generated artwork, fitted to the
+     gold one's exact 1010x320 frame so the hero renders identically on
+     either skin rather than reflowing when you switch. */
   --mw-crest: url("/static/assets/logo/crest-neon.svg");
+  --mw-logo:  url("/static/assets/logo/meshwars-horizontal-neon.webp");
+  --mw-hero-scrim: linear-gradient(180deg, rgba(5, 8, 13, 0.82) 0%, rgba(5, 8, 13, 0.94) 100%);
 }

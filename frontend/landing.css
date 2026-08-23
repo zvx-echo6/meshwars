@@ -48,17 +48,27 @@ body {
   border-radius: 12px;
   background-color: var(--mw-page);
   background-image:
-    linear-gradient(180deg, rgba(12, 11, 10, 0.80) 0%, rgba(12, 11, 10, 0.92) 100%),
+    var(--mw-hero-scrim),
     url("/static/assets/texture/meshwars-topo.webp");
   background-size: cover;
   background-position: center;
 }
 
+/* A background rather than an <img>, so the lockup follows --mw-logo the
+   way the crest follows --mw-crest. The aspect ratio is stated here
+   because a background carries no intrinsic size: both artworks are
+   1010x320, so the box reserves its space before either loads and the
+   hero never jumps. The element keeps role="img" and a label, since a
+   background has no alt text of its own. */
 .landing-hero-logo {
   display: block;
   width: min(640px, 100%);
-  height: auto;
+  aspect-ratio: 1010 / 320;
   margin: 0 auto;
+  background-image: var(--mw-logo);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 
 /* ---- live numbers band --------------------------------------------------
