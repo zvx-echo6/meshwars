@@ -541,6 +541,40 @@ body {
   transition: opacity 0.15s ease, color 0.15s ease;
 }
 .mw-nav-github svg { display: block; }
+
+/* The skin switch, sitting quietly beside the GitHub mark and styled to
+   match it: this is a preference, not a feature, and it should not
+   compete with the page links for attention. The half-filled circle is
+   the conventional glyph and needs no label to read as "appearance".
+   It is a <button> rather than a link because it changes the page you
+   are on rather than taking you somewhere. */
+.mw-theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--mw-text-5);
+  opacity: 0.35;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-theme-btn svg { display: block; }
+.mw-theme-btn:hover,
+.mw-theme-btn:focus-visible {
+  opacity: 1;
+  color: var(--mw-accent);
+}
+.mw-theme-btn[aria-pressed="true"] {
+  opacity: 0.85;
+  color: var(--mw-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-nav-github, .mw-theme-btn { transition: none; }
+}
 .mw-nav-github:hover,
 .mw-nav-github:focus-visible {
   opacity: 1;

@@ -961,3 +961,34 @@ body {
   .mw-nav-github { padding: 4px; }
   .mw-nav-github svg { width: 14px; height: 14px; }
 }
+
+/* Skin switch -- see the matching rule in landing.css. The nav is
+   duplicated across this file, landing.css and join.css (the pages do
+   not share a stylesheet), so this rule is too. */
+.mw-theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--mw-text-5);
+  opacity: 0.35;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-theme-btn svg { display: block; }
+.mw-theme-btn:hover,
+.mw-theme-btn:focus-visible {
+  opacity: 1;
+  color: var(--mw-accent);
+}
+.mw-theme-btn[aria-pressed="true"] {
+  opacity: 0.85;
+  color: var(--mw-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-theme-btn { transition: none; }
+}
