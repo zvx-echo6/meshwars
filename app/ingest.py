@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -130,6 +131,74 @@ def _bump_player_stat(conn, player_id: int, day: int, **counters: int) -> None:
 
 def _stat_day(ts: int) -> int:
     return int(datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y%m%d"))
+
+
+# Matches a quoted protobuf text-format field body, e.g. the bit between
+# the quotes in `public_key: "M\216\013..."`. `(?:[^"\\]|\\.)*` walks
+# past an escaped quote or backslash without ending the match early --
+# it does not need to understand octal escapes specifically, since a
+# `\017`-style escape's backslash is consumed by `\\.` (matching just
+# the backslash and the following `0`) and the trailing `17` falls
+# through to the plain `[^"\\]` branch. Compiled at import time, same as
+# app/node_ref.py's _NODE_REF_RE, since this runs once per packet on
+# every NodeInfo poll.
+_PB_STRING_FIELD = "{name}:\\s*\"((?:[^\"\\\\]|\\\\.)*)\""
+_PUBLIC_KEY_RE = re.compile(_PB_STRING_FIELD.format(name="public_key"))
+_LONG_NAME_RE = re.compile(_PB_STRING_FIELD.format(name="long_name"))
+
+
+def _decode_pb_text_escapes(body: str) -> bytes | None:
+    """Turn a protobuf text-format quoted body -- a Python str that
+    contains literal backslash escape sequences (octal \\NNN, \\\\, \\")
+    rather than actual control bytes -- into the raw bytes it denotes.
+
+    latin-1 round-trips every byte value 0-255 as exactly one character,
+    so encoding to latin-1 first is lossless for arbitrary binary data
+    smuggled through as text; decoding that through 'unicode_escape'
+    then interprets the literal backslash escapes (this is exactly what
+    Python's own source parser does for byte-string literals); the final
+    encode back to latin-1 recovers the raw bytes.
+    """
+    try:
+        return body.encode("latin-1", "backslashreplace").decode("unicode_escape").encode("latin-1")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        return None
+
+
+def parse_nodeinfo_public_key(payload: str) -> tuple[str | None, str | None]:
+    """(public_key_hex, long_name) from a NodeInfo packet payload, or
+    (None, None) when it carries neither.
+
+    `payload` is meshview's protobuf text-format string (see
+    app/meshview_client.py's parse_meshtastic_payload_text for the same
+    format used by position packets) -- a Python str containing literal
+    backslash escapes for any non-printable byte, not bytes that have
+    already been unescaped. Each field is decoded independently: a
+    present, well-formed long_name does not depend on public_key
+    decoding cleanly, and vice versa.
+    """
+    if not isinstance(payload, str):
+        return None, None
+
+    public_key: str | None = None
+    m = _PUBLIC_KEY_RE.search(payload)
+    if m:
+        raw = _decode_pb_text_escapes(m.group(1))
+        # A real Curve25519 public key is exactly 32 bytes; anything
+        # else (truncated match, a future key size, garbage) is not a
+        # key we can trust the shape of, so treat it as absent rather
+        # than record something that isn't actually a 32-byte key.
+        if raw is not None and len(raw) == 32:
+            public_key = raw.hex()
+
+    long_name: str | None = None
+    m = _LONG_NAME_RE.search(payload)
+    if m:
+        raw = _decode_pb_text_escapes(m.group(1))
+        if raw is not None:
+            long_name = raw.decode("utf-8", "replace")
+
+    return public_key, long_name
 
 
 class Ingestor:
@@ -410,6 +479,67 @@ class Ingestor:
             "poll: packets=%d processed=%d skipped=%d max_import_us=%d",
             len(packets), n_processed, n_skipped, max_import_us,
         )
+
+        # NodeInfo pass: passive accumulation into mt_node_key only (see
+        # that table's comment in app/db.py). Entirely separate from the
+        # position poll above and from scoring -- nothing reads
+        # mt_node_key yet -- so it is isolated in its own try/except:
+        # a failure here (upstream hiccup, an unparsable payload) must
+        # never take position ingest or scoring down with it.
+        try:
+            await self._poll_nodeinfo()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("nodeinfo poll failed")
+
+    async def _poll_nodeinfo(self) -> None:
+        """Fetch the newest NodeInfo (portnum=4) packets and record any
+        (node_ref, public_key) pairs they carry into mt_node_key. Purely
+        additive evidence -- see that table's comment in app/db.py for
+        why the pair, not the node alone, is the key.
+        """
+        try:
+            packets = await self.client.packets(portnum=4, limit=100)
+        except Exception as e:
+            log.warning("nodeinfo packets() failed: %s", e)
+            return
+        if not packets:
+            return
+
+        now = int(time.time())
+        new_count = 0
+        async with WriteSession() as conn:
+            for pkt in packets:
+                node_id = extract_node_id(pkt)
+                if node_id is None:
+                    continue
+                payload = pkt.get("payload")
+                if not isinstance(payload, str):
+                    continue
+                public_key, long_name = parse_nodeinfo_public_key(payload)
+                if not public_key:
+                    continue
+                node_ref = _bare_node_ref(node_id)
+
+                existing = conn.execute(
+                    "SELECT 1 FROM mt_node_key WHERE node_ref = ? AND public_key = ?",
+                    (node_ref, public_key),
+                ).fetchone()
+                # first_seen only set on insert; a conflict updates
+                # last_seen/long_name and leaves first_seen untouched.
+                conn.execute(
+                    "INSERT INTO mt_node_key(node_ref, public_key, long_name, first_seen, last_seen) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(node_ref, public_key) DO UPDATE SET "
+                    "  last_seen = excluded.last_seen, long_name = excluded.long_name",
+                    (node_ref, public_key, long_name, now, now),
+                )
+                if existing is None:
+                    new_count += 1
+
+        if new_count:
+            log.info("nodeinfo: %d new node/key pair(s) recorded", new_count)
 
     async def _process_one_packet(
         self,

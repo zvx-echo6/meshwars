@@ -92,6 +92,30 @@ CREATE TABLE IF NOT EXISTS node_seen (
 
 CREATE INDEX IF NOT EXISTS idx_node_seen_season ON node_seen(season_id);
 
+-- Node id -> public key evidence. Meshtastic 2.8 derives a node's id
+-- from its key material rather than from fixed hardware, so the id is
+-- no longer a stable identity: it can change under a node, and two
+-- nodes can collide on one. The public key is the stable thing, but
+-- only NodeInfo packets (portnum 4) carry it -- position packets, which
+-- is what scoring reads, do not -- so this accumulates the mapping
+-- passively, from app/ingest.py's own NodeInfo poll pass, well ahead of
+-- anything needing to read it back. Nothing does yet.
+--
+-- Primary key is the (node_ref, public_key) PAIR, not node_ref alone,
+-- and that is deliberate: keying on node_ref alone would overwrite the
+-- old row the instant a node's key changed, destroying exactly the
+-- evidence of drift or collision this table exists to catch. A node
+-- that has broadcast under two different keys ends up as two rows here,
+-- not one row silently rewritten.
+CREATE TABLE IF NOT EXISTS mt_node_key (
+    node_ref    TEXT NOT NULL,      -- bare lowercase 8-hex, as app/node_ref.py canonicalises it
+    public_key  TEXT NOT NULL,      -- full key, lowercase hex, 64 chars for a 32-byte key
+    long_name   TEXT,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    PRIMARY KEY (node_ref, public_key)
+);
+CREATE INDEX IF NOT EXISTS idx_mt_node_key_pub ON mt_node_key(public_key);
 
 -- Fortress score per (tile, team). Decays over time. The owning team's
 -- score = current defense. Attacker scores accumulate per attempt.
