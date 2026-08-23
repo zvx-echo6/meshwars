@@ -7,6 +7,13 @@
    collapsed, because thirty players expanded is nine thousand pixels of
    scrolling past people who are fine. */
 
+/* The `hidden` attribute is only a user-agent `display: none`, so any
+   author rule that sets `display` on the same element silently beats it
+   -- which is what left the sign-in card on screen after a successful
+   sign-in, with the app shell rendered behind it. This makes hidden mean
+   hidden regardless of what else an element's own rules say. */
+[hidden] { display: none !important; }
+
 :root {
   --ok:   #4caf50;
   --warn: #d9a441;
