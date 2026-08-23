@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <!-- Applied before any stylesheet paints, so a reader who chose the
+       neon skin never sees a frame of gold first. Deliberately inline
+       and tiny: a fetched script here would block first paint, which is
+       the thing this exists to avoid. Mirrors theme-toggle.js, which
+       owns everything after load. -->
+  <script>
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
+  </script>
+  <title>MeshWars — Rules</title>
+  <meta name="description" content="The complete MeshWars rules: how squares are claimed, taken and held, how scores decay, how seasons and the weekly net work, every monthly honor, and the fair-play rules.">
+  <link rel="canonical" href="https://meshwars.com/rules">
+
+  <!-- See index.html's matching comment: Google reads a site's
+       search-results favicon from the home page specifically, but these
+       declarations are kept identical across all three pages so the
+       <head> stays consistent site-wide. -->
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="MeshWars — Rules">
+  <meta property="og:description" content="Every mechanic in MeshWars, written out: scoring, capture, decay, seasons, the weekly net, streaks, the monthly honors and fair play.")>
+  <meta property="og:url" content="https://meshwars.com/rules">
+  <meta property="og:image" content="https://meshwars.com/static/assets/social/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="MeshWars — Rules">
+  <meta name="twitter:description" content="Every mechanic in MeshWars, written out: scoring, capture, decay, seasons, the weekly net, streaks, the monthly honors and fair play.")>
+  <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
+
+  <!-- See index.html's matching comment for what this describes and why
+       it's minimal. Same content, this page's own "url". -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Game",
+    "name": "MeshWars",
+    "url": "https://meshwars.com/rules",
+    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+    "genre": ["Location-based game", "Capture the flag"],
+    "isBasedOn": {
+      "@type": "SoftwareSourceCode",
+      "name": "MeshWars",
+      "codeRepository": "https://github.com/zvx-echo6/meshwars",
+      "programmingLanguage": "Python",
+      "license": "https://opensource.org/licenses/MIT"
+    }
+  }
+  </script>
+
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change -- do not touch the pinned external Leaflet CDN links. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260823-10" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260823-10" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260823-10" />
+</head>
+<body>
+
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/">Map</a>
+      <a href="/results">Results</a>
+      <a href="/rules" class="active">Rules</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+      </button>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main class="rules-wrap">
+
+    <header class="rules-header">
+      <h1 class="rules-title">Rules</h1>
+      <p class="rules-sub">Every mechanic, written out. Nothing here is a summary of something else &mdash; these are the numbers the server actually uses.</p>
+    </header>
+
+    <div class="rules-layout">
+      <nav class="rules-toc" aria-label="Sections">
+        <p class="rules-toc-title">Contents</p>
+        <ul>
+        <li><a href="#basics">The basics</a></li>
+        <li><a href="#claiming">Claiming a square</a></li>
+        <li><a href="#holding">Taking and holding</a></li>
+        <li><a href="#seasons">Seasons</a></li>
+        <li><a href="#net">The weekly net</a></li>
+        <li><a href="#streaks">Streaks</a></li>
+        <li><a href="#months">Monthly results</a></li>
+        <li><a href="#honors">The honors</a></li>
+        <li><a href="#registering">Registering a radio</a></li>
+        <li><a href="#area">Where it counts</a></li>
+        <li><a href="#fairplay">Fair play</a></li>
+        <li><a href="#protocols">MeshCore and Meshtastic</a></li>
+        </ul>
+      </nav>
+
+      <div class="rules-body">
+        <section id="basics">
+          <h2>The basics</h2>
+          <p>Every player is on one of seven teams: RED, GREEN, BLUE, PURPLE, YELLOW, ORANGE or PINK. You pick one when you join and it does not change.</p>
+          <p>The map is cut into fixed squares roughly 300 metres on a side. You claim a square for your team by being inside it and reaching the mesh from it &mdash; not by being there, and not by seeing it on a map. The radio has to actually get out.</p>
+          <p>A season runs six months. The team holding the most ground when it ends wins. Inside the season, each calendar month has its own winner, so there is always something close to play for.</p>
+        </section>
+
+        <section id="claiming">
+          <h2>Claiming a square</h2>
+          <p>Everything starts with a ping: your position, plus which mesh nodes that transmission reached. Each node it reached is worth a tenth of a point, and a single ping can never be worth more than one point no matter how many it reached.</p>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>Per node reached</th><td>0.1 points</td></tr>
+              <tr><th>Most one ping can earn</th><td>1.0 points</td></tr>
+              <tr><th>A ping that reached nobody</th><td>nothing at all</td></tr>
+            </tbody>
+          </table>
+          <p>That last line is the rule people trip over. Being somewhere is not enough. A ping from a valley with no coverage is recorded, costs you nothing, and claims nothing.</p>
+          <p>Which nodes count differs by protocol and it is inverted between them &mdash; see <a href="#protocols">MeshCore and Meshtastic</a>.</p>
+        </section>
+
+        <section id="holding">
+          <h2>Taking and holding</h2>
+          <p>Points accumulate per team, per square. Ownership follows from them.</p>
+          <ul class="rules-list">
+            <li><strong>Unclaimed ground</strong> goes to the first team to paint it.</li>
+            <li><strong>A square that just changed hands cannot be taken for fifteen minutes</strong>, whatever anyone scores. A capture you have to defend from the second it lands is not a capture.</li>
+            <li><strong>After that it falls to whoever out-scores the team currently holding it.</strong> Only the holder's score matters &mdash; not the highest score among the other six. With seven teams there is no single rival, so each attacker is measured against whoever actually has the ground.</li>
+            <li><strong>The first time a new person paints a square for their team it is worth an extra half point.</strong> Three people who each visit once beat one person who visits three times.</li>
+            <li><strong>The same person cannot repaint the same square inside five minutes.</strong> Parking in one spot and transmitting does not run up a score.</li>
+            <li><strong>Scores fade by a quarter point a day, toward zero.</strong> This is why a six-month season does not calcify: ground painted once and never revisited is worth nothing within weeks, so what you hold always means what you have reached recently.</li>
+          </ul>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>Protection after a capture</th><td>15 minutes</td></tr>
+              <tr><th>Same player, same square</th><td>once per 5 minutes</td></tr>
+              <tr><th>New painter bonus</th><td>+0.5 points, once per player per square</td></tr>
+              <tr><th>Decay</th><td>0.25 points per day, floor of zero</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="seasons">
+          <h2>Seasons</h2>
+          <p>A season is 180 days. The two boards run their own seasons on their own clocks &mdash; the current MeshCore season ends 14 February 2027 and the Meshtastic one a day later.</p>
+          <p>A team's standing is the squares it holds plus the check-in points its players have earned. Both count, and they count in the same units: one square held is worth the same as one check-in point.</p>
+          <p>When a season ends, the board resets and check-in points reset with it. Streaks do not &mdash; see <a href="#streaks">streaks</a>.</p>
+        </section>
+
+        <section id="net">
+          <h2>The weekly net</h2>
+          <p>There is a net every Wednesday evening, 17:00 to 23:59 Boise time. Checking in during that window earns your team points on top of any ground you hold.</p>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>When</th><td>Wednesdays, 17:00&ndash;23:59 America/Boise</td></tr>
+              <tr><th>Base value</th><td>25 points</td></tr>
+              <tr><th>How often</th><td>once per net, per player</td></tr>
+              <tr><th>On MeshCore</th><td>post in the <code>#weekly-net</code> channel</td></tr>
+              <tr><th>On Meshtastic</th><td>send a message containing <code>#freq51</code></td></tr>
+            </tbody>
+          </table>
+          <p>Posting five times earns once, the same as everyone else. A message before 17:00 or after midnight does not count &mdash; the window is the window.</p>
+          <p>This is a genuine way to play rather than a consolation prize. Points land in the same team total as squares, so a night on the net contributes whether or not you ever leave the house.</p>
+        </section>
+
+        <section id="streaks">
+          <h2>Streaks</h2>
+          <p>Turning up every week is worth more than turning up once. The bonus starts on your second consecutive net and stops growing after the sixth.</p>
+          <table class="rules-table rules-table-num">
+            <thead><tr><th>Consecutive net</th><th>Base</th><th>Bonus</th><th>Total</th></tr></thead>
+            <tbody>
+              <tr><td>1st</td><td>25</td><td>&mdash;</td><td>25</td></tr>
+              <tr><td>2nd</td><td>25</td><td>5</td><td>30</td></tr>
+              <tr><td>3rd</td><td>25</td><td>10</td><td>35</td></tr>
+              <tr><td>4th</td><td>25</td><td>15</td><td>40</td></tr>
+              <tr><td>5th</td><td>25</td><td>20</td><td>45</td></tr>
+              <tr><td>6th and after</td><td>25</td><td>25</td><td>50</td></tr>
+            </tbody>
+          </table>
+          <p>Miss a net and you start again at 25.</p>
+          <p><strong>A week where the net does not happen at all costs you nothing.</strong> A Wednesday only counts as a net if somebody checked in. If everyone skips a holiday week, nobody's run breaks.</p>
+          <p><strong>Your streak survives a season boundary.</strong> The points it earned reset with everything else, but the run itself is a record of showing up, not territory. Streaks are counted per board &mdash; a MeshCore run and a Meshtastic run are separate.</p>
+        </section>
+
+        <section id="months">
+          <h2>Monthly results</h2>
+          <p>Each calendar month, Boise time, gets its own result on the <a href="/results">results page</a>.</p>
+          <p><strong>A month is judged when it ends, not as it goes.</strong> Nothing is shown for the month in progress except when it closes. An award you can watch changing hands daily is not an award.</p>
+          <p><strong>A month is scored on the month.</strong> Ground taken and points earned between its own dates &mdash; never a snapshot of the season standings. If it were a snapshot, whoever led in the first month would lead in all of them and none of it would mean anything. Falling behind early never puts the next month out of reach.</p>
+          <p>Ties are refused rather than split. If two people share the lead for an award, nobody gets it that month.</p>
+        </section>
+
+        <section id="honors">
+          <h2>The honors</h2>
+          <p>Each month hands out the following, alongside the team standings.</p>
+          <dl class="rules-honors">
+            <dt>Month Winner</dt><dd>The team that gained the most points that month &mdash; squares captured plus check-in points earned.</dd>
+            <dt>Top Attacker</dt><dd>Took the most squares off other teams. Claiming empty ground does not count here.</dd>
+            <dt>Top Defender</dt><dd>Won back the most squares their team had lost. A capture counts as a defence when the previous capture of that same square took it from the team now taking it back.</dd>
+            <dt>Team Attacker &amp; Team Defender</dt><dd>The same two awards, given within each team, so a strong team does not sweep everything.</dd>
+            <dt>Explorer</dt><dd>Claimed the most squares nobody had ever claimed. Easy early in a season when the whole map is new, genuinely hard once it fills in.</dd>
+            <dt>Frontier</dt><dd>Claimed the most squares more than twenty miles beyond the edge of any town. Every Frontier square is also an Explorer square, so going remote counts toward both. Twenty miles out is where coverage runs out, so expect months where nobody earns it.</dd>
+            <dt>Top Phreak</dt><dd>Earned the most points from checking in to the weekly net.</dd>
+            <dt>Most Consistent</dt><dd>Held the longest run of consecutive nets during the month.</dd>
+            <dt>Quick Fingers</dt><dd>Checked in fastest after the net opened, averaged across the month. Needs at least two check-ins &mdash; one lucky night does not win it.</dd>
+          </dl>
+        </section>
+
+        <section id="registering">
+          <h2>Registering a radio</h2>
+          <p>Nothing you transmit earns anything until the radio it came from is registered to you. Every ping and every check-in is credited through that link.</p>
+          <p><strong>On MeshCore</strong>, your radio is identified by its contact key &mdash; the first eight characters of its public key. MeshMapper binds it for you the first time you wardrive, provided its "Include Contact Key" setting is on. That setting being off is the single most common reason a player sees nothing happen. You can also pick your node from a list on the join page, or type the eight characters in yourself.</p>
+          <p><strong>On Meshtastic</strong>, your radio is identified by its node ID, and you add it yourself on the join page. It cannot bind itself, because the packets MeshWars reads carry nothing that points back to you.</p>
+          <p>A radio belongs to one player. If a contact already registered to somebody else turns up under your key, the ping is dropped rather than credited &mdash; to either of you.</p>
+          <p>Your API key is shown once and only a hash of it is stored, so it cannot be recovered. A MeshCore player can read theirs back out of MeshMapper's own settings; otherwise an operator can issue you an extra key without breaking the one you have.</p>
+        </section>
+
+        <section id="area">
+          <h2>Where it counts</h2>
+          <p>Play is bounded to a box covering the western United States and Texas.</p>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>North</th><td>49.29&deg; &mdash; the Canadian border</td></tr>
+              <tr><th>South</th><td>25.80&deg; &mdash; the southern tip of Texas</td></tr>
+              <tr><th>West</th><td>&minus;125.00&deg; &mdash; past the Pacific coast</td></tr>
+              <tr><th>East</th><td>&minus;93.50&deg; &mdash; eastern Texas</td></tr>
+            </tbody>
+          </table>
+          <p>A ping from outside the box is discarded before anything else happens &mdash; it claims nothing and it does not register your radio. The live outline is drawn on the <a href="/about">about page</a>.</p>
+        </section>
+
+        <section id="fairplay">
+          <h2>Fair play</h2>
+          <p>Three mechanics exist to keep the game about reaching the mesh. All of them are narrow on purpose.</p>
+
+          <h3>Aircraft</h3>
+          <p>A radio at altitude reaches an absurd number of nodes, which would make the exploration awards meaningless. MeshWars works out your speed between consecutive positions, and anything moving faster than roughly 100 mph is marked as airborne.</p>
+          <p>Those squares <strong>still count as territory</strong> &mdash; the radio genuinely reached those nodes, and that is what territory measures. They do not count toward Explorer or Frontier, which are about reach and effort rather than reception. Nothing is taken away and nobody is penalised.</p>
+          <p>An implausibly large jump between two positions is treated as a bad GPS fix rather than a flight, so a phone that briefly locates you in the next county does not disqualify a legitimate remote claim. Nothing catches a hovering aircraft; that is a known gap.</p>
+
+          <h3>Automated check-ins</h3>
+          <p>Quick Fingers is an award for reacting quickly to an event that happens on a schedule, which is an open invitation to a cron job. So it ships with its own defence.</p>
+          <p>A person posting from a phone lands somewhere different each week &mdash; scattered across minutes. A script fires at the same offset every time, to within a second or two. MeshWars looks at how much a player's check-in timing varies across the month, and when it barely varies at all over enough nets, that player is quietly skipped for Quick Fingers.</p>
+          <p>That is the whole extent of it. It is not a penalty, it is not an accusation, and it affects nothing else &mdash; the check-in still earns its points, the streak still counts, every other award is unaffected. A false positive costs somebody one novelty award, whereas punishing anyone on the strength of a statistical hunch would mean settling arguments that cannot actually be settled.</p>
+
+          <h3>Sharing keys</h3>
+          <p>A contact key bound to one player cannot earn for another. If a ping arrives under one player's API key carrying a radio registered to somebody else, it is dropped and logged rather than credited to either of them.</p>
+        </section>
+
+        <section id="protocols">
+          <h2>MeshCore and Meshtastic</h2>
+          <p>Two boards, one game. Same seven teams, same grid, same scoring table, same rules on this page. What differs is how your position reaches MeshWars &mdash; and it is inverted between them.</p>
+          <table class="rules-table rules-table-compare">
+            <thead><tr><th></th><th>MeshCore</th><th>Meshtastic</th></tr></thead>
+            <tbody>
+              <tr><th>How position arrives</th><td>pushed &mdash; MeshMapper forwards a copy of your wardrive</td><td>pulled &mdash; MeshWars polls a public meshview instance</td></tr>
+              <tr><th>What earns points</th><td>how many repeaters <em>you heard</em></td><td>how many MQTT feeders <em>heard you</em></td></tr>
+              <tr><th>Registering</th><td>binds itself on your first wardrive</td><td>you add the node ID yourself</td></tr>
+              <tr><th>Net check-in</th><td><code>#weekly-net</code> channel</td><td>any message containing <code>#freq51</code></td></tr>
+            </tbody>
+          </table>
+          <p>The inversion is not a design choice, it is what each network lets anyone observe. MeshCore tells you what your radio reached; Meshtastic tells you who logged your radio.</p>
+          <p>Everything else &mdash; teams, squares, capture, decay, seasons, the net, streaks, the honors &mdash; is identical.</p>
+        </section>
+
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/theme-toggle.js?v=20260823-10" type="module"></script>
+  <script src="/static/rules.js?v=20260823-10" type="module"></script>
+</body>
+</html>

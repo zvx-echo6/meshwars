@@ -1,0 +1,253 @@
+/* /rules -- the full rulebook. Sits on theme.css for tokens and brings
+   its own layout, because it is the one page built to be read straight
+   through rather than scanned: a fixed contents rail on the left, a
+   single reading column on the right.
+
+   Deliberately NOT .landing-wrap. That wrapper goes two-column above
+   900px, which is right for About's independent panels and wrong for
+   prose that has to be read in order. */
+
+.rules-wrap {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: calc(var(--mw-nav-h) + 24px) 16px 96px;
+}
+
+.rules-header { margin-bottom: 32px; }
+
+.rules-title {
+  font-size: clamp(2rem, 6vw, 2.75rem);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: var(--mw-gold-light);
+  margin: 0 0 8px;
+}
+
+.rules-sub {
+  color: var(--mw-text-2);
+  font-size: 1rem;
+  line-height: 1.55;
+  margin: 0;
+  max-width: 62ch;
+}
+
+/* ---- layout --------------------------------------------------------- */
+.rules-layout { display: block; }
+
+@media (min-width: 900px) {
+  .rules-layout {
+    display: grid;
+    grid-template-columns: 210px minmax(0, 1fr);
+    gap: 48px;
+    align-items: start;
+  }
+}
+
+/* ---- contents rail -------------------------------------------------- */
+.rules-toc {
+  margin: 0 0 32px;
+  padding: 0 0 16px;
+  border-bottom: 1px solid var(--mw-line);
+}
+
+@media (min-width: 900px) {
+  .rules-toc {
+    position: sticky;
+    /* Clears the fixed nav bar, plus breathing room. */
+    top: calc(var(--mw-nav-h) + 24px);
+    margin: 0;
+    padding: 0;
+    border-bottom: 0;
+    /* Its own scrollbar if the list ever outgrows the viewport, rather
+       than letting the rail run off the bottom of a short window. */
+    max-height: calc(100vh - var(--mw-nav-h) - 48px);
+    overflow-y: auto;
+  }
+}
+
+.rules-toc-title {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+  margin: 0 0 10px;
+}
+
+.rules-toc ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+}
+
+@media (min-width: 900px) {
+  .rules-toc ul { display: block; }
+}
+
+.rules-toc a {
+  display: block;
+  padding: 4px 0 4px 10px;
+  border-left: 2px solid transparent;
+  color: var(--mw-text-4);
+  text-decoration: none;
+  font-size: 0.875rem;
+  line-height: 1.35;
+}
+
+.rules-toc a:hover { color: var(--mw-gold-light); }
+
+/* Set by rules.js as you scroll. The rail is a position indicator as
+   much as a set of links -- in a document this long, "where am I" is
+   the question it answers most often. */
+.rules-toc a.current {
+  color: var(--mw-gold-light);
+  border-left-color: var(--mw-gold);
+  font-weight: 600;
+}
+
+.rules-toc a:focus-visible {
+  outline: 2px solid var(--mw-gold);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ---- the prose ------------------------------------------------------ */
+.rules-body { max-width: 68ch; }
+
+.rules-body section {
+  padding-bottom: 28px;
+  margin-bottom: 28px;
+  border-bottom: 1px solid var(--mw-line);
+}
+.rules-body section:last-child { border-bottom: 0; }
+
+/* An anchor jump must not tuck the heading under the fixed nav bar. */
+.rules-body section { scroll-margin-top: calc(var(--mw-nav-h) + 20px); }
+
+.rules-body h2 {
+  font-size: 1.375rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  color: var(--mw-gold-light);
+  margin: 0 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--mw-gold);
+}
+
+.rules-body h3 {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mw-gold);
+  margin: 24px 0 8px;
+}
+
+.rules-body p {
+  color: var(--mw-text-2);
+  font-size: 0.9375rem;
+  line-height: 1.62;
+  margin: 0 0 12px;
+}
+
+.rules-body p:last-child { margin-bottom: 0; }
+.rules-body strong { color: var(--mw-text-1); }
+
+.rules-body a {
+  color: var(--mw-accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+.rules-body a:hover { text-decoration: underline; }
+
+.rules-body code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.875em;
+  background: var(--mw-raised);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--mw-text-1);
+}
+
+.rules-list {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  color: var(--mw-text-2);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+}
+.rules-list li { margin-bottom: 8px; }
+.rules-list li::marker { color: var(--mw-gold); }
+
+/* ---- tables --------------------------------------------------------- */
+.rules-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4px 0 16px;
+  font-size: 0.9375rem;
+  /* Every table here is a table of numbers, whether or not the column
+     is headed as one. */
+  font-variant-numeric: tabular-nums;
+}
+
+.rules-table th,
+.rules-table td {
+  text-align: left;
+  padding: 7px 14px 7px 0;
+  border-bottom: 1px solid var(--mw-line);
+  vertical-align: top;
+}
+
+.rules-table tbody th {
+  color: var(--mw-text-1);
+  font-weight: 600;
+  width: 40%;
+}
+
+.rules-table td { color: var(--mw-text-2); }
+
+.rules-table thead th {
+  color: var(--mw-gold);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-bottom-color: var(--mw-gold);
+  width: auto;
+}
+
+.rules-table tr:last-child th,
+.rules-table tr:last-child td { border-bottom: 0; }
+
+.rules-table-num tbody td:first-child { color: var(--mw-text-1); }
+.rules-table-num tbody td:last-child { color: var(--mw-gold-light); font-weight: 700; }
+
+.rules-table-compare tbody th { width: 26%; }
+
+/* ---- the honors list ------------------------------------------------ */
+.rules-honors { margin: 0; }
+
+.rules-honors dt {
+  color: var(--mw-gold-light);
+  font-weight: 700;
+  font-size: 0.9375rem;
+  margin-top: 14px;
+}
+.rules-honors dt:first-child { margin-top: 0; }
+
+.rules-honors dd {
+  margin: 3px 0 0;
+  color: var(--mw-text-2);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+}
+
+/* A long rulebook on a phone: the tables are the only thing that can
+   force sideways scroll, so they get their own. */
+@media (max-width: 560px) {
+  .rules-table { display: block; overflow-x: auto; white-space: normal; }
+  .rules-table tbody th { width: 45%; }
+}

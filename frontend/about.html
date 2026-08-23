@@ -68,13 +68,13 @@
        fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
-  <link rel="stylesheet" href="/static/theme.css?v=20260823-9" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260823-9" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260823-10" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260823-10" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
         crossorigin="anonymous" />
-  <link rel="stylesheet" href="/static/play-area-map.css?v=20260823-9" />
+  <link rel="stylesheet" href="/static/play-area-map.css?v=20260823-10" />
 </head>
 <body>
 
@@ -83,6 +83,7 @@
     <div class="mw-nav-links">
       <a href="/">Map</a>
       <a href="/results">Results</a>
+      <a href="/rules">Rules</a>
       <a href="/about" class="active">About</a>
       <a href="/join">Join</a>
       <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
@@ -138,32 +139,16 @@
 
     <section class="landing-panel">
       <div class="landing-panel-title">How scoring works</div>
-      <ol class="landing-list landing-scoring">
-        <li>You claim a square by hearing repeaters from it. Each repeater a ping hears is worth a tenth of a point, up to one point per ping.</li>
-        <li>A ping that hears no repeaters scores nothing and claims nothing. Being somewhere is not enough &mdash; you have to reach the mesh.</li>
-        <li>The first team to paint an unclaimed square takes it.</li>
-        <li>A square that has just been captured cannot be taken for fifteen minutes, no matter what.</li>
-        <li>After that it falls to whoever out-scores the team currently holding it. Only the holder's score matters, not every other team's.</li>
-        <li>The first time a new person paints a square for their team, it is worth an extra half point. More people beats one person going back and forth.</li>
-        <li>The same person cannot repaint the same square within five minutes.</li>
-        <li>Scores fade over time, so held ground has to be revisited.</li>
-      </ol>
+      <p>You claim a square by reaching the mesh from inside it. Each mesh node your ping reaches is worth a tenth of a point, up to one point per ping &mdash; and a ping that reaches nobody claims nothing, because being somewhere is not enough.</p>
+      <p>Squares change hands when a team out-scores whoever is holding one, scores fade over time so held ground has to be revisited, and a square that just changed hands is protected for fifteen minutes.</p>
+      <p>The exact numbers, the cooldowns and every other mechanic are in the <a href="/rules">rules</a>.</p>
     </section>
 
     <section class="landing-panel">
       <div class="landing-panel-title">Net check-ins</div>
       <p>There's a <a href="https://freq51.net/weeklynet" target="_blank" rel="noopener noreferrer">weekly net</a> on Wednesday evenings, 17:00 to 23:59 Boise time. Checking in during that window earns your team 25 points, on top of any ground you hold &mdash; a check-in before 17:00 or after midnight doesn't count.</p>
       <p>You can check in once per net. Posting five times doesn't earn five times &mdash; it earns once, same as everyone else.</p>
-      <p>Turn up week after week and each check-in is worth more. The bonus starts on your second net in a row and grows until it caps:</p>
-      <ul class="landing-plain">
-        <li>1st net in a row &mdash; 25 points</li>
-        <li>2nd &mdash; 30</li>
-        <li>3rd &mdash; 35</li>
-        <li>4th &mdash; 40</li>
-        <li>5th &mdash; 45</li>
-        <li>6th and every one after &mdash; 50</li>
-      </ul>
-      <p>Miss a net and you start again at 25. A week where the net doesn't happen at all costs you nothing &mdash; your run picks up where it left off.</p>
+      <p>Turn up week after week and each check-in is worth more, from 25 points up to 50 for a run of six nets or longer. Miss one and you start again &mdash; though a week where the net doesn't happen at all costs you nothing. The <a href="/rules">rules</a> have the full table.</p>
       <p>Points count toward your team's total alongside squares, so a night on the net is a real contribution whether or not you ever leave the house. Wardriving and checking in are two ways to play, not two kinds of player. People who take ground are Wardrivers and people who work the net are Phreaks, but that's flavour, not a class you pick &mdash; do both and you'll show up on both leaderboards.</p>
       <p>To be credited, your radio has to be registered to you. On Meshtastic that's your node ID. On MeshCore it's your contact ID, which MeshMapper binds for you automatically if you wardrive, or you can pick your node from the list when you join.</p>
     </section>
@@ -171,18 +156,7 @@
     <section class="landing-panel">
       <div class="landing-panel-title">Every month has a winner</div>
       <p>A six-month season is a long time to wait to find out how you did, so each calendar month closes with its own <a href="/results">result</a>. A month is judged on that month alone &mdash; ground taken and points earned between its own dates &mdash; not on the season standings, so falling behind early never puts the next month out of reach.</p>
-      <p>Alongside the team standings, each month hands out honors:</p>
-      <ul class="landing-plain">
-        <li><strong>Month Winner</strong> &mdash; the team that gained the most points that month.</li>
-        <li><strong>Top Attacker</strong> &mdash; took the most squares off other teams. There's a version of this for each team too.</li>
-        <li><strong>Top Defender</strong> &mdash; won back the most squares your team had lost. Also awarded per team.</li>
-        <li><strong>Explorer</strong> &mdash; claimed the most squares nobody had ever claimed. Easy early in a season, harder as the map fills in.</li>
-        <li><strong>Frontier</strong> &mdash; claimed the most squares more than twenty miles beyond any town. Some months nobody manages one at all.</li>
-        <li><strong>Top Phreak</strong> &mdash; earned the most points from checking in to the weekly net.</li>
-        <li><strong>Most Consistent</strong> &mdash; checked in to the most weekly nets in a row.</li>
-        <li><strong>Quick Fingers</strong> &mdash; checked in fastest after the net opened, on average.</li>
-      </ul>
-      <p>Two things don't count toward Explorer or Frontier: squares claimed while moving at aircraft speed, and squares inside a town for Frontier. Those two awards are about reach and effort, and flying over the back country is neither.</p>
+      <p>Alongside the team standings, each month hands out honors &mdash; for taking the most ground off other teams, winning the most back, claiming squares nobody had ever claimed, getting furthest past the towns, and working the weekly net. Every one of them is defined in the <a href="/rules">rules</a>.</p>
     </section>
 
     <section class="landing-panel">
@@ -251,8 +225,8 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
-  <script src="/static/play-area-map.js?v=20260823-9"></script>
-  <script src="/static/about.js?v=20260823-9" type="module"></script>
-  <script src="/static/theme-toggle.js?v=20260823-9" type="module"></script>
+  <script src="/static/play-area-map.js?v=20260823-10"></script>
+  <script src="/static/about.js?v=20260823-10" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260823-10" type="module"></script>
 </body>
 </html>

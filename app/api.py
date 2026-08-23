@@ -657,7 +657,7 @@ def _inject_head(html: str) -> str:
 
 def _templated_html_page(request: Request, path: Path, missing_message: str) -> Response:
     """Like _html_page, for a top-level page that also needs _inject_head()
-    run over it (the map, /results, /join, /about -- everywhere the verification
+    run over it (the map, /results, /rules, /join, /about -- everywhere the verification
     tag can appear).
 
     Reads and transforms the file instead of handing it to FileResponse,
@@ -726,6 +726,10 @@ def mount(app: FastAPI) -> None:
         @app.get("/results", response_class=HTMLResponse, include_in_schema=False)
         async def results_page(request: Request):
             return _templated_html_page(request, frontend_dir / "results.html", "results page not bundled")
+
+        @app.get("/rules", response_class=HTMLResponse, include_in_schema=False)
+        async def rules_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "rules.html", "rules page not bundled")
 
         # robots.txt / sitemap.xml: plain static files, same explicit
         # top-level-route pattern as the three pages above (not folded
