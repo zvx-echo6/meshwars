@@ -46,7 +46,7 @@ TEAM_AWARDS = [
 PLAYER_AWARDS = [
     ("top_attacker", "Top Attacker"),
     ("top_defender", "Top Defender"),
-    ("top_phreak", "Top Phreak"),
+    ("top_netop", "Top NetOp"),
     ("most_consistent", "Most Consistent"),
     ("quick_fingers", "Quick Fingers"),
     ("explorer", "Explorer"),
@@ -212,7 +212,7 @@ def _top(counts: dict, minimum: float = 1):
 
 def _award(award, key, value, names, detail=None, scope="", team=None):
     """One honor row. `detail` says what the number counts -- every award
-    carries one, because "Top Phreak 130" is a figure with no unit and
+    carries one, because "Top NetOp 130" is a figure with no unit and
     the awards whose unit is not guessable from the name are exactly the
     ones a reader has to guess at."""
     if key is None:
@@ -346,7 +346,7 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
                 r["message_ts"] - _net_window_open(r["net_date"])
             )
 
-    add(_award("top_phreak", *(_top(points, 0.001) or (None, 0)), names=names,
+    add(_award("top_netop", *(_top(points, 0.001) or (None, 0)), names=names,
                detail="points from weekly net check-ins"))
     add(_award("most_consistent", *(_top(streaks) or (None, 0)), names=names,
                detail="nets checked into in a row"))

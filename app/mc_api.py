@@ -789,9 +789,9 @@ async def mc_top() -> list[dict]:
 def top_checkin_for(protocol: str) -> list[dict]:
     """Players ranked by check-in points earned in `protocol`'s active
     season, from mc_checkin_award. Top 20, empty list if there's no
-    data (or no active season) -- the "Phreaks" counterpart of
+    data (or no active season) -- the "NetOps" counterpart of
     top_for() above (see app/checkin.py's module docstring for the
-    Wardrivers/Phreaks theming; both are ACTIVITIES on the same
+    Wardrivers/NetOps theming; both are ACTIVITIES on the same
     player model, so a player who does both shows up in both rankings).
 
     Follows the exact same *_for() pattern as

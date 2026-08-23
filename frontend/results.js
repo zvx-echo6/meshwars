@@ -96,7 +96,7 @@ function renderHonors(awards) {
   // Per-team awards carry a scope; they read as "Top Attacker, RED"
   // rather than as seven separate award names.
   // The value and what it counts are both shown -- the detail sits under
-  // the award name rather than replacing the number, because "Top Phreak
+  // the award name rather than replacing the number, because "Top NetOp
   // 130" without a unit is the exact ambiguity the detail exists to fix.
   return `<ul class="rs-honors">${awards.map((a) => {
     const who = a.player || a.team || '—';
