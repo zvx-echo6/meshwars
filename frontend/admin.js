@@ -95,90 +95,132 @@ function renderHealth(h, boards) {
   const wrap = document.getElementById('tiles');
   wrap.replaceChildren();
 
-  // Ingest quiet for an hour is worth noticing but not alarming -- it is
-  // the middle of the night somewhere most of the time. Six hours is a
-  // real signal.
-  const lastPing = h.last_ping_at;
-  const pingAge = lastPing ? Math.floor(Date.now() / 1000) - lastPing : null;
+  // Four tiles, not nine. The question a tile answers has to be one
+  // somebody actually asks on opening the page -- is data arriving, is
+  // the poller alive, how much is broken, how long is left. Database
+  // size and town-data counts are diagnostics; they live in the quiet
+  // line underneath, where they cost nothing and interrupt nobody.
+  const now = Math.floor(Date.now() / 1000);
+  const pingAge = h.last_ping_at ? now - h.last_ping_at : null;
   wrap.appendChild(tile(h.pings_last_hour, 'pings, last hour',
     pingAge === null || pingAge > 21600 ? 'bad' : (pingAge > 3600 ? 'warn' : 'ok')));
-  wrap.appendChild(tile(h.pings_last_day, 'pings, 24h'));
-  wrap.appendChild(tile(h.players_active_today, 'players active, 24h'));
 
   const poll = h.checkin_poller || {};
-  const pollAge = poll.last_poll_at ? Math.floor(Date.now() / 1000) - poll.last_poll_at : null;
+  const pollAge = poll.last_poll_at ? now - poll.last_poll_at : null;
   wrap.appendChild(tile(
     poll.running ? (poll.last_poll_at ? ago(poll.last_poll_at) : 'starting') : 'stopped',
     'check-in poller',
     !poll.running || (pollAge !== null && pollAge > 300) ? 'bad' : 'ok'));
 
-  boards.forEach((b) => {
-    const days = b.ends_at ? Math.round((b.ends_at - Date.now() / 1000) / 86400) : null;
-    wrap.appendChild(tile(days === null ? '—' : days + 'd',
-      (b.board === 'mc' ? 'MeshCore' : 'Meshtastic') + ' season left'));
-  });
+  wrap.appendChild(tile(h.players_active_today, 'players active, 24h'));
 
-  wrap.appendChild(tile(bytes(h.disk_free_bytes), 'disk free',
-    h.disk_free_bytes && h.disk_free_bytes < 1e9 ? 'bad' : null));
-  wrap.appendChild(tile(bytes(h.database_bytes), 'database'));
+  const mc = boards.find((b) => b.board === 'mc');
+  const days = mc && mc.ends_at ? Math.round((mc.ends_at - now) / 86400) : null;
+  wrap.appendChild(tile(days === null ? '—' : days + 'd', 'season left'));
 
-  // The exploration awards skip themselves without this and say so only
-  // in a log line, which is exactly how it went unnoticed once.
-  wrap.appendChild(tile(h.places_loaded || 0, 'town data',
-    h.places_loaded ? null : 'bad'));
-
-  if (poll.last_error) {
-    const e = el('p', { className: 'adm-hint adm-status-bad', text: 'Poller error: ' + poll.last_error });
-    wrap.parentNode.insertBefore(e, wrap.nextSibling);
-  }
+  const bits = [
+    h.pings_last_day + ' pings in 24h',
+    bytes(h.database_bytes) + ' database',
+    bytes(h.disk_free_bytes) + ' disk free',
+    h.places_loaded ? 'town data loaded' : 'TOWN DATA MISSING',
+  ];
+  if (poll.last_error) bits.push('poller error: ' + poll.last_error);
+  const line = document.getElementById('health-line');
+  line.textContent = bits.join('  ·  ');
+  line.className = 'adm-hint' +
+    ((!h.places_loaded || poll.last_error) ? ' adm-status-bad' : '');
 }
+
+// One row per PROBLEM, not per player. Fourteen people with the same
+// unreachable radio was fourteen identical rows carrying the same
+// sentence and the same fix, which is most of why the page read as a
+// wall. Grouped, that is one line saying fourteen, opening to the names.
+const KIND_TITLES = {
+  no_radio: 'never connected a radio',
+  no_key: 'has no working key',
+  no_contact_key: 'sending without a contact key',
+  out_of_area: 'playing outside the map',
+  no_repeaters: 'reaching nothing',
+  never_accepted: 'nothing they send is counting',
+  never_sent: 'connected a radio, never sent',
+  wrong_owner: 'using someone else\'s radio',
+  checkin_unreachable: 'cannot earn net check-ins',
+  stale: 'stopped playing',
+};
+
+const openGroups = new Set();
 
 function renderAttention(list) {
   const host = document.getElementById('attention');
   const count = document.getElementById('attention-count');
   host.replaceChildren();
-  count.textContent = list.length ? list.length + ' to look at' : 'nothing to do';
 
   if (!list.length) {
-    host.appendChild(el('p', { className: 'adm-hint', text: 'Everyone is set up and sending. Nothing needs you.' }));
+    count.textContent = 'nothing to do';
+    badge('nav-attention', '', false);
+    host.appendChild(el('p', { className: 'adm-hint', text: 'Everyone is set up and sending.' }));
     return;
   }
 
+  const groups = new Map();
   list.forEach((a) => {
-    const row = el('div', { className: 'adm-att' });
-    row.appendChild(el('span', { className: 'adm-dot adm-dot-' + a.severity }));
-    row.appendChild(el('span', { className: 'adm-att-who', text: a.player }));
-    row.appendChild(el('span', { className: 'adm-att-what', text: a.detail }));
-    row.appendChild(el('span', { className: 'adm-att-fix', text: a.fix }));
+    if (!groups.has(a.kind)) groups.set(a.kind, { kind: a.kind, fix: a.fix, severity: a.severity, items: [] });
+    groups.get(a.kind).items.push(a);
+  });
+  count.textContent = list.length + ' across ' + groups.size +
+    (groups.size === 1 ? ' issue' : ' issues');
+  badge('nav-attention', list.length, list.some((a) => a.severity === 'bad'));
 
-    const actions = el('div', { className: 'adm-att-actions' });
-    actions.appendChild(btn('Open player', 'adm-btn-quiet', () => {
-      expanded.add(a.player_id);
-      renderPlayers();
-      const node = document.getElementById('player-' + a.player_id);
-      if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  groups.forEach((g) => {
+    const open = openGroups.has(g.kind);
+    const wrap = el('div', { className: 'adm-group' });
+
+    const head = el('div', { className: 'adm-group-head' });
+    head.appendChild(el('span', { className: 'adm-caret', text: open ? '▾' : '▸' }));
+    head.appendChild(el('span', { className: 'adm-dot adm-dot-' + g.severity }));
+    head.appendChild(el('span', { className: 'adm-group-n', text: String(g.items.length) }));
+    head.appendChild(el('span', { className: 'adm-group-title', text: KIND_TITLES[g.kind] || g.kind }));
+    head.appendChild(el('span', {
+      className: 'adm-group-who',
+      text: g.items.map((i) => i.player).join(', '),
     }));
-    // The one problem with a fix that lives nowhere else: a player the
-    // directory cannot resolve needs a name registered by hand.
-    if (a.kind === 'checkin_unreachable') {
-      const name = el('input', { placeholder: 'name their check-ins appear under' });
-      const save = btn('Register name', '', async (b) => {
-        b.disabled = true;
-        try {
-          await post('/api/admin/checkin/binding',
-            { player_id: a.player_id, sender_name: name.value });
-          setStatus('Registered check-in name for ' + a.player, false);
-          await loadOverview();
-        } catch (e) {
-          setStatus('Failed: ' + e.message, true);
-          b.disabled = false;
+    head.addEventListener('click', () => {
+      if (open) openGroups.delete(g.kind); else openGroups.add(g.kind);
+      renderAttention(list);
+    });
+    wrap.appendChild(head);
+
+    if (open) {
+      const body = el('div', { className: 'adm-group-body' });
+      body.appendChild(el('p', { className: 'adm-hint', text: g.fix }));
+      g.items.forEach((a) => {
+        const row = el('div', { className: 'adm-row' });
+        row.appendChild(el('strong', { text: a.player }));
+        row.appendChild(el('span', { text: a.detail }));
+        row.appendChild(btn('Open', 'adm-btn-quiet', () => {
+          expanded.add(a.player_id);
+          renderPlayers();
+          const node = document.getElementById('player-' + a.player_id);
+          if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }));
+        if (a.kind === 'checkin_unreachable') {
+          const name = el('input', { placeholder: 'name their check-ins appear under' });
+          row.appendChild(name);
+          row.appendChild(btn('Register', '', async (b) => {
+            b.disabled = true;
+            try {
+              await post('/api/admin/checkin/binding',
+                { player_id: a.player_id, sender_name: name.value });
+              setStatus('Registered check-in name for ' + a.player, false);
+              await loadOverview();
+            } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+          }));
         }
+        body.appendChild(row);
       });
-      actions.appendChild(name);
-      actions.appendChild(save);
+      wrap.appendChild(body);
     }
-    row.appendChild(actions);
-    host.appendChild(row);
+    host.appendChild(wrap);
   });
 }
 
@@ -535,21 +577,90 @@ async function createApiClient(b) {
   b.disabled = false;
 }
 
-// ---- wiring -----------------------------------------------------------
+// ---- session and navigation -------------------------------------------
+//
+// Signing in is a real step, not a text box above the content: the token
+// is checked against the server before anything is shown, so a wrong one
+// says so here instead of leaving six panels silently empty.
+
+function show(sectionName) {
+  document.querySelectorAll('.adm-section').forEach((s) => {
+    s.hidden = s.dataset.section !== sectionName;
+  });
+  document.querySelectorAll('.adm-nav-item').forEach((b) => {
+    b.classList.toggle('active', b.dataset.section === sectionName);
+  });
+  // Deep-linkable, and survives a reload -- an operator who bookmarks
+  // the players list should land on the players list.
+  if (location.hash.slice(1) !== sectionName) {
+    history.replaceState(null, '', '#' + sectionName);
+  }
+}
+
+function badge(id, value, bad) {
+  const b = document.getElementById(id);
+  if (!b) return;
+  b.textContent = value === 0 || value ? String(value) : '';
+  b.className = 'adm-nav-badge' + (bad ? ' adm-nav-badge-bad' : '');
+}
 
 async function refreshAll() {
   await Promise.all([loadPlayers(), loadOverview(), loadApiClients()]);
+  badge('nav-players', allPlayers.length, false);
 }
 
-function load() {
-  adminToken = document.getElementById('token-input').value;
-  if (!adminToken) { setStatus('Paste the admin token first', true); return; }
-  refreshAll();
+async function signIn(e) {
+  if (e) e.preventDefault();
+  const input = document.getElementById('token-input');
+  const err = document.getElementById('login-err');
+  const btnEl = document.getElementById('login-btn');
+  err.textContent = '';
+  if (!input.value) { err.textContent = 'Enter the admin token.'; return; }
+
+  adminToken = input.value;
+  btnEl.disabled = true;
+  btnEl.textContent = 'Checking...';
+  try {
+    // Any authenticated route would do; players is the cheapest that
+    // proves the token rather than merely proving the server is up.
+    await api('/api/admin/players');
+  } catch (ex) {
+    adminToken = '';
+    err.textContent = ex.message === 'unauthorized'
+      ? 'That token was not accepted.'
+      : ('Could not sign in: ' + ex.message);
+    btnEl.disabled = false;
+    btnEl.textContent = 'Sign in';
+    return;
+  }
+  input.value = '';
+  btnEl.disabled = false;
+  btnEl.textContent = 'Sign in';
+
+  document.getElementById('login').hidden = true;
+  document.getElementById('app').hidden = false;
+  const wanted = location.hash.slice(1);
+  show(document.querySelector('.adm-section[data-section="' + wanted + '"]') ? wanted : 'overview');
+  await refreshAll();
 }
 
-document.getElementById('load-btn').addEventListener('click', load);
-document.getElementById('token-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') load();
+function signOut() {
+  adminToken = '';
+  allPlayers = [];
+  expanded.clear();
+  document.getElementById('app').hidden = true;
+  document.getElementById('login').hidden = false;
+  document.getElementById('token-input').focus();
+}
+
+document.getElementById('login-form').addEventListener('submit', signIn);
+document.getElementById('signout-btn').addEventListener('click', signOut);
+document.getElementById('refresh-btn').addEventListener('click', function () {
+  setStatus('Refreshing...', false);
+  refreshAll().then(() => setStatus('Up to date', false));
+});
+document.querySelectorAll('.adm-nav-item').forEach((b) => {
+  b.addEventListener('click', () => show(b.dataset.section));
 });
 document.getElementById('player-search').addEventListener('input', renderPlayers);
 document.getElementById('ci-award').addEventListener('click', function () { awardCheckin(this); });
