@@ -419,16 +419,29 @@ def maybe_roll_months(conn: sqlite3.Connection, now: int, protocol: str) -> int:
 # ---- read --------------------------------------------------------------
 
 
-def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: int = 12) -> list[dict]:
-    """Most recent months first: the month in progress computed live,
-    then frozen months read back."""
+def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: int = 12) -> dict:
+    """FINISHED months only, most recent first, plus when the month in
+    progress closes.
+
+    The month in progress is deliberately absent. It can be computed --
+    compute_month() will happily do it for any month, and the freeze
+    below uses exactly that -- but showing it would turn every honor
+    into a running total that changes daily, and a title you can watch
+    slipping between two people all month is not a title. A month is
+    judged once, when it is over.
+
+    That does mean the page carries only the closing date until the
+    first month ends. An empty page for a few weeks is the cost of an
+    award that lands as an event.
+    """
     current = month_key(now)
-    out = [dict(compute_month(conn, protocol, current), in_progress=True)]
+    _, closes_at = month_bounds(current)
+    out: list[dict] = []
 
     rows = conn.execute(
         "SELECT month FROM month_result WHERE protocol = ? AND month < ? "
         " ORDER BY month DESC LIMIT ?",
-        (protocol, current, max(limit - 1, 0)),
+        (protocol, current, max(limit, 1)),
     ).fetchall()
     for r in rows:
         month = r["month"]
@@ -447,5 +460,10 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
         for a in awards:
             a["player"] = names.get(a["player_id"], (None, None))[0] if a["player_id"] else None
         out.append({"month": month, "protocol": protocol, "standings": standings,
-                    "awards": awards, "in_progress": False})
-    return out
+                    "awards": awards})
+    return {
+        "protocol": protocol,
+        "open_month": current,
+        "open_month_closes_at": closes_at,
+        "months": out,
+    }

@@ -841,9 +841,10 @@ def top_checkin_for(protocol: str) -> list[dict]:
     return result if result is not None else []
 
 
-def results_for(protocol: str, limit: int = 12) -> list[dict]:
-    """Monthly standings and honors for `protocol`, newest month first,
-    with the month in progress computed live. See app/results.py.
+def results_for(protocol: str, limit: int = 12) -> dict:
+    """Finished months for `protocol`, newest first, plus when the month
+    in progress closes. See app/results.py for why the open month is not
+    included.
 
     Same *_for() pattern as board_for/scores_for/top_for above, so
     app/api.py's Meshtastic route calls this rather than duplicating it.
@@ -853,11 +854,12 @@ def results_for(protocol: str, limit: int = 12) -> list[dict]:
         return results.month_results_for(conn, protocol, int(time.time()), limit)
 
     out = _safe_query(run)
-    return out if out is not None else []
+    return out if out is not None else {"protocol": protocol, "open_month": None,
+                                        "open_month_closes_at": None, "months": []}
 
 
 @router.get("/api/mc/results")
-async def mc_results() -> list[dict]:
+async def mc_results() -> dict:
     """Monthly results for the MeshCore board. See results_for()."""
     return results_for(MC_PROTOCOL)
 

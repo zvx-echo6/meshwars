@@ -296,7 +296,7 @@ async def get_nodes() -> Response:
 # results PAGE. A data route and a page cannot share it, and the page is
 # the one a person types.
 @router.get("/api/results")
-async def mt_results() -> list[dict]:
+async def mt_results() -> dict:
     """Monthly results for the Meshtastic board. See
     mc_api.results_for()."""
     return mc_api.results_for(MT_PROTOCOL)
