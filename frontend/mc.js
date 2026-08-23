@@ -136,9 +136,10 @@ function formatCountdown(secondsRemaining) {
 //  - History modal: /api/mc/history (array) vs /history (.seasons) --
 //                    same per-season shape once unwrapped.
 //  - Roster modal:  /api/mc/players (flat [{display_name,team}]) vs
-//                    /teams ({teams:{TEAM:[{display_name,node_hex}]}})
-//                    -- different shape, both grouped into a common
-//                    Map<team, [{display_name}]> by fetchRoster below.
+//                    /teams ({teams:{TEAM:[{display_name}]}}) -- one
+//                    entry per player on both, different shape, both
+//                    grouped into a common Map<team, [{display_name}]>
+//                    by fetchRoster below.
 //  - Player Find:   /api/mc/find?name= vs /find?name= -- identical
 //                    shape (same find_for() helper on both sides).
 //                    Looks a player up BY NAME and returns a bounds box
