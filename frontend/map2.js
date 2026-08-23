@@ -47,15 +47,20 @@ const HILLSHADE_ID = 'hillshade';
 // slightly higher exaggeration there. Keyed by theme name.
 const HILLSHADE_EXAGGERATION = { gold: 0.6, neon: 0.85 };
 
-// Each checkbox id -> the style layer id(s) it toggles. Layout
-// visibility only -- no source is ever added or removed here, so
-// toggling is instant and never refetches.
+// Each checkbox id -> the style layer id(s) it toggles, and the
+// minimum zoom its underlying data starts at (measured from the tile
+// archives -- see the minzoom comment in setupOverlayLayers below).
+// Layout visibility only -- no source is ever added or removed here,
+// so toggling is instant and never refetches. Below its minimum zoom
+// a layer has nothing to draw, so the switcher disables that entry
+// instead of leaving a ticked box that silently shows nothing; see
+// setupLayerSwitcher.
 const LAYER_TOGGLES = [
-  ['mw-layer-hillshade', [HILLSHADE_ID]],
-  ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line']],
-  ['mw-layer-usfs-roads', ['usfs-roads-line']],
-  ['mw-layer-usfs-trails', ['usfs-trails-line']],
-  ['mw-layer-blm-routes', ['blm-routes-line']],
+  ['mw-layer-hillshade', [HILLSHADE_ID], 0],
+  ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 4],
+  ['mw-layer-usfs-roads', ['usfs-roads-line'], 6],
+  ['mw-layer-usfs-trails', ['usfs-trails-line'], 6],
+  ['mw-layer-blm-routes', ['blm-routes-line'], 0],
 ];
 
 // pmtiles.js registers no protocol on its own -- this wires the
@@ -173,6 +178,22 @@ function watchTheme(map) {
 // flips a layout property -- no addSource/addLayer after this point.
 // Inserted beforeId 'board-fill' so they always sit under the team
 // squares, no matter the draw order MapLibre would otherwise pick.
+// Measured data ranges, from the tile headers (not a style choice):
+//   public-lands   z4  - z12
+//   usfs roads     z6  - z14
+//   usfs trails    z6  - z14
+//   blm routes     z0  - z12
+// None of the four gets a `maxzoom` -- MapLibre overzooms a vector
+// layer fine, reusing the highest tile it has, so each should keep
+// drawing all the way to the map's own maxZoom (17) rather than
+// stopping early. (Unlike the raster DEM hillshade above, which tore
+// on overzoom and is deliberately cut off at 13 -- left alone.)
+// Each layer below does get an explicit `minzoom` so its low end is
+// declared rather than accidental; the values mirror the tiles, they
+// are not a style choice. Below that zoom there is genuinely nothing
+// to draw -- see LAYER_TOGGLES and setupLayerSwitcher, which grey out
+// the corresponding checkbox instead of leaving it ticked over a
+// blank layer.
 function setupOverlayLayers(map) {
   map.addSource('public-lands', {
     type: 'vector',
@@ -192,6 +213,7 @@ function setupOverlayLayers(map) {
     type: 'fill',
     source: 'public-lands',
     'source-layer': 'public_lands',
+    minzoom: 4,
     layout: { visibility: 'none' },
     paint: {
       'fill-color': '#4f7a4a',
@@ -203,6 +225,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'public-lands',
     'source-layer': 'public_lands',
+    minzoom: 4,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#4f7a4a',
@@ -215,6 +238,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'usfs-trails-roads',
     'source-layer': 'roads',
+    minzoom: 6,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#b06a3a',
@@ -226,6 +250,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'usfs-trails-roads',
     'source-layer': 'trails',
+    minzoom: 6,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#7a5a2a',
@@ -238,6 +263,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'blm-trails-roads',
     'source-layer': 'blm_routes',
+    minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#8a6a4a',
@@ -246,17 +272,79 @@ function setupOverlayLayers(map) {
   }, 'board-fill');
 }
 
+// A checked box over a layer with no data at the current zoom reads as
+// broken -- there is nothing wrong, the tiles just do not exist below
+// their minzoom (see LAYER_TOGGLES / setupOverlayLayers). So each
+// switcher entry tracks the zoom it becomes available at, and this
+// applies that on every 'zoom' event (and once at setup, for whatever
+// zoom the map happened to load at):
+//   - below minzoom: disable the checkbox, mark its row .unavailable,
+//     and swap the label for one that names the reason.
+//   - at/above minzoom: re-enable it and restore the plain label.
+// What the user actually wants ticked is tracked separately (`wanted`)
+// from the checkbox's own `checked` state, which this function may
+// force off while unavailable -- so zooming back in restores the tick
+// on its own rather than the user having to redo it.
 function setupLayerSwitcher(map) {
-  for (const [checkboxId, layerIds] of LAYER_TOGGLES) {
+  const entries = [];
+
+  for (const [checkboxId, layerIds, minZoom] of LAYER_TOGGLES) {
     const checkbox = document.getElementById(checkboxId);
     if (!checkbox) continue;
+    const row = checkbox.closest('li');
+    const label = checkbox.closest('label');
+    // The label markup is `<input> Some Text` -- pull out that trailing
+    // text node once so it can be swapped for an availability note
+    // later without touching the checkbox or rebuilding the label.
+    let textNode = null;
+    if (label) {
+      for (const node of label.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
+          textNode = node;
+          break;
+        }
+      }
+    }
+    const baseText = textNode ? textNode.textContent.trim() : '';
+
+    const entry = { checkbox, layerIds, minZoom, row, textNode, baseText, wanted: checkbox.checked };
+    entries.push(entry);
+
     checkbox.addEventListener('change', () => {
+      entry.wanted = checkbox.checked;
       const visibility = checkbox.checked ? 'visible' : 'none';
       for (const layerId of layerIds) {
         map.setLayoutProperty(layerId, 'visibility', visibility);
       }
     });
   }
+
+  function applyAvailability() {
+    const zoom = map.getZoom();
+    for (const entry of entries) {
+      const available = zoom >= entry.minZoom;
+
+      entry.checkbox.disabled = !available;
+      if (entry.row) entry.row.classList.toggle('unavailable', !available);
+      if (entry.textNode) {
+        entry.textNode.textContent = available
+          ? ` ${entry.baseText}`
+          : ` ${entry.baseText} (from zoom ${entry.minZoom})`;
+      }
+
+      const shouldBeChecked = available && entry.wanted;
+      if (entry.checkbox.checked !== shouldBeChecked) {
+        entry.checkbox.checked = shouldBeChecked;
+        const visibility = shouldBeChecked ? 'visible' : 'none';
+        for (const layerId of entry.layerIds) {
+          map.setLayoutProperty(layerId, 'visibility', visibility);
+        }
+      }
+    }
+  }
+
+  map.on('zoom', applyAvailability);
+  applyAvailability();
 }
 
 async function loadBoardData(map) {

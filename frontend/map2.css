@@ -100,6 +100,20 @@ html, body {
   cursor: pointer;
 }
 
+/* Applied to a switcher row (see map2.js setupLayerSwitcher) when the
+ * current zoom is below that layer's data -- the checkbox is disabled
+ * at the same time, so this only needs to read as "off" rather than
+ * clickable. Colour comes from the theme's own least-emphasis token,
+ * same one used for captions and disabled controls elsewhere. */
+.mw-layers-list li.unavailable {
+  opacity: 0.45;
+  color: var(--mw-text-6);
+}
+
+.mw-layers-list li.unavailable label {
+  cursor: default;
+}
+
 .mw-scores {
   position: absolute;
   top: 12px;
