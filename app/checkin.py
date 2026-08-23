@@ -632,6 +632,19 @@ def mt_roster_entries(conn) -> list[dict]:
         "  FROM node_seen WHERE season_id = ? ORDER BY last_seen DESC",
         (season["id"],),
     ).fetchall()
+
+    # One bulk query rather than one per row: node_seen runs to roughly
+    # a thousand rows, so this stays a single query instead of a
+    # thousand. GROUP BY ... HAVING COUNT(*) = 1 picks out exactly the
+    # node_refs with a single distinct public_key on record -- the same
+    # "zero or many means NULL" rule POST /api/nodes uses when
+    # auto-filling a binding, applied here to a whole roster at once.
+    key_rows = conn.execute(
+        "SELECT node_ref, public_key FROM mt_node_key "
+        " GROUP BY node_ref HAVING COUNT(*) = 1"
+    ).fetchall()
+    key_by_ref = {r["node_ref"]: r["public_key"] for r in key_rows}
+
     excluded = settings.excluded_roles_set
     out = []
     for r in rows:
@@ -641,13 +654,15 @@ def mt_roster_entries(conn) -> list[dict]:
         name = r["name"]
         if not isinstance(name, str) or not name:
             continue
+        node_ref = format_node_ref(r["node_id"])
         out.append({
             "name": name,
             "short_name": r["short_name"] or None,
-            "node_ref": format_node_ref(r["node_id"]),
+            "node_ref": node_ref,
             "last_seen": r["last_seen"],
             "lat": r["lat"],
             "lon": r["lon"],
+            "public_key": key_by_ref.get(node_ref),
         })
     return out
 

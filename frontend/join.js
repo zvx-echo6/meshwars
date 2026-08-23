@@ -108,13 +108,15 @@ function displayNodeRef(protocol, nodeRef) {
 // Searchable pickers over GET /api/checkin/mc/nodes and
 // GET /api/checkin/mt/nodes (app/checkin_api.py) -- both public, no key
 // required, so a node picked here travels straight into the join form
-// itself: for Meshtastic it becomes /api/join's own optional node_ref
-// field (unchanged), and for MeshCore -- which /api/join has never
-// accepted a node_ref for, since a MeshCore radio normally self-binds
-// from a wardriving ping's contact key -- it becomes a follow-up
-// POST /api/nodes call in handleJoinClick() below, using the key
-// /api/join just returned. Either way the player never has to paste a
-// key of their own just to make a pick.
+// itself: for Meshtastic with no public key entered, it becomes
+// /api/join's own optional node_ref field (unchanged); with one
+// entered, or for MeshCore -- which /api/join has never accepted a
+// node_ref for, since a MeshCore radio normally self-binds from a
+// wardriving ping's contact key -- it becomes a follow-up POST
+// /api/nodes call in handleJoinClick() below (bindPickedMtNode() /
+// bindPickedMcNode()), using the key /api/join just returned. Either
+// way the player never has to paste a key of their own just to make a
+// pick.
 //
 // Replaces free-text node ID entry because the lists are genuinely long
 // (800+ Meshtastic entries) and, on both protocols, can contain more
@@ -154,7 +156,12 @@ function nodePickerEntryLabel(node) {
   return node.short_name ? `${node.name} (${node.short_name})` : node.name;
 }
 
-function createNodePicker(protocol) {
+// onSelect is optional and fires only from a picker click (never manual
+// entry, which has nothing to fire it with) -- today only the 'mt'
+// picker passes one, to auto-fill the public key field from the
+// picked entry's public_key (GET /api/checkin/mt/nodes now carries one
+// when mt_node_key has exactly one distinct key on file for that node).
+function createNodePicker(protocol, onSelect) {
   const els = {
     searchWrap: document.getElementById(`${protocol}-node-picker-search`),
     searchInput: document.getElementById(`f-${protocol}-node-search`),
@@ -245,6 +252,7 @@ function createNodePicker(protocol) {
     els.selectedName.textContent = nodePickerEntryLabel(node);
     els.selectedRef.textContent = displayNodeRef(protocol, node.node_ref);
     setMode('selected');
+    if (onSelect) onSelect(node);
   }
 
   function ensureFetched() {
@@ -558,6 +566,42 @@ async function bindPickedMcNode(key, nodeRef) {
   }
 }
 
+// Same shape and same reasoning as bindPickedMcNode() just above, but
+// only ever called when a public key was entered for a Meshtastic
+// registration. Without one, /api/join's own optional node_ref field
+// still does the binding in the same request as before (unchanged) --
+// there's nothing else worth a second call for. WITH one, /api/join is
+// asked to register with no node_ref at all (see handleJoinClick()) and
+// this follow-up POST /api/nodes call -- the one place public_key
+// validation lives (app/nodes_api.py) -- does the binding instead, so
+// the key travels in the exact same request as the node_ref it belongs
+// to rather than requiring a schema change to /api/join just to carry
+// one extra optional field.
+async function bindPickedMtNode(key, nodeRef, publicKey) {
+  try {
+    const res = await fetch('/api/nodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+      body: JSON.stringify({ node_ref: nodeRef, protocol: 'mt', public_key: publicKey }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      const detail = (data && typeof data.error === 'string') ? data.error : `status ${res.status}`;
+      return {
+        ok: false,
+        message: `Your account was created. The radio you picked was NOT attached to it (${detail}). Your key above still works -- paste it into the setup-check panel further down this page to add the radio there.`,
+      };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      message: "Your account was created. The radio you picked was NOT attached to it -- the server couldn't be reached to do it. Your key above still works -- paste it into the setup-check panel further down this page to add the radio there.",
+    };
+  }
+}
+
 async function handleJoinClick() {
   clearError();
   hideNodeWarning();
@@ -568,6 +612,11 @@ async function handleJoinClick() {
   const protocol = checkedProtocol ? checkedProtocol.value : 'mc';
   const mtNodeRef = mtPicker ? mtPicker.getValue() : null;
   const mcNodeRef = mcPicker ? mcPicker.getValue() : null;
+  const mtPublicKeyInput = document.getElementById('f-mt-public-key');
+  const mtPublicKeyRaw = mtPublicKeyInput ? mtPublicKeyInput.value.trim() : '';
+  // Only meaningful alongside a node -- a key with nothing to bind it
+  // to is never sent.
+  const mtPublicKey = (mtNodeRef && mtPublicKeyRaw) ? mtPublicKeyRaw : null;
 
   if (!selectedTeam) {
     showError('Choose a team.');
@@ -580,7 +629,13 @@ async function handleJoinClick() {
     team: selectedTeam,
     protocol,
   };
-  if (protocol === 'mt' && mtNodeRef) {
+  // With no public key, /api/join's own optional node_ref field still
+  // does the binding in the same request, exactly as before. With one,
+  // node_ref is left off here on purpose and the follow-up
+  // bindPickedMtNode() call below does the binding instead -- see that
+  // function's comment for why: public_key validation lives in
+  // app/nodes_api.py's POST /api/nodes, not /api/join.
+  if (protocol === 'mt' && mtNodeRef && !mtPublicKey) {
     body.node_ref = mtNodeRef;
   }
 
@@ -607,6 +662,12 @@ async function handleJoinClick() {
 
     if (protocol === 'mc' && mcNodeRef) {
       const bindResult = await bindPickedMcNode(data.key, mcNodeRef);
+      if (!bindResult.ok) {
+        showNodeWarning(bindResult.message);
+      }
+    }
+    if (protocol === 'mt' && mtNodeRef && mtPublicKey) {
+      const bindResult = await bindPickedMtNode(data.key, mtNodeRef, mtPublicKey);
       if (!bindResult.ok) {
         showNodeWarning(bindResult.message);
       }
@@ -1217,7 +1278,12 @@ function setupStatusKeyToggle() {
 function boot() {
   buildTeamPicker();
   mcPicker = createNodePicker('mc');
-  mtPicker = createNodePicker('mt');
+  mtPicker = createNodePicker('mt', (node) => {
+    if (node.public_key) {
+      const el = document.getElementById('f-mt-public-key');
+      if (el) el.value = node.public_key;
+    }
+  });
   setupProtocolToggle();
   applyMeshtasticAvailability();
   applyInviteCodeHint();

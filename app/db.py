@@ -206,6 +206,14 @@ CREATE TABLE IF NOT EXISTS player_node (
     node_ref   TEXT NOT NULL,
     player_id  INTEGER NOT NULL,
     bound_at   INTEGER NOT NULL,
+    -- Public key supplied at registration, mirroring mt_node_key above:
+    -- the key is the stable identity, node_ref is not (2.8 can change
+    -- an id under a node, and two nodes can collide on one). This is
+    -- metadata only -- a position packet still carries nothing but a
+    -- node id, so attribution still keys on node_ref exactly as before.
+    -- Nullable because most bindings predate this column and supplying
+    -- one is optional.
+    public_key TEXT,
     PRIMARY KEY (protocol, node_ref)
 );
 CREATE INDEX IF NOT EXISTS idx_player_node_player ON player_node(player_id);
@@ -738,6 +746,13 @@ MIGRATIONS = [
     # came from -- see mc_scoring.team_totals() for the combined figure
     # itself, which is what decides the winner.
     "ALTER TABLE mc_season_team_tally ADD COLUMN checkin_points REAL NOT NULL DEFAULT 0",
+    # Nullable on purpose: every binding written before this column
+    # existed has no key to backfill, and supplying one at registration
+    # is optional going forward too. See mt_node_key above -- the public
+    # key is the stable identity, node_ref is not, so this rides along
+    # as metadata; attribution still keys on node_ref because that is
+    # all a position packet carries.
+    "ALTER TABLE player_node ADD COLUMN public_key TEXT",
 ]
 
 PRAGMAS = [

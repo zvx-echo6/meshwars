@@ -64,7 +64,7 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .db import connect
 from .mc_ingest import hash_secret
-from .node_ref import normalize_node_ref
+from .node_ref import normalize_node_ref, normalize_public_key
 
 router = APIRouter()
 
@@ -219,6 +219,42 @@ def _radios_out(conn, player_id: int) -> list[dict]:
     ]
 
 
+def _resolve_public_key(conn, protocol: str, node_ref: str, raw_public_key: object) -> tuple[str | None, JSONResponse | None]:
+    """Work out what public_key to store on a new binding.
+
+    Supplied explicitly: it must normalize cleanly or this is a 400.
+    Not supplied: for a Meshtastic node, look it up in mt_node_key by
+    node_ref. If exactly one distinct key is on record, use it -- that
+    is the ordinary case, a node we've already heard NodeInfo from.
+    Zero rows means we've simply never heard it yet, so NULL is correct.
+    MORE than one distinct key is the drift/collision case mt_node_key
+    exists to catch -- the node has broadcast under two different keys
+    -- and guessing which one is "current" would be inventing an answer
+    this table was built specifically not to invent; NULL leaves it for
+    a human. MeshCore is left alone entirely: its node_ref already IS a
+    key prefix, so there is nothing to resolve.
+    """
+    if raw_public_key is not None:
+        normalized = normalize_public_key(raw_public_key)
+        if normalized is None:
+            return None, JSONResponse(
+                {"error": "public_key must be 64 hex characters"},
+                status_code=400,
+            )
+        return normalized, None
+
+    if protocol != "mt":
+        return None, None
+
+    rows = conn.execute(
+        "SELECT DISTINCT public_key FROM mt_node_key WHERE node_ref = ?",
+        (node_ref,),
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0]["public_key"], None
+    return None, None
+
+
 def _parse_protocol(raw: object) -> str:
     """Missing (None) means "not supplied" -> the default, "mt". Anything
     else that isn't one of _VALID_PROTOCOLS is invalid -- returned as ""
@@ -281,6 +317,10 @@ async def add_node(request: Request) -> JSONResponse:
     now = int(time.time())
     conn = connect()
     try:
+        public_key, err = _resolve_public_key(conn, protocol, node_ref, body.get("public_key"))
+        if err is not None:
+            return err
+
         conn.execute("BEGIN IMMEDIATE")
 
         # Check-then-act, same pattern as the already-registered check
@@ -312,9 +352,9 @@ async def add_node(request: Request) -> JSONResponse:
             )
 
         conn.execute(
-            "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) "
-            "VALUES (?, ?, ?, ?)",
-            (protocol, node_ref, player_id, now),
+            "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (protocol, node_ref, player_id, now, public_key),
         )
         conn.execute("COMMIT")
 

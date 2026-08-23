@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 
 _NODE_REF_RE = re.compile(r"^[0-9a-fA-F]{8}$")
+_PUBLIC_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def normalize_node_ref(raw: object) -> str | None:
@@ -39,6 +40,24 @@ def normalize_node_ref(raw: object) -> str | None:
     if not _NODE_REF_RE.match(bare):
         return None
     return bare.lower()
+
+
+def normalize_public_key(raw: object) -> str | None:
+    """Canonical form of a node's public key: strip whitespace, drop an
+    optional leading "0x", lowercase, and accept it only if what's left
+    is exactly 64 hexadecimal characters -- a 32-byte key rendered as
+    hex. Returns None for anything else, including None and the empty
+    string.
+    """
+    if not isinstance(raw, str):
+        return None
+    key = raw.strip()
+    if key.startswith("0x") or key.startswith("0X"):
+        key = key[2:]
+    key = key.lower()
+    if not _PUBLIC_KEY_RE.match(key):
+        return None
+    return key
 
 
 def normalize_sender_name(raw: object) -> str | None:
