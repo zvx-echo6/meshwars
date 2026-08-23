@@ -17,7 +17,7 @@ html {
 body {
   margin: 0;
   background: var(--mw-page);
-  color: #ddd;
+  color: var(--mw-text-1);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -44,7 +44,7 @@ body {
   text-align: center;
   padding: 48px 20px 40px;
   margin-bottom: 28px;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 12px;
   background-color: var(--mw-page);
   background-image:
@@ -82,7 +82,7 @@ body {
   max-width: 220px;
   text-align: center;
   background: var(--mw-panel);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 8px;
   padding: 14px 12px;
 }
@@ -101,13 +101,13 @@ body {
   font-size: 0.6875rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #999;
+  color: var(--mw-text-5);
 }
 
 /* ---- panels ------------------------------------------------------------ */
 .landing-panel {
   background: var(--mw-panel);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 8px;
   padding: 20px 22px;
   margin-bottom: 24px;
@@ -128,7 +128,7 @@ body {
   margin: 0 0 10px;
   font-size: 0.875rem;
   line-height: 1.5;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .landing-panel p:last-child { margin-bottom: 0; }
 
@@ -144,7 +144,7 @@ body {
   padding-left: 20px;
   font-size: 0.8125rem;
   line-height: 1.6;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .landing-list li { margin-bottom: 8px; }
 .landing-list li:last-child { margin-bottom: 0; }
@@ -164,7 +164,7 @@ body {
 }
 
 .team-chip {
-  --chip-color: #888;
+  --chip-color: var(--mw-text-6);
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -233,7 +233,7 @@ body {
 
 .protocol-card {
   background: #141414;
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--mw-raised);
   border-radius: 6px;
   padding: 12px 14px;
 }
@@ -263,7 +263,7 @@ body {
   margin: 0;
   font-size: 0.8125rem;
   line-height: 1.5;
-  color: #bbb;
+  color: var(--mw-text-3);
 }
 
 .protocol-live-badge {
@@ -287,9 +287,9 @@ body {
    /join protocol picker, kept in sync wording-wise. */
 .protocol-badge {
   display: inline-block;
-  background: #2a2410;
+  background: var(--mw-accent-wash);
   color: var(--mw-accent);
-  border: 1px solid #4a3f1a;
+  border: 1px solid var(--mw-accent-wash-line);
   border-radius: 3px;
   padding: 1px 5px;
   margin-left: 4px;
@@ -306,7 +306,7 @@ body {
   padding-left: 20px;
   font-size: 0.8125rem;
   line-height: 1.6;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .landing-steps li { margin-bottom: 6px; }
 .landing-steps li:last-child { margin-bottom: 0; }
@@ -323,13 +323,13 @@ body {
   padding-left: 20px;
   font-size: 0.8125rem;
   line-height: 1.6;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .landing-substeps li { margin-bottom: 8px; }
 .landing-substeps li:last-child { margin-bottom: 0; }
 .landing-substeps code {
   background: var(--mw-page);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 3px;
   padding: 1px 4px;
 }
@@ -353,7 +353,7 @@ body {
    the eye rather than blend into the surrounding paragraphs. Same
    treatment as join.css's .join-warning-box. */
 .landing-warning-box {
-  background: #2a1a10;
+  background: var(--mw-accent-deep);
   border: 1px solid var(--mw-hostile);
   border-radius: 6px;
   padding: 10px 12px;
@@ -370,7 +370,7 @@ body {
 
 .landing-warnings {
   background: #141414;
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--mw-raised);
   border-radius: 6px;
   padding: 10px 12px;
   margin-bottom: 14px;
@@ -378,23 +378,23 @@ body {
 .landing-warnings p {
   margin: 0 0 6px;
   font-size: 0.75rem;
-  color: #bbb;
+  color: var(--mw-text-3);
 }
 .landing-warnings p:last-child { margin-bottom: 0; }
 
 .landing-join-cta {
   display: block;
   text-align: center;
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
   padding: 10px;
   font-size: 0.875rem;
   font-weight: 700;
   text-decoration: none;
 }
-.landing-join-cta:hover { background: #333; }
+.landing-join-cta:hover { background: var(--mw-line); }
 
 /* ---- links list ----------------------------------------------------------- */
 .landing-links {
@@ -417,7 +417,7 @@ body {
 
 .landing-link-desc {
   display: block;
-  color: #999;
+  color: var(--mw-text-5);
   font-size: 0.75rem;
   margin-top: 2px;
 }
@@ -485,7 +485,7 @@ body {
   gap: 12px;
   padding: 0 16px;
   background: var(--mw-panel);
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--mw-line);
   box-sizing: border-box;
 }
 .mw-nav-brand {
@@ -500,10 +500,19 @@ body {
   text-decoration: none;
   white-space: nowrap;
 }
+/* A background rather than an <img src>, so the mark follows
+   --mw-crest the way every colour follows its token. The element keeps
+   an aria-label and role="img" since a background carries no alternative
+   text of its own. */
 .mw-nav-crest {
   display: block;
   height: 28px;
-  width: auto;
+  width: 28px;
+  flex: none;
+  background-image: var(--mw-crest);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 .mw-nav-links {
   display: flex;
@@ -514,14 +523,14 @@ body {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #999;
+  color: var(--mw-text-5);
   text-decoration: none;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   background: var(--mw-panel);
   white-space: nowrap;
 }
-.mw-nav-links a:hover { background: #262626; color: var(--mw-accent); }
+.mw-nav-links a:hover { background: var(--mw-raised); color: var(--mw-accent); }
 .mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
 
 /* GitHub mark: deliberately understated per the owner ("faded into the
@@ -534,13 +543,47 @@ body {
   align-items: center;
   justify-content: center;
   padding: 6px;
-  color: #999;
+  color: var(--mw-text-5);
   opacity: 0.35;
   text-decoration: none;
   border-radius: 4px;
   transition: opacity 0.15s ease, color 0.15s ease;
 }
 .mw-nav-github svg { display: block; }
+
+/* The skin switch, sitting quietly beside the GitHub mark and styled to
+   match it: this is a preference, not a feature, and it should not
+   compete with the page links for attention. The half-filled circle is
+   the conventional glyph and needs no label to read as "appearance".
+   It is a <button> rather than a link because it changes the page you
+   are on rather than taking you somewhere. */
+.mw-theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--mw-text-5);
+  opacity: 0.35;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-theme-btn svg { display: block; }
+.mw-theme-btn:hover,
+.mw-theme-btn:focus-visible {
+  opacity: 1;
+  color: var(--mw-accent);
+}
+.mw-theme-btn[aria-pressed="true"] {
+  opacity: 0.85;
+  color: var(--mw-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-nav-github, .mw-theme-btn { transition: none; }
+}
 .mw-nav-github:hover,
 .mw-nav-github:focus-visible {
   opacity: 1;
@@ -574,7 +617,7 @@ body {
   padding-left: 20px;
   font-size: 0.875rem;
   line-height: 1.6;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 
 .landing-plain li { margin-bottom: 4px; }

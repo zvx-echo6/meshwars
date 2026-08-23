@@ -23,4 +23,121 @@
   --mw-accent: var(--mw-gold);     /* was #e8a735 */
   --mw-panel:  var(--mw-ink-soft); /* was #1a1a1a */
   --mw-page:   var(--mw-ink);      /* was #0a0a0a */
+
+  /* ---- neutral ramp ------------------------------------------------
+     The brand colours above were tokenised from the start; the greys
+     were not, and roughly 120 literal #333 / #ccc / #888 values across
+     five stylesheets are exactly what stops a second theme from being
+     possible -- a theme block can redefine a token, but it can never
+     reach a hex typed into a rule.
+
+     These are the values that were already in use, unchanged, so the
+     default look is identical to the character. A ramp rather than
+     role names because that is honestly what they are: six steps of
+     dimming text, two weights of rule, one raised surface. A theme
+     shifts the whole ramp at once. */
+  --mw-text-1: #ddd;   /* body text */
+  --mw-text-2: #ccc;
+  --mw-text-3: #bbb;
+  --mw-text-4: #aaa;
+  --mw-text-5: #999;
+  --mw-text-6: #888;   /* captions, disabled, least emphasis */
+
+  --mw-line:        #333;    /* the default rule and panel border */
+  --mw-line-strong: #444;
+  --mw-raised:      #2a2a2a; /* a surface lifted off --mw-panel */
+
+  /* Accent-tinted surfaces: the warm dark fills behind a selected
+     control, a highlighted note, a callout. Tokenised for the same
+     reason the greys were -- a theme has to be able to move them, and a
+     cyan skin with four warm brown panels still left in it reads as a
+     half-finished job rather than a skin. */
+  --mw-accent-wash:      #2a2410;  /* subtle accent-tinted surface */
+  --mw-accent-wash-line: #4a3f1a;  /* its border */
+  --mw-accent-deep:      #2a1a10;  /* a deeper tint of the same idea */
+  --mw-accent-active:    #3a2f12;  /* a control that is currently selected */
+
+  /* The marks, as tokens for the same reason the colours are: a skin
+     swaps them by redefining a value rather than by any page knowing
+     which theme is on. Rendered as backgrounds (see .mw-nav-crest), so
+     an <img src> would defeat the point.
+
+     The favicon is NOT here and cannot be: it is a <link>, out of CSS's
+     reach, and a tab icon that changes under a reader is worse than one
+     that does not match. Same for the social images, which render where
+     no theme exists. */
+  --mw-crest: url("/static/assets/favicon/favicon-64x64.png");
+
+  /* No --mw-logo token yet, deliberately. The About hero is the full
+     horizontal lockup, and its lettering is custom artwork -- there is
+     no honest way to redraw it in another palette here, so the hero
+     stays one image on both skins and keeps its <picture> element,
+     alt text and dimensions. When a neon lockup exists, it becomes a
+     token exactly like the crest above; a token nothing reads today
+     would only be a promise the code does not keep. */
+}
+
+/* -------------------------------------------------------------------------
+   Alternate skin: neon.
+
+   Opt-in only. Gold stays the default because it is the more distinctive
+   identity -- neon is what every mesh and hacker project already looks
+   like, so it is offered as a skin rather than made the face of the site.
+   Applied by setting data-theme="neon" on <html>; see theme-toggle.js,
+   which also writes it before first paint so the page never flashes gold.
+
+   Redefines tokens ONLY. Nothing here styles a component, which is what
+   keeps a theme to one block instead of a parallel stylesheet -- and is
+   only possible because the neutral ramp above is tokenised too.
+
+   Two things deliberately do NOT change:
+
+   - Team colours. They live in the page scripts, not here, because they
+     are gameplay: seven maximally distinguishable colours on a map. Neon
+     versions of seven hues would collide with each other and with this
+     palette, and a player misreading who holds a square is a worse
+     outcome than a slightly off-palette dot.
+   - The favicon and the social images. CSS cannot reach a favicon,
+     people find a tab by its icon, and a link preview renders somewhere
+     the reader's theme does not exist. */
+:root[data-theme="neon"] {
+  /* The accent ramp: cyan where gold was. Bright enough to carry a
+     heading on near-black, dark enough at the bronze end to sit under
+     text as a fill. */
+  --mw-gold-light: #9DFDF6;
+  --mw-gold:       #2BE8E0;
+  --mw-bronze:     #0E4A52;
+
+  /* Ground and panel, biased blue rather than neutral black -- a pure
+     grey ground under a cyan accent reads as a mistake. */
+  --mw-ink:      #05080D;
+  --mw-ink-soft: #0B111A;
+
+  --mw-hostile:  #FF2E63;
+  --mw-friendly: #39FF88;
+
+  /* The same six-step ramp, shifted cool so text sits in the same
+     family as the ground instead of on top of it. */
+  --mw-text-1: #D6E6F2;
+  --mw-text-2: #BACBDA;
+  --mw-text-3: #A2B4C4;
+  --mw-text-4: #8B9DAD;
+  --mw-text-5: #75879A;
+  --mw-text-6: #5F7183;
+
+  --mw-line:        #1B2A3A;
+  --mw-line-strong: #27394D;
+  --mw-raised:      #131F2C;
+
+  --mw-accent-wash:      #0C2630;
+  --mw-accent-wash-line: #14424F;
+  --mw-accent-deep:      #08202B;
+  --mw-accent-active:    #0F3B47;
+
+  /* Drawn rather than recoloured: the gold crest is a painted heraldic
+     mark and a cyan trace of it would read as a worse copy, so the neon
+     crest is the same idea (shield, mesh, one node lit) drawn the way
+     this skin talks. The horizontal lockup is still the gold artwork --
+     its lettering is custom and cannot honestly be redrawn here. */
+  --mw-crest: url("/static/assets/logo/crest-neon.svg");
 }

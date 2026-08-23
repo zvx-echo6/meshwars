@@ -54,7 +54,7 @@
 /* ---- one month ------------------------------------------------------ */
 .rs-month {
   background: var(--mw-panel);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 8px;
   padding: 20px 22px;
   margin-bottom: 24px;
@@ -101,19 +101,19 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #8a8378;
+  color: var(--mw-text-6);
   padding: 0 10px 6px 0;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--mw-line);
 }
 
 .rs-table td {
   padding: 7px 10px 7px 0;
-  border-bottom: 1px solid #262220;
+  border-bottom: 1px solid var(--mw-line);
 }
 
 .rs-table tr:last-child td { border-bottom: 0; }
 .rs-num { text-align: right; padding-right: 0 !important; }
-.rs-rank { color: #6f675c; width: 2rem; }
+.rs-rank { color: var(--mw-text-6); width: 2rem; }
 .rs-total { color: var(--mw-gold-light); font-weight: 700; }
 
 .mc-dot {
@@ -132,7 +132,7 @@
   padding: 0;
   display: grid;
   gap: 1px;
-  background: #262220;   /* shows through as hairline rules between rows */
+  background: var(--mw-line);   /* shows through as hairline rules between rows */
   border-radius: 4px;
   overflow: hidden;
 }
@@ -153,18 +153,18 @@
   letter-spacing: 0.02em;
 }
 
-.rs-honor-who { color: #d8d0c4; }
+.rs-honor-who { color: var(--mw-text-1); }
 
 .rs-scope {
   font-size: 0.8125rem;
   font-weight: 400;
-  color: #8a8378;
+  color: var(--mw-text-6);
   white-space: nowrap;
 }
 
 .rs-detail {
   text-align: right;
-  color: #8a8378;
+  color: var(--mw-text-6);
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
 }
@@ -182,7 +182,7 @@
 }
 
 .rs-empty, .rs-loading {
-  color: #8a8378;
+  color: var(--mw-text-6);
   font-size: 0.9375rem;
   margin: 4px 0 0;
 }

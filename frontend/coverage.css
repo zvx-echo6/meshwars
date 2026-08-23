@@ -19,7 +19,7 @@ html, body {
   padding: 0;
   height: 100%;
   background: var(--mw-page);
-  color: #ddd;
+  color: var(--mw-text-1);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
                "Helvetica Neue", Arial, sans-serif;
 }
@@ -59,7 +59,7 @@ html, body {
 .mw-noscript p {
   max-width: 480px;
   margin: 0;
-  color: #ddd;
+  color: var(--mw-text-1);
   font-size: 14px;
   line-height: 1.5;
   text-align: center;
@@ -81,11 +81,11 @@ html, body {
 }
 #loading-overlay.fade-out { opacity: 0; pointer-events: none; }
 .loading-inner { text-align: center; }
-.loading-text  { margin-top: 14px; color: #888; font-size: 13px; }
+.loading-text  { margin-top: 14px; color: var(--mw-text-6); font-size: 13px; }
 .loading-spinner {
   width: 32px;
   height: 32px;
-  border: 3px solid #2a2a2a;
+  border: 3px solid var(--mw-raised);
   border-top-color: var(--mw-accent);
   border-radius: 50%;
   margin: 0 auto;
@@ -99,21 +99,21 @@ html, body {
 .leaflet-bar a,
 .leaflet-bar a:hover {
   background-color: var(--mw-panel);
-  color: #ddd;
-  border-bottom: 1px solid #333;
+  color: var(--mw-text-1);
+  border-bottom: 1px solid var(--mw-line);
 }
 .leaflet-control-attribution {
   background: rgba(20, 20, 20, 0.7) !important;
-  color: #888 !important;
+  color: var(--mw-text-6) !important;
 }
-.leaflet-control-attribution a { color: #aaa !important; }
+.leaflet-control-attribution a { color: var(--mw-text-4) !important; }
 .leaflet-popup-content-wrapper, .leaflet-popup-tip {
   background: var(--mw-panel);
-  color: #ddd;
-  border: 1px solid #333;
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
 }
 .leaflet-popup-content { margin: 12px 14px; font-size: 13px; line-height: 1.45; }
-.leaflet-popup-close-button { color: #aaa !important; }
+.leaflet-popup-close-button { color: var(--mw-text-4) !important; }
 
 /* -------------------------------------------------------------------------
    Site nav bar (Map / About / Join). Fixed, full width, across the very
@@ -146,7 +146,7 @@ html, body {
   gap: 12px;
   padding: 0 16px;
   background: var(--mw-panel);
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--mw-line);
   box-sizing: border-box;
 }
 .mw-nav-brand {
@@ -161,10 +161,19 @@ html, body {
   text-decoration: none;
   white-space: nowrap;
 }
+/* A background rather than an <img src>, so the mark follows
+   --mw-crest the way every colour follows its token. The element keeps
+   an aria-label and role="img" since a background carries no alternative
+   text of its own. */
 .mw-nav-crest {
   display: block;
   height: 28px;
-  width: auto;
+  width: 28px;
+  flex: none;
+  background-image: var(--mw-crest);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 .mw-nav-links {
   display: flex;
@@ -175,14 +184,14 @@ html, body {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #999;
+  color: var(--mw-text-5);
   text-decoration: none;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   background: var(--mw-panel);
   white-space: nowrap;
 }
-.mw-nav-links a:hover { background: #262626; color: var(--mw-accent); }
+.mw-nav-links a:hover { background: var(--mw-raised); color: var(--mw-accent); }
 .mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
 
 /* GitHub mark: deliberately understated per the owner ("faded into the
@@ -195,7 +204,7 @@ html, body {
   align-items: center;
   justify-content: center;
   padding: 6px;
-  color: #999;
+  color: var(--mw-text-5);
   opacity: 0.35;
   text-decoration: none;
   border-radius: 4px;
@@ -216,4 +225,35 @@ html, body {
   .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
   .mw-nav-github { padding: 4px; }
   .mw-nav-github svg { width: 14px; height: 14px; }
+}
+
+/* Skin switch -- see the matching rule in landing.css. The nav is
+   duplicated across this file, landing.css and join.css (the pages do
+   not share a stylesheet), so this rule is too. */
+.mw-theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--mw-text-5);
+  opacity: 0.35;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-theme-btn svg { display: block; }
+.mw-theme-btn:hover,
+.mw-theme-btn:focus-visible {
+  opacity: 1;
+  color: var(--mw-accent);
+}
+.mw-theme-btn[aria-pressed="true"] {
+  opacity: 0.85;
+  color: var(--mw-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-theme-btn { transition: none; }
 }

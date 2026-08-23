@@ -14,7 +14,7 @@ html {
 body {
   margin: 0;
   background: var(--mw-page);
-  color: #ddd;
+  color: var(--mw-text-1);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -32,13 +32,13 @@ body {
 
 .join-tagline {
   margin: 0 0 20px;
-  color: #aaa;
+  color: var(--mw-text-4);
   font-size: 0.875rem;
 }
 
 .join-panel {
   background: var(--mw-panel);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 8px;
   padding: 16px 18px;
   margin-bottom: 16px;
@@ -66,7 +66,7 @@ body {
   margin: 0 auto 12px;
   text-align: right;
   font-size: 0.75rem;
-  color: #999;
+  color: var(--mw-text-5);
 }
 .join-check-teaser a {
   color: var(--mw-accent);
@@ -89,13 +89,13 @@ body {
   font-size: 0.6875rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #888;
+  color: var(--mw-text-6);
   margin: 14px 0 6px;
 }
 
 .join-play-area p {
   font-size: 0.8125rem;
-  color: #ccc;
+  color: var(--mw-text-2);
   margin: 0;
 }
 
@@ -112,7 +112,7 @@ body {
   display: block;
   margin-bottom: 14px;
   font-size: 0.75rem;
-  color: #999;
+  color: var(--mw-text-5);
 }
 
 .join-field > span {
@@ -127,8 +127,8 @@ body {
 .join-field input[type="password"] {
   width: 100%;
   background: var(--mw-page);
-  color: #ddd;
-  border: 1px solid #333;
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   padding: 8px 10px;
   font-size: 0.875rem;
@@ -142,12 +142,12 @@ body {
 
 .hint {
   font-size: 0.6875rem;
-  color: #888;
+  color: var(--mw-text-6);
   margin: 4px 0 0;
 }
 .hint code {
   background: var(--mw-page);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 3px;
   padding: 1px 4px;
 }
@@ -181,7 +181,7 @@ body {
 }
 
 .team-swatch {
-  --swatch-color: #888;
+  --swatch-color: var(--mw-text-6);
   background: var(--mw-page);
   color: var(--swatch-color);
   border: 1px solid var(--swatch-color);
@@ -212,7 +212,7 @@ body {
   align-items: center;
   gap: 6px;
   font-size: 0.8125rem;
-  color: #ddd;
+  color: var(--mw-text-1);
   cursor: pointer;
 }
 
@@ -223,9 +223,9 @@ body {
 
 .protocol-badge {
   display: inline-block;
-  background: #2a2410;
+  background: var(--mw-accent-wash);
   color: var(--mw-accent);
-  border: 1px solid #4a3f1a;
+  border: 1px solid var(--mw-accent-wash-line);
   border-radius: 3px;
   padding: 1px 5px;
   margin-left: 4px;
@@ -249,12 +249,12 @@ body {
 
 .protocol-block {
   background: #141414;
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--mw-raised);
   border-radius: 6px;
   padding: 10px 12px;
   margin-bottom: 14px;
   font-size: 0.75rem;
-  color: #bbb;
+  color: var(--mw-text-3);
 }
 
 .protocol-block p {
@@ -282,7 +282,7 @@ body {
   padding: 0;
   max-height: 220px;
   overflow-y: auto;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   background: var(--mw-page);
 }
@@ -294,10 +294,10 @@ body {
   text-align: left;
   background: none;
   border: none;
-  border-bottom: 1px solid #262626;
+  border-bottom: 1px solid var(--mw-raised);
   padding: 7px 10px;
   cursor: pointer;
-  color: #ddd;
+  color: var(--mw-text-1);
 }
 .node-picker-results li:last-child .node-picker-result {
   border-bottom: none;
@@ -312,7 +312,7 @@ body {
 }
 .node-picker-result-name {
   font-size: 0.8125rem;
-  color: #ddd;
+  color: var(--mw-text-1);
 }
 /* Bare 8-hex on MeshCore, "!"-prefixed on Meshtastic -- rendered by the
    shared displayNodeRef() helper in join.js, same convention already
@@ -322,7 +322,7 @@ body {
 .node-picker-result-ref {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.6875rem;
-  color: #888;
+  color: var(--mw-text-6);
 }
 
 .node-picker-status {
@@ -335,7 +335,7 @@ body {
   justify-content: space-between;
   gap: 10px;
   background: var(--mw-page);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   padding: 8px 10px;
   margin: 10px 0 4px;
@@ -357,24 +357,24 @@ body {
 }
 .node-picker-selected-name {
   font-size: 0.8125rem;
-  color: #ddd;
+  color: var(--mw-text-1);
 }
 .node-picker-selected-ref {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.6875rem;
-  color: #888;
+  color: var(--mw-text-6);
 }
 .node-picker-change-btn {
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
   padding: 5px 10px;
   font-size: 0.75rem;
   cursor: pointer;
   flex: 0 0 auto;
 }
-.node-picker-change-btn:hover { background: #333; }
+.node-picker-change-btn:hover { background: var(--mw-line); }
 
 .node-picker-manual {
   margin: 10px 0 4px;
@@ -383,9 +383,9 @@ body {
 #join-submit,
 #status-submit {
   width: 100%;
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
   padding: 10px;
   font-size: 0.875rem;
@@ -393,7 +393,7 @@ body {
   cursor: pointer;
 }
 #join-submit:hover,
-#status-submit:hover { background: #333; }
+#status-submit:hover { background: var(--mw-line); }
 #join-submit:disabled,
 #status-submit:disabled { opacity: 0.5; cursor: default; }
 
@@ -418,7 +418,7 @@ body {
    meshmapper:// link into the URL field" caution, which needs to stop
    the eye rather than blend into the surrounding paragraphs. */
 .join-warning-box {
-  background: #2a1a10;
+  background: var(--mw-accent-deep);
   border: 1px solid var(--mw-hostile);
   border-radius: 6px;
   padding: 10px 12px;
@@ -457,8 +457,8 @@ body {
 .copy-row input {
   flex: 1;
   background: var(--mw-page);
-  color: #ddd;
-  border: 1px solid #333;
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   padding: 6px 8px;
   font-size: 0.75rem;
@@ -466,16 +466,16 @@ body {
 }
 
 .copy-row button {
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
   padding: 6px 12px;
   font-size: 0.75rem;
   cursor: pointer;
   flex: 0 0 auto;
 }
-.copy-row button:hover { background: #333; }
+.copy-row button:hover { background: var(--mw-line); }
 
 /* ---- The join flow (#join-flow-panel) ------------------------------------
    One continuous numbered sequence -- native <ol> numbering is the
@@ -486,7 +486,7 @@ body {
   list-style: decimal;
   padding-left: 22px;
   margin: 8px 0 0;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .join-flow > li {
   margin-bottom: 22px;
@@ -496,7 +496,7 @@ body {
 }
 .join-flow-label {
   font-size: 0.8125rem;
-  color: #ddd;
+  color: var(--mw-text-1);
   line-height: 1.4;
   margin: 0 0 8px;
 }
@@ -572,7 +572,7 @@ body {
    via #working-check-panel p a above. */
 #working-check-panel p {
   font-size: 0.8125rem;
-  color: #ccc;
+  color: var(--mw-text-2);
   margin: 0 0 10px;
 }
 #working-check-panel p:last-child {
@@ -594,8 +594,8 @@ body {
 .key-input-row input {
   flex: 1;
   background: var(--mw-page);
-  color: #ddd;
-  border: 1px solid #333;
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   padding: 8px 10px;
   font-size: 0.875rem;
@@ -606,23 +606,23 @@ body {
   border-color: var(--mw-accent);
 }
 .key-input-row button {
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
   padding: 6px 12px;
   font-size: 0.75rem;
   cursor: pointer;
   flex: 0 0 auto;
 }
-.key-input-row button:hover { background: #333; }
+.key-input-row button:hover { background: var(--mw-line); }
 
 .status-result {
   margin-top: 14px;
 }
 .status-result p {
   font-size: 0.8125rem;
-  color: #ccc;
+  color: var(--mw-text-2);
   margin: 0 0 8px;
 }
 
@@ -645,7 +645,7 @@ body {
   color: #b8e0a0;
 }
 .status-diagnosis-attention {
-  background: #2a1a10;
+  background: var(--mw-accent-deep);
   border: 1px solid var(--mw-hostile);
   color: #f0c0a8;
 }
@@ -658,13 +658,13 @@ body {
 }
 .status-table th,
 .status-table td {
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   padding: 5px 8px;
   text-align: left;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .status-table thead th {
-  color: #888;
+  color: var(--mw-text-6);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-size: 0.625rem;
@@ -683,7 +683,7 @@ body {
    player never sees it. */
 .status-protocol-divider {
   border: none;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid var(--mw-raised);
   margin: 16px 0 12px;
 }
 
@@ -694,7 +694,7 @@ body {
 .status-radios {
   margin-top: 18px;
   padding-top: 14px;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid var(--mw-raised);
 }
 
 .radios-list {
@@ -709,12 +709,12 @@ body {
   justify-content: space-between;
   gap: 10px;
   background: var(--mw-page);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   padding: 8px 10px;
   margin-bottom: 6px;
   font-size: 0.8125rem;
-  color: #ddd;
+  color: var(--mw-text-1);
 }
 .radios-item span {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -734,7 +734,7 @@ body {
 
 .radios-empty {
   list-style: none;
-  color: #888;
+  color: var(--mw-text-6);
   font-size: 0.8125rem;
   margin: 0 0 12px;
   padding: 0;
@@ -757,16 +757,16 @@ body {
 .add-radio-form select {
   width: 100%;
   background: var(--mw-page);
-  color: #ddd;
-  border: 1px solid #333;
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   padding: 8px 10px;
   font-size: 0.875rem;
 }
 .add-radio-form button {
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
   padding: 10px 14px;
   font-size: 0.8125rem;
@@ -774,7 +774,7 @@ body {
   cursor: pointer;
   flex: 0 0 auto;
 }
-.add-radio-form button:hover { background: #333; }
+.add-radio-form button:hover { background: var(--mw-line); }
 .add-radio-form button:disabled { opacity: 0.5; cursor: default; }
 
 /* ---- MeshCore check-in fallback name (advanced, inside #status-radios) --
@@ -787,11 +787,11 @@ body {
 .checkin-name-section {
   margin-top: 16px;
   padding-top: 14px;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid var(--mw-raised);
 }
 .checkin-name-section summary {
   cursor: pointer;
-  color: #999;
+  color: var(--mw-text-5);
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -810,12 +810,12 @@ body {
   justify-content: space-between;
   gap: 10px;
   background: var(--mw-page);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   padding: 8px 10px;
   margin: 8px 0 10px;
   font-size: 0.8125rem;
-  color: #ddd;
+  color: var(--mw-text-1);
 }
 .checkin-name-current[hidden] {
   display: none;
@@ -844,9 +844,9 @@ body {
   margin: 0;
 }
 .checkin-name-form button {
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
   padding: 10px 14px;
   font-size: 0.8125rem;
@@ -854,7 +854,7 @@ body {
   cursor: pointer;
   flex: 0 0 auto;
 }
-.checkin-name-form button:hover { background: #333; }
+.checkin-name-form button:hover { background: var(--mw-line); }
 .checkin-name-form button:disabled { opacity: 0.5; cursor: default; }
 
 
@@ -890,7 +890,7 @@ body {
   gap: 12px;
   padding: 0 16px;
   background: var(--mw-panel);
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--mw-line);
   box-sizing: border-box;
 }
 .mw-nav-brand {
@@ -905,10 +905,19 @@ body {
   text-decoration: none;
   white-space: nowrap;
 }
+/* A background rather than an <img src>, so the mark follows
+   --mw-crest the way every colour follows its token. The element keeps
+   an aria-label and role="img" since a background carries no alternative
+   text of its own. */
 .mw-nav-crest {
   display: block;
   height: 28px;
-  width: auto;
+  width: 28px;
+  flex: none;
+  background-image: var(--mw-crest);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 .mw-nav-links {
   display: flex;
@@ -919,14 +928,14 @@ body {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #999;
+  color: var(--mw-text-5);
   text-decoration: none;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   background: var(--mw-panel);
   white-space: nowrap;
 }
-.mw-nav-links a:hover { background: #262626; color: var(--mw-accent); }
+.mw-nav-links a:hover { background: var(--mw-raised); color: var(--mw-accent); }
 .mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
 
 /* GitHub mark: deliberately understated per the owner ("faded into the
@@ -939,7 +948,7 @@ body {
   align-items: center;
   justify-content: center;
   padding: 6px;
-  color: #999;
+  color: var(--mw-text-5);
   opacity: 0.35;
   text-decoration: none;
   border-radius: 4px;
@@ -960,4 +969,35 @@ body {
   .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
   .mw-nav-github { padding: 4px; }
   .mw-nav-github svg { width: 14px; height: 14px; }
+}
+
+/* Skin switch -- see the matching rule in landing.css. The nav is
+   duplicated across this file, landing.css and join.css (the pages do
+   not share a stylesheet), so this rule is too. */
+.mw-theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--mw-text-5);
+  opacity: 0.35;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-theme-btn svg { display: block; }
+.mw-theme-btn:hover,
+.mw-theme-btn:focus-visible {
+  opacity: 1;
+  color: var(--mw-accent);
+}
+.mw-theme-btn[aria-pressed="true"] {
+  opacity: 0.85;
+  color: var(--mw-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-theme-btn { transition: none; }
 }

@@ -77,10 +77,17 @@
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
     }).addTo(map);
 
+    // Leaflet paints to canvas, so the token cannot be handed to it as a
+    // var() -- but it can be READ off the document, which is what keeps
+    // this rectangle on-palette when the skin changes instead of leaving
+    // a gold box on a cyan page. The fallback is the gold value.
+    const accent = getComputedStyle(document.documentElement)
+      .getPropertyValue('--mw-gold').trim() || '#A9885B';
+
     L.rectangle(bounds, {
-      color: '#A9885B',        // --mw-gold; Leaflet paints to canvas, not
-      weight: 2,               // CSS, so the token cannot be used directly
-      fillColor: '#A9885B',
+      color: accent,
+      weight: 2,
+      fillColor: accent,
       fillOpacity: 0.12,
       interactive: false,
     }).addTo(map);

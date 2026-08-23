@@ -14,7 +14,7 @@
 #play-area-map {
   height: 260px;
   width: 100%;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 6px;
   background: var(--mw-page);
   /* Leaflet stacks panes/controls with z-index; give the container its
@@ -27,7 +27,7 @@
 /* Leaflet's default attribution is white-on-light; these pages are dark. */
 #play-area-map .leaflet-control-attribution {
   background: rgba(12, 11, 10, 0.75);
-  color: #8a8378;
+  color: var(--mw-text-6);
   font-size: 0.6875rem;
 }
 
