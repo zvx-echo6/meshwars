@@ -57,9 +57,9 @@ const HILLSHADE_EXAGGERATION = { gold: 0.6, neon: 0.85 };
 // setupLayerSwitcher.
 const LAYER_TOGGLES = [
   ['mw-layer-hillshade', [HILLSHADE_ID], 0],
-  ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 4],
-  ['mw-layer-usfs-roads', ['usfs-roads-line'], 6],
-  ['mw-layer-usfs-trails', ['usfs-trails-line'], 6],
+  ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 0],
+  ['mw-layer-usfs-roads', ['usfs-roads-line'], 0],
+  ['mw-layer-usfs-trails', ['usfs-trails-line'], 0],
   ['mw-layer-blm-routes', ['blm-routes-line'], 0],
 ];
 
@@ -179,21 +179,23 @@ function watchTheme(map) {
 // Inserted beforeId 'board-fill' so they always sit under the team
 // squares, no matter the draw order MapLibre would otherwise pick.
 // Measured data ranges, from the tile headers (not a style choice):
-//   public-lands   z4  - z12
-//   usfs roads     z6  - z14
-//   usfs trails    z6  - z14
+//   usfs roads     z0  - z14
+//   usfs trails    z0  - z14
+//   public-lands   z0  - z12
 //   blm routes     z0  - z12
+// All four now start at z0. The usfs and public-lands archives used to
+// report z6 and z4 floors respectively -- that was never a limit of the
+// source data, it was tippecanoe flags baked into the old archives. Both
+// have since been rebuilt from the source geodatabases on navi, and the
+// rebuilt archives simply start at zero like blm always did.
 // None of the four gets a `maxzoom` -- MapLibre overzooms a vector
 // layer fine, reusing the highest tile it has, so each should keep
 // drawing all the way to the map's own maxZoom (17) rather than
 // stopping early. (Unlike the raster DEM hillshade above, which tore
 // on overzoom and is deliberately cut off at 13 -- left alone.)
-// Each layer below does get an explicit `minzoom` so its low end is
-// declared rather than accidental; the values mirror the tiles, they
-// are not a style choice. Below that zoom there is genuinely nothing
-// to draw -- see LAYER_TOGGLES and setupLayerSwitcher, which grey out
-// the corresponding checkbox instead of leaving it ticked over a
-// blank layer.
+// Each layer below does still get an explicit `minzoom` so its low end
+// is declared rather than accidental; the values mirror the tiles, they
+// are not a style choice.
 function setupOverlayLayers(map) {
   map.addSource('public-lands', {
     type: 'vector',
@@ -213,7 +215,7 @@ function setupOverlayLayers(map) {
     type: 'fill',
     source: 'public-lands',
     'source-layer': 'public_lands',
-    minzoom: 4,
+    minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
       'fill-color': '#4f7a4a',
@@ -225,7 +227,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'public-lands',
     'source-layer': 'public_lands',
-    minzoom: 4,
+    minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#4f7a4a',
@@ -238,7 +240,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'usfs-trails-roads',
     'source-layer': 'roads',
-    minzoom: 6,
+    minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#b06a3a',
@@ -250,7 +252,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'usfs-trails-roads',
     'source-layer': 'trails',
-    minzoom: 6,
+    minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#7a5a2a',
@@ -285,6 +287,10 @@ function setupOverlayLayers(map) {
 // from the checkbox's own `checked` state, which this function may
 // force off while unavailable -- so zooming back in restores the tick
 // on its own rather than the user having to redo it.
+// Dormant right now: every archive in LAYER_TOGGLES starts at z0, so
+// `available` below is always true -- kept because it is data-driven off
+// LAYER_TOGGLES, not deleted, for whichever future layer does not start
+// at zero.
 function setupLayerSwitcher(map) {
   const entries = [];
 
