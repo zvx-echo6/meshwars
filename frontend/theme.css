@@ -134,13 +134,14 @@
   --mw-accent-deep:      #08202B;
   --mw-accent-active:    #0F3B47;
 
-  /* The crest is drawn rather than recoloured -- the gold one is a
-     painted heraldic mark and a cyan trace of it would read as a worse
-     copy -- so it is the same idea (shield, mesh, one node lit) in this
-     skin's own language. The lockup is generated artwork, fitted to the
-     gold one's exact 1010x320 frame so the hero renders identically on
-     either skin rather than reflowing when you switch. */
-  --mw-crest: url("/static/assets/logo/crest-neon.svg");
+  /* Both marks come out of the same generated lockup: the crest is its
+     shield, cropped and squared, rather than a separate drawing. An
+     earlier hand-drawn SVG sat here and was replaced -- a nav crest that
+     is a different shield from the one in the hero is the kind of
+     mismatch nobody can name but everybody feels. The lockup itself is
+     fitted to the gold one's exact 1010x320 frame, so the hero renders
+     identically on either skin instead of reflowing when you switch. */
+  --mw-crest: url("/static/assets/logo/crest-neon.png");
   --mw-logo:  url("/static/assets/logo/meshwars-horizontal-neon.webp");
   --mw-hero-scrim: linear-gradient(180deg, rgba(5, 8, 13, 0.82) 0%, rgba(5, 8, 13, 0.94) 100%);
 }
