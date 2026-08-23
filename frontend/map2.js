@@ -284,6 +284,12 @@ async function main() {
     container: 'map',
     center: [-116.10, 43.76],
     zoom: 10,
+    // Pitching made the hillshade render with holes -- the DEM tiles are
+    // not all there once the camera tilts, with nothing erroring to say
+    // so -- and it took bandwidth from 8 MB to 32 MB for a worse picture.
+    // This is a top-down territory game, so the camera is locked flat
+    // rather than the rendering chased.
+    maxPitch: 0,
     style: {
       version: 8,
       sources: {
@@ -338,7 +344,16 @@ async function main() {
     },
   });
 
-  map.addControl(new maplibregl.NavigationControl(), 'top-left');
+  // Camera is locked flat (see maxPitch above), so drop the compass/pitch
+  // button from the nav control -- there is nothing left for it to do.
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+
+  // Belt-and-suspenders for the flat camera: disable every interaction
+  // that could still pitch or rotate the map. Each handler is guarded in
+  // case a future MapLibre version renames one.
+  if (map.dragRotate) map.dragRotate.disable();
+  if (map.touchZoomRotate) map.touchZoomRotate.disableRotation();
+  if (map.keyboard) map.keyboard.disableRotation();
 
   map.on('load', () => {
     // Board source/layers are created empty and filled in once the
