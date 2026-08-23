@@ -44,6 +44,7 @@ from .mc_ingest import hash_secret, log_raw_batch
 from .mc_scoring import team_checkin_points, team_tile_counts
 from .node_ref import normalize_node_ref
 from .nodes_api import router as nodes_router
+from .public_api import router as public_router
 
 log = logging.getLogger("api")
 
@@ -705,6 +706,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(admin_router)
     app.include_router(nodes_router)
     app.include_router(checkin_router)
+    app.include_router(public_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
@@ -730,6 +732,13 @@ def mount(app: FastAPI) -> None:
         @app.get("/rules", response_class=HTMLResponse, include_in_schema=False)
         async def rules_page(request: Request):
             return _templated_html_page(request, frontend_dir / "rules.html", "rules page not bundled")
+
+        # Not in the nav bar on purpose -- this is a reference for the
+        # handful of people building against the API, linked from the
+        # foot of /about rather than offered to every visitor.
+        @app.get("/api", response_class=HTMLResponse, include_in_schema=False)
+        async def api_docs_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "api.html", "api docs not bundled")
 
         # robots.txt / sitemap.xml: plain static files, same explicit
         # top-level-route pattern as the three pages above (not folded

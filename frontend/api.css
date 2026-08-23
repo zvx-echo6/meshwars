@@ -1,0 +1,50 @@
+/* /api -- the public API docs. Rides on rules.css, which already has the
+   contents rail, the reading column and the tables; only the things a
+   reference page needs that a rulebook does not live here. */
+
+/* An endpoint line: the thing a reader scans for. Monospace because it
+   is a URL to be copied, not prose to be read, and set apart from the
+   paragraph under it rather than buried in one. */
+.api-route {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.875rem;
+  color: var(--mw-text-1);
+  background: var(--mw-raised);
+  border-left: 3px solid var(--mw-gold);
+  border-radius: 0 4px 4px 0;
+  padding: 7px 12px;
+  margin: 0 0 12px;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.api-verb {
+  color: var(--mw-gold);
+  font-weight: 700;
+  margin-right: 8px;
+  letter-spacing: 0.05em;
+}
+
+/* Response samples and code. Real captured output, so some of it is
+   wide; it scrolls in its own box rather than widening the page. */
+.api-pre {
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 12px 14px;
+  margin: 0 0 14px;
+  overflow-x: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--mw-text-2);
+  /* Long JSON stays on its own lines rather than reflowing into
+     something that no longer looks like JSON. */
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* A sample can be tall; cap it so one response does not push the next
+   section off the screen entirely. */
+.api-pre { max-height: 30rem; overflow-y: auto; }

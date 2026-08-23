@@ -633,3 +633,24 @@ body {
 .landing-plain li { margin-bottom: 4px; }
 .landing-plain li:last-child { margin-bottom: 0; }
 .landing-plain strong { color: var(--mw-gold-light); }
+
+/* A quiet line at the very foot of /about, pointing at the API docs.
+   Not a panel and not in the nav: it is for the few people who want to
+   build something, and it should read as a footnote to everyone else. */
+.landing-footnote {
+  margin: 8px 0 0;
+  padding-top: 20px;
+  border-top: 1px solid var(--mw-line);
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.landing-footnote a { color: var(--mw-gold); font-weight: 600; text-decoration: none; }
+.landing-footnote a:hover { text-decoration: underline; }
+
+@media (min-width: 900px) {
+  /* Spans both columns, so it sits under the whole page rather than
+     landing at the bottom of whichever column it flowed into. */
+  .landing-footnote { column-span: all; }
+}

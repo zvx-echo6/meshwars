@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from .api import mount
@@ -84,6 +85,22 @@ app = FastAPI(title="meshwars", lifespan=lifespan)
 # minimum_size skips the small routes (/scores, /config, /season), where
 # the header overhead would not pay for itself.
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Cross-origin GETs, for the public read API (app/public_api.py). Every
+# route it serves was already reachable without a key, so allowing a
+# browser to read them changes what is possible for a dashboard, not
+# what is possible for an attacker -- CORS restricts browsers, not
+# clients. Methods are limited to GET and HEAD so the same permission
+# never extends to the ingest or admin routes, which do write and which
+# authenticate by header.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "HEAD"],
+    allow_headers=["*"],
+    max_age=3600,
+)
 mount(app)
 
 

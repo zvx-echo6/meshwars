@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <!-- Applied before any stylesheet paints, so a reader who chose the
+       neon skin never sees a frame of gold first. Deliberately inline
+       and tiny: a fetched script here would block first paint, which is
+       the thing this exists to avoid. Mirrors theme-toggle.js, which
+       owns everything after load. -->
+  <script>
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
+  </script>
+  <title>MeshWars — API</title>
+  <meta name="description" content="The MeshWars public read API: a stable, key-free JSON surface for bots and dashboards. Standings, players, the capture feed, monthly results and the weekly net.">
+  <link rel="canonical" href="https://meshwars.com/api">
+
+  <!-- See index.html's matching comment: Google reads a site's
+       search-results favicon from the home page specifically, but these
+       declarations are kept identical across all three pages so the
+       <head> stays consistent site-wide. -->
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="MeshWars — API">
+  <meta property="og:description" content="Every mechanic in MeshWars, written out: scoring, capture, decay, seasons, the weekly net, streaks, the monthly honors and fair play.")>
+  <meta property="og:url" content="https://meshwars.com/api">
+  <meta property="og:image" content="https://meshwars.com/static/assets/social/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="MeshWars — API">
+  <meta name="twitter:description" content="Every mechanic in MeshWars, written out: scoring, capture, decay, seasons, the weekly net, streaks, the monthly honors and fair play.")>
+  <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
+
+  <!-- See index.html's matching comment for what this describes and why
+       it's minimal. Same content, this page's own "url". -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Game",
+    "name": "MeshWars",
+    "url": "https://meshwars.com/api",
+    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+    "genre": ["Location-based game", "Capture the flag"],
+    "isBasedOn": {
+      "@type": "SoftwareSourceCode",
+      "name": "MeshWars",
+      "codeRepository": "https://github.com/zvx-echo6/meshwars",
+      "programmingLanguage": "Python",
+      "license": "https://opensource.org/licenses/MIT"
+    }
+  }
+  </script>
+
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change -- do not touch the pinned external Leaflet CDN links. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260823-12" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260823-12" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260823-12" />
+  <link rel="stylesheet" href="/static/api.css?v=20260823-12" />
+</head>
+<body>
+
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/">Map</a>
+      <a href="/results">Results</a>
+      <a href="/rules">Rules</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+      </button>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+  <main class="rules-wrap">
+
+    <header class="rules-header">
+      <h1 class="rules-title">API</h1>
+      <p class="rules-sub">A read-only JSON API for building a mesh bot, a Discord bot or a dashboard on MeshWars data. No key, no signup, no write access.</p>
+    </header>
+
+    <div class="rules-layout">
+      <nav class="rules-toc" aria-label="Sections">
+        <p class="rules-toc-title">Contents</p>
+        <ul>
+        <li><a href="#start">Getting started</a></li>
+        <li><a href="#conventions">Conventions</a></li>
+        <li><a href="#status">Status</a></li>
+        <li><a href="#seasons">Seasons</a></li>
+        <li><a href="#teams">Teams</a></li>
+        <li><a href="#players">Players</a></li>
+        <li><a href="#top">Rankings</a></li>
+        <li><a href="#board">Board</a></li>
+        <li><a href="#cells">Cells</a></li>
+        <li><a href="#captures">Captures</a></li>
+        <li><a href="#results">Results</a></li>
+        <li><a href="#net">Net</a></li>
+        <li><a href="#recipes">Two worked examples</a></li>
+        </ul>
+      </nav>
+
+      <div class="rules-body">
+
+        <section id="start">
+          <h2>Getting started</h2>
+          <p>Everything lives under <code>/api/v1</code> and returns JSON. There is no authentication because there is nothing here to protect &mdash; all of it is data the site already shows.</p>
+          <pre class="api-pre">curl https://meshwars.com/api/v1</pre>
+          <p>That route describes the rest, so a client can discover what exists without this page.</p>
+          <p><strong>The contract.</strong> Response shapes only ever gain fields. A field that exists keeps its name and its meaning. If something has to change incompatibly it becomes <code>/api/v2</code> and this stays as it is. The site's own routes &mdash; <code>/api/mc/board</code> and friends &mdash; carry no such promise and will change without warning; do not build on them.</p>
+        </section>
+
+        <section id="conventions">
+          <h2>Conventions</h2>
+          <h3>Choosing a board</h3>
+          <p>MeshWars runs two games. Every route except <code>/status</code> takes a <code>board</code> parameter, so one integration serves both.</p>
+          <pre class="api-pre">?board=meshcore    (the default)
+?board=meshtastic</pre>
+          <p><code>mc</code> and <code>mt</code> are accepted as well. An unknown board is a 400 rather than a silent fallback.</p>
+
+          <h3>Times and dates</h3>
+          <p>Anything named <code>*_at</code> or <code>*_ts</code> is unix seconds, UTC. Anything that is genuinely a calendar date &mdash; a net date, a month &mdash; is a string like <code>2026-08-19</code> or <code>2026-08</code>, in Boise time, because that is what those things actually are.</p>
+
+          <h3>Limits</h3>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>Rate limit</th><td>120 requests per minute, per address</td></tr>
+              <tr><th>Over the limit</th><td>429 with a JSON body saying what the budget is</td></tr>
+              <tr><th>Cross-origin</th><td>GET and HEAD allowed from anywhere</td></tr>
+              <tr><th>Compression</th><td>gzip, if you send <code>Accept-Encoding</code></td></tr>
+            </tbody>
+          </table>
+          <p>The limit is deliberately generous &mdash; polling every few seconds is the expected use, not an abuse of it.</p>
+
+          <h3>Errors</h3>
+          <pre class="api-pre">{"error": "unknown board", "detail": "board must be one of: meshcore, meshtastic"}</pre>
+          <p>Every error carries <code>error</code> and <code>detail</code>. 400 for a bad parameter, 404 for something that does not exist, 429 for the rate limit.</p>
+        </section>
+
+        <section id="status">
+          <h2>Status</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/status</p>
+          <p>Both boards in one call: season, standings, player count, squares owned, and the state of the weekly net. This is the one to build a <code>!status</code> command on &mdash; it exists so a bot does not need four requests to answer one question.</p>
+          <pre class="api-pre">{
+  &quot;generated_at&quot;: 1787457894,
+  &quot;boards&quot;: [
+    {
+      &quot;board&quot;: &quot;meshcore&quot;,
+      &quot;season&quot;: {
+        &quot;id&quot;: 2,
+        &quot;started_at&quot;: 1787029453,
+        &quot;ends_at&quot;: 1802581453,
+        &quot;status&quot;: &quot;active&quot;,
+        &quot;winner&quot;: null,
+        &quot;seconds_remaining&quot;: 15123559
+      },
+      &quot;standings&quot;: [
+        {
+          &quot;team&quot;: &quot;GREEN&quot;,
+          &quot;squares&quot;: 2390,
+          &quot;checkin_points&quot;: 75.0,
+          &quot;total&quot;: 2465.0,
+          &quot;rank&quot;: 1
+        },
+        {
+          &quot;team&quot;: &quot;RED&quot;,
+          &quot;squares&quot;: 1909,
+          &quot;checkin_points&quot;: 50.0,
+          &quot;total&quot;: 1959.0,
+          &quot;rank&quot;: 2
+        }
+      ],
+      &quot;players&quot;: 23,
+      &quot;squares_owned&quot;: 6004
+    }
+  ],
+  &quot;net&quot;: {
+    &quot;open&quot;: false,
+    &quot;weekday&quot;: 2,
+    &quot;opens_hour_local&quot;: 17,
+    &quot;closes_hour_local&quot;: 23,
+    &quot;timezone&quot;: &quot;America/Boise&quot;,
+    &quot;current_net_date&quot;: null,
+    &quot;next_opens_at&quot;: 1787785200,
+    &quot;base_points&quot;: 25.0,
+    &quot;streak_bonus_per_net&quot;: 5.0,
+    &quot;streak_bonus_max&quot;: 25.0
+  }
+}</pre>
+        </section>
+
+        <section id="seasons">
+          <h2>Seasons</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/seasons?board=meshcore</p>
+          <p>The running season and every closed one, newest first, each with its final per-team tally and winner. A season runs 180 days; <code>seconds_remaining</code> on the current one saves you the arithmetic.</p>
+        </section>
+
+        <section id="teams">
+          <h2>Teams</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/teams?board=meshcore</p>
+          <p>Standings, ranked. <code>total</code> is what decides the season: squares held plus check-in points, which count in the same units.</p>
+          <pre class="api-pre">{
+  &quot;board&quot;: &quot;meshcore&quot;,
+  &quot;season&quot;: {
+    &quot;id&quot;: 2,
+    &quot;started_at&quot;: 1787029453,
+    &quot;ends_at&quot;: 1802581453,
+    &quot;status&quot;: &quot;active&quot;,
+    &quot;winner&quot;: null,
+    &quot;seconds_remaining&quot;: 15123559
+  },
+  &quot;teams&quot;: [
+    {
+      &quot;team&quot;: &quot;GREEN&quot;,
+      &quot;squares&quot;: 2390,
+      &quot;checkin_points&quot;: 75.0,
+      &quot;total&quot;: 2465.0,
+      &quot;rank&quot;: 1
+    },
+    {
+      &quot;team&quot;: &quot;RED&quot;,
+      &quot;squares&quot;: 1909,
+      &quot;checkin_points&quot;: 50.0,
+      &quot;total&quot;: 1959.0,
+      &quot;rank&quot;: 2
+    },
+    {
+      &quot;team&quot;: &quot;BLUE&quot;,
+      &quot;squares&quot;: 929,
+      &quot;checkin_points&quot;: 0.0,
+      &quot;total&quot;: 929.0,
+      &quot;rank&quot;: 3
+    }
+  ]
+}</pre>
+        </section>
+
+        <section id="players">
+          <h2>Players</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/players?board=meshcore</p>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/players/{name}?board=meshcore</p>
+          <p>The whole roster, or one player by display name, matched case-insensitively. 404 if they are not registered on that board. Disabled accounts are absent from both.</p>
+          <pre class="api-pre">{
+  &quot;board&quot;: &quot;meshcore&quot;,
+  &quot;season_id&quot;: 2,
+  &quot;player&quot;: {
+    &quot;name&quot;: &quot;kraroed&quot;,
+    &quot;team&quot;: &quot;GREEN&quot;,
+    &quot;joined_at&quot;: 1787074788,
+    &quot;radios&quot;: [
+      &quot;c177e995&quot;
+    ],
+    &quot;captures&quot;: 1038,
+    &quot;captures_from_other_teams&quot;: 100,
+    &quot;checkins&quot;: 0,
+    &quot;checkin_points&quot;: 0.0,
+    &quot;last_checkin_net_date&quot;: null,
+    &quot;current_streak&quot;: null,
+    &quot;last_position_ts&quot;: 1787337190
+  }
+}</pre>
+          <p><code>current_streak</code> is the run they are carrying right now &mdash; the streak on their most recent check-in, not their longest ever. It is <code>null</code> for anyone who has not checked in this season.</p>
+        </section>
+
+        <section id="top">
+          <h2>Rankings</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/top?board=meshcore&amp;kind=captures</p>
+          <p>Top 20 for the running season, the same list the site's own Season Rankings shows. <code>kind</code> is <code>captures</code> or <code>checkins</code>.</p>
+          <pre class="api-pre">{
+  &quot;board&quot;: &quot;meshcore&quot;,
+  &quot;kind&quot;: &quot;checkins&quot;,
+  &quot;players&quot;: [
+    {
+      &quot;display_name&quot;: &quot;Malice&quot;,
+      &quot;team&quot;: &quot;ORANGE&quot;,
+      &quot;points&quot;: 25.0,
+      &quot;streak&quot;: 1
+    },
+    {
+      &quot;display_name&quot;: &quot;Littleaton&quot;,
+      &quot;team&quot;: &quot;GREEN&quot;,
+      &quot;points&quot;: 25.0,
+      &quot;streak&quot;: 1
+    }
+  ]
+}</pre>
+        </section>
+
+        <section id="board">
+          <h2>Board</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/board?board=meshcore</p>
+          <p>Every owned square in the running season with its bounds and holder. Several thousand of them &mdash; this is by far the heaviest route here, so fetch it on a timer and cache it rather than per command. If you only want what changed, use the capture feed instead.</p>
+        </section>
+
+        <section id="cells">
+          <h2>Cells</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/cells/{cell_id}?board=meshcore</p>
+          <p>One square: who holds it, every team's score on it, when it last changed hands, and the repeaters heard from it. Cell ids look like <code>16090_-29380</code> and come back on the board and capture routes.</p>
+        </section>
+
+        <section id="captures">
+          <h2>Captures</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/captures?board=meshcore&amp;since=0&amp;limit=100</p>
+          <p>The event feed, newest first. Poll it with the newest <code>ts</code> you have already seen as <code>since</code> and you get only what has happened since &mdash; the ordering guarantees that works.</p>
+          <pre class="api-pre">{
+  &quot;board&quot;: &quot;meshcore&quot;,
+  &quot;season_id&quot;: 2,
+  &quot;count&quot;: 2,
+  &quot;captures&quot;: [
+    {
+      &quot;cell_id&quot;: &quot;15191_-29143&quot;,
+      &quot;ts&quot;: 1787449108,
+      &quot;player&quot;: &quot;Pantsy91&quot;,
+      &quot;team&quot;: &quot;PURPLE&quot;,
+      &quot;from_team&quot;: null,
+      &quot;by_air&quot;: false
+    },
+    {
+      &quot;cell_id&quot;: &quot;15191_-29144&quot;,
+      &quot;ts&quot;: 1787449011,
+      &quot;player&quot;: &quot;Pantsy91&quot;,
+      &quot;team&quot;: &quot;PURPLE&quot;,
+      &quot;from_team&quot;: &quot;RED&quot;,
+      &quot;by_air&quot;: false
+    }
+  ]
+}</pre>
+          <p><code>from_team</code> is <code>null</code> when the square was unclaimed, which means it was an expansion rather than an attack. <code>by_air</code> marks a claim made at aircraft speed; it still counts as territory but not toward the exploration honors.</p>
+          <p><code>limit</code> is 1&ndash;500 and defaults to 100.</p>
+        </section>
+
+        <section id="results">
+          <h2>Results</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/results?board=meshcore&amp;limit=12</p>
+          <p>Finished months, newest first, each with its standings and its honors, plus <code>open_month_closes_at</code> for the month still being played.</p>
+          <p>The month in progress is deliberately absent &mdash; a month is judged when it ends, not as it goes. Until the first month closes, <code>months</code> is empty and only the closing time is there.</p>
+        </section>
+
+        <section id="net">
+          <h2>Net</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/net?board=meshcore</p>
+          <p>Whether the weekly net is open right now, when the next one opens, what a check-in is worth, and everyone who checked in to the most recent one.</p>
+          <pre class="api-pre">{
+  &quot;board&quot;: &quot;meshcore&quot;,
+  &quot;net&quot;: {
+    &quot;open&quot;: false,
+    &quot;weekday&quot;: 2,
+    &quot;opens_hour_local&quot;: 17,
+    &quot;closes_hour_local&quot;: 23,
+    &quot;timezone&quot;: &quot;America/Boise&quot;,
+    &quot;current_net_date&quot;: null,
+    &quot;next_opens_at&quot;: 1787785200,
+    &quot;base_points&quot;: 25.0,
+    &quot;streak_bonus_per_net&quot;: 5.0,
+    &quot;streak_bonus_max&quot;: 25.0
+  },
+  &quot;latest_net_date&quot;: &quot;2026-08-19&quot;,
+  &quot;latest_checkins&quot;: [
+    {
+      &quot;player&quot;: &quot;DrkSkyz&quot;,
+      &quot;team&quot;: &quot;GREEN&quot;,
+      &quot;points&quot;: 25.0,
+      &quot;streak&quot;: 1
+    },
+    {
+      &quot;player&quot;: &quot;KB7WHO Ken&quot;,
+      &quot;team&quot;: &quot;GREEN&quot;,
+      &quot;points&quot;: 25.0,
+      &quot;streak&quot;: 1
+    }
+  ]
+}</pre>
+          <p><code>current_net_date</code> is only set while the net is actually open. <code>next_opens_at</code> is always the next start, so a reminder bot needs nothing else.</p>
+        </section>
+
+        <section id="recipes">
+          <h2>Two worked examples</h2>
+
+          <h3>A status command</h3>
+          <pre class="api-pre">r = requests.get("https://meshwars.com/api/v1/status").json()
+mc = r["boards"][0]
+lead = mc["standings"][0]
+days = mc["season"]["seconds_remaining"] // 86400
+print(f'{lead["team"]} leads with {lead["total"]:.0f} '
+      f'({lead["squares"]} squares). Season ends in {days} days.')
+
+if r["net"]["open"]:
+    print("The net is on right now.")</pre>
+
+          <h3>Announcing captures</h3>
+          <pre class="api-pre">seen = 0   # keep this between polls
+
+while True:
+    r = requests.get("https://meshwars.com/api/v1/captures",
+                     params={"since": seen, "limit": 100}).json()
+    for c in reversed(r["captures"]):          # oldest first, to announce in order
+        if c["from_team"]:
+            say(f'{c["player"]} took a square from {c["from_team"]} for {c["team"]}')
+        else:
+            say(f'{c["player"]} claimed new ground for {c["team"]}')
+        seen = max(seen, c["ts"])
+    time.sleep(60)</pre>
+          <p>Start <code>seen</code> at the current time rather than zero if you do not want the whole season announced on first run.</p>
+        </section>
+
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/theme-toggle.js?v=20260823-12" type="module"></script>
+  <script src="/static/rules.js?v=20260823-12" type="module"></script>
+</body>
+</html>
