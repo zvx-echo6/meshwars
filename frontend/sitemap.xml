@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- The five public pages only: /admin is operator-only and excluded
+<!-- The public pages only: /admin is operator-only and excluded
      from robots.txt, so it has no business in a sitemap either. No
      lastmod on any entry, since these pages change on deploys, not on a
      schedule, and there is no reliable per-page last-changed timestamp
@@ -19,5 +19,8 @@
   </url>
   <url>
     <loc>https://meshwars.com/join</loc>
+  </url>
+  <url>
+    <loc>https://meshwars.com/api</loc>
   </url>
 </urlset>

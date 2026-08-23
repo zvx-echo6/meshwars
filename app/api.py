@@ -733,6 +733,13 @@ def mount(app: FastAPI) -> None:
         async def rules_page(request: Request):
             return _templated_html_page(request, frontend_dir / "rules.html", "rules page not bundled")
 
+        # Not in the nav bar on purpose -- this is a reference for the
+        # handful of people building against the API, linked from the
+        # foot of /about rather than offered to every visitor.
+        @app.get("/api", response_class=HTMLResponse, include_in_schema=False)
+        async def api_docs_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "api.html", "api docs not bundled")
+
         # robots.txt / sitemap.xml: plain static files, same explicit
         # top-level-route pattern as the three pages above (not folded
         # into the /static mount, which is cache-friendly but lives
