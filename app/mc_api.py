@@ -43,6 +43,7 @@ from .db import connect
 from .grid import cell_bounds
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .mc_scoring import team_checkin_points, team_tile_counts
+from . import results
 
 router = APIRouter()
 
@@ -788,9 +789,9 @@ async def mc_top() -> list[dict]:
 def top_checkin_for(protocol: str) -> list[dict]:
     """Players ranked by check-in points earned in `protocol`'s active
     season, from mc_checkin_award. Top 20, empty list if there's no
-    data (or no active season) -- the "Netrunners" counterpart of
+    data (or no active season) -- the "Phreaks" counterpart of
     top_for() above (see app/checkin.py's module docstring for the
-    Wardrivers/Netrunners theming; both are ACTIVITIES on the same
+    Wardrivers/Phreaks theming; both are ACTIVITIES on the same
     player model, so a player who does both shows up in both rankings).
 
     Follows the exact same *_for() pattern as
@@ -838,6 +839,27 @@ def top_checkin_for(protocol: str) -> list[dict]:
 
     result = _safe_query(run)
     return result if result is not None else []
+
+
+def results_for(protocol: str, limit: int = 12) -> list[dict]:
+    """Monthly standings and honors for `protocol`, newest month first,
+    with the month in progress computed live. See app/results.py.
+
+    Same *_for() pattern as board_for/scores_for/top_for above, so
+    app/api.py's Meshtastic route calls this rather than duplicating it.
+    """
+
+    def run(conn):
+        return results.month_results_for(conn, protocol, int(time.time()), limit)
+
+    out = _safe_query(run)
+    return out if out is not None else []
+
+
+@router.get("/api/mc/results")
+async def mc_results() -> list[dict]:
+    """Monthly results for the MeshCore board. See results_for()."""
+    return results_for(MC_PROTOCOL)
 
 
 @router.get("/api/mc/top-checkins")

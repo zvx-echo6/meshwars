@@ -562,3 +562,21 @@ body {
     padding: 36px 16px 30px;
   }
 }
+
+/* A plain bulleted list inside a panel -- the streak table and the
+   monthly honors on /about. Separate from .landing-list, which is the
+   numbered scoring rules and carries its own counter styling; this one
+   is just prose in bullets and matches .landing-panel p's size and
+   colour so a list does not read as a different voice from the
+   paragraph above it. */
+.landing-plain {
+  margin: 0 0 10px;
+  padding-left: 20px;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: #ccc;
+}
+
+.landing-plain li { margin-bottom: 4px; }
+.landing-plain li:last-child { margin-bottom: 0; }
+.landing-plain strong { color: var(--mw-gold-light); }

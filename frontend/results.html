@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <title>MeshWars — Monthly Results</title>
+  <meta name="description" content="Monthly standings and honors for MeshWars: which team gained the most ground, and who took, held, explored and checked in the most each month.">
+  <link rel="canonical" href="https://meshwars.com/results">
+
+  <!-- See index.html's matching comment: Google reads a site's
+       search-results favicon from the home page specifically, but these
+       declarations are kept identical across all three pages so the
+       <head> stays consistent site-wide. -->
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="MeshWars — Monthly Results">
+  <meta property="og:description" content="Every calendar month gets its own standings and honors, scored on the month rather than the season.">
+  <meta property="og:url" content="https://meshwars.com/results">
+  <meta property="og:image" content="https://meshwars.com/static/assets/social/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="MeshWars — Monthly Results">
+  <meta name="twitter:description" content="Every calendar month gets its own standings and honors, scored on the month rather than the season.">
+  <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
+
+  <!-- See index.html's matching comment for what this describes and why
+       it's minimal. Same content, this page's own "url". -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Game",
+    "name": "MeshWars",
+    "url": "https://meshwars.com/results",
+    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+    "genre": ["Location-based game", "Capture the flag"],
+    "isBasedOn": {
+      "@type": "SoftwareSourceCode",
+      "name": "MeshWars",
+      "codeRepository": "https://github.com/zvx-echo6/meshwars",
+      "programmingLanguage": "Python",
+      "license": "https://opensource.org/licenses/MIT"
+    }
+  }
+  </script>
+
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change -- do not touch the pinned external Leaflet CDN links. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260823-1" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260823-1" />
+  <link rel="stylesheet" href="/static/results.css?v=20260823-1" />
+</head>
+<body>
+
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><img src="/static/assets/favicon/favicon-64x64.png" alt="" class="mw-nav-crest" width="28" height="28" />MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/">Map</a>
+      <a href="/results" class="active">Results</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main class="landing-wrap rs-wrap">
+
+    <header class="landing-header">
+      <h1 class="landing-title">Results</h1>
+      <p class="landing-sub">A season runs six months. Every calendar month inside it gets its own result, scored on the month &mdash; ground taken and points earned between its own boundaries, not a snapshot of the season standings.</p>
+    </header>
+
+    <div class="rs-board-toggle" role="group" aria-label="Which board">
+      <button type="button" class="rs-board-btn" data-board="meshtastic">Meshtastic</button>
+      <button type="button" class="rs-board-btn active" data-board="meshcore">MeshCore</button>
+    </div>
+
+    <div id="rs-months" aria-live="polite">
+      <p class="rs-loading">Loading results&hellip;</p>
+    </div>
+
+  </main>
+
+  <script src="/static/results.js?v=20260823-1" type="module"></script>
+</body>
+</html>

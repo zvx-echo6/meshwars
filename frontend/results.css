@@ -1,0 +1,197 @@
+/* /results -- monthly standings and honors. Sits on top of theme.css
+   and landing.css, which already supply the page frame, the nav and the
+   type scale; everything here is specific to a month block. Colours come
+   from theme.css tokens, except the team dots, which are gameplay
+   colours and are set inline by results.js the same way the map does. */
+
+/* landing.css turns .landing-wrap into two columns above 900px, which
+   is right for About's short independent panels and wrong here: a month
+   is one tall block of a wide table plus a wide honors list, and multicol
+   flowed the honors into the second column, outside the card that owns
+   them. This page opts back out and narrows instead, so a month stays
+   one unbroken card at a comfortable measure. break-inside is belt and
+   braces for any future column context. */
+.rs-wrap { max-width: 860px; }
+
+@media (min-width: 900px) {
+  .rs-wrap { column-count: 1; }
+}
+
+.rs-month { break-inside: avoid; }
+
+.rs-board-toggle {
+  display: flex;
+  gap: 0;
+  margin: 0 0 28px;
+  border: 1px solid var(--mw-bronze);
+  border-radius: 6px;
+  overflow: hidden;
+  width: fit-content;
+}
+
+.rs-board-btn {
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 8px 20px;
+  background: transparent;
+  color: var(--mw-gold);
+  border: 0;
+  cursor: pointer;
+}
+
+.rs-board-btn.active {
+  background: var(--mw-bronze);
+  color: var(--mw-gold-light);
+}
+
+.rs-board-btn:focus-visible {
+  outline: 2px solid var(--mw-gold-light);
+  outline-offset: -2px;
+}
+
+/* ---- one month ------------------------------------------------------ */
+.rs-month {
+  background: var(--mw-panel);
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 20px 22px;
+  margin-bottom: 24px;
+}
+
+.rs-month-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 1.25rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--mw-gold-light);
+  margin: 0 0 4px;
+  padding-bottom: 10px;
+  border-bottom: 2px solid var(--mw-gold);
+}
+
+.rs-badge {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  border: 1px solid var(--mw-gold);
+  border-radius: 3px;
+  color: var(--mw-gold);
+}
+
+.rs-sub {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--mw-gold);
+  margin: 22px 0 10px;
+}
+
+/* ---- standings ------------------------------------------------------ */
+.rs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+  /* Captures/Check-ins/Points are read down the column, so the digits
+     have to line up rather than merely be right-aligned. */
+  font-variant-numeric: tabular-nums;
+}
+
+.rs-table th {
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8a8378;
+  padding: 0 10px 6px 0;
+  border-bottom: 1px solid #333;
+}
+
+.rs-table td {
+  padding: 7px 10px 7px 0;
+  border-bottom: 1px solid #262220;
+}
+
+.rs-table tr:last-child td { border-bottom: 0; }
+.rs-num { text-align: right; padding-right: 0 !important; }
+.rs-rank { color: #6f675c; width: 2rem; }
+.rs-total { color: var(--mw-gold-light); font-weight: 700; }
+
+.mc-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: baseline;
+}
+
+/* ---- honors --------------------------------------------------------- */
+.rs-honors {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1px;
+  background: #262220;   /* shows through as hairline rules between rows */
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.rs-honor {
+  display: grid;
+  grid-template-columns: minmax(9rem, 1.1fr) minmax(7rem, 1fr) auto;
+  gap: 10px 16px;
+  align-items: baseline;
+  padding: 9px 12px;
+  background: var(--mw-panel);
+  font-size: 0.9375rem;
+}
+
+.rs-honor-name {
+  font-weight: 700;
+  color: var(--mw-gold-light);
+  letter-spacing: 0.02em;
+}
+
+.rs-honor-who { color: #d8d0c4; }
+
+.rs-scope {
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: #8a8378;
+  white-space: nowrap;
+}
+
+.rs-detail {
+  text-align: right;
+  color: #8a8378;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.rs-empty, .rs-loading {
+  color: #8a8378;
+  font-size: 0.9375rem;
+  margin: 4px 0 0;
+}
+
+/* On a phone the three honor columns stop fitting side by side; stack
+   them and let the detail sit under the name rather than squeezing all
+   three into 320px. */
+@media (max-width: 560px) {
+  .rs-honor {
+    grid-template-columns: 1fr auto;
+  }
+  .rs-honor-who { grid-column: 1; }
+  .rs-detail { grid-column: 2; grid-row: 1; }
+  .rs-month { padding: 16px 14px; }
+}

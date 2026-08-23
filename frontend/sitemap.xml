@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- The three public pages only: /admin is operator-only and excluded
+<!-- The four public pages only: /admin is operator-only and excluded
      from robots.txt, so it has no business in a sitemap either. No
      lastmod on any entry, since these pages change on deploys, not on a
      schedule, and there is no reliable per-page last-changed timestamp
@@ -7,6 +7,9 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://meshwars.com/</loc>
+  </url>
+  <url>
+    <loc>https://meshwars.com/results</loc>
   </url>
   <url>
     <loc>https://meshwars.com/about</loc>

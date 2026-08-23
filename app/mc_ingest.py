@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from . import mc_scoring
+from . import mc_scoring, results
 from .config import settings
 from .db import _WRITE_LOCK, connect
 from .grid import cell_center, cell_id, distance_m, in_play_area, valid_coord
@@ -519,6 +519,10 @@ class McIngestor:
             # MeshCore season bookkeeping happens at most once per batch,
             # not once per ping.
             mc_scoring.maybe_roll_season(conn, received_at, PROTOCOL)
+            # Same cadence, same reason: a finished month is frozen by
+            # whatever traffic arrives after the boundary rather than by a
+            # scheduler of its own. See app/results.py.
+            results.maybe_roll_months(conn, received_at, PROTOCOL)
             season_id = mc_scoring.ensure_active_season(conn, received_at, PROTOCOL)
 
             # The whole batch belongs to one player, so their team is read
