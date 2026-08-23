@@ -21,7 +21,14 @@ are:
   is what they are -- a net date is a Wednesday in Boise, not an
   instant.
 - Every list route documents its own limit and never returns more.
-- Read-only. Nothing here writes, so nothing here needs a key.
+- Read-only. Nothing here writes.
+- A key is required, in an `X-API-Key` header. Not because the data is
+  secret -- the site shows all of it -- but because an anonymous
+  surface cannot be reasoned about: with keys, a misbehaving
+  integration can be identified and revoked on its own rather than by
+  blocking an address that might be a whole mesh community behind one
+  NAT. Keys are issued from the admin panel and only their hash is
+  stored, so a lost key is replaced, never recovered.
 
 It reads through the same *_for() helpers the site's own routes use
 rather than issuing its own copies of those queries, so a figure a bot
@@ -41,7 +48,7 @@ from fastapi.responses import JSONResponse
 from . import mc_api, results
 from .config import settings
 from .db import connect
-from .mc_ingest import PROTOCOL as MC_PROTOCOL
+from .mc_ingest import PROTOCOL as MC_PROTOCOL, hash_secret
 from .mc_scoring import team_checkin_points, team_tile_counts
 
 log = logging.getLogger("public_api")
@@ -65,6 +72,65 @@ def _protocol(board: str) -> str | None:
     return _BOARDS.get((board or "").strip().lower())
 
 
+# ---- authentication ----------------------------------------------------
+
+_KEY_HEADER = "X-API-Key"
+
+# key_hash -> (checked_at_monotonic, label or None if it is not valid).
+# Every read would otherwise be two queries: one to authenticate and one
+# to answer. Bounded because the header is attacker-controlled and a
+# flood of invented keys would otherwise grow this without limit.
+_key_cache: dict[str, tuple[float, str | None]] = {}
+_KEY_CACHE_MAX = 10000
+_KEY_CACHE_SECONDS = 60
+
+
+def _authenticate(raw_key: str) -> str | None:
+    """The client's label if this key is valid and unrevoked, else None.
+
+    Cached for a minute, which is also how long a revocation takes to
+    bite. That is the deliberate trade: an operator revoking a key wants
+    it gone, but a minute of grace costs nothing on a read-only surface
+    and saves a query on every single request.
+    """
+    key_hash = hash_secret(raw_key)
+    now = time.monotonic()
+
+    hit = _key_cache.get(key_hash)
+    if hit is not None and now - hit[0] < _KEY_CACHE_SECONDS:
+        return hit[1]
+
+    if len(_key_cache) >= _KEY_CACHE_MAX:
+        for k, v in list(_key_cache.items()):
+            if now - v[0] >= _KEY_CACHE_SECONDS:
+                del _key_cache[k]
+        if len(_key_cache) >= _KEY_CACHE_MAX:
+            _key_cache.clear()
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT label FROM api_client WHERE key_hash = ? AND revoked_at IS NULL",
+            (key_hash,),
+        ).fetchone()
+        label = row["label"] if row else None
+        if label is not None:
+            # Usage bookkeeping, so an operator can tell a live
+            # integration from an abandoned one before revoking it.
+            conn.execute(
+                "UPDATE api_client SET last_seen_at = ?, request_count = request_count + 1 "
+                " WHERE key_hash = ?", (int(time.time()), key_hash))
+            conn.commit()
+    except sqlite3.OperationalError:
+        # Schema not landed yet. Refuse rather than fall open.
+        label = None
+    finally:
+        conn.close()
+
+    _key_cache[key_hash] = (now, label)
+    return label
+
+
 # ---- rate limiting -----------------------------------------------------
 
 _hits: dict[str, list[float]] = {}
@@ -75,9 +141,10 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _rate_limited(ip: str) -> bool:
-    """True if `ip` is over budget for the window, recording this call
-    when it is not.
+def _rate_limited(bucket: str) -> bool:
+    """True if `bucket` -- a key hash, or an address for the one route
+    that needs none -- is over budget for the window, recording this
+    call when it is not.
 
     Same shape as the limiter on /api/mc/status. It exists here because
     this surface invites automation by design -- a bot polling every few
@@ -94,19 +161,44 @@ def _rate_limited(ip: str) -> bool:
         if len(_hits) >= _MAX_TRACKED:
             _hits.clear()
 
-    times = [t for t in _hits.get(ip, []) if now - t < window]
+    times = [t for t in _hits.get(bucket, []) if now - t < window]
     if len(times) >= limit:
-        _hits[ip] = times
+        _hits[bucket] = times
         return True
     times.append(now)
-    _hits[ip] = times
+    _hits[bucket] = times
     return False
 
 
-def _guard(request: Request, board: str | None = None):
-    """Rate limit, and resolve the board if one was asked for. Returns
-    (protocol, error_response) -- exactly one of which is None."""
-    if _rate_limited(_client_ip(request)):
+def _guard(request: Request, board: str | None = None, require_key: bool = True):
+    """Authenticate, rate limit, and resolve the board if one was asked
+    for. Returns (protocol, error_response) -- exactly one of which is
+    None.
+
+    The budget is spent per KEY rather than per address, which is the
+    main practical reason keys exist here: a mesh community behind one
+    NAT is many integrations at one address, and rate limiting the
+    address would have them starve each other.
+    """
+    if require_key:
+        raw = request.headers.get(_KEY_HEADER, "")
+        if not raw:
+            return None, JSONResponse(
+                {"error": "unauthorized",
+                 "detail": "send your key in an %s header -- see https://meshwars.com/api"
+                           % _KEY_HEADER},
+                status_code=401,
+            )
+        if _authenticate(raw) is None:
+            return None, JSONResponse(
+                {"error": "unauthorized", "detail": "unknown or revoked key"},
+                status_code=401,
+            )
+        bucket = hash_secret(raw)
+    else:
+        bucket = _client_ip(request)
+
+    if _rate_limited(bucket):
         return None, JSONResponse(
             {"error": "rate limited",
              "detail": "%d requests per %d seconds"
@@ -223,10 +315,11 @@ def _board_summary(conn, protocol: str) -> dict:
 
 @router.get("/api/v1")
 async def v1_index(request: Request) -> JSONResponse:
-    """What this API is and what is in it. A first stop for anyone
-    pointing something at it, and the only route that describes the
-    others."""
-    _, err = _guard(request)
+    """What this API is and what is in it, and the one route that needs
+    no key -- so somebody who has just been handed one, or is deciding
+    whether to ask for one, can see what they are getting. Rate limited
+    by address instead."""
+    _, err = _guard(request, require_key=False)
     if err:
         return err
     return JSONResponse({
@@ -234,6 +327,11 @@ async def v1_index(request: Request) -> JSONResponse:
         "version": API_VERSION,
         "docs": "https://meshwars.com/api",
         "boards": list(_BOARD_NAMES.values()),
+        "authentication": {
+            "header": _KEY_HEADER,
+            "required": True,
+            "how_to_get_one": "ask the operator; see https://meshwars.com/api",
+        },
         "rate_limit": {
             "requests": settings.public_api_rate_limit_requests,
             "window_seconds": settings.public_api_rate_limit_window_seconds,

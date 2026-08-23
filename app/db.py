@@ -573,6 +573,25 @@ CREATE TABLE IF NOT EXISTS month_award (
     detail    TEXT,              -- award-specific, e.g. Frontier's cell and distance
     PRIMARY KEY (month, protocol, award, scope)
 );
+
+-- ---------------------------------------------------------------------
+-- Keys for the public read API (app/public_api.py). Separate from
+-- api_key above on purpose: that one belongs to a PLAYER and authorises
+-- writing their own wardriving data. This one belongs to an
+-- INTEGRATION -- a bot, a dashboard -- authorises reading only, and is
+-- issued by the operator rather than earned by joining. Sharing one
+-- table would mean a read key could post pings.
+--
+-- Only the hash is stored, same as api_key, so a key cannot be read
+-- back out. Losing one means issuing another.
+CREATE TABLE IF NOT EXISTS api_client (
+    key_hash     TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,      -- what it is for, e.g. "freq51 discord bot"
+    created_at   INTEGER NOT NULL,
+    revoked_at   INTEGER,
+    last_seen_at INTEGER,
+    request_count INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
