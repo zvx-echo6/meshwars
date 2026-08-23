@@ -115,7 +115,17 @@
 }
 
 /* ---- the prose ------------------------------------------------------ */
-.rules-body { max-width: 68ch; }
+.rules-body { max-width: 100%; }
+
+/* The measure is set on the text elements rather than on .rules-body,
+   so it is counted in the size the text is actually set at -- a ch on
+   the container is a wider character than a ch in a 0.9375rem
+   paragraph, which is how the column ended up running past eighty
+   characters a line. Tables are left out on purpose: they are read
+   across, not along, and want the full column. */
+.rules-body p,
+.rules-body .rules-list,
+.rules-body .rules-honors dd { max-width: 68ch; }
 
 .rules-body section {
   padding-bottom: 28px;
