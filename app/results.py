@@ -364,18 +364,33 @@ def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) 
     log.info("results: froze %s for %s (%d awards)", month, protocol, len(result["awards"]))
 
 
+# Last local month each protocol was checked for pending freezes. The
+# check below scans mc_tile_capture_log, and this is called from the
+# ingest batch worker -- at a busy moment that is dozens of full scans a
+# second over a table that only grows. Nothing it looks for can change
+# except at a month boundary, so one check per protocol per month is
+# exactly enough. Reset on restart, which costs one extra scan.
+_LAST_CHECKED: dict[str, str] = {}
+
+
 def maybe_roll_months(conn: sqlite3.Connection, now: int, protocol: str) -> int:
     """Freeze every finished month that has activity and no result yet.
 
     Called from the same places maybe_roll_season() is, so a month
     closes on whatever traffic arrives after the boundary rather than
-    needing a scheduler of its own. Written to catch up rather than to
+    needing a scheduler of its own -- but at most once per protocol per
+    month (see _LAST_CHECKED), since the ingest path calls this on every
+    batch and the scan below only has new work to find at a boundary. Written to catch up rather than to
     fire exactly at midnight: if the service was down over a month end,
     or several months pass quietly, the next call still freezes each of
     them. Only months strictly before the current one are eligible, so
     the month in progress is never frozen early.
     """
     current = month_key(now)
+    if _LAST_CHECKED.get(protocol) == current:
+        return 0
+    _LAST_CHECKED[protocol] = current
+
     have = {
         r["month"] for r in conn.execute(
             "SELECT month FROM month_result WHERE protocol = ?", (protocol,))
