@@ -95,16 +95,18 @@ function renderHonors(awards) {
   }
   // Per-team awards carry a scope; they read as "Top Attacker, RED"
   // rather than as seven separate award names.
+  // The value and what it counts are both shown -- the detail sits under
+  // the award name rather than replacing the number, because "Top Phreak
+  // 130" without a unit is the exact ambiguity the detail exists to fix.
   return `<ul class="rs-honors">${awards.map((a) => {
     const who = a.player || a.team || '—';
     const scope = a.scope ? ` <span class="rs-scope">${teamDot(a.scope)}${escapeHtml(a.scope)}</span>` : '';
     const team = a.player && a.team ? ` <span class="rs-scope">${teamDot(a.team)}${escapeHtml(a.team)}</span>` : '';
-    const detail = a.detail ? `<span class="rs-detail">${escapeHtml(a.detail)}</span>`
-                            : `<span class="rs-detail">${num(a.value)}</span>`;
+    const detail = a.detail ? `<span class="rs-detail">${escapeHtml(a.detail)}</span>` : '';
     return `<li class="rs-honor">
-      <span class="rs-honor-name">${escapeHtml(a.label)}${scope}</span>
+      <span class="rs-honor-name">${escapeHtml(a.label)}${scope}${detail}</span>
       <span class="rs-honor-who">${escapeHtml(who)}${team}</span>
-      ${detail}
+      <span class="rs-honor-value">${num(a.value)}</span>
     </li>`;
   }).join('')}</ul>`;
 }

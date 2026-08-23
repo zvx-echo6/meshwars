@@ -211,6 +211,10 @@ def _top(counts: dict, minimum: float = 1):
 
 
 def _award(award, key, value, names, detail=None, scope="", team=None):
+    """One honor row. `detail` says what the number counts -- every award
+    carries one, because "Top Phreak 130" is a figure with no unit and
+    the awards whose unit is not guessable from the name are exactly the
+    ones a reader has to guess at."""
     if key is None:
         return None
     if team is None and isinstance(key, int):
@@ -264,7 +268,8 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     # names the same team almost every month -- captures dominate the
     # points total -- and two team titles that usually agree is a thing to
     # explain rather than a thing to win.
-    add(_award("month_winner", *(_top({s["team"]: s["points"] for s in standings}, 0.001) or (None, 0)), names=names))
+    add(_award("month_winner", *(_top({s["team"]: s["points"] for s in standings}, 0.001) or (None, 0)),
+               names=names, detail="points this month"))
 
     # ---- attack and defence -------------------------------------------
     attacks: dict[int, int] = {}
@@ -286,15 +291,18 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
             retakes[pid] = retakes.get(pid, 0) + 1
             per_team_retakes.setdefault(tm, {})[pid] = per_team_retakes.setdefault(tm, {}).get(pid, 0) + 1
 
-    add(_award("top_attacker", *(_top(attacks) or (None, 0)), names=names))
-    add(_award("top_defender", *(_top(retakes) or (None, 0)), names=names))
-    add(_award("explorer", *(_top(virgin) or (None, 0)), names=names))
+    add(_award("top_attacker", *(_top(attacks) or (None, 0)), names=names,
+               detail="squares taken from other teams"))
+    add(_award("top_defender", *(_top(retakes) or (None, 0)), names=names,
+               detail="squares taken back"))
+    add(_award("explorer", *(_top(virgin) or (None, 0)), names=names,
+               detail="squares nobody had claimed"))
 
     for team in settings.teams_list:
         add(_award("team_attacker", *(_top(per_team_attacks.get(team, {})) or (None, 0)),
-                   names=names, scope=team, team=team))
+                   names=names, scope=team, team=team, detail="squares taken from other teams"))
         add(_award("team_defender", *(_top(per_team_retakes.get(team, {})) or (None, 0)),
-                   names=names, scope=team, team=team))
+                   names=names, scope=team, team=team, detail="squares taken back"))
 
     # ---- frontier: how much ground you claimed out past the towns -----
     # Counted, not measured. The furthest single square rewarded one
@@ -323,7 +331,7 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     won = _top(frontier)
     if won is not None:
         add(_award("frontier", won[0], won[1], names,
-                   detail="furthest %.0f mi out" % furthest[won[0]]))
+                   detail="squares past the towns, furthest %.0f mi out" % furthest[won[0]]))
 
     # ---- check-in awards ----------------------------------------------
     points: dict[int, float] = {}
@@ -338,8 +346,10 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
                 r["message_ts"] - _net_window_open(r["net_date"])
             )
 
-    add(_award("top_phreak", *(_top(points, 0.001) or (None, 0)), names=names))
-    add(_award("most_consistent", *(_top(streaks) or (None, 0)), names=names))
+    add(_award("top_phreak", *(_top(points, 0.001) or (None, 0)), names=names,
+               detail="points from weekly net check-ins"))
+    add(_award("most_consistent", *(_top(streaks) or (None, 0)), names=names,
+               detail="nets checked into in a row"))
 
     # Quick Fingers, and the guard that makes it survivable. An award for
     # being fastest on a scheduled event invites a cron job, so a player

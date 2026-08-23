@@ -148,6 +148,9 @@
 }
 
 .rs-honor-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   font-weight: 700;
   color: var(--mw-gold-light);
   letter-spacing: 0.02em;
@@ -162,11 +165,22 @@
   white-space: nowrap;
 }
 
+/* What the number counts, under the award name. Deliberately quiet: it
+   is there for the first read and should disappear on every one after. */
 .rs-detail {
-  text-align: right;
+  font-weight: 400;
+  letter-spacing: 0;
   color: var(--mw-text-6);
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+
+.rs-honor-value {
+  text-align: right;
+  color: var(--mw-gold-light);
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* The one line about the month still being played. Sits above the
@@ -195,6 +209,6 @@
     grid-template-columns: 1fr auto;
   }
   .rs-honor-who { grid-column: 1; }
-  .rs-detail { grid-column: 2; grid-row: 1; }
+  .rs-honor-value { grid-column: 2; grid-row: 1; }
   .rs-month { padding: 16px 14px; }
 }
