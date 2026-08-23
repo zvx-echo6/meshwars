@@ -177,14 +177,13 @@ const PROTOCOLS = {
   meshcore: {
     protocol: 'mc',
     boardTitle: 'MeshCore Territory',
-    topButtonLabel: 'Top Wardrivers',
-    // Tab labels inside the top-players modal (see openTopModal) --
-    // "Wardrivers" for the capture ranking, matching topButtonLabel's
-    // own vocabulary for this board. "Phreaks" (the check-in
-    // ranking's theme, app/checkin.py) is not board-specific -- net
-    // check-ins are the same activity on both boards, so this label is
-    // identical in both PROTOCOLS entries rather than reworded per
-    // board the way the capture-ranking vocabulary is.
+    // "Operators" is the umbrella and the tabs are the two activities
+    // under it -- which is exactly the model the schema already has: a
+    // player is one account with one team, and wardriving and checking
+    // in are two things they can do, not two kinds of person (see
+    // app/checkin.py). Identical on both boards, so the button never
+    // renames itself when you flip protocol.
+    topButtonLabel: 'Top Operators',
     topCaptureLabel: 'Wardrivers',
     topCheckinLabel: 'Phreaks',
     lookupPlaceholder: 'player name',
@@ -205,12 +204,15 @@ const PROTOCOLS = {
   meshtastic: {
     protocol: 'mt',
     boardTitle: 'Meshtastic Territory',
-    // "Wardrivers" is MeshCore-specific vocabulary (MeshMapper is a
-    // deliberate wardriving app); a Meshtastic node just broadcasts its
-    // own position, so the community term for the person behind a node
-    // -- "operator" -- fits better than reusing "wardriver" here.
+    // Same three labels as MeshCore, deliberately. "Wardriving" started
+    // as MeshCore vocabulary -- MeshMapper is a wardriving app, while a
+    // Meshtastic node just broadcasts its own position -- and this board
+    // used to say "Operators" for the capture ranking on that reasoning.
+    // One vocabulary across both boards is worth more than that
+    // distinction: a reader flipping protocol should see the same two
+    // activities, not have to learn a second set of words for them.
     topButtonLabel: 'Top Operators',
-    topCaptureLabel: 'Operators',
+    topCaptureLabel: 'Wardrivers',
     topCheckinLabel: 'Phreaks',
     // Same by-name search as MeshCore now that /find exists for this
     // board too (see app/api.py) -- no more of a node-ID-only Find box.
