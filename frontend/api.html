@@ -68,10 +68,10 @@
        fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
-  <link rel="stylesheet" href="/static/theme.css?v=20260823-13" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260823-13" />
-  <link rel="stylesheet" href="/static/rules.css?v=20260823-13" />
-  <link rel="stylesheet" href="/static/api.css?v=20260823-13" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260823-14" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260823-14" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260823-14" />
+  <link rel="stylesheet" href="/static/api.css?v=20260823-14" />
 </head>
 <body>
 
@@ -95,7 +95,7 @@
 
     <header class="rules-header">
       <h1 class="rules-title">API</h1>
-      <p class="rules-sub">A read-only JSON API for building a mesh bot, a Discord bot or a dashboard on MeshWars data. No key, no signup, no write access.</p>
+      <p class="rules-sub">A read-only JSON API for building a mesh bot, a Discord bot or a dashboard on MeshWars data. Ask for a key and it is yours.</p>
     </header>
 
     <div class="rules-layout">
@@ -122,14 +122,23 @@
 
         <section id="start">
           <h2>Getting started</h2>
-          <p>Everything lives under <code>/api/v1</code> and returns JSON. There is no authentication because there is nothing here to protect &mdash; all of it is data the site already shows.</p>
+          <p>Everything lives under <code>/api/v1</code> and returns JSON. One route needs no key &mdash; the index, so you can see what you would be getting:</p>
           <pre class="api-pre">curl https://meshwars.com/api/v1</pre>
-          <p>That route describes the rest, so a client can discover what exists without this page.</p>
+          <p>Everything else takes a key in an <code>X-API-Key</code> header:</p>
+          <pre class="api-pre">curl -H "X-API-Key: $MESHWARS_KEY" \
+     https://meshwars.com/api/v1/status</pre>
+          <p><strong>Getting one:</strong> ask malice in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a> and say what you are building. Keys are free and issued per integration.</p>
+          <p>The key is shown once when it is issued and only its hash is stored, so it cannot be looked up later. Lose it and you get a new one.</p>
           <p><strong>The contract.</strong> Response shapes only ever gain fields. A field that exists keeps its name and its meaning. If something has to change incompatibly it becomes <code>/api/v2</code> and this stays as it is. The site's own routes &mdash; <code>/api/mc/board</code> and friends &mdash; carry no such promise and will change without warning; do not build on them.</p>
         </section>
 
         <section id="conventions">
           <h2>Conventions</h2>
+          <h3>Authentication</h3>
+          <p>Send your key as an <code>X-API-Key</code> header on every request except <code>/api/v1</code> itself. A missing or revoked key is a 401.</p>
+          <p>Keys are per integration rather than per person, which is the point of them: a bot that misbehaves can be turned off on its own, instead of an address being blocked that might be a whole mesh community behind one connection.</p>
+          <p><strong>Do not put a key in a web page.</strong> Cross-origin reads are allowed, so a browser dashboard will work &mdash; but anything in front-end code is readable by whoever loads it. Put the key on a server you control and have the page call that.</p>
+
           <h3>Choosing a board</h3>
           <p>MeshWars runs two games. Every route except <code>/status</code> takes a <code>board</code> parameter, so one integration serves both.</p>
           <pre class="api-pre">?board=meshcore    (the default)
@@ -142,17 +151,18 @@
           <h3>Limits</h3>
           <table class="rules-table">
             <tbody>
-              <tr><th>Rate limit</th><td>120 requests per minute, per address</td></tr>
+              <tr><th>Rate limit</th><td>120 requests per minute, per key</td></tr>
               <tr><th>Over the limit</th><td>429 with a JSON body saying what the budget is</td></tr>
               <tr><th>Cross-origin</th><td>GET and HEAD allowed from anywhere</td></tr>
+              <tr><th>Authentication</th><td><code>X-API-Key</code> header, on everything but the index</td></tr>
               <tr><th>Compression</th><td>gzip, if you send <code>Accept-Encoding</code></td></tr>
             </tbody>
           </table>
-          <p>The limit is deliberately generous &mdash; polling every few seconds is the expected use, not an abuse of it.</p>
+          <p>The limit is deliberately generous &mdash; polling every few seconds is the expected use, not an abuse of it. It is counted per key, so your budget is yours and nobody else can spend it.</p>
 
           <h3>Errors</h3>
           <pre class="api-pre">{"error": "unknown board", "detail": "board must be one of: meshcore, meshtastic"}</pre>
-          <p>Every error carries <code>error</code> and <code>detail</code>. 400 for a bad parameter, 404 for something that does not exist, 429 for the rate limit.</p>
+          <p>Every error carries <code>error</code> and <code>detail</code>. 400 for a bad parameter, 401 for a missing or revoked key, 404 for something that does not exist, 429 for the rate limit.</p>
         </section>
 
         <section id="status">
@@ -395,7 +405,9 @@
           <h2>Two worked examples</h2>
 
           <h3>A status command</h3>
-          <pre class="api-pre">r = requests.get("https://meshwars.com/api/v1/status").json()
+          <pre class="api-pre">H = {"X-API-Key": os.environ["MESHWARS_KEY"]}
+
+r = requests.get("https://meshwars.com/api/v1/status", headers=H).json()
 mc = r["boards"][0]
 lead = mc["standings"][0]
 days = mc["season"]["seconds_remaining"] // 86400
@@ -410,7 +422,7 @@ if r["net"]["open"]:
 
 while True:
     r = requests.get("https://meshwars.com/api/v1/captures",
-                     params={"since": seen, "limit": 100}).json()
+                     headers=H, params={"since": seen, "limit": 100}).json()
     for c in reversed(r["captures"]):          # oldest first, to announce in order
         if c["from_team"]:
             say(f'{c["player"]} took a square from {c["from_team"]} for {c["team"]}')
@@ -425,7 +437,7 @@ while True:
     </div>
   </main>
 
-  <script src="/static/theme-toggle.js?v=20260823-13" type="module"></script>
-  <script src="/static/rules.js?v=20260823-13" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260823-14" type="module"></script>
+  <script src="/static/rules.js?v=20260823-14" type="module"></script>
 </body>
 </html>

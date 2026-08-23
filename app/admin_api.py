@@ -784,3 +784,126 @@ async def admin_player_reissue(request: Request):
         "issued_at": now,
         "revoked_count": revoked_count,
     }
+
+
+# ---- public API clients ------------------------------------------------
+#
+# Keys for app/public_api.py. Deliberately not the same table as a
+# player's api_key: that one authorises writing wardriving data for one
+# person, this one authorises reading the public surface for one
+# integration. A shared table would let a read key post pings.
+
+
+@router.get("/api/admin/api-clients")
+async def admin_api_clients(request: Request):
+    """Every issued read-API key, newest first. Only the first twelve
+    characters of the hash are shown -- enough to tell two rows apart
+    and to name one in a revoke, and useless to anyone who sees the
+    screen."""
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT key_hash, label, created_at, revoked_at, last_seen_at, request_count "
+            "  FROM api_client ORDER BY created_at DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return JSONResponse([{
+        "key_hash_prefix": r["key_hash"][:12],
+        "label": r["label"],
+        "created_at": r["created_at"],
+        "revoked_at": r["revoked_at"],
+        "last_seen_at": r["last_seen_at"],
+        # Authentications rather than requests -- see the column's own
+        # comment in app/db.py. Returned for completeness; the admin UI
+        # shows last_seen_at instead, which is the honest signal.
+        "auth_count": r["request_count"],
+        "revoked": r["revoked_at"] is not None,
+    } for r in rows])
+
+
+@router.post("/api/admin/api-clients/create")
+async def admin_api_client_create(request: Request):
+    """Mint a read-API key for one integration.
+
+    The raw key is returned HERE AND NOWHERE ELSE. Only its hash is
+    stored, the same contract a player's key has, so there is no route
+    that can show it again and no amount of database access recovers
+    it. A lost key is replaced by issuing another and revoking the old
+    one.
+
+    The label is what makes a list of hashes usable a year later --
+    "freq51 discord bot" rather than a twelve-character prefix nobody
+    can place. It is required for that reason.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    label = (body.get("label") or "").strip() if isinstance(body, dict) else ""
+    if not label:
+        return JSONResponse({"error": "label is required"}, status_code=400)
+    if len(label) > 80:
+        return JSONResponse({"error": "label is too long (80 characters max)"}, status_code=400)
+
+    raw = secrets.token_urlsafe(32)
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO api_client(key_hash, label, created_at) VALUES (?, ?, ?)",
+            (hash_secret(raw), label, now),
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: issued read-API key for %r", label)
+    return JSONResponse({"label": label, "key": raw, "created_at": now})
+
+
+@router.post("/api/admin/api-clients/revoke")
+async def admin_api_client_revoke(request: Request):
+    """Revoke one key by its hash prefix. Takes effect within a minute --
+    app/public_api.py caches authentication for that long, which is the
+    price of not querying on every read.
+
+    The row is kept rather than deleted so the label, when it was
+    issued and how much it was used stay visible afterwards; a revoked
+    key that vanishes leaves an operator unable to answer "what was
+    that and did I already deal with it".
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    prefix = (body.get("key_hash_prefix") or "").strip() if isinstance(body, dict) else ""
+    if not prefix or len(prefix) < 8:
+        return JSONResponse({"error": "key_hash_prefix is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE api_client SET revoked_at = ? "
+            " WHERE key_hash LIKE ? AND revoked_at IS NULL", (now, prefix + "%"))
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    if not cur.rowcount:
+        return JSONResponse({"error": "no active key with that prefix"}, status_code=404)
+    log.info("admin: revoked read-API key %s", prefix)
+    return JSONResponse({"revoked": cur.rowcount, "revoked_at": now})

@@ -45,6 +45,17 @@
       margin-bottom: 16px;
     }
 
+    .admin-key-reveal {
+      width: 100%;
+      margin-top: 6px;
+      padding: 8px 10px;
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 0.8125rem;
+      color: var(--mw-gold-light);
+      background: var(--mw-page);
+      border: 1px solid var(--mw-gold);
+      border-radius: 4px;
+    }
     .admin-panel-title {
       font-weight: 700;
       font-size: 12px;
@@ -357,6 +368,17 @@
       <div id="players"></div>
       <div id="delete-result" class="admin-delete-result"></div>
       <div id="reissue-result" class="admin-reissue-result"></div>
+    </section>
+
+    <section class="admin-panel">
+      <div class="admin-panel-title">Read-API keys</div>
+      <p class="admin-hint">Keys for the public read API at <code>/api/v1</code> &mdash; one per integration, so a misbehaving bot can be revoked on its own. Read-only: these cannot post wardriving data.</p>
+      <div class="admin-token-row">
+        <input type="text" id="apikey-label" autocomplete="off" maxlength="80" placeholder="what is it for, e.g. freq51 discord bot" />
+        <button type="button" id="apikey-create" class="admin-btn">Issue key</button>
+      </div>
+      <div id="apikey-result" class="admin-reissue-result"></div>
+      <div id="apikeys"></div>
     </section>
 
   </main>
@@ -818,16 +840,118 @@ async function loadPlayers() {
   }
 }
 
+// One Load button fills every panel -- the token is what gates them all,
+// so making the operator press it twice would be a way to forget.
+function loadAll() {
+  loadPlayers();
+  loadApiClients();
+}
+
 els.loadBtn.addEventListener('click', function () {
   adminToken = els.tokenInput.value;
-  loadPlayers();
+  loadAll();
 });
 els.tokenInput.addEventListener('keydown', function (e) {
   if (e.key === 'Enter') {
     adminToken = els.tokenInput.value;
-    loadPlayers();
+    loadAll();
   }
 });
-  </script>
+  
+// ---- read-API keys ---------------------------------------------------
+//
+// The raw key is shown once, here, and never again -- only its hash is
+// stored, the same contract a player's key has. So the created row is
+// rendered as something to copy NOW rather than as a line in the list.
+
+function renderApiClient(c) {
+  var row = el('div', { className: 'admin-key-row' });
+  row.appendChild(el('span', { className: 'admin-key-hash', text: c.key_hash_prefix }));
+  row.appendChild(el('span', { text: c.label }));
+  row.appendChild(el('span', { text: 'issued ' + fmtTs(c.created_at) }));
+  row.appendChild(el('span', { text: 'last used ' + fmtTs(c.last_seen_at) }));
+  row.appendChild(el('span', {
+    className: c.revoked ? 'admin-badge admin-badge-bad' : 'admin-badge admin-badge-ok',
+    text: c.revoked ? 'revoked' : 'active',
+  }));
+  if (!c.revoked) {
+    var btn = el('button', { className: 'admin-btn admin-btn-danger', text: 'Revoke' });
+    btn.type = 'button';
+    btn.addEventListener('click', function () { revokeApiClient(c, btn); });
+    row.appendChild(btn);
+  }
+  return row;
+}
+
+async function loadApiClients() {
+  var host = document.getElementById('apikeys');
+  if (!host) return;
+  host.replaceChildren();
+  try {
+    var list = await apiCall('/api/admin/api-clients');
+    if (!list.length) {
+      host.appendChild(el('p', { className: 'admin-hint', text: 'No keys issued yet.' }));
+      return;
+    }
+    list.forEach(function (c) { host.appendChild(renderApiClient(c)); });
+  } catch (e) {
+    host.appendChild(el('p', { className: 'admin-hint', text: 'Could not load keys: ' + e.message }));
+  }
+}
+
+async function createApiClient() {
+  var input = document.getElementById('apikey-label');
+  var out = document.getElementById('apikey-result');
+  var btn = document.getElementById('apikey-create');
+  var label = (input.value || '').trim();
+  out.replaceChildren();
+  if (!label) {
+    out.appendChild(el('p', { className: 'admin-hint', text: 'Give it a label first.' }));
+    return;
+  }
+  btn.disabled = true;
+  try {
+    var r = await apiCall('/api/admin/api-clients/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: label }),
+    });
+    out.appendChild(el('p', { text: 'Key for "' + r.label + '" \u2014 copy it now, it is not shown again:' }));
+    var box = el('input', { className: 'admin-key-reveal' });
+    box.type = 'text';
+    box.readOnly = true;
+    box.value = r.key;
+    out.appendChild(box);
+    box.focus();
+    box.select();
+    input.value = '';
+    await loadApiClients();
+  } catch (e) {
+    out.appendChild(el('p', { className: 'admin-hint', text: 'Failed: ' + e.message }));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function revokeApiClient(c, btn) {
+  if (!window.confirm('Revoke the key for "' + c.label + '"? Anything using it stops working within a minute.')) return;
+  btn.disabled = true;
+  try {
+    await apiCall('/api/admin/api-clients/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_hash_prefix: c.key_hash_prefix }),
+    });
+    await loadApiClients();
+  } catch (e) {
+    btn.disabled = false;
+    window.alert('Failed: ' + e.message);
+  }
+}
+
+document.getElementById('apikey-create')
+  .addEventListener('click', function () { createApiClient(); });
+
+</script>
 </body>
 </html>
