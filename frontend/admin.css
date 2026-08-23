@@ -1,0 +1,304 @@
+/* The operator panel. Split out of admin.html, which had grown to 957
+   lines with 336 of CSS and 572 of JS inside one document.
+
+   One idea shapes the whole thing: an operator opens this because
+   something is wrong, so the page opens with what is wrong. Everything
+   else -- the full roster, the keys, the actions -- is below that and
+   collapsed, because thirty players expanded is nine thousand pixels of
+   scrolling past people who are fine. */
+
+:root {
+  --ok:   #4caf50;
+  --warn: #d9a441;
+  --bad:  #d05a3f;
+}
+
+body {
+  background: var(--mw-page);
+  color: var(--mw-text-2);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  margin: 0;
+  padding: 0 16px 80px;
+}
+
+.adm-wrap { max-width: 1080px; margin: 0 auto; }
+
+/* ---- header and the token bar --------------------------------------- */
+.adm-head { padding: 28px 0 16px; }
+
+.adm-title {
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: var(--mw-gold-light);
+  margin: 0 0 4px;
+  letter-spacing: 0.01em;
+}
+
+.adm-sub { color: var(--mw-text-6); font-size: 0.875rem; margin: 0; }
+
+/* Sticky, because every panel below is gated on it and scrolling back
+   up to re-enter a token is the sort of thing that makes a tool feel
+   hostile. */
+.adm-tokenbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 12px 0;
+  margin-bottom: 20px;
+  background: var(--mw-page);
+  border-bottom: 1px solid var(--mw-line);
+}
+
+.adm-tokenbar input { flex: 1 1 260px; }
+.adm-tokenbar .adm-status { flex: 1 1 100%; font-size: 0.8125rem; }
+
+input, select {
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 7px 10px;
+  color: var(--mw-text-1);
+  background: var(--mw-ink);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+}
+
+input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--mw-gold);
+  outline-offset: -1px;
+}
+
+.adm-btn {
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 7px 12px;
+  color: var(--mw-gold-light);
+  background: var(--mw-accent-active);
+  border: 1px solid var(--mw-gold);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.adm-btn:hover { background: var(--mw-bronze); }
+.adm-btn:disabled { opacity: 0.45; cursor: default; }
+.adm-btn-quiet { color: var(--mw-text-3); background: none; border-color: var(--mw-line-strong); }
+.adm-btn-quiet:hover { background: var(--mw-raised); }
+.adm-btn-danger { color: #f0c0a8; background: #3a1a1a; border-color: #663333; }
+.adm-btn-danger:hover { background: #4a2020; }
+
+/* ---- panels ---------------------------------------------------------- */
+.adm-panel {
+  background: var(--mw-panel);
+  border: 1px solid var(--mw-line);
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin-bottom: 18px;
+}
+
+.adm-panel-title {
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--mw-gold);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--mw-line);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.adm-count {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--mw-text-6);
+}
+
+.adm-hint { color: var(--mw-text-6); font-size: 0.8125rem; margin: 0 0 10px; }
+.adm-status { color: var(--mw-text-4); font-size: 0.8125rem; }
+.adm-status-bad { color: var(--bad); }
+
+/* ---- health tiles ---------------------------------------------------- */
+.adm-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.adm-tile {
+  background: var(--mw-ink);
+  border: 1px solid var(--mw-line);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.adm-tile-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--mw-text-1);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.adm-tile-label {
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+  margin-top: 2px;
+}
+
+.adm-tile-ok   .adm-tile-value { color: var(--ok); }
+.adm-tile-warn .adm-tile-value { color: var(--warn); }
+.adm-tile-bad  .adm-tile-value { color: var(--bad); }
+
+/* ---- needs attention ------------------------------------------------- */
+.adm-att {
+  display: grid;
+  grid-template-columns: auto minmax(7rem, auto) 1fr;
+  gap: 2px 12px;
+  align-items: baseline;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--mw-line);
+}
+
+.adm-att:last-child { border-bottom: 0; }
+
+.adm-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  align-self: center;
+}
+
+.adm-dot-bad  { background: var(--bad); }
+.adm-dot-warn { background: var(--warn); }
+.adm-dot-info { background: var(--mw-text-6); }
+
+.adm-att-who { font-weight: 700; color: var(--mw-text-1); }
+.adm-att-what { color: var(--mw-text-2); font-size: 0.9375rem; }
+
+/* The fix, in words. Spans the row under it so it reads as a sentence
+   rather than a fourth column of shrapnel. */
+.adm-att-fix {
+  grid-column: 3;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+}
+
+.adm-att-actions { grid-column: 3; margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---- players --------------------------------------------------------- */
+.adm-search { width: 100%; margin-bottom: 10px; }
+
+.adm-player {
+  border-bottom: 1px solid var(--mw-line);
+}
+.adm-player:last-child { border-bottom: 0; }
+
+/* The collapsed row is the whole point: one line each, so thirty
+   players is a screen rather than a scroll. */
+.adm-player-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.adm-player-row:hover .adm-player-name { color: var(--mw-gold-light); }
+
+.adm-caret { color: var(--mw-text-6); width: 10px; flex: none; font-size: 0.75rem; }
+.adm-player-name { font-weight: 700; color: var(--mw-text-1); }
+.adm-player-meta { color: var(--mw-text-6); font-size: 0.8125rem; margin-left: auto; }
+
+.adm-badge {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--mw-line-strong);
+  color: var(--mw-text-4);
+}
+
+.adm-badge-ok  { color: var(--ok);  border-color: var(--ok); }
+.adm-badge-bad { color: var(--bad); border-color: var(--bad); }
+
+.adm-player-detail {
+  padding: 4px 0 16px 20px;
+  border-left: 2px solid var(--mw-line);
+  margin-left: 4px;
+}
+
+.adm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 5px 0;
+  font-size: 0.8125rem;
+  color: var(--mw-text-4);
+}
+
+.adm-mono {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--mw-gold-light);
+  background: var(--mw-ink);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.adm-sub-title {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+  margin: 12px 0 4px;
+}
+
+/* Destructive actions live behind the expansion and behind their own
+   heading, so nothing irreversible sits one stray click from a row you
+   were only reading. */
+.adm-danger-zone {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--mw-line-strong);
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.adm-reveal {
+  width: 100%;
+  margin-top: 6px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.8125rem;
+  color: var(--mw-gold-light);
+  background: var(--mw-page);
+  border-color: var(--mw-gold);
+}
+
+.adm-result { margin-top: 8px; font-size: 0.8125rem; color: var(--mw-text-3); }
+
+.adm-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.adm-form input { flex: 1 1 180px; }
+
+@media (max-width: 620px) {
+  .adm-att { grid-template-columns: auto 1fr; }
+  .adm-att-what, .adm-att-fix, .adm-att-actions { grid-column: 2; }
+  .adm-player-meta { margin-left: 0; width: 100%; }
+}
