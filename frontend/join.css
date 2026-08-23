@@ -223,9 +223,9 @@ body {
 
 .protocol-badge {
   display: inline-block;
-  background: #2a2410;
+  background: var(--mw-accent-wash);
   color: var(--mw-accent);
-  border: 1px solid #4a3f1a;
+  border: 1px solid var(--mw-accent-wash-line);
   border-radius: 3px;
   padding: 1px 5px;
   margin-left: 4px;
@@ -418,7 +418,7 @@ body {
    meshmapper:// link into the URL field" caution, which needs to stop
    the eye rather than blend into the surrounding paragraphs. */
 .join-warning-box {
-  background: #2a1a10;
+  background: var(--mw-accent-deep);
   border: 1px solid var(--mw-hostile);
   border-radius: 6px;
   padding: 10px 12px;
@@ -645,7 +645,7 @@ body {
   color: #b8e0a0;
 }
 .status-diagnosis-attention {
-  background: #2a1a10;
+  background: var(--mw-accent-deep);
   border: 1px solid var(--mw-hostile);
   color: #f0c0a8;
 }

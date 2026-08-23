@@ -33,7 +33,7 @@
 }
 
 .mc-switch-btn.active {
-  background: #3a2f12;
+  background: var(--mw-accent-active);
   color: var(--mw-accent);
   border-color: var(--mw-accent);
 }
@@ -462,7 +462,7 @@
   background: var(--mw-line);
 }
 .mc-modal-tab.active {
-  background: #3a2f12;
+  background: var(--mw-accent-active);
   color: var(--mw-accent);
   border-color: var(--mw-accent);
 }

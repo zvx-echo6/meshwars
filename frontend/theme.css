@@ -46,6 +46,16 @@
   --mw-line:        #333;    /* the default rule and panel border */
   --mw-line-strong: #444;
   --mw-raised:      #2a2a2a; /* a surface lifted off --mw-panel */
+
+  /* Accent-tinted surfaces: the warm dark fills behind a selected
+     control, a highlighted note, a callout. Tokenised for the same
+     reason the greys were -- a theme has to be able to move them, and a
+     cyan skin with four warm brown panels still left in it reads as a
+     half-finished job rather than a skin. */
+  --mw-accent-wash:      #2a2410;  /* subtle accent-tinted surface */
+  --mw-accent-wash-line: #4a3f1a;  /* its border */
+  --mw-accent-deep:      #2a1a10;  /* a deeper tint of the same idea */
+  --mw-accent-active:    #3a2f12;  /* a control that is currently selected */
 }
 
 /* -------------------------------------------------------------------------
@@ -99,4 +109,9 @@
   --mw-line:        #1B2A3A;
   --mw-line-strong: #27394D;
   --mw-raised:      #131F2C;
+
+  --mw-accent-wash:      #0C2630;
+  --mw-accent-wash-line: #14424F;
+  --mw-accent-deep:      #08202B;
+  --mw-accent-active:    #0F3B47;
 }
