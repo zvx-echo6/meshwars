@@ -23,4 +23,27 @@
   --mw-accent: var(--mw-gold);     /* was #e8a735 */
   --mw-panel:  var(--mw-ink-soft); /* was #1a1a1a */
   --mw-page:   var(--mw-ink);      /* was #0a0a0a */
+
+  /* ---- neutral ramp ------------------------------------------------
+     The brand colours above were tokenised from the start; the greys
+     were not, and roughly 120 literal #333 / #ccc / #888 values across
+     five stylesheets are exactly what stops a second theme from being
+     possible -- a theme block can redefine a token, but it can never
+     reach a hex typed into a rule.
+
+     These are the values that were already in use, unchanged, so the
+     default look is identical to the character. A ramp rather than
+     role names because that is honestly what they are: six steps of
+     dimming text, two weights of rule, one raised surface. A theme
+     shifts the whole ramp at once. */
+  --mw-text-1: #ddd;   /* body text */
+  --mw-text-2: #ccc;
+  --mw-text-3: #bbb;
+  --mw-text-4: #aaa;
+  --mw-text-5: #999;
+  --mw-text-6: #888;   /* captions, disabled, least emphasis */
+
+  --mw-line:        #333;    /* the default rule and panel border */
+  --mw-line-strong: #444;
+  --mw-raised:      #2a2a2a; /* a surface lifted off --mw-panel */
 }

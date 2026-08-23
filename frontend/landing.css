@@ -17,7 +17,7 @@ html {
 body {
   margin: 0;
   background: var(--mw-page);
-  color: #ddd;
+  color: var(--mw-text-1);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -44,7 +44,7 @@ body {
   text-align: center;
   padding: 48px 20px 40px;
   margin-bottom: 28px;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 12px;
   background-color: var(--mw-page);
   background-image:
@@ -82,7 +82,7 @@ body {
   max-width: 220px;
   text-align: center;
   background: var(--mw-panel);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 8px;
   padding: 14px 12px;
 }
@@ -101,13 +101,13 @@ body {
   font-size: 0.6875rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #999;
+  color: var(--mw-text-5);
 }
 
 /* ---- panels ------------------------------------------------------------ */
 .landing-panel {
   background: var(--mw-panel);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 8px;
   padding: 20px 22px;
   margin-bottom: 24px;
@@ -128,7 +128,7 @@ body {
   margin: 0 0 10px;
   font-size: 0.875rem;
   line-height: 1.5;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .landing-panel p:last-child { margin-bottom: 0; }
 
@@ -144,7 +144,7 @@ body {
   padding-left: 20px;
   font-size: 0.8125rem;
   line-height: 1.6;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .landing-list li { margin-bottom: 8px; }
 .landing-list li:last-child { margin-bottom: 0; }
@@ -164,7 +164,7 @@ body {
 }
 
 .team-chip {
-  --chip-color: #888;
+  --chip-color: var(--mw-text-6);
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -233,7 +233,7 @@ body {
 
 .protocol-card {
   background: #141414;
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--mw-raised);
   border-radius: 6px;
   padding: 12px 14px;
 }
@@ -263,7 +263,7 @@ body {
   margin: 0;
   font-size: 0.8125rem;
   line-height: 1.5;
-  color: #bbb;
+  color: var(--mw-text-3);
 }
 
 .protocol-live-badge {
@@ -306,7 +306,7 @@ body {
   padding-left: 20px;
   font-size: 0.8125rem;
   line-height: 1.6;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .landing-steps li { margin-bottom: 6px; }
 .landing-steps li:last-child { margin-bottom: 0; }
@@ -323,13 +323,13 @@ body {
   padding-left: 20px;
   font-size: 0.8125rem;
   line-height: 1.6;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .landing-substeps li { margin-bottom: 8px; }
 .landing-substeps li:last-child { margin-bottom: 0; }
 .landing-substeps code {
   background: var(--mw-page);
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 3px;
   padding: 1px 4px;
 }
@@ -370,7 +370,7 @@ body {
 
 .landing-warnings {
   background: #141414;
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--mw-raised);
   border-radius: 6px;
   padding: 10px 12px;
   margin-bottom: 14px;
@@ -378,23 +378,23 @@ body {
 .landing-warnings p {
   margin: 0 0 6px;
   font-size: 0.75rem;
-  color: #bbb;
+  color: var(--mw-text-3);
 }
 .landing-warnings p:last-child { margin-bottom: 0; }
 
 .landing-join-cta {
   display: block;
   text-align: center;
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
   padding: 10px;
   font-size: 0.875rem;
   font-weight: 700;
   text-decoration: none;
 }
-.landing-join-cta:hover { background: #333; }
+.landing-join-cta:hover { background: var(--mw-line); }
 
 /* ---- links list ----------------------------------------------------------- */
 .landing-links {
@@ -417,7 +417,7 @@ body {
 
 .landing-link-desc {
   display: block;
-  color: #999;
+  color: var(--mw-text-5);
   font-size: 0.75rem;
   margin-top: 2px;
 }
@@ -485,7 +485,7 @@ body {
   gap: 12px;
   padding: 0 16px;
   background: var(--mw-panel);
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--mw-line);
   box-sizing: border-box;
 }
 .mw-nav-brand {
@@ -514,14 +514,14 @@ body {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #999;
+  color: var(--mw-text-5);
   text-decoration: none;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   border-radius: 4px;
   background: var(--mw-panel);
   white-space: nowrap;
 }
-.mw-nav-links a:hover { background: #262626; color: var(--mw-accent); }
+.mw-nav-links a:hover { background: var(--mw-raised); color: var(--mw-accent); }
 .mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
 
 /* GitHub mark: deliberately understated per the owner ("faded into the
@@ -534,7 +534,7 @@ body {
   align-items: center;
   justify-content: center;
   padding: 6px;
-  color: #999;
+  color: var(--mw-text-5);
   opacity: 0.35;
   text-decoration: none;
   border-radius: 4px;
@@ -574,7 +574,7 @@ body {
   padding-left: 20px;
   font-size: 0.875rem;
   line-height: 1.6;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 
 .landing-plain li { margin-bottom: 4px; }

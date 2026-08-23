@@ -13,14 +13,14 @@
   gap: 4px;
   margin-bottom: 8px;
   padding-bottom: 8px;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid var(--mw-raised);
 }
 
 .mc-switch-btn {
   flex: 1 1 0;
-  background: #2a2a2a;
-  color: #ccc;
-  border: 1px solid #444;
+  background: var(--mw-raised);
+  color: var(--mw-text-2);
+  border: 1px solid var(--mw-line-strong);
   border-radius: 3px;
   padding: 6px 8px;
   font-size: 12px;
@@ -29,7 +29,7 @@
 }
 
 .mc-switch-btn:hover {
-  background: #333;
+  background: var(--mw-line);
 }
 
 .mc-switch-btn.active {
@@ -49,10 +49,10 @@
      on a large monitor (never balloons past a small info-card width). */
   box-sizing: border-box;
   background: var(--mw-panel);
-  color: #ddd;
+  color: var(--mw-text-1);
   padding: 10px 14px;
   border-radius: 6px;
-  border: 1px solid #333;
+  border: 1px solid var(--mw-line);
   font-size: 12px;
   min-width: 140px;
   max-width: min(300px, calc(100vw - 20px));
@@ -86,12 +86,12 @@
   font-size: 11px;
   letter-spacing: normal;
   text-transform: none;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .mc-header-caret {
   display: none;
   margin-left: 6px;
-  color: #888;
+  color: var(--mw-text-6);
   font-size: 10px;
   transition: transform 0.15s ease;
 }
@@ -165,7 +165,7 @@
 .mc-winner-count,
 .mc-tally-count {
   cursor: pointer;
-  border-bottom: 1px dotted #888;
+  border-bottom: 1px dotted var(--mw-text-6);
 }
 .mc-team-count {
   font-weight: 600;
@@ -190,9 +190,9 @@
 .mc-countdown {
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid var(--mw-raised);
   font-size: 11px;
-  color: #aaa;
+  color: var(--mw-text-4);
 }
 
 .mc-scoreboard a {
@@ -205,30 +205,30 @@
 .mc-lookup-row {
   margin-top: 4px;
   padding-top: 6px;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid var(--mw-raised);
   gap: 4px !important;
 }
 #mc-lookup-input {
   flex: 1;
   background: var(--mw-page);
-  color: #ddd;
-  border: 1px solid #333;
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
   border-radius: 3px;
   padding: 3px 6px;
   font-size: 11px;
   min-width: 0;
 }
 #mc-lookup-btn {
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 3px;
   padding: 3px 8px;
   cursor: pointer;
   font-size: 11px;
 }
-#mc-lookup-btn:hover { background: #333; }
-.mc-lookup-result { font-size: 11px; margin-top: 4px; color: #ccc; }
+#mc-lookup-btn:hover { background: var(--mw-line); }
+.mc-lookup-result { font-size: 11px; margin-top: 4px; color: var(--mw-text-2); }
 
 /* Refresh / Top-players buttons -- the top button's label text (Top
    Wardrivers on MeshCore, Top Operators on Meshtastic) comes from
@@ -238,9 +238,9 @@
 }
 .mc-scoreboard #mc-refresh-btn,
 .mc-scoreboard #mc-top-btn {
-  background: #2a2a2a;
+  background: var(--mw-raised);
   color: var(--mw-accent);
-  border: 1px solid #444;
+  border: 1px solid var(--mw-line-strong);
   border-radius: 3px;
   padding: 5px 10px;
   cursor: pointer;
@@ -249,7 +249,7 @@
 }
 .mc-scoreboard #mc-refresh-btn:hover,
 .mc-scoreboard #mc-top-btn:hover {
-  background: #333;
+  background: var(--mw-line);
 }
 
 /* ===== Winner banner =====
@@ -302,14 +302,14 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
-  color: #ccc;
+  color: var(--mw-text-2);
 }
 .mc-winner-count-entry {
   display: flex;
   align-items: center;
 }
 .mc-winner-dates {
-  color: #888;
+  color: var(--mw-text-6);
   font-size: 11px;
 }
 
@@ -335,7 +335,7 @@
 
 /* Cell popup content, rendered inside a Leaflet popup */
 .mc-popup {
-  color: #ddd;
+  color: var(--mw-text-1);
   font-size: 12px;
   min-width: 200px;
 }
@@ -357,7 +357,7 @@
   font-size: 11px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #888;
+  color: var(--mw-text-6);
   margin-top: 8px;
   margin-bottom: 3px;
 }
@@ -371,7 +371,7 @@
 .mc-popup-capture-row {
   margin: 2px 0;
   font-size: 11px;
-  color: #bbb;
+  color: var(--mw-text-3);
 }
 
 .mc-popup-empty {
@@ -380,7 +380,7 @@
 }
 
 .mc-popup-loading {
-  color: #888;
+  color: var(--mw-text-6);
   font-style: italic;
 }
 
@@ -398,8 +398,8 @@
 }
 .mc-modal-inner {
   background: var(--mw-panel);
-  color: #ddd;
-  border: 1px solid #444;
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line-strong);
   border-radius: 8px;
   width: min(700px, 92vw);
   max-height: 80vh;
@@ -410,7 +410,7 @@
   justify-content: space-between;
   align-items: center;
   padding: 12px 18px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--mw-line);
   font-weight: 700;
   font-size: 14px;
   color: var(--mw-accent);
@@ -419,7 +419,7 @@
 }
 .mc-modal-close {
   cursor: pointer;
-  color: #aaa;
+  color: var(--mw-text-4);
   font-size: 22px;
   background: none;
   border: none;
@@ -428,7 +428,7 @@
 .mc-modal-loading,
 .mc-modal-empty {
   padding: 1em;
-  color: #888;
+  color: var(--mw-text-6);
   font-style: italic;
 }
 .mc-modal-error {
@@ -449,9 +449,9 @@
 }
 .mc-modal-tab {
   flex: 1 1 0;
-  background: #2a2a2a;
-  color: #ccc;
-  border: 1px solid #444;
+  background: var(--mw-raised);
+  color: var(--mw-text-2);
+  border: 1px solid var(--mw-line-strong);
   border-radius: 3px;
   padding: 6px 8px;
   font-size: 12px;
@@ -459,7 +459,7 @@
   cursor: pointer;
 }
 .mc-modal-tab:hover {
-  background: #333;
+  background: var(--mw-line);
 }
 .mc-modal-tab.active {
   background: #3a2f12;
@@ -476,10 +476,10 @@
 .mc-history-table td {
   padding: 8px 12px;
   text-align: left;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid var(--mw-raised);
 }
 .mc-history-table th {
-  color: #888;
+  color: var(--mw-text-6);
   font-weight: 600;
   font-size: 11px;
   text-transform: uppercase;
