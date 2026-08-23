@@ -523,6 +523,56 @@ CREATE TABLE IF NOT EXISTS mc_checkin_seen_message (
     packet_id  INTEGER PRIMARY KEY,
     seen_at    INTEGER NOT NULL
 );
+
+-- ---------------------------------------------------------------------
+-- Monthly results (app/results.py). A six-month season leaves five
+-- months with nothing to show, so each calendar month closes with its
+-- own standings and honors on the /results page.
+--
+-- A month is scored ON THE MONTH -- ground taken and points earned
+-- between its boundaries -- not as a snapshot of season standings. A
+-- snapshot would name the same leader every month and mean nothing;
+-- "who gained the most in August" is a fresh contest each time.
+--
+-- Months are CALENDAR months in settings.checkin_net_timezone, the same
+-- local clock net dates already use. Not per-season offsets: the two
+-- boards started on different days, and one site should not hold two
+-- different opinions about when August ended.
+--
+-- These tables are a freeze, not the source of truth. Everything in
+-- them is derived from mc_tile_capture_log and mc_checkin_award, and
+-- the current (unfinished) month is computed live from those same rows
+-- rather than read from here. A month is written here once it is over,
+-- so a result can never change after the fact -- a later correction to
+-- history will not silently rewrite a month somebody already won.
+CREATE TABLE IF NOT EXISTS month_result (
+    month     TEXT NOT NULL,     -- 'YYYY-MM', local
+    protocol  TEXT NOT NULL,     -- 'mc' | 'mt'
+    closed_at INTEGER NOT NULL,
+    PRIMARY KEY (month, protocol)
+);
+
+CREATE TABLE IF NOT EXISTS month_standing (
+    month          TEXT NOT NULL,
+    protocol       TEXT NOT NULL,
+    team           TEXT NOT NULL,
+    captures       INTEGER NOT NULL DEFAULT 0,
+    checkin_points REAL NOT NULL DEFAULT 0,
+    points         REAL NOT NULL DEFAULT 0,   -- captures + checkin_points; what places the team
+    PRIMARY KEY (month, protocol, team)
+);
+
+CREATE TABLE IF NOT EXISTS month_award (
+    month     TEXT NOT NULL,
+    protocol  TEXT NOT NULL,
+    award     TEXT NOT NULL,     -- see app/results.py AWARDS
+    scope     TEXT NOT NULL DEFAULT '',   -- '' for an overall award, else the team it is scoped to
+    player_id INTEGER,           -- null for a team award
+    team      TEXT,
+    value     REAL NOT NULL,
+    detail    TEXT,              -- award-specific, e.g. Frontier's cell and distance
+    PRIMARY KEY (month, protocol, award, scope)
+);
 """
 
 

@@ -225,6 +225,25 @@ class Settings(BaseSettings):
     # earned, so changing these never rewrites what someone already won.
     checkin_streak_bonus: float = 5.0
     checkin_streak_bonus_max: float = 25.0
+
+    # ---- monthly results (app/results.py) ----------------------------
+    # How far beyond the nearest town's edge a square must be to qualify
+    # for Frontier. Twenty miles out is where mesh coverage runs out, so
+    # a qualifying square still has to hear a repeater -- expect months
+    # with no winner, which is the point of a prestige award.
+    frontier_miles: float = 20.0
+
+    # Quick Fingers needs more than one check-in to average, or a single
+    # lucky night wins it.
+    quick_fingers_min_checkins: int = 2
+
+    # Automation guard, applied to Quick Fingers ONLY. A player whose
+    # check-in lands within this many seconds of the same offset every
+    # week, over at least this many nets, is almost certainly a cron job
+    # and is skipped for that one award -- silently, never penalised
+    # elsewhere. A human posting from a phone scatters over minutes.
+    automation_stdev_seconds: float = 2.0
+    automation_min_samples: int = 3
     checkin_poll_interval_seconds: int = 30   # tight -- MeshCore's feed returns only its newest 100 messages, no pagination, and a busy net can approach that
 
     # The net window. Weekday follows Python's datetime.weekday()

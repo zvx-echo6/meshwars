@@ -291,6 +291,17 @@ async def get_nodes() -> Response:
     return mc_api.cached_json_response("mt_board", _build_get_nodes)
 
 
+# Deliberately NOT the bare "/results" the other Meshtastic data routes
+# would suggest (/scores, /top, /top-checkins): that path belongs to the
+# results PAGE. A data route and a page cannot share it, and the page is
+# the one a person types.
+@router.get("/api/results")
+async def mt_results() -> list[dict]:
+    """Monthly results for the Meshtastic board. See
+    mc_api.results_for()."""
+    return mc_api.results_for(MT_PROTOCOL)
+
+
 @router.get("/get-samples")
 async def get_samples() -> dict:
     """Per-position sample data from the retired geohash board (the old
@@ -646,7 +657,7 @@ def _inject_head(html: str) -> str:
 
 def _templated_html_page(request: Request, path: Path, missing_message: str) -> Response:
     """Like _html_page, for a top-level page that also needs _inject_head()
-    run over it (the map, /join, /about -- everywhere the verification
+    run over it (the map, /results, /join, /about -- everywhere the verification
     tag can appear).
 
     Reads and transforms the file instead of handing it to FileResponse,
@@ -711,6 +722,10 @@ def mount(app: FastAPI) -> None:
         @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
         async def about_page(request: Request):
             return _templated_html_page(request, frontend_dir / "about.html", "about page not bundled")
+
+        @app.get("/results", response_class=HTMLResponse, include_in_schema=False)
+        async def results_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "results.html", "results page not bundled")
 
         # robots.txt / sitemap.xml: plain static files, same explicit
         # top-level-route pattern as the three pages above (not folded

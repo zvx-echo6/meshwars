@@ -4,7 +4,7 @@ A weekly net runs Wednesday evenings. Checking in during the net window
 earns a registered, non-disabled player's team settings.checkin_points,
 once per player per net -- on top of, never instead of, the squares
 their team holds (see app/mc_scoring.py's team_totals()). Theme only:
-square-holders are "Wardrivers," check-in earners are "Netrunners," but
+square-holders are "Wardrivers," check-in earners are "Phreaks," but
 these are two ACTIVITIES on the same player model, not two kinds of
 player -- the same person can do both and shows up in both rankings.
 There is no class or mode anywhere in this schema.
@@ -106,7 +106,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import mc_scoring
+from . import mc_scoring, results
 from .config import settings
 from .db import WriteSession
 from .mc_api import active_season
@@ -808,6 +808,7 @@ class CheckinPoller:
             # current.
             mc_scoring.maybe_roll_season(conn, now, MC_PROTOCOL)
             season_id = mc_scoring.ensure_active_season(conn, now, MC_PROTOCOL)
+            results.maybe_roll_months(conn, now, MC_PROTOCOL)
             resolved = _resolve_mc_identities(conn, self._directory)
 
             for m in messages:
@@ -875,6 +876,7 @@ class CheckinPoller:
         async with WriteSession() as conn:
             mc_scoring.maybe_roll_season(conn, now, MT_PROTOCOL)
             season_id = mc_scoring.ensure_active_season(conn, now, MT_PROTOCOL)
+            results.maybe_roll_months(conn, now, MT_PROTOCOL)
             registered = _load_mt_registered_players(conn)
 
             for pkt in packets:
