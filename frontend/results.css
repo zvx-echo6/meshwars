@@ -4,6 +4,21 @@
    from theme.css tokens, except the team dots, which are gameplay
    colours and are set inline by results.js the same way the map does. */
 
+/* landing.css turns .landing-wrap into two columns above 900px, which
+   is right for About's short independent panels and wrong here: a month
+   is one tall block of a wide table plus a wide honors list, and multicol
+   flowed the honors into the second column, outside the card that owns
+   them. This page opts back out and narrows instead, so a month stays
+   one unbroken card at a comfortable measure. break-inside is belt and
+   braces for any future column context. */
+.rs-wrap { max-width: 860px; }
+
+@media (min-width: 900px) {
+  .rs-wrap { column-count: 1; }
+}
+
+.rs-month { break-inside: avoid; }
+
 .rs-board-toggle {
   display: flex;
   gap: 0;
