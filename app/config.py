@@ -192,6 +192,12 @@ class Settings(BaseSettings):
     # or the wrong one, still costs us a request, and this is the same
     # bounded per-address limiter pattern app/join_api.py already uses
     # for /api/join, not a second mechanism.
+    # Public read API (app/public_api.py). Generous on purpose: a bot
+    # polling the capture feed every few seconds is the expected caller,
+    # not an abusive one. It is still a bound, and it is per address.
+    public_api_rate_limit_requests: int = 120
+    public_api_rate_limit_window_seconds: int = 60
+
     mc_status_rate_limit_attempts: int = 30
     mc_status_rate_limit_window_seconds: int = 60
 
