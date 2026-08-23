@@ -818,7 +818,10 @@ async def admin_api_clients(request: Request):
         "created_at": r["created_at"],
         "revoked_at": r["revoked_at"],
         "last_seen_at": r["last_seen_at"],
-        "request_count": r["request_count"],
+        # Authentications rather than requests -- see the column's own
+        # comment in app/db.py. Returned for completeness; the admin UI
+        # shows last_seen_at instead, which is the honest signal.
+        "auth_count": r["request_count"],
         "revoked": r["revoked_at"] is not None,
     } for r in rows])
 

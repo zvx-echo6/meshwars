@@ -590,6 +590,11 @@ CREATE TABLE IF NOT EXISTS api_client (
     created_at   INTEGER NOT NULL,
     revoked_at   INTEGER,
     last_seen_at INTEGER,
+    -- Authentications, NOT requests. app/public_api.py caches a key
+    -- lookup for a minute, so a client polling every second bumps this
+    -- once. It is a coarse "has this been used much" signal and nothing
+    -- finer; last_seen_at is the number an operator should actually
+    -- read, and that one is accurate to within the same minute.
     request_count INTEGER NOT NULL DEFAULT 0
 );
 """

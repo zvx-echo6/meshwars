@@ -870,7 +870,6 @@ function renderApiClient(c) {
   row.appendChild(el('span', { text: c.label }));
   row.appendChild(el('span', { text: 'issued ' + fmtTs(c.created_at) }));
   row.appendChild(el('span', { text: 'last used ' + fmtTs(c.last_seen_at) }));
-  row.appendChild(el('span', { text: c.request_count + ' requests' }));
   row.appendChild(el('span', {
     className: c.revoked ? 'admin-badge admin-badge-bad' : 'admin-badge admin-badge-ok',
     text: c.revoked ? 'revoked' : 'active',
