@@ -712,6 +712,12 @@ class CheckinPoller:
         self._task: asyncio.Task | None = None
         self._directory: list[dict] = []
         self._directory_fetched_at: float = 0.0
+        # Wall-clock of the last completed cycle, for the admin health
+        # panel. In memory rather than a table because it is a liveness
+        # signal, and a liveness signal that survives the process dying
+        # is not one. Zero until the first cycle finishes.
+        self.last_poll_at: int = 0
+        self.last_poll_error: str | None = None
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self.run_forever(), name="checkin-poller")
@@ -761,12 +767,19 @@ class CheckinPoller:
         if self._mc_client is not None:
             try:
                 await self._poll_mc()
-            except Exception:
+            except Exception as e:
                 log.exception("checkin: mc poll failed")
+                self.last_poll_error = "mc: %s" % e
         try:
             await self._poll_mt()
-        except Exception:
+        except Exception as e:
             log.exception("checkin: mt poll failed")
+            self.last_poll_error = "mt: %s" % e
+        else:
+            if self._mc_client is None or self.last_poll_error is None \
+                    or not self.last_poll_error.startswith("mc:"):
+                self.last_poll_error = None
+        self.last_poll_at = int(time.time())
 
     async def _refresh_directory_if_stale(self) -> None:
         now = time.monotonic()

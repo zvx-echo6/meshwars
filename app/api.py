@@ -35,6 +35,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from . import mc_api
 from .admin_api import router as admin_router
+from .admin_ops import router as admin_ops_router
 from .checkin_api import router as checkin_router
 from .config import settings
 from .db import connect
@@ -704,6 +705,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(mc_router)
     app.include_router(join_router)
     app.include_router(admin_router)
+    app.include_router(admin_ops_router)
     app.include_router(nodes_router)
     app.include_router(checkin_router)
     app.include_router(public_router)
