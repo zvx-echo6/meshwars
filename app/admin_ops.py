@@ -196,15 +196,36 @@ def _health(conn) -> dict:
         "players_active_today": count(
             "SELECT count(DISTINCT player_id) FROM player_cell_ping WHERE seen_at > ?",
             now - 86400),
-        # The check-in poller writes here on every cycle it sees a
-        # message, so a stale value means the poller is not running --
-        # which has happened before and was invisible.
-        "last_checkin_poll_at": count("SELECT max(seen_at) FROM mc_checkin_seen_message"),
+        # NOT a poller heartbeat, and it was briefly used as one here:
+        # a message is only recorded once it is SETTLED, and a message
+        # nobody could be matched to is deliberately left unsettled so a
+        # later poll can retry it. Between nets the channel is quiet and
+        # this stands still while the poller runs perfectly. It is the
+        # age of the newest decision, which is a different question.
+        "last_settled_checkin_at": count("SELECT max(seen_at) FROM mc_checkin_seen_message"),
         "database_bytes": db_bytes,
         "disk_free_bytes": free_bytes,
         # The exploration awards skip themselves silently when this file
         # is missing, which is exactly how it went unnoticed once.
         "places_loaded": places.loaded_count(),
+    }
+
+
+def _poller_health(request: Request) -> dict:
+    """Liveness of the check-in poller, read off the running object.
+
+    In memory, so it resets when the process does -- which is the honest
+    answer, since what is being asked is whether the loop is turning
+    right now. The database cannot answer that: a poller that runs
+    perfectly writes nothing at all between nets.
+    """
+    poller = getattr(request.app.state, "checkin_poller", None)
+    if poller is None:
+        return {"running": False, "last_poll_at": None, "last_error": None}
+    return {
+        "running": True,
+        "last_poll_at": getattr(poller, "last_poll_at", 0) or None,
+        "last_error": getattr(poller, "last_poll_error", None),
     }
 
 
@@ -232,7 +253,7 @@ async def admin_overview(request: Request):
                     (season["id"],)).fetchone()[0] if season else 0,
             })
         return JSONResponse({
-            "health": _health(conn),
+            "health": dict(_health(conn), checkin_poller=_poller_health(request)),
             "boards": boards,
             "directory_size": len(directory),
             "attention": _attention(conn, directory),

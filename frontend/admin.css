@@ -163,14 +163,21 @@ input:focus-visible, select:focus-visible {
 .adm-tile-bad  .adm-tile-value { color: var(--bad); }
 
 /* ---- needs attention ------------------------------------------------- */
+/* Every row is its own grid, so an `auto` name column sizes to that row
+   alone and each line starts somewhere different. A fixed name column
+   makes the list read as a column instead of as ragged prose. */
 .adm-att {
   display: grid;
-  grid-template-columns: auto minmax(7rem, auto) 1fr;
+  grid-template-columns: 8px 11rem 1fr;
   gap: 2px 12px;
   align-items: baseline;
   padding: 9px 0;
   border-bottom: 1px solid var(--mw-line);
 }
+
+/* A long display name wraps inside its column rather than widening it
+   and pushing this one row out of step with the rest. */
+.adm-att-who { overflow-wrap: anywhere; }
 
 .adm-att:last-child { border-bottom: 0; }
 
