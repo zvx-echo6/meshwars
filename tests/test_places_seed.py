@@ -94,6 +94,7 @@ def test_park_cells_excludes_a_sliver():
 # ---------------------------------------------------------------------
 
 import csv as _csv
+import os
 import time
 
 import app.places_seed as places_seed_module
@@ -245,3 +246,38 @@ def test_past_activation_against_a_pruned_place_still_resolves_and_counts(conn, 
         (42,),
     ).fetchone()[0]
     assert name == "W7I/SW-001"
+
+
+def test_upgrading_to_the_reconcile_fix_forces_one_full_reload(conn, tmp_path, monkeypatch):
+    """A DB that already recorded this exact CSV's fingerprint under the
+    OLD insert-only loader (no _RECONCILE_VERSION in the fingerprint)
+    must not skip its first load after upgrading -- otherwise a stale
+    row from before this fix landed would never actually get
+    reconciled, since the CSV file itself never changes again.
+    """
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+    _write_seed_csv(csv_path, [_seed_row("landmark", "n1", lat=44.0, lon=-117.0)])
+
+    # Simulate the pre-fix fingerprint already recorded for this exact
+    # file (size:mtime, no version suffix) and a stale summit row an
+    # old insert-only loader left behind.
+    st = os.stat(csv_path)
+    old_style_fingerprint = f"{st.st_size}:{int(st.st_mtime)}"
+    conn.execute(
+        "INSERT INTO cursor(k, v) VALUES ('places_seed_csv_fingerprint', ?)",
+        (old_style_fingerprint,),
+    )
+    conn.execute(
+        "INSERT INTO place(ref_type, ref_code, name, lat, lon, points, source, "
+        "rotates, active, created_at) VALUES ('summit', 'stale', 'stale', 43.0, -116.0, "
+        "100, 'STALE', 0, 1, ?)",
+        (int(time.time()),),
+    )
+
+    stats = load_places_seed(conn)
+
+    assert stats["deactivated"] == 1
+    assert conn.execute(
+        "SELECT active FROM place WHERE ref_code = 'stale'"
+    ).fetchone()[0] == 0

@@ -213,8 +213,20 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # table (get_cursor/set_cursor) -- read/written directly here rather
     # than imported, since importing app.db from a module app.db itself
     # imports would be circular.
+    #
+    # _RECONCILE_VERSION rides along in the fingerprint string so a code
+    # upgrade alone -- CSV byte-for-byte unchanged -- still forces one
+    # full pass. Without it, a DB that already recorded this exact CSV's
+    # fingerprint under the OLD insert-only loader (no reconcile at all)
+    # would skip forever after upgrading to this fix: the file never
+    # changes again, so "unchanged since last load" would stay true
+    # indefinitely and the stale rows this fix exists to clean up would
+    # never actually get cleaned up. Bump this only when the reconcile
+    # logic itself changes in a way that requires re-running it against
+    # an already-fingerprinted CSV.
+    _RECONCILE_VERSION = 1
     st = os.stat(_DATA_PATH)
-    fingerprint = f"{st.st_size}:{int(st.st_mtime)}"
+    fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}"
     row = conn.execute("SELECT v FROM cursor WHERE k = 'places_seed_csv_fingerprint'").fetchone()
     if row is not None and row[0] == fingerprint:
         log.info("places_seed: CSV unchanged since last load (%s), skipping", fingerprint)
