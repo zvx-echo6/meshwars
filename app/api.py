@@ -24,12 +24,14 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from email.utils import formatdate
 from pathlib import Path
 
+import anyio
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -600,6 +602,178 @@ def _file_etag(path: Path) -> tuple[str, str]:
     return etag, last_modified
 
 
+# Terrain/overlay PMTiles archives (/tiles/<name>.pmtiles, see mount()
+# below). NOT served by Starlette's StaticFiles: the pinned
+# starlette==0.38.6 (pulled in by fastapi==0.115.0) does not forward an
+# incoming Range header through StaticFiles at all -- a PMTiles client
+# asking for 127 bytes gets back 200 and the entire multi-hundred-
+# megabyte file. starlette==0.41.3 fixes it, but bumping the framework
+# to chase one route's behaviour, on a branch heading for production,
+# changes everything else in the app along with it. This endpoint
+# implements the byte-range contract itself instead.
+
+_TILE_RANGE_RE = re.compile(r"^bytes=(\d+)-(\d*)$")
+_TILE_CHUNK_SIZE = 256 * 1024  # streamed read size; keeps a hundreds-of-MB file off the heap
+
+
+class _UnsatisfiableRange(Exception):
+    """The requested Range cannot be honoured -- caller should answer 416."""
+
+
+def _resolve_tile_path(filename: str) -> Path | None:
+    """Map a requested /tiles/<filename> onto a real file inside
+    settings.tiles_dir, or return None if it should be refused.
+
+    This endpoint answers to the open internet, so the traversal check
+    here is load-bearing: a bug that let a request read outside
+    tiles_dir would serve arbitrary files off the container. Three
+    separate guards, all required:
+
+    - only a bare *.pmtiles name is servable at all (no .db, no .env,
+      no source we didn't mean to publish);
+    - an absolute filename is rejected outright before it ever reaches
+      the join below -- Path("/tiles-data") / "/etc/passwd" evaluates
+      to plain "/etc/passwd" in pathlib (joining an absolute path
+      replaces, rather than extends, what came before it), so without
+      this check a leading slash would walk straight past tiles_dir;
+    - the joined path is resolved (following any symlink) and then
+      required to sit inside the resolved tiles_dir via relative_to --
+      this is what actually catches "../../etc/passwd" and friends,
+      since {filename:path} captures ".." as a literal path segment
+      rather than normalizing it away.
+    """
+    if not filename.endswith(".pmtiles"):
+        return None
+    if filename.startswith("/") or Path(filename).is_absolute():
+        return None
+
+    base = Path(settings.tiles_dir).resolve()
+    try:
+        candidate = (base / filename).resolve()
+        candidate.relative_to(base)
+    except (ValueError, OSError):
+        return None
+
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _parse_tile_range(range_header: str, total: int) -> tuple[int, int]:
+    """Parse a Range header into an inclusive (start, end) byte pair.
+
+    PMTiles only ever issues a single range per request: a closed
+    'bytes=START-END' for its usual directory/leaf-chunk fetches, or an
+    open-ended 'bytes=START-' occasionally. A comma-separated list is a
+    multi-range request (RFC 7233); we don't support true
+    multipart/byteranges responses, and the correct thing for a server
+    that can't is to refuse rather than silently answer with only the
+    first range and let a caller that needed all of them get quietly
+    wrong data -- so any request naming more than one range is treated
+    as unsatisfiable and gets a 416, same as a genuinely out-of-bounds
+    one. A leading-less suffix form ('bytes=-500', "last 500 bytes") is
+    likewise not something PMTiles asks for and isn't accepted here.
+    """
+    if "," in range_header:
+        raise _UnsatisfiableRange()
+
+    m = _TILE_RANGE_RE.match(range_header.strip())
+    if not m:
+        raise _UnsatisfiableRange()
+
+    start_s, end_s = m.groups()
+    if start_s == "":
+        raise _UnsatisfiableRange()
+
+    start = int(start_s)
+    end = int(end_s) if end_s else total - 1
+    if start >= total or start > end:
+        raise _UnsatisfiableRange()
+
+    return start, min(end, total - 1)
+
+
+async def _stream_tile_range(path: Path, start: int, end: int):
+    """Yield the inclusive byte range [start, end] from path, one
+    _TILE_CHUNK_SIZE slice at a time.
+
+    Uses anyio's threaded file I/O (the same mechanism Starlette's own
+    FileResponse uses internally) rather than a plain open()/read()
+    inside this async function -- these files are hundreds of megabytes
+    and a blocking read would stall the whole event loop, every other
+    request included, for as long as that read takes.
+    """
+    remaining = end - start + 1
+    async with await anyio.open_file(path, "rb") as f:
+        await f.seek(start)
+        while remaining > 0:
+            chunk = await f.read(min(_TILE_CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+async def tile_file(filename: str, request: Request) -> Response:
+    """Serve one PMTiles archive from settings.tiles_dir with real
+    byte-range support -- see the module comment above this section for
+    why this exists instead of Starlette's StaticFiles.
+
+    Cache-Control is "public, max-age=31536000, immutable": these
+    archives are large and static, and the frontend already appends
+    TILE_REV as a cache-busting query param whenever it serves a
+    genuinely different file (see frontend/map2.js), so there is no
+    "stale until revalidated" case to protect against the way
+    _html_page's no-cache exists to protect the HTML shell -- a cached
+    copy under one TILE_REV is simply correct forever. ETag/
+    If-None-Match still uses _file_etag's mtime+size scheme (matching
+    every other file route in this module) so a client that skips the
+    cache (or a revalidating proxy) gets a cheap 304 instead of a
+    re-download.
+    """
+    path = _resolve_tile_path(filename)
+    if path is None:
+        return Response(status_code=404)
+
+    total = path.stat().st_size
+    etag, last_modified = _file_etag(path)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "ETag": etag,
+        "Last-Modified": last_modified,
+        "Cache-Control": "public, max-age=31536000, immutable",
+    }
+
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+
+    range_header = request.headers.get("range")
+    if range_header:
+        try:
+            start, end = _parse_tile_range(range_header, total)
+        except _UnsatisfiableRange:
+            return Response(
+                status_code=416,
+                headers={**headers, "Content-Range": f"bytes */{total}"},
+            )
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        headers["Content-Length"] = str(end - start + 1)
+        return StreamingResponse(
+            _stream_tile_range(path, start, end),
+            status_code=206,
+            headers=headers,
+            media_type="application/octet-stream",
+        )
+
+    headers["Content-Length"] = str(total)
+    return StreamingResponse(
+        _stream_tile_range(path, 0, total - 1),
+        status_code=200,
+        headers=headers,
+        media_type="application/octet-stream",
+    )
+
+
 def _html_page(request: Request, path: Path, missing_message: str) -> Response:
     """Serve a top-level HTML document (the map, /join, /about).
 
@@ -723,14 +897,16 @@ def mount(app: FastAPI) -> None:
         # which broke every time navi's archives were rebuilt in place: a
         # browser holding byte ranges of the old file kept serving them
         # against a file that had since changed shape underneath it.
-        # Same-origin now, so no CORS is needed. Starlette's StaticFiles
-        # (via FileResponse) answers Range requests on its own, which is
-        # what PMTiles' range-based reads depend on. Skipped entirely
-        # when the directory isn't there (e.g. a dev checkout that
-        # hasn't set up TILES_DIR) -- same pattern as /static above.
+        # Same-origin now, so no CORS is needed. NOT a StaticFiles mount
+        # -- see the module comment above tile_file() for why: the
+        # pinned starlette==0.38.6 doesn't forward Range through
+        # StaticFiles, so PMTiles' range-based reads need this explicit
+        # route instead. Skipped entirely when the directory isn't there
+        # (e.g. a dev checkout that hasn't set up TILES_DIR) -- same
+        # pattern as /static above.
         tiles_dir = Path(settings.tiles_dir)
         if tiles_dir.exists():
-            app.mount("/tiles", StaticFiles(directory=str(tiles_dir)), name="tiles")
+            app.get("/tiles/{filename:path}", include_in_schema=False)(tile_file)
 
         # The MapLibre map (frontend/map2.html + map2.js/.css) -- built
         # alongside the original Leaflet map at /map-legacy below, and
