@@ -1,21 +1,23 @@
 /*
- * MeshWars: staging-only MapLibre GL map page (/map2). A proof-of-concept
- * renderer swap for the existing Leaflet page at / (frontend/mc.js) --
- * this file does NOT touch that page or its data model, it just asks the
- * same /api/mc/board and /api/mc/scores endpoints for the same data and
- * draws it with MapLibre GL + a self-hosted PMTiles DEM for hillshade,
- * which Leaflet has no equivalent for.
+ * MeshWars: front page (/), also reachable at /map2. Boots a MapLibre GL
+ * map -- the renderer swap for the original Leaflet page, now kept at
+ * /map-legacy (frontend/mc.js) -- and draws it with a self-hosted
+ * PMTiles DEM for hillshade, which Leaflet has no equivalent for.
  *
- * Extended (staging only) with: the site's theme system (theme.css +
- * theme-toggle.js, same as every other page), a basemap that follows
- * that theme (light raster under gold, dark under neon, both defined up
- * front and toggled by visibility rather than rebuilt -- rebuilding the
- * style loses the reader's pan/zoom), three self-hosted PMTiles
- * overlays (public lands, USFS roads/trails) and a contour overlay
+ * Also carries: the site's theme system (theme.css + theme-toggle.js,
+ * same as every other page, but defaulting to the neon/dark theme here
+ * specifically -- see the boot snippet in map2.html), a basemap that
+ * follows that theme (light raster under gold, dark under neon, both
+ * defined up front and toggled by visibility rather than rebuilt --
+ * rebuilding the style loses the reader's pan/zoom), three self-hosted
+ * PMTiles overlays (public lands, USFS roads/trails), a contour overlay
  * generated client-side from the same DEM used for hillshade (via
  * mlcontour -- no tileset of its own), all behind a small
- * layer-switcher panel, also visibility-toggled so flipping a checkbox
- * never refetches a source.
+ * layer-switcher panel (also visibility-toggled, so flipping a checkbox
+ * never refetches a source), Places Worth Going markers and a slide-out
+ * panel, and the territory scoreboard/roster/history/top-players panel
+ * and winner banner ported from frontend/mc.js -- see the "Territory
+ * panel" section below for what that port did and did not carry over.
  *
  * Team colours are gameplay, not branding: they are the same constant
  * regardless of theme and never touched by the theme code below.
@@ -98,6 +100,18 @@ const PLACE_ICON_PX = { summit: 22, park: 15, landmark: 9 };
 // reader has zoomed in enough for a name to mean something.
 const PLACE_LABEL_MIN_ZOOM = 12;
 
+// Cap on how far the map is ever allowed to zoom in when framing a
+// player search result (doPlayerFind) -- same cap and same reasoning
+// as frontend/mc.js's MAX_FIT_ZOOM: a single player holding one or two
+// 300m cells has a tiny bounds box, and fitting to it with no cap zooms
+// in far enough to fill the screen with one giant colored square and no
+// context.
+const MAX_FIT_ZOOM = 13;
+
+// Matches the breakpoint mc.css's collapsible-header media query uses
+// for "phone-width" (see setMcCollapsed below).
+const NARROW_BREAKPOINT_PX = 600;
+
 // pmtiles.js registers no protocol on its own -- this wires the
 // pmtiles:// URL scheme into MapLibre's request pipeline so a
 // raster-dem source can point straight at a single .pmtiles archive
@@ -172,10 +186,614 @@ async function fetchBoard() {
   };
 }
 
-async function fetchScores() {
-  const res = await fetch('/api/mc/scores');
-  if (!res.ok) throw new Error(`scores fetch failed: ${res.status}`);
-  return res.json();
+// ===== Territory panel (ported from frontend/mc.js) =====
+//
+// The scoreboard/roster/history/top-players/player-lookup panel and the
+// winner banner, both of which lived only on the Leaflet page (frontend/
+// mc.js's buildScoreboardControl et al.) until this page became the
+// front page. Same markup, same mc.css/coverage.css classes (loaded by
+// map2.html alongside map2.css), same information -- rebuilt here
+// because mc.js's version anchors itself via L.control/L.DomUtil/
+// L.DomEvent, none of which exist without a Leaflet map. The panel div
+// is built once and appended straight to <body>, positioned by
+// map2.css (#mc-scoreboard-position) the way Leaflet's own topright
+// control corner used to position it for free.
+//
+// NOT ported: the Meshtastic/MeshCore board SWITCH (.mc-switch-row) at
+// the top of mc.js's panel. This map draws exactly one board (MeshCore,
+// via the board/board-fill source+layer in main() below) -- adding the
+// switch back would mean teaching this page to also fetch and render
+// the Meshtastic board through a second MapLibre source, a real feature
+// this page does not have, not a markup port. Every string this panel
+// shows (board title, button labels, endpoints) is the MeshCore half of
+// mc.js's PROTOCOLS table, inlined below as MC.
+//
+// Also not ported: per-cell click popups (mc.js's bindCellPopup /
+// buildCellPopupHtml, showing a square's owner/captures/repeaters on
+// click). This page's board-fill layer has no click handler at all
+// today, on either the old minimal panel or this one -- flagged in the
+// deploy report as a real gap, not silently carried over or silently
+// dropped.
+const MC = {
+  boardTitle: 'MeshCore Territory',
+  topButtonLabel: 'Top Operators',
+  topCaptureLabel: 'Wardrivers',
+  topCheckinLabel: 'NetOps',
+  lookupPlaceholder: 'player name',
+  lookupHelp: 'Search by player name.',
+  scoresEndpoint: '/api/mc/scores',
+  historyEndpoint: '/api/mc/history',
+  rosterEndpoint: '/api/mc/players',
+  findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
+  topEndpoint: '/api/mc/top',
+  topCheckinEndpoint: '/api/mc/top-checkins',
+  seasonEndpoint: '/api/mc/season',
+};
+
+const REFRESH_INTERVAL_MS = 30000;
+
+// ---- module state (territory panel) ----
+let scoreboardBody = null;
+let scoreboardPanelEl = null;
+let scoreboardHeaderBtn = null;
+let scoreboardSummaryEl = null;
+let scoreboardLookupInput = null;
+let scoreboardEndsAt = null;
+
+function formatTs(ts) {
+  if (!ts) return 'unknown';
+  try {
+    return new Date(ts * 1000).toLocaleString();
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
+function formatCountdown(secondsRemaining) {
+  if (secondsRemaining <= 0) return 'closing';
+  const days = Math.floor(secondsRemaining / 86400);
+  const hours = Math.floor((secondsRemaining % 86400) / 3600);
+  const mins = Math.floor((secondsRemaining % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+// A team's number, wherever it's shown: squares held PLUS check-in
+// points (app/mc_scoring.py's team_totals()) -- the combined figure
+// that actually decides the season now, not squares alone. Falls back
+// to tiles-only for the all-zero seed row renderScoreboard(null) hands
+// out before the first real fetch, which has no checkin_points/total
+// fields at all yet.
+function teamTotal(t) {
+  if (typeof t.total === 'number') return t.total;
+  return t.tiles ?? 0;
+}
+
+function teamBreakdown(t) {
+  const tiles = t.tiles ?? 0;
+  const pts = t.checkin_points ?? 0;
+  const squareWord = tiles === 1 ? 'square' : 'squares';
+  const pointWord = pts === 1 ? 'point' : 'points';
+  return `${tiles} ${squareWord} + ${pts} check-in ${pointWord}`;
+}
+
+function teamBreakdownCompact(t) {
+  const tiles = t.tiles ?? 0;
+  const pts = t.checkin_points ?? 0;
+  return `${tiles}+${pts}`;
+}
+
+function bindBreakdownToggle(el) {
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const showingBreakdown = el.classList.toggle('mc-showing-breakdown');
+    el.textContent = showingBreakdown ? el.dataset.compact : el.dataset.total;
+  });
+}
+
+function attachBreakdownToggle(el, totalText, compactText) {
+  el.dataset.total = totalText;
+  el.dataset.compact = compactText;
+  el.textContent = totalText;
+  bindBreakdownToggle(el);
+}
+
+function leadingTeam(teams) {
+  let best = null;
+  teams.forEach((t) => {
+    if (!best || teamTotal(t) > teamTotal(best)) best = t;
+  });
+  return best;
+}
+
+function setMcCollapsed(collapsed) {
+  if (!scoreboardPanelEl || !scoreboardHeaderBtn) return;
+  scoreboardPanelEl.classList.toggle('mc-collapsed', collapsed);
+  scoreboardHeaderBtn.setAttribute('aria-expanded', String(!collapsed));
+}
+
+function renderScoreboard(data) {
+  if (!scoreboardBody) return;
+  scoreboardBody.replaceChildren();
+
+  const teams = (data && Array.isArray(data.teams) && data.teams.length)
+    ? data.teams
+    : TEAM_ORDER.map((t) => ({ team: t, tiles: 0 }));
+
+  if (scoreboardSummaryEl) {
+    const lead = leadingTeam(teams);
+    scoreboardSummaryEl.textContent = lead ? `${lead.team} ${teamTotal(lead)}` : '';
+  }
+
+  const ordered = teams.slice().sort((a, b) => (
+    teamTotal(b) - teamTotal(a) ||
+    TEAM_ORDER.indexOf(a.team) - TEAM_ORDER.indexOf(b.team)
+  ));
+
+  ordered.forEach((entry) => {
+    const row = document.createElement('div');
+    row.className = 'mc-row';
+
+    const dot = document.createElement('span');
+    dot.className = 'mc-dot';
+    dot.style.background = TEAM_COLORS[entry.team] || '#888';
+    row.appendChild(dot);
+
+    const label = document.createElement('span');
+    label.className = 'mc-team-label';
+    label.textContent = `${entry.team}: `;
+    row.appendChild(label);
+
+    const count = document.createElement('span');
+    count.className = 'mc-team-count';
+    count.title = teamBreakdown(entry);
+    attachBreakdownToggle(count, String(teamTotal(entry)), teamBreakdownCompact(entry));
+    row.appendChild(count);
+
+    scoreboardBody.appendChild(row);
+  });
+}
+
+function tickCountdown() {
+  const el = document.getElementById('mc-countdown');
+  if (!el || !scoreboardEndsAt) return;
+  const now = Math.floor(Date.now() / 1000);
+  el.textContent = formatCountdown(scoreboardEndsAt - now);
+}
+
+async function loadScoreboard() {
+  try {
+    const res = await fetch(MC.scoresEndpoint);
+    if (!res.ok) return;
+    const data = await res.json();
+    renderScoreboard(data);
+    scoreboardEndsAt = data.ends_at || null;
+  } catch (err) {
+    console.warn('MeshWars map2: scoreboard refresh failed', err);
+  }
+}
+
+async function fetchHistorySeasons() {
+  const res = await fetch(MC.historyEndpoint);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+// MeshCore's /api/mc/players is a flat list; grouped here into
+// Map<team, [{display_name}]> -- the shape the roster modal renders.
+async function fetchRosterByTeam() {
+  const byTeam = new Map();
+  const res = await fetch(MC.rosterEndpoint);
+  if (!res.ok) return byTeam;
+  const players = await res.json();
+  if (!Array.isArray(players)) return byTeam;
+  players.forEach((p) => {
+    const team = p.team || 'UNKNOWN';
+    if (!byTeam.has(team)) byTeam.set(team, []);
+    byTeam.get(team).push({ display_name: p.display_name });
+  });
+  return byTeam;
+}
+
+// ===== Player search (Find) =====
+async function doPlayerFind(value) {
+  const resultEl = document.getElementById('mc-lookup-result');
+  if (!resultEl) return;
+  const query = (value || '').trim();
+  if (!query) { resultEl.textContent = ''; return; }
+  resultEl.textContent = 'Searching...';
+
+  try {
+    const res = await fetch(MC.findEndpoint(query));
+    if (res.status === 404) {
+      resultEl.textContent = `Not found: ${query}`;
+      return;
+    }
+    if (!res.ok) {
+      resultEl.textContent = 'Search failed.';
+      return;
+    }
+    const data = await res.json();
+    if (!data.bounds || !data.tiles_held) {
+      resultEl.textContent = `${data.display_name} (${data.team}) holds no cells right now.`;
+      return;
+    }
+    const b = data.bounds;
+    // MapLibre bounds are [[west, south], [east, north]] -- Leaflet's
+    // equivalent call (mc.js's doPlayerFind) uses [lat, lng] order
+    // instead; only the coordinate order changes here, not the padding
+    // or the MAX_FIT_ZOOM cap.
+    if (window.__mwMap) {
+      window.__mwMap.fitBounds([[b.west, b.south], [b.east, b.north]], { padding: 24, maxZoom: MAX_FIT_ZOOM });
+    }
+    const plural = data.tiles_held === 1 ? '' : 's';
+    resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`;
+  } catch (err) {
+    resultEl.textContent = 'Search failed.';
+  }
+}
+
+// ===== Modal (History / Roster / Top) =====
+
+let mcModalEl = null;
+let mcModalTitleEl = null;
+let mcModalBodyEl = null;
+
+function ensureModal() {
+  if (mcModalEl) return;
+  mcModalEl = document.createElement('div');
+  mcModalEl.id = 'mc-modal';
+  mcModalEl.className = 'mc-modal';
+  mcModalEl.innerHTML = `
+    <div class="mc-modal-inner">
+      <div class="mc-modal-header">
+        <span id="mc-modal-title"></span>
+        <button type="button" class="mc-modal-close" id="mc-modal-close">&times;</button>
+      </div>
+      <div id="mc-modal-body"></div>
+    </div>
+  `;
+  document.body.appendChild(mcModalEl);
+  mcModalTitleEl = mcModalEl.querySelector('#mc-modal-title');
+  mcModalBodyEl = mcModalEl.querySelector('#mc-modal-body');
+  mcModalEl.querySelector('#mc-modal-close').addEventListener('click', closeMcModal);
+  mcModalEl.addEventListener('click', (e) => {
+    if (e.target === mcModalEl) closeMcModal();
+  });
+}
+
+function openMcModal(title) {
+  ensureModal();
+  mcModalTitleEl.textContent = title;
+  mcModalBodyEl.replaceChildren();
+  const loading = document.createElement('div');
+  loading.className = 'mc-modal-loading';
+  loading.textContent = 'Loading...';
+  mcModalBodyEl.appendChild(loading);
+  mcModalEl.style.display = 'flex';
+  return mcModalBodyEl;
+}
+
+function closeMcModal() {
+  if (mcModalEl) mcModalEl.style.display = 'none';
+}
+
+function showModalMessage(body, className, text) {
+  body.replaceChildren();
+  const el = document.createElement('div');
+  el.className = className;
+  el.textContent = text;
+  body.appendChild(el);
+}
+
+async function openHistoryModal() {
+  const body = openMcModal('Past Seasons');
+  try {
+    const seasons = await fetchHistorySeasons();
+    if (!seasons.length) {
+      showModalMessage(body, 'mc-modal-empty', 'No completed seasons yet.');
+      return;
+    }
+    const rows = seasons.map((s) => {
+      const started = s.started_at ? new Date(s.started_at * 1000).toLocaleDateString() : '?';
+      const ended = s.ends_at ? new Date(s.ends_at * 1000).toLocaleDateString() : '?';
+      const teams = Array.isArray(s.teams) ? s.teams : [];
+      const tallyText = teams
+        .filter((t) => teamTotal(t) > 0)
+        .map((t) => `${escapeHtml(t.team)} <span class="mc-tally-count" data-total="${escapeHtml(teamTotal(t))}" data-compact="${escapeHtml(teamBreakdownCompact(t))}" title="${escapeHtml(teamBreakdown(t))}">${escapeHtml(teamTotal(t))}</span>`)
+        .join(', ') || 'no tiles recorded';
+      return `<tr>
+        <td>#${escapeHtml(s.id)}</td>
+        <td>${escapeHtml(started)} &ndash; ${escapeHtml(ended)}</td>
+        <td class="mc-winner-cell">${escapeHtml(s.winner || '-')}</td>
+        <td>${tallyText}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `<table class="mc-history-table">
+      <thead><tr><th>Season</th><th>Dates</th><th>Winner</th><th>Final tallies</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+    body.querySelectorAll('.mc-tally-count').forEach(bindBreakdownToggle);
+  } catch (err) {
+    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+  }
+}
+
+async function openRosterModal() {
+  const body = openMcModal('Player Roster');
+  try {
+    const byTeam = await fetchRosterByTeam();
+    if (byTeam.size === 0) {
+      showModalMessage(body, 'mc-modal-empty', 'No players yet.');
+      return;
+    }
+    const teamOrder = TEAM_ORDER.filter((t) => byTeam.has(t))
+      .concat([...byTeam.keys()].filter((t) => !TEAM_ORDER.includes(t)));
+    const sections = teamOrder.map((team) => {
+      const list = (byTeam.get(team) || []).slice()
+        .sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''));
+      const rows = list.map((p) => `<tr><td>${escapeHtml(p.display_name)}</td></tr>`).join('');
+      const color = TEAM_COLORS[team] || '#888';
+      return `<div class="mc-roster-team">
+        <h3 style="color:${color};">${escapeHtml(team)} &mdash; ${list.length}</h3>
+        <table class="mc-roster-table"><tbody>${rows}</tbody></table>
+      </div>`;
+    }).join('');
+    body.innerHTML = `<div class="mc-roster-grid">${sections}</div>`;
+  } catch (err) {
+    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+  }
+}
+
+let topModalTab = 'captures';
+
+function topTabSpecs() {
+  return {
+    captures: {
+      label: MC.topCaptureLabel,
+      endpoint: MC.topEndpoint,
+      valueKey: 'captures',
+      valueHeader: 'Captures',
+      emptyText: 'No capture activity yet.',
+    },
+    checkins: {
+      label: MC.topCheckinLabel,
+      endpoint: MC.topCheckinEndpoint,
+      valueKey: 'points',
+      valueHeader: 'Points',
+      emptyText: 'No check-in activity yet.',
+      extraKey: 'streak',
+      extraHeader: 'Streak',
+    },
+  };
+}
+
+async function renderTopModalTab() {
+  const tabBody = mcModalBodyEl.querySelector('#mc-top-tab-body');
+  if (!tabBody) return;
+  const spec = topTabSpecs()[topModalTab];
+  tabBody.innerHTML = '<div class="mc-modal-loading">Loading...</div>';
+
+  try {
+    const res = await fetch(spec.endpoint);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) {
+      tabBody.innerHTML = '';
+      const el = document.createElement('div');
+      el.className = 'mc-modal-empty';
+      el.textContent = spec.emptyText;
+      tabBody.appendChild(el);
+      return;
+    }
+    const trs = rows.map((r, i) => {
+      const color = TEAM_COLORS[r.team] || '#888';
+      const extra = spec.extraKey
+        ? `<td>${escapeHtml(r[spec.extraKey] == null ? '—' : `${r[spec.extraKey]}x`)}</td>`
+        : '';
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${escapeHtml(r.display_name)}</td>
+        <td><span class="mc-dot" style="background:${color}"></span>${escapeHtml(r.team)}</td>
+        <td>${escapeHtml(r[spec.valueKey])}</td>
+        ${extra}
+      </tr>`;
+    }).join('');
+    const extraHead = spec.extraHeader ? `<th>${escapeHtml(spec.extraHeader)}</th>` : '';
+    tabBody.innerHTML = `<table class="mc-history-table">
+      <thead><tr><th>#</th><th>Player</th><th>Team</th><th>${escapeHtml(spec.valueHeader)}</th>${extraHead}</tr></thead>
+      <tbody>${trs}</tbody>
+    </table>`;
+  } catch (err) {
+    tabBody.innerHTML = '';
+    const el = document.createElement('div');
+    el.className = 'mc-modal-error';
+    el.textContent = `Failed to load: ${err.message}`;
+    tabBody.appendChild(el);
+  }
+}
+
+async function openTopModal() {
+  const specs = topTabSpecs();
+  topModalTab = 'captures';
+  const body = openMcModal('Season Rankings');
+  body.innerHTML = `
+    <div class="mc-modal-tabs">
+      <button type="button" class="mc-modal-tab active" data-tab="captures">${escapeHtml(specs.captures.label)}</button>
+      <button type="button" class="mc-modal-tab" data-tab="checkins">${escapeHtml(specs.checkins.label)}</button>
+    </div>
+    <div id="mc-top-tab-body"></div>
+  `;
+  body.querySelectorAll('.mc-modal-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.tab === topModalTab) return;
+      topModalTab = btn.dataset.tab;
+      body.querySelectorAll('.mc-modal-tab').forEach((b) => b.classList.toggle('active', b === btn));
+      renderTopModalTab();
+    });
+  });
+  await renderTopModalTab();
+}
+
+// ===== Winner banner =====
+//
+// Top-center overlay on the map itself (#mc-winner-banner in
+// map2.html) -- same element, same position, same behavior as the
+// Leaflet page's. Shows nothing once the season's display window
+// elapses, same as the backend already decides via winner_banner_active
+// / settings.winner_banner_hours -- this never has its own opinion
+// about when to hide it.
+function renderWinnerBanner(banner) {
+  const el = document.getElementById('mc-winner-banner');
+  if (!el) return;
+  if (!banner) {
+    el.style.display = 'none';
+    el.replaceChildren();
+    return;
+  }
+
+  el.replaceChildren();
+
+  const isTie = !banner.winner || banner.winner === 'TIE';
+  const tag = document.createElement('span');
+  tag.className = 'mc-winner-tag';
+  tag.style.background = isTie ? '#888' : (TEAM_COLORS[banner.winner] || '#888');
+  tag.textContent = isTie ? 'TIE' : `${banner.winner} WINS`;
+  el.appendChild(tag);
+
+  const counts = document.createElement('span');
+  counts.className = 'mc-winner-counts';
+  const teams = Array.isArray(banner.teams) ? banner.teams : [];
+  teams.forEach((t) => {
+    const entry = document.createElement('span');
+    entry.className = 'mc-winner-count-entry';
+    const dot = document.createElement('span');
+    dot.className = 'mc-dot';
+    dot.style.background = TEAM_COLORS[t.team] || '#888';
+    entry.appendChild(dot);
+    const countSpan = document.createElement('span');
+    countSpan.className = 'mc-winner-count';
+    countSpan.title = teamBreakdown(t);
+    attachBreakdownToggle(countSpan, String(teamTotal(t)), teamBreakdownCompact(t));
+    entry.appendChild(countSpan);
+    counts.appendChild(entry);
+  });
+  el.appendChild(counts);
+
+  const dates = document.createElement('span');
+  dates.className = 'mc-winner-dates';
+  dates.textContent = `Season #${banner.season_id}`;
+  el.appendChild(dates);
+
+  el.style.display = 'flex';
+}
+
+async function refreshWinnerBanner() {
+  try {
+    const res = await fetch(MC.seasonEndpoint);
+    if (!res.ok) { renderWinnerBanner(null); return; }
+    const data = await res.json();
+    renderWinnerBanner(data.winner_banner || null);
+  } catch (err) {
+    console.warn('MeshWars map2: winner banner refresh failed', err);
+    renderWinnerBanner(null);
+  }
+}
+
+// ===== Scoreboard control =====
+//
+// Board switch, collapsible header with live summary, seven-team
+// scoreboard with color dots, season countdown, player lookup, History/
+// Roster, Refresh, and a ranked-players button -- everything mc.js's
+// buildScoreboardControl built, minus the board-switch row (see this
+// section's header comment). Built once and appended straight into
+// <body>; map2.css positions it (#mc-scoreboard-position) the way
+// Leaflet's own topright control corner used to for mc.js.
+function buildScoreboardControl(map) {
+  const div = document.createElement('div');
+  div.id = 'mc-scoreboard-position';
+  div.className = 'mc-scoreboard';
+  div.innerHTML = `
+    <button type="button" class="mc-row mc-title mc-header-btn" id="mc-header-btn" aria-expanded="true">
+      <span class="mc-header-title-text" id="mc-header-title-text">${escapeHtml(MC.boardTitle)}</span>
+      <span class="mc-header-right">
+        <span class="mc-header-summary" id="mc-header-summary"></span>
+        <span class="mc-header-caret" aria-hidden="true">&#9662;</span>
+      </span>
+    </button>
+    <div class="mc-panel-content" id="mc-panel-content">
+      <div class="mc-scoreboard-body"></div>
+      <div class="mc-row mc-countdown">Ends in&nbsp;<span id="mc-countdown">--</span></div>
+      <div class="mc-row mc-lookup-row">
+        <input type="text" id="mc-lookup-input" placeholder="${escapeHtml(MC.lookupPlaceholder)}" title="${escapeHtml(MC.lookupHelp)}" />
+        <button type="button" id="mc-lookup-btn">Find</button>
+      </div>
+      <div id="mc-lookup-result" class="mc-lookup-result"></div>
+      <div class="mc-row"><a href="#" id="mc-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mc-roster-link">Roster</a></div>
+      <div class="mc-row mc-actions">
+        <button type="button" id="mc-refresh-btn">Refresh map</button>
+      </div>
+      <div class="mc-row mc-actions">
+        <button type="button" id="mc-top-btn">${escapeHtml(MC.topButtonLabel)}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(div);
+
+  scoreboardBody = div.querySelector('.mc-scoreboard-body');
+  scoreboardPanelEl = div;
+  scoreboardHeaderBtn = div.querySelector('#mc-header-btn');
+  scoreboardSummaryEl = div.querySelector('#mc-header-summary');
+  scoreboardLookupInput = div.querySelector('#mc-lookup-input');
+
+  // Leaflet's L.DomEvent.disableClickPropagation/disableScrollPropagation
+  // stopped clicks/scrolls on a control from reaching the map underneath
+  // it -- there is no map-wide equivalent to opt out of on MapLibre, so
+  // this stops the same events at the panel's own root instead.
+  ['click', 'dblclick', 'mousedown', 'touchstart', 'wheel'].forEach((evt) => {
+    div.addEventListener(evt, (e) => e.stopPropagation());
+  });
+
+  const topBtn = div.querySelector('#mc-top-btn');
+
+  div.querySelector('#mc-header-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setMcCollapsed(!scoreboardPanelEl.classList.contains('mc-collapsed'));
+  });
+
+  div.querySelector('#mc-history-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    openHistoryModal();
+  });
+  div.querySelector('#mc-roster-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    openRosterModal();
+  });
+
+  const lookupBtn = div.querySelector('#mc-lookup-btn');
+  const doLookup = () => doPlayerFind(scoreboardLookupInput.value);
+  lookupBtn.addEventListener('click', doLookup);
+  scoreboardLookupInput.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') doLookup();
+  });
+  scoreboardLookupInput.addEventListener('keyup', (e) => e.stopPropagation());
+  scoreboardLookupInput.addEventListener('keypress', (e) => e.stopPropagation());
+
+  div.querySelector('#mc-refresh-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    loadBoardData(map);
+    loadScoreboard();
+  });
+
+  topBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openTopModal();
+  });
+
+  return div;
 }
 
 // ---- Places Worth Going (docs/features/places.md) ----------------------
@@ -381,32 +999,6 @@ function setupPlacesPanel(map) {
   if (closeBtn) closeBtn.addEventListener('click', () => setOpen(false));
 }
 
-function renderScores(data) {
-  const list = document.getElementById('mw-scores-list');
-  list.innerHTML = '';
-  const byTeam = new Map((data.teams || []).map((t) => [t.team, t]));
-  for (const team of TEAM_ORDER) {
-    const entry = byTeam.get(team) || { total: 0 };
-    const li = document.createElement('li');
-
-    const name = document.createElement('span');
-    name.className = 'mw-score-name';
-    const dot = document.createElement('span');
-    dot.className = 'mw-score-dot';
-    dot.style.background = TEAM_COLORS[team];
-    name.appendChild(dot);
-    name.appendChild(document.createTextNode(team));
-
-    const value = document.createElement('span');
-    value.className = 'mw-score-value';
-    value.textContent = entry.total ?? 0;
-
-    li.appendChild(name);
-    li.appendChild(value);
-    list.appendChild(li);
-  }
-}
-
 function teamMatchExpression() {
   // ['match', ['get', 'team'], 'RED', '#ff4136', 'GREEN', '#2ecc40', ..., fallback]
   const expr = ['match', ['get', 'team']];
@@ -418,7 +1010,10 @@ function teamMatchExpression() {
 }
 
 // Mirrors theme-toggle.js's currentTheme(): gold is the default and the
-// only other value the toggle ever writes is 'neon'.
+// only other value the toggle ever writes is 'neon'. (map2.html's own
+// boot snippet defaults the FRONT PAGE to neon specifically when no
+// choice has been stored yet -- see that file -- but once data-theme is
+// set, reading it back here works exactly the same either way.)
 function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === 'neon' ? 'neon' : 'gold';
 }
@@ -706,15 +1301,6 @@ async function loadBoardData(map) {
   }
 }
 
-async function loadScores() {
-  try {
-    const scores = await fetchScores();
-    renderScores(scores);
-  } catch (err) {
-    console.error('MeshWars map2: failed to load scores', err);
-  }
-}
-
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
 // Read from /config rather than written down here, same reasoning as
@@ -839,10 +1425,11 @@ async function main() {
   });
 
   // Referenced by the places panel's click-to-fly-to handler
-  // (renderPlacesPanel) -- that markup is built well after `map` goes
-  // out of this function's own scope, so it reads the map back off
-  // window rather than main() threading it through another layer of
-  // closures for one click handler.
+  // (renderPlacesPanel) and by the territory panel's player-lookup
+  // fitBounds (doPlayerFind) -- both build their markup well after
+  // `map` goes out of this function's own scope, so they read the map
+  // back off window rather than main() threading it through another
+  // layer of closures.
   window.__mwMap = map;
 
   // Camera is locked flat (see maxPitch above), so drop the compass/pitch
@@ -855,6 +1442,23 @@ async function main() {
   if (map.dragRotate) map.dragRotate.disable();
   if (map.touchZoomRotate) map.touchZoomRotate.disableRotation();
   if (map.keyboard) map.keyboard.disableRotation();
+
+  // Territory panel + winner banner (ported from frontend/mc.js -- see
+  // the "Territory panel" section above). Built here, alongside the
+  // NavigationControl above, rather than inside map.on('load') below:
+  // neither reads anything off the map style, so there is no reason to
+  // wait for it, and doing it here means the panel and its seeded
+  // all-zero rows are on screen the instant the page paints instead of
+  // popping in once tiles start arriving.
+  buildScoreboardControl(map);
+  renderScoreboard(null); // seed all-zero rows immediately, before the first fetch
+
+  // Territory panel starts collapsed on narrow screens only (phones) --
+  // it otherwise eats a lot of a phone screen. Desktop always starts
+  // (and stays) expanded; see setMcCollapsed / mc.css.
+  if (window.matchMedia(`(max-width: ${NARROW_BREAKPOINT_PX}px)`).matches) {
+    setMcCollapsed(true);
+  }
 
   map.on('load', () => {
     // Board source/layers are created empty and filled in once the
@@ -901,9 +1505,30 @@ async function main() {
     applyBasemapTheme(map);
 
     loadBoardData(map);
-    loadScores();
+    loadScoreboard();
+    refreshWinnerBanner();
     loadPlacesViewport(map);
     loadPlacesPanel(map);
+
+    const loadingOverlay = document.getElementById('loading-overlay');
+    if (loadingOverlay) {
+      loadingOverlay.classList.add('fade-out');
+      setTimeout(() => loadingOverlay.remove(), 500);
+    }
+
+    // Same 30s cadence as frontend/mc.js's own REFRESH_INTERVAL_MS --
+    // board squares, the scoreboard, and the winner banner all move on
+    // their own (other players capturing cells, a season rolling over),
+    // so this is a periodic re-fetch, never a re-fit of the camera: it
+    // must not fight a visitor's own panning/zooming, same as the
+    // Refresh map button (buildScoreboardControl) and unlike the
+    // player-lookup Find (doPlayerFind), which fits deliberately.
+    setInterval(() => {
+      loadBoardData(map);
+      loadScoreboard();
+      refreshWinnerBanner();
+    }, REFRESH_INTERVAL_MS);
+    setInterval(tickCountdown, 1000);
 
     // Places refresh on moveend, debounced -- a drag or zoom fires many
     // intermediate move events, and only the settled position (bbox for

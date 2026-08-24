@@ -718,9 +718,25 @@ def mount(app: FastAPI) -> None:
     if frontend_dir.exists():
         app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
+        # The MapLibre map (frontend/map2.html + map2.js/.css) -- built
+        # alongside the original Leaflet map at /map-legacy below, and
+        # now the front page in its own right rather than a staging-only
+        # proof off to the side. Carries its own copy of this page's SEO
+        # markup (title/description/canonical/OG/JSON-LD/favicon) plus
+        # the nav, territory panel, and winner banner ported over from
+        # frontend/index.html + mc.js -- see map2.html/map2.js for what
+        # that port did and did not carry forward.
         @app.get("/", response_class=HTMLResponse, include_in_schema=False)
         async def index(request: Request):
-            return _templated_html_page(request, frontend_dir / "index.html", "map page not bundled")
+            return _templated_html_page(request, frontend_dir / "map2.html", "map page not bundled")
+
+        # The original Leaflet map, kept reachable for side-by-side
+        # comparison now that / serves the MapLibre map instead. noindex
+        # in its own <head> (frontend/index.html) so it never competes
+        # with / for the site's own search identity.
+        @app.get("/map-legacy", response_class=HTMLResponse, include_in_schema=False)
+        async def map_legacy_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "index.html", "legacy map page not bundled")
 
         @app.get("/join", response_class=HTMLResponse, include_in_schema=False)
         async def join_page(request: Request):
@@ -738,10 +754,10 @@ def mount(app: FastAPI) -> None:
         async def rules_page(request: Request):
             return _templated_html_page(request, frontend_dir / "rules.html", "rules page not bundled")
 
-        # Staging-only MapLibre renderer proof, evaluated on a private
-        # tailnet instance -- see frontend/map2.js's module docstring.
-        # Parallel to / (frontend/index.html + mc.js), never linked from
-        # the nav bar, and not meant to reach production traffic.
+        # Alias for / (frontend/map2.html, same handler target as index()
+        # above) -- kept working for anyone who already has this URL
+        # open or bookmarked from before the MapLibre map became the
+        # front page.
         @app.get("/map2", response_class=HTMLResponse, include_in_schema=False)
         async def map2_page(request: Request):
             return _templated_html_page(request, frontend_dir / "map2.html", "map2 page not bundled")

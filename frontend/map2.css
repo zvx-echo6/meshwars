@@ -1,62 +1,42 @@
-/* MeshWars: staging-only MapLibre map page (/map2). Deliberately
- * separate from coverage.css/mc.css -- this page has no nav bar and no
- * modals, just the map, a plain scores panel, a layer switcher and a
- * theme toggle. theme.css is loaded before this file (see map2.html)
- * so every panel below reads its colours from --mw-* tokens rather
- * than hardcoding them -- chrome follows the theme, team colours never
- * do (those live in frontend/map2.js and are gameplay, not branding).
+/* MeshWars: front page (/), also reachable at /map2. Loads coverage.css
+ * (page layout, the loading overlay, the no-JS fallback, the site nav
+ * bar, Leaflet chrome overrides that simply match nothing here) and
+ * mc.css (the territory panel/modals/winner banner, ported into
+ * map2.js -- see that file's "Territory panel" section) ahead of this
+ * file, same as frontend/index.html -- reused rather than duplicated,
+ * so the panel is pixel-identical to its Leaflet original. This file
+ * only carries what is unique to the MapLibre map itself: the #map
+ * sizing MapLibre needs, the layer switcher, and the Places Worth
+ * Going markers + slide-out panel. theme.css is loaded first (see
+ * map2.html) so every panel below reads its colours from --mw-* tokens
+ * rather than hardcoding them -- chrome follows the theme, team
+ * colours never do (those live in frontend/map2.js and are gameplay,
+ * not branding).
  * See frontend/map2.js for the map itself.
  */
 
-html, body {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  width: 100%;
-  background: var(--mw-page);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-}
-
 #map {
   position: absolute;
-  top: 0;
+  top: var(--mw-nav-h);
   left: 0;
   right: 0;
   bottom: 0;
 }
 
-/* Sits in the map's top-left, offset clear of MapLibre's own
- * NavigationControl (zoom/compass), which map2.js also anchors
- * top-left. */
-.mw-map-controls {
+/* Territory panel (mc.css's .mc-scoreboard, built by map2.js's
+ * buildScoreboardControl -- see that file). mc.css carries none of its
+ * own positioning: on the Leaflet page it sits inside Leaflet's own
+ * "topright" control corner, which does not exist here, so this file
+ * places it explicitly in the same visual corner instead -- same 10px
+ * gutter Leaflet's control corners use. z-index sits above the Places
+ * panel (below): both are anchored to the right edge, and the ported
+ * panel is the one the owner asked to keep the richer/primary of the
+ * two, so opening Places does not bury it. */
+.mc-scoreboard#mc-scoreboard-position {
   position: absolute;
-  top: 12px;
-  left: 58px;
-  z-index: 5;
-}
-
-.mw-theme-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 29px;
-  height: 29px;
-  padding: 0;
-  background: var(--mw-panel);
-  border: 1px solid var(--mw-line);
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--mw-text-5);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
-  transition: opacity 0.15s ease, color 0.15s ease;
-}
-.mw-theme-btn svg { display: block; }
-.mw-theme-btn:hover,
-.mw-theme-btn:focus-visible {
-  color: var(--mw-gold);
-}
-.mw-theme-btn[aria-pressed="true"] {
-  color: var(--mw-gold);
+  top: calc(var(--mw-nav-h) + 10px);
+  right: 10px;
+  z-index: 20;
 }
 
 .mw-layers {
@@ -112,62 +92,6 @@ html, body {
 
 .mw-layers-list li.unavailable label {
   cursor: default;
-}
-
-.mw-scores {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 5;
-  background: var(--mw-panel);
-  color: var(--mw-text-1);
-  border: 1px solid var(--mw-line);
-  border-radius: 8px;
-  padding: 10px 14px;
-  min-width: 160px;
-  font-size: 13px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
-}
-
-.mw-scores-title {
-  font-weight: 600;
-  margin-bottom: 6px;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  font-size: 11px;
-  color: var(--mw-text-6);
-}
-
-.mw-scores-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.mw-scores-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 2px 0;
-}
-
-.mw-score-dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  margin-right: 6px;
-}
-
-.mw-score-name {
-  display: flex;
-  align-items: center;
-}
-
-.mw-score-value {
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
 }
 
 /* Places Worth Going: slide-out panel (docs/features/places.md) --

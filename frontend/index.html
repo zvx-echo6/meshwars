@@ -15,6 +15,15 @@
     } } catch (e) {}
   </script>
   <title>MeshWars — Live Territory Map</title>
+  <!-- This is now the LEGACY Leaflet map, served at /map-legacy (see
+       app/api.py) -- the MapLibre map at frontend/map2.html took over
+       / and carries this file's SEO markup instead. noindex here so
+       this page never competes with / for the site's own search
+       identity; canonical still points at https://meshwars.com/ (the
+       new front page) rather than being removed, reinforcing the same
+       thing to a crawler that respects noindex but still follows
+       canonical. -->
+  <meta name="robots" content="noindex">
   <meta name="description" content="MeshWars is a live mesh map: a real-world capture-the-flag game where seven teams claim ground on Meshtastic and MeshCore mesh coverage.">
   <link rel="canonical" href="https://meshwars.com/">
 
@@ -100,13 +109,13 @@
        fresh HTML paired with a stale cached stylesheet/script. Bump v=20260820-1 on
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
-  <link rel="stylesheet" href="/static/theme.css?v=20260823-19" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260824-1" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
         crossorigin="anonymous" />
-  <link rel="stylesheet" href="/static/coverage.css?v=20260823-19" />
-  <link rel="stylesheet" href="/static/mc.css?v=20260823-19" />
+  <link rel="stylesheet" href="/static/coverage.css?v=20260824-1" />
+  <link rel="stylesheet" href="/static/mc.css?v=20260824-1" />
 </head>
 <body>
 
@@ -165,7 +174,7 @@
        renders both boards; its own modal (built at runtime, not markup
        here) replaces the #mt-history-modal shell that used to live in
        this file. -->
-  <script src="/static/mc.js?v=20260823-19" type="module"></script>
-  <script src="/static/theme-toggle.js?v=20260823-19" type="module"></script>
+  <script src="/static/mc.js?v=20260824-1" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260824-1" type="module"></script>
 </body>
 </html>
