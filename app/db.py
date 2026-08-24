@@ -629,6 +629,50 @@ CREATE TABLE IF NOT EXISTS api_client (
     -- read, and that one is accurate to within the same minute.
     request_count INTEGER NOT NULL DEFAULT 0
 );
+
+-- ---------------------------------------------------------------------
+-- "Places Worth Going" -- see docs/features/places.md for the design
+-- and scripts/build_places_seed.py for how this table gets its data.
+-- Seed only in this migration: no scoring/activation table yet, and
+-- nothing reads this one back out until that lands.
+-- ---------------------------------------------------------------------
+
+-- One row per named destination: a SOTA summit, a POTA park, or an
+-- OpenStreetMap landmark off the narrowed tag list. ref_code is the
+-- source's own identifier (SOTA summit code, POTA reference, or an
+-- "n<id>"/"w<id>" OSM object reference) -- stable, so re-running the
+-- seed script updates a place in place rather than duplicating it.
+--
+-- area_m2 and geom are NULL for a summit or a landmark (those score
+-- the single square their point falls in -- see the design note) and
+-- for a park POTA-to-PAD-US matching could not find a boundary for.
+-- Where a park DOES have a matched boundary, area_m2 is PAD-US's own
+-- whole-unit acreage (converted to m^2) and geom is that boundary as
+-- WKT, clipped to a radius around the park's centre point and
+-- simplified for storage -- see build_places_seed.py's match_parks()
+-- for exactly how much, and why a park's boundary is stored as WKT
+-- text rather than a second geometry table: one flat row per place is
+-- enough for the scoring stage to test "is this square more than half
+-- inside geom" later without a join.
+--
+-- Brand new table, no existing deployed shape to ALTER, so CREATE
+-- TABLE IF NOT EXISTS here is sufficient on its own -- same reasoning
+-- as player_cell_repeater_credit above; no MIGRATIONS entry needed.
+CREATE TABLE IF NOT EXISTS place (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref_type    TEXT NOT NULL CHECK (ref_type IN ('summit', 'park', 'landmark')),
+    ref_code    TEXT NOT NULL,      -- source's own id: SOTA code, POTA reference, or n<id>/w<id> from OSM
+    name        TEXT NOT NULL,
+    lat         REAL NOT NULL,
+    lon         REAL NOT NULL,
+    points      INTEGER NOT NULL,   -- flat by ref_type: landmark 5, park 25, summit 100
+    source      TEXT NOT NULL,      -- 'SOTA' | 'POTA' | 'POTA/PAD-US' | 'OSM'
+    area_m2     REAL,               -- park only, and only when PAD-US matched a boundary
+    geom        TEXT,               -- park only: matched boundary as WKT, NULL otherwise
+    created_at  INTEGER NOT NULL,
+    UNIQUE (ref_type, ref_code)
+);
+CREATE INDEX IF NOT EXISTS idx_place_latlon ON place(lat, lon);
 """
 
 
