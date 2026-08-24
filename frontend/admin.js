@@ -522,6 +522,62 @@ async function freezeMonth(b) {
   b.disabled = false;
 }
 
+// ---- places rotation preview -------------------------------------------
+
+async function previewPlaces(b) {
+  const week = document.getElementById('pl-week').value.trim();
+  const out = document.getElementById('pl-result');
+  out.replaceChildren();
+  if (week && !/^\d{4}-\d{2}-\d{2}$/.test(week)) {
+    out.textContent = 'Week must look like 2026-08-19, or be left blank.';
+    return;
+  }
+  b.disabled = true;
+  try {
+    const qs = week ? ('?week_start=' + encodeURIComponent(week)) : '';
+    const r = await api('/api/admin/places/preview' + qs);
+
+    out.appendChild(el('p', {
+      text: r.live_rotating_count + ' live rotating places for the week of ' + r.week_start +
+        ' -- ' + r.region_cells_with_a_live_pick + ' of ' + r.region_cells_with_candidates +
+        ' candidate-bearing region cells filled.',
+    }));
+    out.appendChild(el('p', {
+      className: 'adm-hint',
+      text: 'Candidates per cell: min ' + r.candidates_per_cell.min +
+        ', max ' + r.candidates_per_cell.max + ', mean ' + r.candidates_per_cell.mean + '.',
+    }));
+
+    if (r.by_type && Object.keys(r.by_type).length) {
+      const parts = Object.keys(r.by_type).sort().map((t) => t + ': ' + r.by_type[t]);
+      out.appendChild(el('p', { className: 'adm-hint', text: 'By type -- ' + parts.join(', ') + '.' }));
+    }
+
+    if (r.densest_cells && r.densest_cells.length) {
+      out.appendChild(el('h3', { className: 'adm-h3', text: 'Densest region cells' }));
+      const list = el('ul');
+      for (const c of r.densest_cells) {
+        list.appendChild(el('li', {
+          text: c.cell + ': ' + c.candidates + ' candidates, ' + c.chosen + ' chosen',
+        }));
+      }
+      out.appendChild(list);
+    }
+
+    if (r.sample && r.sample.length) {
+      out.appendChild(el('h3', { className: 'adm-h3', text: 'Sample of the draw' }));
+      const list = el('ul');
+      for (const p of r.sample) {
+        list.appendChild(el('li', { text: p.name + ' (' + p.ref_type + ', ' + p.points + ' pts)' }));
+      }
+      out.appendChild(list);
+    }
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 // ---- read-API keys ----------------------------------------------------
 
 async function loadApiClients() {
@@ -665,4 +721,5 @@ document.querySelectorAll('.adm-nav-item').forEach((b) => {
 document.getElementById('player-search').addEventListener('input', renderPlayers);
 document.getElementById('ci-award').addEventListener('click', function () { awardCheckin(this); });
 document.getElementById('mo-freeze').addEventListener('click', function () { freezeMonth(this); });
+document.getElementById('pl-preview').addEventListener('click', function () { previewPlaces(this); });
 document.getElementById('apikey-create').addEventListener('click', function () { createApiClient(this); });

@@ -10,7 +10,7 @@
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/static/theme.css?v=20260823-16" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260823-17" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260824-1" />
 </head>
 <body>
 
@@ -53,6 +53,7 @@
         <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
         <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
         <button type="button" class="adm-nav-item" data-section="months">Months</button>
+        <button type="button" class="adm-nav-item" data-section="places">Places</button>
         <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
       </nav>
 
@@ -108,6 +109,16 @@
           <div id="mo-result" class="adm-result"></div>
         </section>
 
+        <section class="adm-section" data-section="places" hidden>
+          <h2 class="adm-h2">Places</h2>
+          <p class="adm-hint">Previews the weekly rotation draw for Places Worth Going &mdash; landmarks and small parks, deterministic from the week alone. This does not persist anything; the real draw for the current week resolves itself the first time a scoring ping or the map needs it. Leave the week blank for the current week, or give any date and it snaps to that date's Wednesday.</p>
+          <div class="adm-form">
+            <input type="text" id="pl-week" autocomplete="off" placeholder="2026-08-19 (optional)" />
+            <button type="button" id="pl-preview" class="adm-btn">Preview draw</button>
+          </div>
+          <div id="pl-result" class="adm-result"></div>
+        </section>
+
         <section class="adm-section" data-section="keys" hidden>
           <h2 class="adm-h2">API keys</h2>
           <p class="adm-hint">Keys for the public read API at <code>/api/v1</code> &mdash; one per integration, so a misbehaving bot can be revoked on its own. Read-only: these cannot post wardriving data.</p>
@@ -124,6 +135,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260823-17"></script>
+  <script src="/static/admin.js?v=20260824-1"></script>
 </body>
 </html>

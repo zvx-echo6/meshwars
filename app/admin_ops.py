@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 import time
+from datetime import datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -35,6 +36,7 @@ from .config import settings
 from .db import connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .node_ref import normalize_sender_name
+from .place_rotation import preview_week, week_start_for_date, week_start_for_ts
 
 log = logging.getLogger("admin_ops")
 
@@ -260,6 +262,75 @@ async def admin_overview(request: Request):
         })
     finally:
         conn.close()
+
+
+@router.get("/api/admin/places/preview")
+async def admin_places_preview(request: Request, week_start: str | None = None):
+    """Preview the Places Worth Going rotation draw for a week WITHOUT
+    persisting it (app/place_rotation.preview_week) -- operator only, so
+    the density and spacing can be sanity-checked before (or long after)
+    a week actually happens. Never writes place_week; the real draw for
+    the CURRENT week is still resolved lazily, the first time a scoring
+    ping or a places API call needs it (see place_rotation.resolve_week).
+
+    `week_start` is any date string; it is snapped to that date's own
+    Wednesday via week_start_for_ts (the same clock the whole feature
+    uses), so an operator does not have to already know which Wednesday
+    a given day belongs to. Omitted, it previews the current week.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    if week_start:
+        try:
+            snapped = week_start_for_date(datetime.fromisoformat(week_start).date())
+        except ValueError:
+            return JSONResponse({"error": "week_start must be an ISO date, e.g. 2026-08-19"}, status_code=400)
+    else:
+        snapped = week_start_for_ts(int(time.time()))
+
+    conn = connect()
+    try:
+        chosen_ids, region_report = preview_week(conn, snapped)
+        sample_rows = []
+        if chosen_ids:
+            marks = ",".join("?" * min(len(chosen_ids), 20))
+            sample_rows = conn.execute(
+                f"SELECT ref_type, name, points, lat, lon FROM place WHERE id IN ({marks})",
+                chosen_ids[:20],
+            ).fetchall()
+        by_type = {}
+        if chosen_ids:
+            for r in conn.execute(
+                "SELECT ref_type, COUNT(*) c FROM place "
+                f"WHERE id IN ({','.join('?' * len(chosen_ids))}) GROUP BY ref_type",
+                chosen_ids,
+            ):
+                by_type[r["ref_type"]] = r["c"]
+    finally:
+        conn.close()
+
+    cells_with_candidates = [v for v in region_report.values() if v["candidates"] > 0]
+    candidate_counts = [v["candidates"] for v in cells_with_candidates] or [0]
+    top_cells = sorted(
+        ({"cell": k, **v} for k, v in region_report.items() if v["candidates"] > 0),
+        key=lambda x: -x["candidates"],
+    )[:10]
+
+    return JSONResponse({
+        "week_start": snapped,
+        "live_rotating_count": len(chosen_ids),
+        "region_cells_with_candidates": len(cells_with_candidates),
+        "region_cells_with_a_live_pick": sum(1 for v in cells_with_candidates if v["chosen"] > 0),
+        "candidates_per_cell": {
+            "min": min(candidate_counts), "max": max(candidate_counts),
+            "mean": round(sum(candidate_counts) / len(candidate_counts), 2),
+        },
+        "densest_cells": top_cells,
+        "by_type": by_type,
+        "sample": [dict(r) for r in sample_rows],
+    })
 
 
 @router.get("/api/admin/player/{player_id}/diagnostics")
