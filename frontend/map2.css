@@ -101,39 +101,44 @@
  * keeps writing to #mw-places-list whether or not the panel is open,
  * so the list is current the instant it opens).
  *
- * top:120px was measured against the old, much shorter #mw-scores box
- * this page used to have in this corner. The ported territory panel
- * (.mc-scoreboard, see map2.css's #mc-scoreboard-position rule above)
- * is taller and sits above z-index 6, so left at 120px the tab would
- * be entirely hidden behind it on desktop, where the panel starts
- * expanded (measured ~264px tall at 1400px wide). The
- * NARROW_BREAKPOINT_PX media query below pushes the tab clear of that
- * on desktop; below the breakpoint the panel starts COLLAPSED (see
- * map2.js's setMcCollapsed) at ~43px tall, well clear of 120px already,
- * so the base rule is untouched there. */
+ * Previously pinned to a fixed `top` offset chosen to clear the ported
+ * territory panel (.mc-scoreboard) below it -- that panel's height is
+ * NOT fixed (board-switch row, roster/history/top buttons, collapsed
+ * vs expanded), so every time it grew the tab went back to being a
+ * clipped sliver behind it, twice in one night. Anchoring from the
+ * BOTTOM instead of the top sidesteps the problem structurally rather
+ * than re-guessing a bigger number: nothing in the bottom-right corner
+ * competes for space the way the top-right one does, so this needs no
+ * coordination with the territory panel's height ever again. Same
+ * corner-anchoring pattern as .mw-layers (bottom-left, see above) --
+ * reused rather than invented, right down to the shadow and radius, so
+ * this reads as the map's other floating control, not a new visual
+ * language. Horizontal text (not the old vertical-rl sliver) and a
+ * plain "Places" label read at a glance the way "Layers" already does.
+ */
 .mw-places-tab {
   position: absolute;
-  top: 120px;
-  right: 0;
+  bottom: 12px;
+  right: 12px;
   z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   background: var(--mw-panel);
   color: var(--mw-text-1);
   border: 1px solid var(--mw-line);
-  border-right: none;
-  border-radius: 8px 0 0 8px;
-  padding: 10px 8px;
-  font-size: 12px;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  writing-mode: vertical-rl;
+  letter-spacing: 0.02em;
   cursor: pointer;
-  box-shadow: -2px 2px 10px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
 }
-@media (min-width: 601px) {
-  .mw-places-tab {
-    top: 340px;
-  }
+.mw-places-tab::after {
+  content: '\203A';
+  font-weight: 400;
+  color: var(--mw-text-6);
 }
 .mw-places-tab:hover,
 .mw-places-tab:focus-visible {

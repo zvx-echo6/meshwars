@@ -129,6 +129,35 @@ const PLACE_ICON_OUTLINE = {
   neon: { color: 'rgba(244,241,232,0.95)', width: 1.5 },
 };
 
+// Park boundaries (app/places_api.py's `park_boundaries` -- a matched
+// PAD-US polygon at or above one grid cell, docs/features/places.md).
+// A big park still keeps its circle marker at every zoom (see
+// setupPlacesLayer/PLACE_TYPE_MIN_ZOOM below) -- the outline is drawn
+// ON TOP of that, only once zoomed in enough for the shape to mean
+// anything, so the park is still findable by its marker at a whole-
+// region zoom even though the outline itself has not appeared yet.
+// MIN_BOUNDARY_ZOOM must match app/places_api.py's own constant of the
+// same name -- it is both the client's own layer minzoom AND the zoom
+// this page starts asking the server for boundary geometry at all
+// (fetchPlacesInViewport passes map.getZoom() in the `zoom` param), so
+// a mismatch here would either fetch boundary data that never draws or
+// draw a layer that never has data.
+const MIN_BOUNDARY_ZOOM = 11;
+
+// Colour reuses PLACE_COLORS.park (the same teal the circle marker
+// already draws in) rather than inventing a new one -- this is the
+// same park, just drawn two ways at once. Fill stays close to nothing
+// on purpose: a boundary is a quiet outline, not a second filled area
+// competing with the team squares (BOARD_FILL_OPACITY, 0.45/0.65) or
+// reading like the public-lands overlay (a flat, unrelated green wash,
+// see setupOverlayLayers) -- per-theme values follow the same
+// BOARD_FILL_OPACITY/PLACE_ICON_OUTLINE pattern: neon needs a touch
+// more of both to hold up against the dark hillshade, gold already
+// reads fine at the lower value.
+const PARK_BOUNDARY_FILL_OPACITY = { gold: 0.05, neon: 0.08 };
+const PARK_BOUNDARY_LINE_WIDTH = { gold: 1, neon: 1.5 };
+const PARK_BOUNDARY_LINE_OPACITY = { gold: 0.7, neon: 0.85 };
+
 // Marker screen size is also zoom-interpolated, on top of the
 // per-theme base pixel sizes above: with ~80,000 places now seeded
 // (43,639 parks + 30,408 landmarks + 6,487 summits, plus rotating live
@@ -983,10 +1012,16 @@ function placeToFeature(p) {
   };
 }
 
-async function fetchPlacesInViewport(bounds) {
+async function fetchPlacesInViewport(bounds, zoom) {
   const params = new URLSearchParams({
     north: bounds.getNorth(), south: bounds.getSouth(),
     west: bounds.getWest(), east: bounds.getEast(),
+    // Server only computes/returns park_boundaries at all once zoom is
+    // present and >= its own MIN_BOUNDARY_ZOOM (app/places_api.py) --
+    // sent unconditionally rather than only above the threshold so the
+    // two constants staying in sync is visible by reading either file,
+    // not by remembering to gate the param here too.
+    zoom,
   });
   const res = await fetch(`/api/places?${params}`);
   if (!res.ok) throw new Error(`places fetch failed: ${res.status}`);
@@ -1067,6 +1102,40 @@ function setupPlacesLayer(map) {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] },
   });
+
+  // Park boundaries (see PARK_BOUNDARY_* above and
+  // app/places_api.py's park_boundaries) -- a separate source/pair of
+  // layers from the marker source above, added first so 'board-fill'
+  // (the team squares) still draws over it, same beforeId pattern
+  // setupOverlayLayers uses for public lands/USFS. Fill and line paint
+  // are set to the gold values here as a safe initial default, same as
+  // places-icons-* above defaulting to currentTheme() before the boot
+  // sequence's first applyBasemapTheme call actually themes it.
+  map.addSource('park-boundaries', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+  map.addLayer({
+    id: 'park-boundaries-fill',
+    type: 'fill',
+    source: 'park-boundaries',
+    minzoom: MIN_BOUNDARY_ZOOM,
+    paint: {
+      'fill-color': PLACE_COLORS.park,
+      'fill-opacity': PARK_BOUNDARY_FILL_OPACITY.gold,
+    },
+  }, 'board-fill');
+  map.addLayer({
+    id: 'park-boundaries-line',
+    type: 'line',
+    source: 'park-boundaries',
+    minzoom: MIN_BOUNDARY_ZOOM,
+    paint: {
+      'line-color': PLACE_COLORS.park,
+      'line-width': PARK_BOUNDARY_LINE_WIDTH.gold,
+      'line-opacity': PARK_BOUNDARY_LINE_OPACITY.gold,
+    },
+  }, 'board-fill');
 
   // One symbol layer per tier, not one shared layer, so each tier can
   // carry its own minzoom (PLACE_TYPE_MIN_ZOOM) -- a single "Places"
@@ -1149,11 +1218,16 @@ function escapeHtml(s) {
 async function loadPlacesViewport(map) {
   try {
     const bounds = map.getBounds();
-    const data = await fetchPlacesInViewport(bounds);
+    const data = await fetchPlacesInViewport(bounds, map.getZoom());
     map.getSource('places').setData({
       type: 'FeatureCollection',
       features: data.places.map(placeToFeature),
     });
+    // park_boundaries is always present (an empty FeatureCollection
+    // below MIN_BOUNDARY_ZOOM, or with no boundary-backed park in
+    // view) -- see app/places_api.py's places_in_viewport docstring --
+    // so this can set it unconditionally rather than checking first.
+    map.getSource('park-boundaries').setData(data.park_boundaries);
   } catch (err) {
     console.error('MeshWars map2: failed to load places', err);
   }
@@ -1241,6 +1315,9 @@ function applyBasemapTheme(map) {
   map.setPaintProperty(HILLSHADE_ID, 'hillshade-exaggeration', HILLSHADE_EXAGGERATION[theme]);
   map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
   map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
+  map.setPaintProperty('park-boundaries-fill', 'fill-opacity', PARK_BOUNDARY_FILL_OPACITY[theme]);
+  map.setPaintProperty('park-boundaries-line', 'line-width', PARK_BOUNDARY_LINE_WIDTH[theme]);
+  map.setPaintProperty('park-boundaries-line', 'line-opacity', PARK_BOUNDARY_LINE_OPACITY[theme]);
   for (const type of PLACE_TYPES) {
     map.setLayoutProperty(`places-icons-${type}`, 'icon-image', ['concat', 'place-icon-', ['get', 'type'], '-', theme]);
   }
