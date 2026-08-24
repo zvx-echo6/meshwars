@@ -54,6 +54,7 @@ from .config import settings
 from .db import WriteSession, connect, set_cursor
 from .grid import cell_id, in_play_area, valid_coord
 from .mc_ingest import RepeaterEntry, record_repeater_observations
+from .place_scoring import credit_places
 from .meshview_client import (
     MeshviewClient,
     extract_feeder_id,
@@ -771,6 +772,20 @@ class Ingestor:
             except Exception:
                 log.exception(
                     "mt scoring: apply_paint failed for player %d cell %s",
+                    player_id, cell,
+                )
+
+            # Places Worth Going (app/place_scoring.py), same hook as
+            # app/mc_ingest.py's MeshCore path. by_air is not tracked on
+            # this board (apply_paint above is never passed one either,
+            # for the same reason -- see its call above), so it is
+            # always False here; nothing on the Meshtastic path detects
+            # aircraft speed today.
+            try:
+                credit_places(conn, player_id, cell, ts, feeder_ids, False)
+            except Exception:
+                log.exception(
+                    "place scoring: credit_places failed for player %d cell %s",
                     player_id, cell,
                 )
 

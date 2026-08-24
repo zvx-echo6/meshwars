@@ -469,6 +469,25 @@ def _player_rows(conn, protocol: str, season_id: int, name: str | None = None) -
         "SELECT player_id, ts FROM player_last_fix WHERE protocol = ? AND player_id IN (%s)" % marks,
         (protocol, *ids)).fetchall())
 
+    # Places Worth Going (app/place_scoring.py): a player's personal
+    # Explorer Score for this season. place_activation has no season_id
+    # of its own -- it is week-scoped, not season-scoped, same reasoning
+    # app/mc_scoring.team_place_points() documents -- so this scopes by
+    # the season's own started_at/ends_at window instead. A missing
+    # season row (should not happen -- season_id is always the caller's
+    # own active/queried season) just yields no explorer points rather
+    # than an error.
+    explorer_points: dict[int, float] = {}
+    season = conn.execute(
+        "SELECT started_at, ends_at FROM mc_season WHERE id = ?", (season_id,)
+    ).fetchone()
+    if season is not None:
+        explorer_points = dict(conn.execute(
+            "SELECT player_id, SUM(points) FROM place_activation "
+            " WHERE player_id IN (%s) AND awarded_at >= ? AND awarded_at <= ? "
+            " GROUP BY player_id" % marks,
+            (*ids, season["started_at"], season["ends_at"])).fetchall())
+
     out = []
     for p in players:
         pid = p["player_id"]
@@ -485,6 +504,7 @@ def _player_rows(conn, protocol: str, season_id: int, name: str | None = None) -
             "last_checkin_net_date": ci[2],
             "current_streak": streaks.get(pid),
             "last_position_ts": last_fix.get(pid),
+            "explorer_points": explorer_points.get(pid, 0),
         })
     return out
 

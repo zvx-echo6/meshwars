@@ -479,10 +479,41 @@ def team_checkin_points(conn: sqlite3.Connection, season_id: int) -> dict[str, f
     return {r["team"]: (r["pts"] or 0.0) for r in rows}
 
 
+def team_place_points(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
+    """Places Worth Going points (app/place_scoring.py) earned per team
+    for a season, summed the same way team_checkin_points() is: by each
+    activation's player's CURRENT team.
+
+    place_activation has no season_id column (see app/db.py's SCHEMA --
+    a place credit is scoped by week_start, not by season, since the
+    weekly cap and the rotation draw are both week-scoped concepts with
+    no reason to know which season they fall in). So this scopes by
+    TIME instead: awarded_at against the season's own started_at/ends_at
+    window, read from mc_season. A season still active has ends_at set
+    in the future, so this naturally includes everything awarded so far
+    without needing to special-case "the season isn't over yet" -- the
+    same reasoning app/results.py uses to score a month live rather than
+    waiting for it to close.
+    """
+    season = conn.execute(
+        "SELECT started_at, ends_at FROM mc_season WHERE id = ?", (season_id,)
+    ).fetchone()
+    if season is None:
+        return {}
+    rows = conn.execute(
+        "SELECT p.team AS team, SUM(a.points) AS pts "
+        "  FROM place_activation a JOIN player p ON p.player_id = a.player_id "
+        " WHERE a.awarded_at >= ? AND a.awarded_at <= ? GROUP BY p.team",
+        (season["started_at"], season["ends_at"]),
+    ).fetchall()
+    return {r["team"]: (r["pts"] or 0.0) for r in rows}
+
+
 def team_totals(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
     """A team's full standing for a season: squares held
     (team_tile_counts) plus net check-in points earned
-    (team_checkin_points). This is THE number for "how is this team
+    (team_checkin_points) plus Places Worth Going points earned
+    (team_place_points). This is THE number for "how is this team
     doing" -- every place that decides a season standing or a season
     winner (maybe_roll_season below, and the live scoreboard routes in
     app/mc_api.py / app/api.py) reads this, not team_tile_counts()
@@ -496,8 +527,12 @@ def team_totals(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
     """
     tiles = team_tile_counts(conn, season_id)
     points = team_checkin_points(conn, season_id)
-    teams = set(tiles) | set(points)
-    return {t: tiles.get(t, 0) + points.get(t, 0.0) for t in teams}
+    place_points = team_place_points(conn, season_id)
+    teams = set(tiles) | set(points) | set(place_points)
+    return {
+        t: tiles.get(t, 0) + points.get(t, 0.0) + place_points.get(t, 0.0)
+        for t in teams
+    }
 
 
 def ensure_active_season(conn: sqlite3.Connection, now: int, protocol: str) -> int:
