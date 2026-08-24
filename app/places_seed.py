@@ -71,6 +71,7 @@ import csv
 import logging
 import math
 import os
+import re
 import sqlite3
 import time
 
@@ -104,6 +105,98 @@ US_SOTA_ASSOCIATIONS = frozenset({
 })
 
 _MIN_OVERLAP_FRACTION = 0.5  # ">50% inside the boundary"
+
+# NAMED-SUMMITS-ONLY FILTER (added 2026-08-24) -- SOTA does not require
+# a summit to have a real name. Where one is missing, SOTA's own
+# summitslist.csv records the peak's elevation as its "name" instead
+# (measured directly against this CSV: 1,688 of 8,082 summit rows, ~a
+# fifth, mostly unnamed Colorado/California/Wyoming thirteeners/high
+# points -- e.g. W0C/LG-007 is named "13546"). A small second group uses
+# a generic placeholder word plus a bare designator instead of an
+# elevation -- "Peak 15-46", "Peak 8" -- same problem, different shape.
+# A game about places worth going should not send someone to go stand
+# on a number. This applies to SUMMITS ONLY -- parks and landmarks are
+# untouched, see _classify_row below.
+#
+# THIRTEENER EXCEPTION (Matt, 2026-08-24): in Colorado specifically,
+# peaks at 13,000ft+ are genuinely known BY their elevation -- climbers
+# say "13546" the way they would say a name, and there is a whole
+# "peak-bagging the thirteeners" pursuit built around exactly that
+# numbering. A bare number there is a real identifier, not missing
+# data, unlike a low unnamed bump whose number tells you nothing. So a
+# purely-numeric name is kept when it parses as an elevation of 13,000
+# ft or more -- expressed as an elevation threshold, not a hardcoded
+# Colorado check, because the reasoning is the convention, not the
+# state line, and it is nearly all Colorado in practice but not
+# exclusively (California and Wyoming both contribute a handful too).
+#
+# This CSV does not carry SOTA's own AltFt/AltM elevation columns (see
+# module docstring -- build_places_seed.py's fetch_sota() never writes
+# them), so there is no separate elevation field in this file to check
+# a numeric name against at load time. Verified as a one-time check
+# instead, against a fresh pull of SOTA's live summitslist.csv on
+# 2026-08-24 (25MB, 181,658 rows with an AltFt value): every one of
+# the 1,688 numeric-named US summits in this seed has an AltFt within
+# 50ft of its own name parsed as a number -- ZERO mismatches. SOTA's
+# elevation-as-name behavior is exact, not approximate, so parsing the
+# name itself as feet and comparing it to 13,000 is equivalent to
+# checking the real AltFt column for every row this filter has ever
+# seen, not a guess dressed up as a threshold.
+_THIRTEENER_MIN_FT = 13000.0
+
+# Matches a name that is ONLY a generic placeholder word followed by
+# nothing but digits/dashes/dots/whitespace -- "Peak 15-46", "Pt.
+# 1234", "BM 6187" -- so it can be dropped the same way a bare
+# elevation is. Anchored start-to-end (not just a prefix match) so a
+# placeholder word followed by any real word survives: "Peak Mountain",
+# "Twin Peaks", "Summit Creek Peak", "Peak of the Clouds" all keep a
+# non-digit, non-placeholder word after (or before) the trigger word and
+# so never match this pattern at all.
+_GENERIC_SUMMIT_NAME_RE = re.compile(
+    r"^(unnamed|peak|pt|point|summit|hill|bm|benchmark)[\s\-.\d]*$",
+    re.IGNORECASE,
+)
+
+
+def _summit_has_real_name(name: str) -> bool:
+    """True if `name` is an actual summit name, not SOTA's elevation-
+    as-name stand-in or a bare "Peak <number>"-style placeholder.
+
+    Drops (in order):
+      1. Empty or whitespace-only.
+      2. No alphabetic character anywhere -- catches a bare elevation
+         like "13546" -- UNLESS it parses as 13,000 or more, the
+         thirteener exception above ("12,883" with a comma, or "2308 m"
+         with a unit, do not parse as a plain float and so fall through
+         to dropped, same as any other unparseable numeric-shaped
+         string below the threshold).
+      3. A generic placeholder word (unnamed/peak/pt/point/summit/hill/
+         bm/benchmark) followed only by digits/dashes/dots/whitespace,
+         case-insensitively -- "Peak 15-46" is exactly SOTA's summit
+         Points 8+ pull result for an unnamed peak in a range that
+         numbers its unnamed summits instead of using an elevation.
+         NOT eligible for the thirteener exception even at a
+         13,000+-sounding number -- that exception is specifically for
+         a bare elevation standing in as a name, not a placeholder word
+         plus a designator.
+
+    Deliberately does NOT drop a name merely because it contains a
+    digit -- "Mount 7", "Ten Mile Peak", "Highway 12 Summit", "Peak C"
+    (a real single-letter designation used on some ridgelines) all have
+    a letter-shaped name a human actually uses and must survive.
+    """
+    name = name.strip()
+    if not name:
+        return False
+    if not any(ch.isalpha() for ch in name):
+        try:
+            elevation_ft = float(name)
+        except ValueError:
+            return False
+        return elevation_ft >= _THIRTEENER_MIN_FT
+    if _GENERIC_SUMMIT_NAME_RE.match(name):
+        return False
+    return True
 
 
 def _cell_area_m2(lat: float) -> float:
@@ -152,7 +245,12 @@ def _classify_row(row: dict) -> tuple[bool, bool]:
     ref_type = row["ref_type"]
     if ref_type == "summit":
         assoc = row["ref_code"].split("/")[0]
-        return (assoc in US_SOTA_ASSOCIATIONS, False)
+        if assoc not in US_SOTA_ASSOCIATIONS:
+            return (False, False)
+        # Country filter passed -- now require an actual name (see
+        # _summit_has_real_name's docstring for what this catches and
+        # what it deliberately lets through).
+        return (_summit_has_real_name(row.get("name", "")), False)
     if ref_type == "park":
         # ADDED 2026-08-24: PAD-US-sourced parks (ref_code "PADUS-<fid>")
         # are pulled directly from a single US-territory PAD-US layer

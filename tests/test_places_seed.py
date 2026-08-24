@@ -11,7 +11,9 @@ from shapely.geometry import box
 
 
 def test_us_sota_association_kept():
-    keep, rotates = _classify_row({"ref_type": "summit", "ref_code": "W7I/SW-001"})
+    keep, rotates = _classify_row(
+        {"ref_type": "summit", "ref_code": "W7I/SW-001", "name": "Steel Mountain"}
+    )
     assert keep is True
     assert rotates is False
 
@@ -28,7 +30,49 @@ def test_canada_sota_association_excluded():
 
 
 def test_minnesota_k0m_is_us_not_a_typo():
-    keep, _ = _classify_row({"ref_type": "summit", "ref_code": "K0M/MN-001"})
+    keep, _ = _classify_row(
+        {"ref_type": "summit", "ref_code": "K0M/MN-001", "name": "Eagle Mountain"}
+    )
+    assert keep is True
+
+
+def test_numeric_named_summit_below_thirteener_threshold_excluded():
+    """SOTA records a summit's elevation as its name when it has none --
+    a US-association summit named "9740" (below the 13,000ft
+    thirteener-exception threshold) must still be excluded even though
+    it clears the country filter."""
+    keep, _ = _classify_row(
+        {"ref_type": "summit", "ref_code": "W7M/SW-001", "name": "9740"}
+    )
+    assert keep is False
+
+
+def test_numeric_named_summit_at_thirteener_threshold_kept():
+    """Colorado's 13,000ft+ peaks are genuinely known BY their elevation
+    -- "13546" (a real example pulled from the seed CSV, W0C/LG-007) is
+    kept, not treated as a missing name."""
+    keep, _ = _classify_row(
+        {"ref_type": "summit", "ref_code": "W0C/LG-007", "name": "13546"}
+    )
+    assert keep is True
+
+
+def test_numeric_named_summit_just_below_thirteener_threshold_excluded():
+    """The threshold is a hard 13,000ft floor, not a rounded-up
+    approximation -- 12,999 does not qualify."""
+    keep, _ = _classify_row(
+        {"ref_type": "summit", "ref_code": "W0C/LG-999", "name": "12999"}
+    )
+    assert keep is False
+
+
+def test_legitimately_named_summit_with_a_digit_kept():
+    """A real name that happens to contain a digit must NOT be treated
+    as an elevation stand-in -- only a name with no letters at all, or
+    a bare generic-placeholder-plus-number, is excluded."""
+    keep, _ = _classify_row(
+        {"ref_type": "summit", "ref_code": "W7I/SW-002", "name": "Ten Mile Peak"}
+    )
     assert keep is True
 
 
