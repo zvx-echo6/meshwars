@@ -169,3 +169,137 @@ html, body {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
+
+/* Places Worth Going: slide-out panel (docs/features/places.md) --
+ * anchored off the right edge, out of view until opened. The tab stays
+ * visible at all times as the one thing that opens it; the panel
+ * itself only ever slides, it is never removed from the DOM (map2.js
+ * keeps writing to #mw-places-list whether or not the panel is open,
+ * so the list is current the instant it opens). */
+.mw-places-tab {
+  position: absolute;
+  top: 120px;
+  right: 0;
+  z-index: 6;
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  padding: 10px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  writing-mode: vertical-rl;
+  cursor: pointer;
+  box-shadow: -2px 2px 10px rgba(0, 0, 0, 0.4);
+}
+.mw-places-tab:hover,
+.mw-places-tab:focus-visible {
+  color: var(--mw-gold);
+}
+
+.mw-places-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 7;
+  width: min(320px, 82vw);
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border-left: 1px solid var(--mw-line);
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.45);
+  transform: translateX(100%);
+  transition: transform 0.2s ease;
+  display: flex;
+  flex-direction: column;
+}
+.mw-places-panel.open {
+  transform: translateX(0);
+}
+
+.mw-places-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--mw-line);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+}
+
+.mw-places-close {
+  background: none;
+  border: none;
+  color: var(--mw-text-1);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.mw-places-close:hover { color: var(--mw-gold); }
+
+.mw-places-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.mw-places-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--mw-line);
+  cursor: pointer;
+  font-size: 13px;
+}
+.mw-places-list li:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mw-places-list .mw-place-icon {
+  flex: none;
+  width: 10px;
+  height: 10px;
+}
+
+.mw-places-list .mw-place-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mw-places-list .mw-place-meta {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--mw-text-6);
+  font-size: 12px;
+}
+
+.mw-places-empty {
+  padding: 16px;
+  color: var(--mw-text-6);
+  font-size: 13px;
+}
+
+/* Marker click popup (MapLibre's own .maplibregl-popup-content already
+ * themes via its default styling; this only sizes the text we put
+ * inside it). */
+.mw-place-popup .mw-place-popup-name {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.mw-place-popup .mw-place-popup-meta {
+  font-size: 12px;
+  color: var(--mw-text-6);
+}

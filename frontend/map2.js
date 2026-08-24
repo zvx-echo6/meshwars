@@ -69,7 +69,34 @@ const LAYER_TOGGLES = [
   ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 4],
   ['mw-layer-usfs-roads', ['usfs-roads-line'], 6],
   ['mw-layer-usfs-trails', ['usfs-trails-line'], 6],
+  ['mw-layer-places', ['places-icons', 'places-labels'], 0],
 ];
+
+// Places Worth Going (docs/features/places.md). Colours are
+// deliberately NOT team colours (TEAM_COLORS above) -- a place is a
+// separate scoring layer from square ownership, and reusing red/green/
+// blue/etc. here would read as if a place belonged to a team. Shape is
+// the primary signal per tier (summit=triangle, park=circle,
+// landmark=square); colour is secondary and mostly there so the three
+// still read apart from each other at a glance against the basemap.
+const PLACE_COLORS = {
+  summit: '#e8b84b',    // warm gold -- matches --mw-gold, the site's own "this matters most" accent
+  park: '#2ec4b6',       // teal
+  landmark: '#8892a0',   // slate
+};
+
+// Pixel sizes (not degrees -- these must stay a constant SCREEN size
+// across zoom, like any map marker, unlike the board squares which are
+// drawn to true ground scale). Summits are sized to dominate, per the
+// brief: a mountain worth 100 points should read as the biggest thing
+// on the map, a park (25) in between, a landmark (5) smallest.
+const PLACE_ICON_PX = { summit: 22, park: 15, landmark: 9 };
+
+// Below this zoom the map is showing a whole region and place NAMES
+// would overlap into noise; icons still draw at every zoom (subject to
+// the viewport fetch's own result cap), just unlabeled until the
+// reader has zoomed in enough for a name to mean something.
+const PLACE_LABEL_MIN_ZOOM = 12;
 
 // pmtiles.js registers no protocol on its own -- this wires the
 // pmtiles:// URL scheme into MapLibre's request pipeline so a
@@ -149,6 +176,209 @@ async function fetchScores() {
   const res = await fetch('/api/mc/scores');
   if (!res.ok) throw new Error(`scores fetch failed: ${res.status}`);
   return res.json();
+}
+
+// ---- Places Worth Going (docs/features/places.md) ----------------------
+
+function placeToFeature(p) {
+  return {
+    type: 'Feature',
+    properties: { id: p.id, type: p.type, name: p.name, points: p.points },
+    geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+  };
+}
+
+async function fetchPlacesInViewport(bounds) {
+  const params = new URLSearchParams({
+    north: bounds.getNorth(), south: bounds.getSouth(),
+    west: bounds.getWest(), east: bounds.getEast(),
+  });
+  const res = await fetch(`/api/places?${params}`);
+  if (!res.ok) throw new Error(`places fetch failed: ${res.status}`);
+  return res.json();
+}
+
+async function fetchPlacesNear(lat, lon) {
+  const params = new URLSearchParams({ lat, lon, limit: 30 });
+  const res = await fetch(`/api/places/near?${params}`);
+  if (!res.ok) throw new Error(`places/near fetch failed: ${res.status}`);
+  return res.json();
+}
+
+// Draws a tiny raster icon for one place tier on an offscreen canvas
+// and hands it to MapLibre via map.addImage -- no sprite sheet or
+// external asset file, generated at runtime instead, same
+// self-contained spirit as everything else this page ships with. A
+// symbol layer (not a fill layer of ground polygons the way the board
+// squares are drawn) is what keeps these a constant PIXEL size across
+// zoom: a place marker is a marker, not a to-scale shape on the ground.
+function drawPlaceIcon(shape, color, sizePx) {
+  const canvas = document.createElement('canvas');
+  // 2x for a crisp icon on high-DPI screens; MapLibre reads pixelRatio
+  // separately from the addImage options below.
+  const dim = sizePx * 2;
+  canvas.width = dim;
+  canvas.height = dim;
+  const ctx = canvas.getContext('2d');
+  const cx = dim / 2, cy = dim / 2, r = dim / 2 - 2;
+
+  ctx.fillStyle = color;
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = 2;
+
+  if (shape === 'triangle') {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - r);
+    ctx.lineTo(cx + r * 0.92, cy + r * 0.8);
+    ctx.lineTo(cx - r * 0.92, cy + r * 0.8);
+    ctx.closePath();
+  } else if (shape === 'square') {
+    const s = r * 0.85;
+    ctx.beginPath();
+    ctx.rect(cx - s, cy - s, s * 2, s * 2);
+  } else {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  }
+  ctx.fill();
+  ctx.stroke();
+
+  return { data: ctx.getImageData(0, 0, dim, dim).data, width: dim, height: dim };
+}
+
+function registerPlaceIcons(map) {
+  const shapes = { summit: 'triangle', park: 'circle', landmark: 'square' };
+  for (const type of Object.keys(shapes)) {
+    const icon = drawPlaceIcon(shapes[type], PLACE_COLORS[type], PLACE_ICON_PX[type]);
+    map.addImage(`place-icon-${type}`, icon, { pixelRatio: 2 });
+  }
+}
+
+function setupPlacesLayer(map) {
+  map.addSource('places', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+
+  map.addLayer({
+    id: 'places-icons',
+    type: 'symbol',
+    source: 'places',
+    layout: {
+      'icon-image': ['concat', 'place-icon-', ['get', 'type']],
+      'icon-allow-overlap': true,
+      'icon-size': 1,
+    },
+  });
+
+  map.addLayer({
+    id: 'places-labels',
+    type: 'symbol',
+    source: 'places',
+    minzoom: PLACE_LABEL_MIN_ZOOM,
+    layout: {
+      'text-field': ['get', 'name'],
+      'text-font': ['Noto Sans Regular'],
+      'text-size': 11,
+      'text-anchor': 'top',
+      'text-offset': [0, 0.9],
+      'text-optional': true,
+      'text-allow-overlap': false,
+    },
+  });
+  // MapLibre paint properties do not read CSS custom properties, so the
+  // theme-aware label colour is set directly from the same tokens
+  // theme.css defines -- resolved once here rather than hardcoded,
+  // matching applyBasemapTheme()'s own pattern of reading data-theme.
+  const textColor = currentTheme() === 'neon' ? '#e8e8e8' : '#1a1a1a';
+  map.setPaintProperty('places-labels', 'text-color', textColor);
+  map.setPaintProperty('places-labels', 'text-halo-color', currentTheme() === 'neon' ? '#0C0B0A' : '#ffffff');
+  map.setPaintProperty('places-labels', 'text-halo-width', 1.2);
+
+  const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, offset: 12 });
+  map.on('click', 'places-icons', (e) => {
+    const f = e.features[0];
+    if (!f) return;
+    const { name, type, points } = f.properties;
+    popup.setLngLat(f.geometry.coordinates).setHTML(
+      `<div class="mw-place-popup">`
+      + `<div class="mw-place-popup-name">${escapeHtml(name)}</div>`
+      + `<div class="mw-place-popup-meta">${escapeHtml(type)} &middot; ${points} pts</div>`
+      + `</div>`
+    ).addTo(map);
+  });
+  map.on('mouseenter', 'places-icons', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'places-icons', () => { map.getCanvas().style.cursor = ''; });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+async function loadPlacesViewport(map) {
+  try {
+    const bounds = map.getBounds();
+    const data = await fetchPlacesInViewport(bounds);
+    map.getSource('places').setData({
+      type: 'FeatureCollection',
+      features: data.places.map(placeToFeature),
+    });
+  } catch (err) {
+    console.error('MeshWars map2: failed to load places', err);
+  }
+}
+
+function renderPlacesPanel(data) {
+  const list = document.getElementById('mw-places-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!data.places.length) {
+    const li = document.createElement('li');
+    li.className = 'mw-places-empty';
+    li.textContent = 'No live places within range of this view.';
+    list.appendChild(li);
+    return;
+  }
+  for (const p of data.places) {
+    const li = document.createElement('li');
+    const miles = (p.distance_m / 1609.344).toFixed(1);
+    li.innerHTML =
+      `<span class="mw-place-icon" style="background:${PLACE_COLORS[p.type] || '#999'}"></span>`
+      + `<span class="mw-place-name">${escapeHtml(p.name)}</span>`
+      + `<span class="mw-place-meta">${p.points}pt &middot; ${miles}mi</span>`;
+    li.addEventListener('click', () => {
+      window.__mwMap && window.__mwMap.flyTo({ center: [p.lon, p.lat], zoom: Math.max(window.__mwMap.getZoom(), 14) });
+    });
+    list.appendChild(li);
+  }
+}
+
+async function loadPlacesPanel(map) {
+  try {
+    const center = map.getCenter();
+    const data = await fetchPlacesNear(center.lat, center.lng);
+    renderPlacesPanel(data);
+  } catch (err) {
+    console.error('MeshWars map2: failed to load places panel', err);
+  }
+}
+
+function setupPlacesPanel(map) {
+  const tab = document.getElementById('mw-places-tab');
+  const panel = document.getElementById('mw-places-panel');
+  const closeBtn = document.getElementById('mw-places-close');
+  if (!tab || !panel) return;
+
+  const setOpen = (open) => {
+    panel.classList.toggle('open', open);
+    panel.setAttribute('aria-hidden', open ? 'false' : 'true');
+    tab.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+
+  tab.addEventListener('click', () => setOpen(!panel.classList.contains('open')));
+  if (closeBtn) closeBtn.addEventListener('click', () => setOpen(false));
 }
 
 function renderScores(data) {
@@ -534,6 +764,17 @@ async function main() {
     maxPitch: 0,
     style: {
       version: 8,
+      // Only needed once Places Worth Going's name labels
+      // (places-labels, setupPlacesLayer) added the first `text-field`
+      // layer this style has ever had -- MapLibre refuses to add ANY
+      // symbol layer using text-field without a glyphs template in the
+      // style, even one that never renders (board/overlay layers below
+      // are all fill/line/hillshade, no text). MapLibre's own public
+      // glyph server -- self-hosted glyph generation is a much heavier
+      // asset pipeline than a few place-name labels justifies, and this
+      // page already fetches its basemap tiles from two other public
+      // hosts (OpenStreetMap, CARTO) the same way.
+      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
       sources: {
         [BASEMAP_GOLD_ID]: {
           type: 'raster',
@@ -596,6 +837,13 @@ async function main() {
     },
   });
 
+  // Referenced by the places panel's click-to-fly-to handler
+  // (renderPlacesPanel) -- that markup is built well after `map` goes
+  // out of this function's own scope, so it reads the map back off
+  // window rather than main() threading it through another layer of
+  // closures for one click handler.
+  window.__mwMap = map;
+
   // Camera is locked flat (see maxPitch above), so drop the compass/pitch
   // button from the nav control -- there is nothing left for it to do.
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
@@ -644,12 +892,32 @@ async function main() {
 
     setupOverlayLayers(map);
     setupContourLayer(map);
+    registerPlaceIcons(map);
+    setupPlacesLayer(map);
+    setupPlacesPanel(map);
     setupLayerSwitcher(map);
     watchTheme(map);
     applyBasemapTheme(map);
 
     loadBoardData(map);
     loadScores();
+    loadPlacesViewport(map);
+    loadPlacesPanel(map);
+
+    // Places refresh on moveend, debounced -- a drag or zoom fires many
+    // intermediate move events, and only the settled position (bbox for
+    // the map markers, centre for the "near here" panel) is worth a
+    // request. 250ms is short enough that a reader does not notice the
+    // lag, long enough that a multi-step pan/zoom gesture only fires
+    // this once at the end of it.
+    let placesRefreshTimer = null;
+    map.on('moveend', () => {
+      clearTimeout(placesRefreshTimer);
+      placesRefreshTimer = setTimeout(() => {
+        loadPlacesViewport(map);
+        loadPlacesPanel(map);
+      }, 250);
+    });
   });
 }
 

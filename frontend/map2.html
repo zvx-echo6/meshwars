@@ -21,7 +21,7 @@
         href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
         crossorigin="anonymous" />
   <link rel="stylesheet" href="/static/theme.css?v=20260823-19" />
-  <link rel="stylesheet" href="/static/map2.css?v=11" />
+  <link rel="stylesheet" href="/static/map2.css?v=12" />
 </head>
 <body>
 
@@ -51,12 +51,32 @@
       <li>
         <label><input type="checkbox" id="mw-layer-usfs-trails"> USFS trails</label>
       </li>
+      <li>
+        <label><input type="checkbox" id="mw-layer-places" checked> Places</label>
+      </li>
     </ul>
   </div>
 
   <div id="mw-scores" class="mw-scores">
     <div class="mw-scores-title">Territory</div>
     <ul id="mw-scores-list" class="mw-scores-list"></ul>
+  </div>
+
+  <!-- Places Worth Going (docs/features/places.md): a slide-out panel,
+       not a page -- explicitly chosen over a /places route. Collapsed
+       by default (the tab handle stays visible; the list itself does
+       not compete with the scores panel for attention until opened),
+       listing LIVE places sorted by distance from the map's current
+       centre, refreshed on moveend (see frontend/map2.js). -->
+  <button type="button" id="mw-places-tab" class="mw-places-tab" aria-expanded="false" aria-controls="mw-places-panel">
+    Places
+  </button>
+  <div id="mw-places-panel" class="mw-places-panel" aria-hidden="true">
+    <div class="mw-places-panel-header">
+      <span>Nearby Places</span>
+      <button type="button" id="mw-places-close" class="mw-places-close" aria-label="Close">&times;</button>
+    </div>
+    <ul id="mw-places-list" class="mw-places-list"></ul>
   </div>
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
@@ -66,7 +86,7 @@
   <script src="https://unpkg.com/@acalcutt/maplibre-contour-pmtiles@0.1.2/dist/maplibre-contour-pmtiles.min.js"
           crossorigin="anonymous"></script>
 
-  <script src="/static/map2.js?v=11" type="module"></script>
+  <script src="/static/map2.js?v=12" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260823-19" type="module"></script>
 </body>
 </html>
