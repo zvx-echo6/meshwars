@@ -4,8 +4,8 @@
 and landmarks that make a captured grid square worth more than an
 ordinary one.
 
-This is a PIPELINE, not a single pass, because its three sources live in
-three different places and two of them need tools this repo's own
+This is a PIPELINE, not a single pass, because its sources live in
+several different places and some of them need tools this repo's own
 environment does not have (osmium + GDAL). Run each stage where its
 inputs live, then `merge` wherever it is convenient:
 
@@ -19,16 +19,28 @@ inputs live, then `merge` wherever it is convenient:
   4. match-parks      -- on navi, which has GDAL/OGR and the local PAD-US
                           File Geodatabase. Takes fetch-pota's output and
                           finds each park's boundary polygon.
-  5. merge            -- anywhere. Combines the three stage outputs into
-                          the final seed CSV in the `place` table's shape.
+  4b. fetch-padus-parks -- on navi, same GDAL/PAD-US dependency as
+                          match-parks. ADDED 2026-08-24: pulls PAD-US's
+                          own local/city/county park units directly, as
+                          a second park source alongside POTA -- see
+                          "PARK SOURCES" below. Also takes fetch-pota's
+                          output, but only to dedup against, not to seed
+                          from.
+  5. merge            -- anywhere. Combines the stage outputs into the
+                          final seed CSV in the `place` table's shape.
 
-SOURCES (pulled 2026-08-24):
+SOURCES (pulled 2026-08-24; PAD-US local-parks addition and the SOTA
+threshold change below re-pulled the same day):
   SOTA summits  -- https://storage.sota.org.uk/summitslist.csv
                    NOTE: this file has a non-CSV title line before the
                    real header ("SOTA Summits List (Date=...)") -- skip
                    line 1, DictReader from line 2.
   POTA parks    -- https://pota.app/all_parks_ext.csv
                    Centre points only -- POTA publishes no boundaries.
+                   Lists only what hams activate (state/national parks
+                   POTA has itself designated a reference for) -- see
+                   "PARK SOURCES" below for why this is not the only
+                   park source any more.
   OSM landmarks -- /mnt/nas/nav/western-us-11states.osm.pbf on pi-nas
                    (read-only source storage -- never write there),
                    reachable from navi.
@@ -37,6 +49,40 @@ SOURCES (pulled 2026-08-24):
                    Designation_Easement (all protected-area types in one
                    layer, so a park does not go unmatched just because
                    it happens to be an easement rather than a fee title).
+                   Used twice: match_parks() attaches a boundary to a
+                   POTA park; fetch_padus_parks() pulls this layer's own
+                   local/city/county park units as parks in their own
+                   right, whether or not POTA ever heard of them.
+
+PARK SOURCES (fetch_padus_parks() added 2026-08-24, "Twin Falls has no
+parks"): POTA lists only what hams activate for POTA credit -- almost
+entirely state and national parks -- so a town with real, ordinary
+municipal parks and nothing POTA-worthy showed zero parks at all, which
+was the actual complaint (Twin Falls: one landmark, no parks, despite
+having several). PAD-US already supplied park boundaries via
+match_parks(); it also carries municipal parks in their own right,
+tagged with a designation (Des_Tp) and a managing-agency code
+(Mang_Type/Mang_Name), so fetch_padus_parks() pulls those directly as a
+second, independent park source. Kept: designation LP (local park) or
+LREC (local recreation area), managed by Mang_Type LOC or DIST
+(city/county/regional-district, not state/federal/private/NGO -- those
+are POTA's or nobody's), Pub_Access "OA" (open access -- RA/XA/UK
+excluded). A 1-acre floor (MIN_PARK_ACRES, raised from an initial 0.1
+after the first pull came back at 45,932 nationwide -- see that
+constant's own comment) and a name-pattern exclusion drop slivers and
+non-destinations (community gardens, detention basins, utility
+parcels) PAD-US's LP tag also sweeps in. Matched against the POTA pull
+by name + proximity (same technique match_parks() itself uses) so a
+park listed in both does not get written twice -- see
+fetch_padus_parks()'s own docstring for the exact rule. Result: 38,346
+PAD-US local parks nationwide (8,107 at or above one grid cell --
+permanent, scored by the >50% rule like a POTA-matched large park;
+30,239 below -- rotate weekly like a landmark, same as a small
+POTA-matched park). These carry source "PAD-US" rather than "POTA" or
+"POTA/PAD-US"; app/places_seed.py's country filter treats that source
+value as already US-only (see that module's docstring) rather than
+running it through POTA's "US-"-prefix check, which their "PADUS-<fid>"
+ref_code would fail.
 
 PLAY AREA (from the running service's /config, NOT app/config.py's
 narrower Idaho-only defaults -- production overrides those via .env):
@@ -64,32 +110,34 @@ these tags is not a "named destination" and is skipped.
 POINTS (flat, by ref_type -- not derived from SOTA's own points column
 or PAD-US acreage): landmark 5, park 25, summit 100.
 
-SUMMIT THRESHOLD (added 2026-08-24, "places worth going" rebalance):
+SUMMIT THRESHOLD (added 2026-08-24, "places worth going" rebalance;
+LOWERED again 2026-08-24, "too few summits"):
 SOTA's own Points column is elevation-derived (a 1-10 scale keyed to a
 summit's prominence within its region) and is exactly the "is this a
 real mountain, not a bump" signal the earlier unfiltered pull lacked --
 every SOTA summit became a marker regardless of size, and summits render
-as the largest symbol, so 26,600 of them buried the map. Matt's brief
-was "high SOTA value, no easy picks" -- SUMMIT_MIN_POINTS is set to 10
-(SOTA's own scale only takes even values 2/4/6/8/10 plus 1, so 10 is
-literally the top of the scale, not an arbitrary round number), which
-keeps 1,865 US in-bbox summits nationwide (measured against every
-threshold from >=1 to >=10 before picking) -- the true top tier, one a
-100-point place should cost an expedition to reach. Spread was checked
-before picking, not assumed: at >=10 all 15 SOTA associations that have
-ANY 10-point summit in the play area still have at least 6 (the
-Dakotas is the thinnest; California the thickest at 353); the only
-associations with zero are K0M/W0I/W0M/W0N (Minnesota/Iowa/Missouri/
-Nebraska) and those are flat-state associations that already have zero
-10-AND-8-point summits -- not something this threshold newly excludes.
-Idaho (W7I), where the active players are, keeps 78 at >=10; the next
-threshold down, >=8, keeps 472 in Idaho (6,487 nationwide) if that ever
-needs revisiting. This filter runs in fetch_sota() below, on SOTA's
-Points column, BEFORE the bbox/name checks -- not a separate stage,
-since it only needs the one column already being read. The `points`
-column written to the seed CSV is unrelated and unchanged by this: it
-is always the flat game value (100 for every surviving summit), never
-SOTA's own points value.
+as the largest symbol, so 26,600 of them buried the map. Matt's first
+brief was "high SOTA value, no easy picks" -- SUMMIT_MIN_POINTS was set
+to 10 (SOTA's own scale only takes even values 2/4/6/8/10 plus 1, so 10
+is literally the top of the scale, not an arbitrary round number), which
+kept 1,865 US in-bbox summits nationwide, 141 in Idaho at the play
+area's then-narrower bbox.
+
+That turned out to be one stop too sparse once it was actually in play
+("too few summits"). Dropped to the next threshold down, SOTA Points
+>= 8 -- still the top half of the scale, not a wide-open floor.
+Verified directly against a fresh pull rather than trusted from the
+note that flagged it as the fallback option: **6,487 US in-bbox summits
+nationwide, 472 in Idaho (W7I)**. Per-state counts for the states this
+game's neighborhood actually covers (association code in parens):
+Idaho 472 (W7I), Utah 420 (W7U), Nevada 635 (W7N), Montana 533 (W7M),
+Wyoming 571 (W7Y), Colorado 539 (W0C), Washington 687 (W7W), Oregon 104
+(W7O), California 1,002 (W6). This filter runs in fetch_sota() below,
+on SOTA's Points column, BEFORE the bbox/name checks -- not a separate
+stage, since it only needs the one column already being read. The
+`points` column written to the seed CSV is unrelated and unchanged by
+this: it is always the flat game value (100 for every surviving
+summit), never SOTA's own points value.
 """
 from __future__ import annotations
 
@@ -113,7 +161,13 @@ POINTS = {"summit": 100, "park": 25, "landmark": 5}
 # summits at or above this SOTA points value become a `place` row at
 # all; the ones that survive still carry the flat game value of 100,
 # not this number.
-SUMMIT_MIN_SOTA_POINTS = 10
+#
+# LOWERED 2026-08-24, "too few summits": >=10 (1,865 nationwide / 141
+# Idaho at the time) was one stop too sparse in play. Dropped to the
+# next threshold down, >=8, per docs/features/places.md and Matt's
+# feedback -- see module docstring "SUMMIT THRESHOLD" for the measured
+# counts at this threshold.
+SUMMIT_MIN_SOTA_POINTS = 8
 
 SEED_FIELDS = [
     "ref_type", "ref_code", "name", "lat", "lon", "points", "source",
@@ -544,6 +598,232 @@ def match_parks(pota_csv: str, out_path: str) -> None:
 
 
 # --------------------------------------------------------------------
+# Stage 4b: PAD-US local/city/county parks -- run on navi
+# --------------------------------------------------------------------
+# ADDED 2026-08-24, "too few parks" -- POTA lists only what hams
+# activate (state and national parks), so a town with real municipal
+# parks and nothing POTA-worthy showed zero (Twin Falls: one landmark,
+# no parks, despite having parks). PAD-US already supplies park
+# boundaries (match_parks above); it also carries municipal parks in
+# their own right, tagged with a designation and a managing agency --
+# this stage pulls those directly as a second park source, alongside
+# POTA rather than instead of it.
+#
+# Kept: Des_Tp (designation) LP (local park) or LREC (local recreation
+# area) -- PAD-US's own "this is a park, not an easement or a wildlife
+# refuge" signal -- AND Mang_Type (manager type) LOC or DIST (city/
+# county/regional-district managed, not state/federal/private/NGO,
+# which POTA or the summit/landmark sources already cover). Also
+# requires Pub_Access "OA" (open access) -- RA (restricted), XA
+# (closed) and UK (unknown) are excluded, since a place worth going
+# needs to actually be reachable, not merely believed to be.
+#
+# A GIS acreage floor (MIN_ACRES) drops slivers PAD-US tags LP/LREC
+# for being public land but that are not a destination anyone would
+# drive to: traffic islands, "Stairway & Pedestrian Way", a detention
+# pond's mowed edge. A name-pattern exclusion catches the other kind of
+# false positive the acreage floor cannot: community gardens and
+# single-purpose utility parcels (detention/retention basins, water
+# towers, substations, lift/pump stations, rights-of-way) that PAD-US's
+# LP designation also sweeps in even at a normal park's size.
+LOCAL_PARK_DESIGNATIONS = {"LP", "LREC"}
+LOCAL_PARK_MANAGER_TYPES = {"LOC", "DIST"}
+# RAISED 2026-08-24 from an initial 0.1 acre: the 0.1 floor kept every
+# LP/LREC feature down to a traffic island (45,932 nationwide, over the
+# "flag it" line) because a huge share of PAD-US's local-park layer is
+# genuinely sub-acre -- tot lots, pocket parks, mini-parks -- and a
+# name-pattern alone cannot separate "small real park" from "mowed
+# strip PAD-US also tagged LP". 1.0 acre (roughly a football field) is
+# the cut that brings the nationwide count back under 40,000 (38,346)
+# while keeping every park big enough to plausibly be a destination,
+# not just publicly-owned ground.
+MIN_PARK_ACRES = 1.0  # ~43,560 sq ft -- below this is a sliver, not a park
+
+
+def _compile_exclude_park_name_re():
+    import re
+    return re.compile(
+        r"community\s+garden|detention|retention\s*(basin|pond)?|stormwater|"
+        r"water\s+tower|\btank\b|substation|lift\s+station|pump\s+station|"
+        r"right.?of.?way|\beasement\b|parking\s+(lot|structure|garage)|"
+        r"comfort\s+station|maintenance\s+(yard|facility|shop)",
+        re.IGNORECASE,
+    )
+
+
+# ~500 m -- same "hand-entered centre point can land just outside its
+# own park" tolerance match_parks() uses for its near-match fallback,
+# reused here as the dedup radius against a POTA point.
+_DEDUP_NEAR_DEG = 0.0045
+# ~2 km -- generous outer query radius before the name/near checks
+# narrow it down, same as match_parks()'s own STRtree query buffer.
+_DEDUP_QUERY_DEG = 0.02
+
+
+def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
+    """Run on navi:  python3 build_places_seed.py fetch-padus-parks pota.csv padus_parks.csv
+
+    pota_csv is fetch_pota()'s raw output (reference,name,lat,lon), used
+    only to deduplicate against -- a PAD-US candidate whose name is a
+    strong match (Jaccard >=0.5, same _name_score as match_parks) to a
+    nearby (within ~500 m) POTA park is dropped so a park listed in both
+    programmes is not written twice. This is deliberately looser than
+    match_parks()'s own accept rule (which also accepts on `contains`
+    alone) because the goal here is the opposite: match_parks decides
+    whether to attach a boundary to a POTA row; this decides whether to
+    SKIP a PAD-US row, so a false-negative dedup (a real duplicate slips
+    through) is the safer failure than a false-positive one (a real
+    Twin-Falls-style city park gets dropped because it happens to share
+    a word or two with some unrelated POTA park 2 km away).
+    """
+    from osgeo import ogr, osr
+    import shapely
+    from shapely import wkb as shapely_wkb
+    from shapely.strtree import STRtree
+
+    exclude_re = _compile_exclude_park_name_re()
+
+    ds = ogr.Open(PADUS_GDB)
+    layer = ds.GetLayerByName(PADUS_LAYER)
+    src_srs = layer.GetSpatialRef()
+    dst_srs = osr.SpatialReference()
+    dst_srs.ImportFromEPSG(4326)
+    dst_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    xform = osr.CoordinateTransformation(src_srs, dst_srs)
+
+    corners = [(WEST, SOUTH), (EAST, SOUTH), (EAST, NORTH), (WEST, NORTH)]
+    xs, ys = [], []
+    inv = osr.CoordinateTransformation(dst_srs, src_srs)
+    for lon, lat in corners:
+        x, y, _ = inv.TransformPoint(lon, lat)
+        xs.append(x)
+        ys.append(y)
+    layer.SetSpatialFilterRect(min(xs), min(ys), max(xs), max(ys))
+    print(f"padus-parks: layer has {layer.GetFeatureCount()} features in bbox", file=sys.stderr)
+
+    # POTA points, for dedup only -- see docstring.
+    pota_pts = []
+    pota_names = []
+    with open(pota_csv, encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            pota_pts.append(shapely.Point(float(row["lon"]), float(row["lat"])))
+            pota_names.append(row["name"])
+    pota_tree = STRtree(pota_pts) if pota_pts else None
+
+    seen_fids = set()
+    kept = 0
+    larger = 0
+    smaller = 0
+    counts = {
+        "wrong_designation": 0, "wrong_manager": 0, "not_open_access": 0,
+        "no_name": 0, "name_excluded": 0, "too_small": 0, "dup_of_pota": 0,
+        "no_geom": 0, "out_of_bbox": 0,
+    }
+
+    with open(out_path, "w", newline="", encoding="utf-8") as out:
+        w = csv.writer(out)
+        w.writerow(SEED_FIELDS)
+        for feat in layer:
+            if feat.GetField("Des_Tp") not in LOCAL_PARK_DESIGNATIONS:
+                counts["wrong_designation"] += 1
+                continue
+            if feat.GetField("Mang_Type") not in LOCAL_PARK_MANAGER_TYPES:
+                counts["wrong_manager"] += 1
+                continue
+            if feat.GetField("Pub_Access") != "OA":
+                counts["not_open_access"] += 1
+                continue
+            name = (feat.GetField("Unit_Nm") or feat.GetField("Loc_Nm") or "").strip()
+            if not name:
+                counts["no_name"] += 1
+                continue
+            if exclude_re.search(name):
+                counts["name_excluded"] += 1
+                continue
+
+            g = feat.GetGeometryRef()
+            if g is None:
+                counts["no_geom"] += 1
+                continue
+            g2 = g.Clone()
+            g2.Transform(xform)
+            try:
+                geom = shapely_wkb.loads(bytes(g2.ExportToWkb()))
+            except Exception:
+                counts["no_geom"] += 1
+                continue
+            if geom.is_empty:
+                counts["no_geom"] += 1
+                continue
+
+            centroid = geom.centroid
+            lat, lon = centroid.y, centroid.x
+            if not in_bbox(lat, lon):
+                counts["out_of_bbox"] += 1
+                continue
+
+            # GIS_Acres is PAD-US's own figure but is stored as an
+            # Integer (rounds to the nearest whole acre), which would
+            # bucket every park under half an acre into the same "0"
+            # and make MIN_PARK_ACRES unable to tell a real pocket park
+            # from a true sliver. Compute area from the transformed
+            # geometry instead -- same formula match_parks() falls back
+            # to when GIS_Acres is missing, used here as the primary
+            # figure rather than a fallback for exactly that precision
+            # reason.
+            area_m2 = geom.area * (111_320.0 ** 2) * math.cos(math.radians(lat))
+            acres = area_m2 / 4046.8564224
+            if acres < MIN_PARK_ACRES:
+                counts["too_small"] += 1
+                continue
+
+            if pota_tree is not None:
+                pt = shapely.Point(lon, lat)
+                buf = pt.buffer(_DEDUP_QUERY_DEG)
+                is_dup = False
+                for i in pota_tree.query(buf):
+                    if _name_score(name, pota_names[i]) >= 0.5 and pt.distance(pota_pts[i]) < _DEDUP_NEAR_DEG:
+                        is_dup = True
+                        break
+                if is_dup:
+                    counts["dup_of_pota"] += 1
+                    continue
+
+            fid = feat.GetFID()
+            if fid in seen_fids:
+                continue
+            seen_fids.add(fid)
+
+            # NOTE: geom_wkt is written for every park regardless of
+            # size, even though app/places_seed.py's loader only ever
+            # parses it for a park at or above one grid cell -- a
+            # SMALLER matched park still needs geom_wkt to be non-empty,
+            # because the loader uses "geom_wkt present" (not its
+            # content) as the signal that this is a genuinely matched-
+            # but-small park (rotates=True, like a landmark) rather than
+            # an unmatched one (rotates=False, permanent -- see
+            # app/places_seed.py's _classify_row/load_places_seed
+            # docstrings). Blanking it to save space would silently flip
+            # every small city park to non-rotating, which contradicts
+            # docs/features/places.md's rotation rule -- so the real
+            # (simplified) boundary is kept for every matched park, and
+            # the seed CSV is larger for it.
+            simplified = geom.simplify(0.0008, preserve_topology=True)
+            w.writerow(["park", f"PADUS-{fid}", name, f"{lat:.6f}", f"{lon:.6f}",
+                        POINTS["park"], "PAD-US", f"{area_m2:.0f}", simplified.wkt])
+            kept += 1
+            if area_m2 >= SQUARE_AREA_M2:
+                larger += 1
+            else:
+                smaller += 1
+
+    print(f"padus-parks: wrote {kept} local/city/county parks "
+          f"(larger-than-cell={larger} permanent, smaller-than-cell={smaller} rotating) "
+          f"-> {out_path}", file=sys.stderr)
+    print(f"padus-parks: excluded {counts}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------
 # Stage 5: merge
 # --------------------------------------------------------------------
 def merge(inputs: list, out_path: str) -> None:
@@ -587,6 +867,10 @@ def main():
     p.add_argument("pota_csv")
     p.add_argument("out")
 
+    p = sub.add_parser("fetch-padus-parks")
+    p.add_argument("pota_csv")
+    p.add_argument("out")
+
     p = sub.add_parser("merge")
     p.add_argument("inputs", nargs="+")
     p.add_argument("--out", required=True)
@@ -600,6 +884,8 @@ def main():
         extract_landmarks(args.pbf, args.out)
     elif args.cmd == "match-parks":
         match_parks(args.pota_csv, args.out)
+    elif args.cmd == "fetch-padus-parks":
+        fetch_padus_parks(args.pota_csv, args.out)
     elif args.cmd == "merge":
         merge(args.inputs, args.out)
 

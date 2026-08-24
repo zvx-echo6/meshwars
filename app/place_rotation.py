@@ -16,22 +16,39 @@ net itself starts at settings.checkin_net_start_hour that evening).
 REGION CELL SIZE -- the brief asked for a chosen size and its yield,
 stated plainly:
 
-  ROTATION_CELL_MILES = 18. One allowance slot per cell
-  (ROTATION_QUOTA_PER_CELL = 1), so a cell that has any rotating
-  candidate at all contributes exactly one live place per week, and an
-  18-mile cell filled edge-to-edge puts that place roughly 18 miles
-  (about a 20-minute drive) from the next one -- inside the brief's
-  15-20 mile target band. A town with a single candidate gets it
-  automatically (its cell has nothing else competing for the slot); a
-  dense area like Boise has many candidates inside a small number of
-  18-mile cells, so it does not get proportionally more live places
-  than a rural cell that also has at least one -- that IS the density
-  levelling the brief asked for, not a bug in it.
+  ROTATION_CELL_MILES = 18. An 18-mile cell filled edge-to-edge puts a
+  live place roughly 18 miles (about a 20-minute drive) from the next
+  one -- inside the brief's 15-20 mile target band. This stays the
+  binding "how far apart" answer; the cell size was NOT the problem
+  "too few live places" turned out to be measuring -- see QUOTA below.
 
   Cell degrees are computed from the configured play area's own
   latitude band (not a hardcoded reference point), the same way
   app/places.py documents its own bucket sizing depends on where degrees
   are being measured -- see _region_cell_degrees().
+
+QUOTA (ROTATION_QUOTA_PER_CELL, RAISED 2026-08-24 from 1 to 5, "a town
+should have more than one place"): at quota 1, an 18-mile cell -- big
+enough to span a town and its nearby neighbors -- contributes exactly
+one live place regardless of how many candidates it holds, so Twin
+Falls (population center of its own cell, sharing that cell with Buhl
+and Filer) drew exactly the county courthouse and nothing else most
+weeks: "twin falls has 1 landmark". Measured directly against the real
+seed (including the PAD-US local-park addition -- see
+scripts/build_places_seed.py) before picking, not assumed: chosen
+places in Twin Falls' own region cell at quota 1/3/5/8 were 1/3/4/4,
+and nationwide live rotating count (all cells, this same seed) was
+3,266/6,617/8,307/9,476. 5 and 8 land on the same in-cell answer (4) --
+MIN_SPACING_MILES's 3-mile floor is what actually caps a compact town's
+count once the quota stops being the binding constraint, exactly as
+intended (see MIN_SPACING_MILES below) -- so 5 is the smallest quota
+that reaches that natural ceiling for a town like Twin Falls, without
+paying 8's extra ~1,169 nationwide rotating places for no further gain
+there. A cell with only one real candidate still contributes only one
+live place (there is nothing else to fill the other slots with); a
+dense cell like Boise's fills more of its quota, which is the "genuine
+handful to choose from" the brief asked for, not the flat levelling
+quota 1 produced.
 
 MIN_SPACING_MILES = 3: no two live rotating places within 3 miles of
 each other, enforced globally (not just within one region cell -- two
@@ -53,7 +70,7 @@ from .grid import distance_m
 MILE_M = 1609.344
 
 ROTATION_CELL_MILES = 18.0
-ROTATION_QUOTA_PER_CELL = 1
+ROTATION_QUOTA_PER_CELL = 5
 MIN_SPACING_MILES = 3.0
 
 _METERS_PER_DEG_LAT = 111_320.0

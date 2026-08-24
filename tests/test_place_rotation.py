@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 
+import app.place_rotation as rot_module
 from app.grid import distance_m
 from app.place_rotation import (
     MIN_SPACING_MILES,
@@ -60,9 +61,34 @@ def test_rotation_differs_by_week(conn):
     constant regardless of input) -- with enough spread-out candidates
     competing across weeks, two different weeks should not draw the
     identical set every single time.
+
+    Each region cell must hold MORE candidates than ROTATION_QUOTA_PER_
+    CELL, or there is no actual choice being made (every candidate that
+    clears spacing gets picked regardless of week) and the two weeks'
+    draws would be identical by construction, not because the algorithm
+    is broken -- exactly what raising ROTATION_QUOTA_PER_CELL from 1 to
+    5 (2026-08-24, "a town should have more than one place") did to the
+    old flat 20x10-grid version of this test, which put only 1-2
+    candidates in most cells. Sixteen candidates per cell, spaced ~4
+    miles apart (comfortably past MIN_SPACING_MILES) inside five
+    well-separated 18-mile cells, keeps this test meaningful regardless
+    of what the quota happens to be tuned to later.
     """
-    for i in range(200):
-        _insert_place(conn, i, "landmark", 40.0 + (i % 20) * 0.3, -110.0 + (i // 20) * 0.3)
+    lat_deg, lon_deg = rot_module._region_cell_degrees()
+    place_id = 0
+    for lat_idx, lon_idx in [(153, -314), (169, -302), (139, -325), (185, -337), (122, -291)]:
+        cell_south = lat_idx * lat_deg
+        cell_west = lon_idx * lon_deg
+        # Grid spans the middle 70% of the cell on each axis, so no
+        # point can land outside it regardless of rounding.
+        lat_step = (lat_deg * 0.7) / 3
+        lon_step = (lon_deg * 0.7) / 3
+        lat0 = cell_south + lat_deg * 0.15
+        lon0 = cell_west + lon_deg * 0.15
+        for r in range(4):
+            for c in range(4):
+                _insert_place(conn, place_id, "landmark", lat0 + r * lat_step, lon0 + c * lon_step)
+                place_id += 1
 
     chosen_1, _ = _compute_week(conn, "2026-08-19")
     chosen_2, _ = _compute_week(conn, "2026-08-26")

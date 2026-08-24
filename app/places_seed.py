@@ -30,7 +30,14 @@ southern Canada. MeshWars is a US game, so this loader excludes:
   - POTA parks: reference prefix (the part of ref_code before the
     first "-") not "US". POTA's own reference scheme puts the country
     right there -- "US-1234" / "CA-1234" / "MX-0001" -- no lookup
-    needed.
+    needed. ADDED 2026-08-24: parks with source "PAD-US" (ref_code
+    "PADUS-<fid>", from build_places_seed.py's fetch_padus_parks() --
+    local/city/county parks POTA never lists at all, since POTA only
+    covers what hams activate) skip this prefix check and are kept
+    unconditionally instead -- they are pulled from a single US-
+    territory PAD-US layer already scoped to the play area's bbox, so
+    there is no CA-/MX- equivalent to filter, and their ref_code does
+    not start with "US-" for the prefix check to even parse correctly.
   - OSM landmarks: NOT filtered. Verified rather than assumed: every
     landmark row's lat/lon falls inside 31.33-49.01N, -124.72 to
     -102.04W -- exactly the western US states extract
@@ -147,6 +154,16 @@ def _classify_row(row: dict) -> tuple[bool, bool]:
         assoc = row["ref_code"].split("/")[0]
         return (assoc in US_SOTA_ASSOCIATIONS, False)
     if ref_type == "park":
+        # ADDED 2026-08-24: PAD-US-sourced parks (ref_code "PADUS-<fid>")
+        # are pulled directly from a single US-territory PAD-US layer
+        # (scripts/build_places_seed.py's fetch_padus_parks(), run
+        # against the play area's own bbox) -- there is no CA-/MX-
+        # equivalent to filter the way POTA's own reference prefix
+        # requires below, so these are kept unconditionally rather than
+        # run through the POTA-shaped prefix check, which would reject
+        # every one of them (their ref_code does not start with "US-").
+        if row.get("source") == "PAD-US":
+            return (True, None)  # rotates decided later, once area is known
         prefix = row["ref_code"].split("-")[0]
         if prefix != "US":
             return (False, False)
