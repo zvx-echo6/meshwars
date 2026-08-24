@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <!-- Applied before any stylesheet paints, so a reader who chose the
+       neon skin never sees a frame of gold first. Deliberately inline
+       and tiny: a fetched script here would block first paint, which is
+       the thing this exists to avoid. Mirrors theme-toggle.js, which
+       owns everything after load. -->
+  <script>
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
+  </script>
+  <title>MeshWars — Staging Map (MapLibre)</title>
+  <meta name="robots" content="noindex, nofollow">
+
+  <link rel="stylesheet"
+        href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+        crossorigin="anonymous" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260823-19" />
+  <link rel="stylesheet" href="/static/map2.css?v=11" />
+</head>
+<body>
+
+  <div id="map"></div>
+
+  <div id="mw-map-controls" class="mw-map-controls">
+    <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+    </button>
+  </div>
+
+  <div id="mw-layers" class="mw-layers">
+    <div class="mw-layers-title">Layers</div>
+    <ul class="mw-layers-list">
+      <li>
+        <label><input type="checkbox" id="mw-layer-hillshade" checked> Hillshade</label>
+      </li>
+      <li>
+        <label><input type="checkbox" id="mw-layer-contours"> Contours</label>
+      </li>
+      <li>
+        <label><input type="checkbox" id="mw-layer-public-lands"> Public lands</label>
+      </li>
+      <li>
+        <label><input type="checkbox" id="mw-layer-usfs-roads"> USFS roads</label>
+      </li>
+      <li>
+        <label><input type="checkbox" id="mw-layer-usfs-trails"> USFS trails</label>
+      </li>
+    </ul>
+  </div>
+
+  <div id="mw-scores" class="mw-scores">
+    <div class="mw-scores-title">Territory</div>
+    <ul id="mw-scores-list" class="mw-scores-list"></ul>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
+          crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
+          crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@acalcutt/maplibre-contour-pmtiles@0.1.2/dist/maplibre-contour-pmtiles.min.js"
+          crossorigin="anonymous"></script>
+
+  <script src="/static/map2.js?v=11" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260823-19" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+/* MeshWars: staging-only MapLibre map page (/map2). Deliberately
+ * separate from coverage.css/mc.css -- this page has no nav bar and no
+ * modals, just the map, a plain scores panel, a layer switcher and a
+ * theme toggle. theme.css is loaded before this file (see map2.html)
+ * so every panel below reads its colours from --mw-* tokens rather
+ * than hardcoding them -- chrome follows the theme, team colours never
+ * do (those live in frontend/map2.js and are gameplay, not branding).
+ * See frontend/map2.js for the map itself.
+ */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--mw-page);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+#map {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+/* Sits in the map's top-left, offset clear of MapLibre's own
+ * NavigationControl (zoom/compass), which map2.js also anchors
+ * top-left. */
+.mw-map-controls {
+  position: absolute;
+  top: 12px;
+  left: 58px;
+  z-index: 5;
+}
+
+.mw-theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 29px;
+  height: 29px;
+  padding: 0;
+  background: var(--mw-panel);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--mw-text-5);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-theme-btn svg { display: block; }
+.mw-theme-btn:hover,
+.mw-theme-btn:focus-visible {
+  color: var(--mw-gold);
+}
+.mw-theme-btn[aria-pressed="true"] {
+  color: var(--mw-gold);
+}
+
+.mw-layers {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 5;
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  min-width: 150px;
+  font-size: 13px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
+.mw-layers-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--mw-text-6);
+}
+
+.mw-layers-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mw-layers-list li {
+  padding: 2px 0;
+}
+
+.mw-layers-list label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* Applied to a switcher row (see map2.js setupLayerSwitcher) when the
+ * current zoom is below that layer's data -- the checkbox is disabled
+ * at the same time, so this only needs to read as "off" rather than
+ * clickable. Colour comes from the theme's own least-emphasis token,
+ * same one used for captions and disabled controls elsewhere. */
+.mw-layers-list li.unavailable {
+  opacity: 0.45;
+  color: var(--mw-text-6);
+}
+
+.mw-layers-list li.unavailable label {
+  cursor: default;
+}
+
+.mw-scores {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 5;
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  min-width: 160px;
+  font-size: 13px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
+.mw-scores-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--mw-text-6);
+}
+
+.mw-scores-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mw-scores-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.mw-score-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.mw-score-name {
+  display: flex;
+  align-items: center;
+}
+
+.mw-score-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
