@@ -112,16 +112,17 @@
        get fresh HTML paired with a stale cached stylesheet/script. Bump
        v=20260824-1 on EVERY /static CSS/JS reference shared with the
        other pages (theme.css, coverage.css, mc.css, theme-toggle.js)
-       whenever any of those files change, and v=13 on map2.css/map2.js
-       specifically whenever either of those two changes -- do not touch
-       the pinned external MapLibre/pmtiles CDN links. -->
+       whenever any of those files change, and bump the small integer
+       version below on map2.css/map2.js specifically whenever either of
+       those two changes -- do not touch the pinned external
+       MapLibre/pmtiles CDN links. -->
   <link rel="stylesheet"
         href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
         crossorigin="anonymous" />
   <link rel="stylesheet" href="/static/theme.css?v=20260824-1" />
   <link rel="stylesheet" href="/static/coverage.css?v=20260824-1" />
   <link rel="stylesheet" href="/static/mc.css?v=20260824-1" />
-  <link rel="stylesheet" href="/static/map2.css?v=13" />
+  <link rel="stylesheet" href="/static/map2.css?v=14" />
 </head>
 <body>
 

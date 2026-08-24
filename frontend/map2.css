@@ -99,7 +99,18 @@
  * visible at all times as the one thing that opens it; the panel
  * itself only ever slides, it is never removed from the DOM (map2.js
  * keeps writing to #mw-places-list whether or not the panel is open,
- * so the list is current the instant it opens). */
+ * so the list is current the instant it opens).
+ *
+ * top:120px was measured against the old, much shorter #mw-scores box
+ * this page used to have in this corner. The ported territory panel
+ * (.mc-scoreboard, see map2.css's #mc-scoreboard-position rule above)
+ * is taller and sits above z-index 6, so left at 120px the tab would
+ * be entirely hidden behind it on desktop, where the panel starts
+ * expanded (measured ~264px tall at 1400px wide). The
+ * NARROW_BREAKPOINT_PX media query below pushes the tab clear of that
+ * on desktop; below the breakpoint the panel starts COLLAPSED (see
+ * map2.js's setMcCollapsed) at ~43px tall, well clear of 120px already,
+ * so the base rule is untouched there. */
 .mw-places-tab {
   position: absolute;
   top: 120px;
@@ -118,6 +129,11 @@
   writing-mode: vertical-rl;
   cursor: pointer;
   box-shadow: -2px 2px 10px rgba(0, 0, 0, 0.4);
+}
+@media (min-width: 601px) {
+  .mw-places-tab {
+    top: 340px;
+  }
 }
 .mw-places-tab:hover,
 .mw-places-tab:focus-visible {
