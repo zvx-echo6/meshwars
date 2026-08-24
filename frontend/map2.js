@@ -57,6 +57,13 @@ const HILLSHADE_ID = 'hillshade';
 // slightly higher exaggeration there. Keyed by theme name.
 const HILLSHADE_EXAGGERATION = { gold: 0.6, neon: 0.85 };
 
+// Team territory washes into the dark neon basemap/hillshade at the
+// gold theme's weights, so it gets more fill opacity and a heavier
+// outline there. Gold is untouched -- it already reads fine. Keyed by
+// theme name, same pattern as HILLSHADE_EXAGGERATION above.
+const BOARD_FILL_OPACITY = { gold: 0.45, neon: 0.65 };
+const BOARD_LINE_WIDTH = { gold: 1, neon: 2 };
+
 // Each checkbox id -> the style layer id(s) it toggles, and the
 // minimum zoom its underlying data starts at (measured from the tile
 // archives -- see the minzoom comment in setupOverlayLayers below).
@@ -1145,6 +1152,8 @@ function applyBasemapTheme(map) {
   map.setLayoutProperty(BASEMAP_GOLD_ID, 'visibility', neon ? 'none' : 'visible');
   map.setLayoutProperty(BASEMAP_NEON_ID, 'visibility', neon ? 'visible' : 'none');
   map.setPaintProperty(HILLSHADE_ID, 'hillshade-exaggeration', HILLSHADE_EXAGGERATION[theme]);
+  map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
+  map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
 }
 
 // theme-toggle.js sets data-theme on <html> directly; observing the
