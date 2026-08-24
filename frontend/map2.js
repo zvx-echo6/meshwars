@@ -34,10 +34,17 @@ const TEAM_COLORS = {
 
 const TEAM_ORDER = Object.keys(TEAM_COLORS);
 
-const DEM_URL = 'https://navi.echo6.co/tiles/planet-dem.pmtiles';
-const PUBLIC_LANDS_URL = 'https://navi.echo6.co/tiles/public-lands.pmtiles';
-const USFS_TRAILS_ROADS_URL = 'https://navi.echo6.co/tiles/usfs-trails-roads.pmtiles';
-const BLM_TRAILS_ROADS_URL = 'https://navi.echo6.co/tiles/blm-trails-roads.pmtiles';
+// The archives on navi get rebuilt in place, keeping the same filename,
+// and a browser that already holds byte ranges of the previous file will
+// happily keep serving them -- pointing into a file that has since
+// changed shape. That shows up as a region silently missing rather than
+// as an error. Bump TILE_REV whenever an archive on navi is replaced, so
+// the URL changes and nothing stale can survive.
+const TILE_REV = '20260824a';
+const DEM_URL = `https://navi.echo6.co/tiles/planet-dem.pmtiles?r=${TILE_REV}`;
+const PUBLIC_LANDS_URL = `https://navi.echo6.co/tiles/public-lands.pmtiles?r=${TILE_REV}`;
+const USFS_TRAILS_ROADS_URL = `https://navi.echo6.co/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
+const BLM_TRAILS_ROADS_URL = `https://navi.echo6.co/tiles/blm-trails-roads.pmtiles?r=${TILE_REV}`;
 
 const BASEMAP_GOLD_ID = 'basemap-gold';
 const BASEMAP_NEON_ID = 'basemap-neon';
