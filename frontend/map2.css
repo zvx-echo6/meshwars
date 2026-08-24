@@ -152,7 +152,14 @@
 
 .mw-places-panel {
   position: absolute;
-  top: 0;
+  /* Was top:0 -- flush with the true viewport top, behind the fixed
+   * nav bar (.mw-nav, z-index 1000 -- see coverage.css). The panel's
+   * own header and close button sat in that same band, so they were
+   * never actually visible OR clickable, at any width, for as long as
+   * this panel has existed. #map and the territory panel both already
+   * start at var(--mw-nav-h) for the same reason; this just joins
+   * them. */
+  top: var(--mw-nav-h);
   right: 0;
   bottom: 0;
   /* Above the territory panel's z-index:20 (see that rule's own
