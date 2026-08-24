@@ -78,7 +78,7 @@ const LAYER_TOGGLES = [
   ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 4],
   ['mw-layer-usfs-roads', ['usfs-roads-line'], 6],
   ['mw-layer-usfs-trails', ['usfs-trails-line'], 6],
-  ['mw-layer-places', ['places-icons', 'places-labels'], 0],
+  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels'], 0],
 ];
 
 // Places Worth Going (docs/features/places.md). Colours are
@@ -86,20 +86,73 @@ const LAYER_TOGGLES = [
 // separate scoring layer from square ownership, and reusing red/green/
 // blue/etc. here would read as if a place belonged to a team. Shape is
 // the primary signal per tier (summit=triangle, park=circle,
-// landmark=square); colour is secondary and mostly there so the three
+// landmark=diamond); colour is secondary and mostly there so the three
 // still read apart from each other at a glance against the basemap.
+// Landmark is deliberately NOT a square: the board's territory tiles
+// are axis-aligned squares, and an axis-aligned square marker sitting
+// among a run of captured tiles (e.g. along a highway) is
+// indistinguishable from one at a glance. A diamond is a square
+// rotated 45 degrees -- it keeps the tier's "squared-off" family
+// relation but a rotated shape never reads as a grid tile, since the
+// board itself is never drawn rotated.
 const PLACE_COLORS = {
   summit: '#e8b84b',    // warm gold -- matches --mw-gold, the site's own "this matters most" accent
   park: '#2ec4b6',       // teal
   landmark: '#8892a0',   // slate
 };
 
-// Pixel sizes (not degrees -- these must stay a constant SCREEN size
-// across zoom, like any map marker, unlike the board squares which are
-// drawn to true ground scale). Summits are sized to dominate, per the
-// brief: a mountain worth 100 points should read as the biggest thing
-// on the map, a park (25) in between, a landmark (5) smallest.
-const PLACE_ICON_PX = { summit: 22, park: 15, landmark: 9 };
+// Base pixel sizes (not degrees -- these must stay a constant SCREEN
+// size across zoom, like any map marker, unlike the board squares
+// which are drawn to true ground scale). Summits are sized to
+// dominate, per the brief: a mountain worth 100 points should read as
+// the biggest thing on the map, a park (25) in between, a landmark (5)
+// smallest. Neon gets a larger baseline than gold -- a marker sized to
+// read against gold's light basemap washes out against neon's dark
+// hillshade and the orange territory squares underneath. Gold is left
+// as it was; same reasoning as BOARD_FILL_OPACITY/BOARD_LINE_WIDTH
+// below, it already reads fine. Zoom-interpolated on top of this via
+// PLACE_ICON_SIZE_ZOOM -- see there for why.
+const PLACE_ICON_PX = {
+  gold: { summit: 22, park: 15, landmark: 9 },
+  neon: { summit: 30, park: 20, landmark: 13 },
+};
+
+// Outline drawn around each marker's fill in drawPlaceIcon. This, not
+// raw size, is what actually separates a filled shape from a dark
+// hillshade and the orange territory squares underneath -- gold's
+// existing soft dark outline is left untouched (it already reads fine
+// against gold's light basemap), neon needs the opposite: a light
+// halo, same problem BOARD_FILL_OPACITY/BOARD_LINE_WIDTH solved for
+// the board layer, same per-theme pattern.
+const PLACE_ICON_OUTLINE = {
+  gold: { color: 'rgba(0,0,0,0.55)', width: 1 },
+  neon: { color: 'rgba(244,241,232,0.95)', width: 1.5 },
+};
+
+// Marker screen size is also zoom-interpolated, on top of the
+// per-theme base pixel sizes above: with ~80,000 places now seeded
+// (43,639 parks + 30,408 landmarks + 6,487 summits, plus rotating live
+// ones), a size tuned to read at zoom 13 close-in tiles into a solid
+// mass at zoom 9's region view if left constant. Same curve for both
+// themes -- the per-theme PX values above already carry the theme
+// difference.
+const PLACE_ICON_SIZE_ZOOM = ['interpolate', ['linear'], ['zoom'], 9, 0.6, 11, 0.85, 13, 1.1];
+
+const PLACE_TYPES = ['summit', 'park', 'landmark'];
+
+// Per-tier reveal zoom (see setupPlacesLayer's three-layer split).
+// City parks alone run ~43,600 -- at a whole-region zoom (e.g. zoom 9
+// over Boise) that many 25-point circles visually bury both the rare
+// 100-point summits and the 5-point landmarks, backwards from what
+// matters. Gating by value instead of shrinking further (shrinking
+// undoes the whole point of this fix) makes the reveal match what is
+// worth going to at that scale: summits from the map's own minzoom
+// (rare and the highest tier -- the thing to see scanning a whole
+// region), parks from zoom 10 (a sub-region has narrowed into view),
+// landmarks from zoom 11 (already looking at one town, same zoom as
+// the Twin Falls reference case). Chosen by screenshot at zoom 7/9/11/
+// 13 -- see the deploy notes for what else was tried.
+const PLACE_TYPE_MIN_ZOOM = { summit: 0, park: 10, landmark: 11 };
 
 // Below this zoom the map is showing a whole region and place NAMES
 // would overlap into noise; icons still draw at every zoom (subject to
@@ -954,7 +1007,9 @@ async function fetchPlacesNear(lat, lon) {
 // symbol layer (not a fill layer of ground polygons the way the board
 // squares are drawn) is what keeps these a constant PIXEL size across
 // zoom: a place marker is a marker, not a to-scale shape on the ground.
-function drawPlaceIcon(shape, color, sizePx) {
+// outline is a {color, width} pair (PLACE_ICON_OUTLINE) -- width is in
+// CSS px, doubled below for the same 2x-canvas reason dim is.
+function drawPlaceIcon(shape, color, sizePx, outline) {
   const canvas = document.createElement('canvas');
   // 2x for a crisp icon on high-DPI screens; MapLibre reads pixelRatio
   // separately from the addImage options below.
@@ -965,8 +1020,8 @@ function drawPlaceIcon(shape, color, sizePx) {
   const cx = dim / 2, cy = dim / 2, r = dim / 2 - 2;
 
   ctx.fillStyle = color;
-  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = outline.color;
+  ctx.lineWidth = outline.width * 2;
 
   if (shape === 'triangle') {
     ctx.beginPath();
@@ -974,10 +1029,14 @@ function drawPlaceIcon(shape, color, sizePx) {
     ctx.lineTo(cx + r * 0.92, cy + r * 0.8);
     ctx.lineTo(cx - r * 0.92, cy + r * 0.8);
     ctx.closePath();
-  } else if (shape === 'square') {
-    const s = r * 0.85;
+  } else if (shape === 'diamond') {
+    const d = r * 0.95;
     ctx.beginPath();
-    ctx.rect(cx - s, cy - s, s * 2, s * 2);
+    ctx.moveTo(cx, cy - d);
+    ctx.lineTo(cx + d, cy);
+    ctx.lineTo(cx, cy + d);
+    ctx.lineTo(cx - d, cy);
+    ctx.closePath();
   } else {
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -988,11 +1047,18 @@ function drawPlaceIcon(shape, color, sizePx) {
   return { data: ctx.getImageData(0, 0, dim, dim).data, width: dim, height: dim };
 }
 
+// Registers both themes' icon images up front (place-icon-<type>-gold
+// and place-icon-<type>-neon) so applyBasemapTheme can flip which set
+// each places-icons-<type> layer points at with a plain
+// setLayoutProperty, the same visibility-swap-not-rebuild pattern the
+// gold/neon basemap rasters use -- see applyBasemapTheme.
 function registerPlaceIcons(map) {
-  const shapes = { summit: 'triangle', park: 'circle', landmark: 'square' };
-  for (const type of Object.keys(shapes)) {
-    const icon = drawPlaceIcon(shapes[type], PLACE_COLORS[type], PLACE_ICON_PX[type]);
-    map.addImage(`place-icon-${type}`, icon, { pixelRatio: 2 });
+  const shapes = { summit: 'triangle', park: 'circle', landmark: 'diamond' };
+  for (const theme of Object.keys(PLACE_ICON_PX)) {
+    for (const type of Object.keys(shapes)) {
+      const icon = drawPlaceIcon(shapes[type], PLACE_COLORS[type], PLACE_ICON_PX[theme][type], PLACE_ICON_OUTLINE[theme]);
+      map.addImage(`place-icon-${type}-${theme}`, icon, { pixelRatio: 2 });
+    }
   }
 }
 
@@ -1002,16 +1068,34 @@ function setupPlacesLayer(map) {
     data: { type: 'FeatureCollection', features: [] },
   });
 
-  map.addLayer({
-    id: 'places-icons',
-    type: 'symbol',
-    source: 'places',
-    layout: {
-      'icon-image': ['concat', 'place-icon-', ['get', 'type']],
-      'icon-allow-overlap': true,
-      'icon-size': 1,
-    },
-  });
+  // One symbol layer per tier, not one shared layer, so each tier can
+  // carry its own minzoom (PLACE_TYPE_MIN_ZOOM) -- a single "Places"
+  // toggle still controls all three together (see LAYER_TOGGLES), this
+  // split is purely about *when* each tier reveals, not a switcher
+  // control of its own. Reveals progressively by value: summits (100
+  // pts, rare) are visible from the map's own minzoom upward; parks
+  // (25 pts, common) fade in at a mid zoom once the region has
+  // narrowed to a town-sized area; landmarks (5 pts, most common)
+  // reveal last, only once zoomed in on a town, so the most valuable
+  // tier is what a reader sees first rather than being swamped by the
+  // most numerous one -- see PLACE_TYPE_MIN_ZOOM's own comment.
+  for (const type of PLACE_TYPES) {
+    map.addLayer({
+      id: `places-icons-${type}`,
+      type: 'symbol',
+      source: 'places',
+      filter: ['==', ['get', 'type'], type],
+      minzoom: PLACE_TYPE_MIN_ZOOM[type],
+      layout: {
+        // Theme suffix is filled in properly by applyBasemapTheme right
+        // after this layer is added (see boot sequence); this initial
+        // value is just a safe default before that first call.
+        'icon-image': ['concat', 'place-icon-', ['get', 'type'], '-', currentTheme()],
+        'icon-allow-overlap': true,
+        'icon-size': PLACE_ICON_SIZE_ZOOM,
+      },
+    });
+  }
 
   map.addLayer({
     id: 'places-labels',
@@ -1038,19 +1122,22 @@ function setupPlacesLayer(map) {
   map.setPaintProperty('places-labels', 'text-halo-width', 1.2);
 
   const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, offset: 12 });
-  map.on('click', 'places-icons', (e) => {
-    const f = e.features[0];
-    if (!f) return;
-    const { name, type, points } = f.properties;
-    popup.setLngLat(f.geometry.coordinates).setHTML(
-      `<div class="mw-place-popup">`
-      + `<div class="mw-place-popup-name">${escapeHtml(name)}</div>`
-      + `<div class="mw-place-popup-meta">${escapeHtml(type)} &middot; ${points} pts</div>`
-      + `</div>`
-    ).addTo(map);
-  });
-  map.on('mouseenter', 'places-icons', () => { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', 'places-icons', () => { map.getCanvas().style.cursor = ''; });
+  for (const type of PLACE_TYPES) {
+    const layerId = `places-icons-${type}`;
+    map.on('click', layerId, (e) => {
+      const f = e.features[0];
+      if (!f) return;
+      const { name, type: t, points } = f.properties;
+      popup.setLngLat(f.geometry.coordinates).setHTML(
+        `<div class="mw-place-popup">`
+        + `<div class="mw-place-popup-name">${escapeHtml(name)}</div>`
+        + `<div class="mw-place-popup-meta">${escapeHtml(t)} &middot; ${points} pts</div>`
+        + `</div>`
+      ).addTo(map);
+    });
+    map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+  }
 }
 
 function escapeHtml(s) {
@@ -1154,6 +1241,9 @@ function applyBasemapTheme(map) {
   map.setPaintProperty(HILLSHADE_ID, 'hillshade-exaggeration', HILLSHADE_EXAGGERATION[theme]);
   map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
   map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
+  for (const type of PLACE_TYPES) {
+    map.setLayoutProperty(`places-icons-${type}`, 'icon-image', ['concat', 'place-icon-', ['get', 'type'], '-', theme]);
+  }
 }
 
 // theme-toggle.js sets data-theme on <html> directly; observing the
