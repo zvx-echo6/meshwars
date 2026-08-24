@@ -890,6 +890,13 @@ function buildScoreboardControl(map) {
       <div class="mc-row mc-actions">
         <button type="button" id="mc-top-btn"></button>
       </div>
+      <div class="mc-row mc-actions">
+        <button type="button" id="mc-places-btn" aria-expanded="false" aria-controls="mc-places-section">Places</button>
+      </div>
+      <div id="mc-places-section" class="mc-places-section">
+        <div class="mc-row mc-places-section-title">Nearby Places</div>
+        <ul id="mw-places-list" class="mw-places-list"></ul>
+      </div>
     </div>
   `;
   document.body.appendChild(div);
@@ -960,6 +967,27 @@ function buildScoreboardControl(map) {
   topBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     openTopModal();
+  });
+
+  // Places Worth Going (docs/features/places.md): a fourth row in the
+  // same .mc-actions stack as Refresh map/Top Operators, expanding the
+  // live-places list IN PLACE below it rather than sliding out a
+  // separate panel -- the previous floating panel sat in the same
+  // top-right corner as this one and, depending on the day, ended up
+  // clipped behind it or behind the fixed nav bar. Nested inside this
+  // card there is nothing left for it to hide behind. Top Operators
+  // (topBtn, above) opens a modal instead of expanding in place, so
+  // there is no real "both expanded" state to reconcile -- the modal
+  // covers the whole screen regardless of whether this section is open,
+  // and closing the modal leaves this section exactly as it was.
+  const placesBtn = div.querySelector('#mc-places-btn');
+  const placesSection = div.querySelector('#mc-places-section');
+  placesBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = !placesSection.classList.contains('open');
+    placesSection.classList.toggle('open', open);
+    placesBtn.setAttribute('aria-expanded', String(open));
+    placesBtn.textContent = open ? 'Hide places' : 'Places';
   });
 
   return div;
@@ -1266,22 +1294,6 @@ async function loadPlacesPanel(map) {
   } catch (err) {
     console.error('MeshWars map2: failed to load places panel', err);
   }
-}
-
-function setupPlacesPanel(map) {
-  const tab = document.getElementById('mw-places-tab');
-  const panel = document.getElementById('mw-places-panel');
-  const closeBtn = document.getElementById('mw-places-close');
-  if (!tab || !panel) return;
-
-  const setOpen = (open) => {
-    panel.classList.toggle('open', open);
-    panel.setAttribute('aria-hidden', open ? 'false' : 'true');
-    tab.setAttribute('aria-expanded', open ? 'true' : 'false');
-  };
-
-  tab.addEventListener('click', () => setOpen(!panel.classList.contains('open')));
-  if (closeBtn) closeBtn.addEventListener('click', () => setOpen(false));
 }
 
 function teamMatchExpression() {
@@ -1800,7 +1812,6 @@ async function main() {
     setupContourLayer(map);
     registerPlaceIcons(map);
     setupPlacesLayer(map);
-    setupPlacesPanel(map);
     setupLayerSwitcher(map);
     watchTheme(map);
     applyBasemapTheme(map);

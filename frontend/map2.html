@@ -119,9 +119,9 @@
   <link rel="stylesheet"
         href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
         crossorigin="anonymous" />
-  <link rel="stylesheet" href="/static/theme.css?v=20260824-1" />
-  <link rel="stylesheet" href="/static/coverage.css?v=20260824-1" />
-  <link rel="stylesheet" href="/static/mc.css?v=20260824-1" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260824-2" />
+  <link rel="stylesheet" href="/static/coverage.css?v=20260824-2" />
+  <link rel="stylesheet" href="/static/mc.css?v=20260824-2" />
   <link rel="stylesheet" href="/static/map2.css?v=14" />
 </head>
 <body>
@@ -196,22 +196,15 @@
     </ul>
   </div>
 
-  <!-- Places Worth Going (docs/features/places.md): a slide-out panel,
-       not a page -- explicitly chosen over a /places route. Collapsed
-       by default (the tab handle stays visible; the list itself does
-       not compete with the territory panel for attention until opened),
-       listing LIVE places sorted by distance from the map's current
-       centre, refreshed on moveend (see frontend/map2.js). -->
-  <button type="button" id="mw-places-tab" class="mw-places-tab" aria-expanded="false" aria-controls="mw-places-panel">
-    Places
-  </button>
-  <div id="mw-places-panel" class="mw-places-panel" aria-hidden="true">
-    <div class="mw-places-panel-header">
-      <span>Nearby Places</span>
-      <button type="button" id="mw-places-close" class="mw-places-close" aria-label="Close">&times;</button>
-    </div>
-    <ul id="mw-places-list" class="mw-places-list"></ul>
-  </div>
+  <!-- Places Worth Going (docs/features/places.md) has no static markup
+       here -- it is a third action button plus an expand section built
+       straight into the territory panel by map2.js's
+       buildScoreboardControl, same as Refresh map/Top Operators next to
+       it, not a separate floating panel of its own (that only left the
+       list hidden behind the territory panel or, worse, behind the
+       fixed nav bar -- see the git history on this file if that's ever
+       tempting again). Listing LIVE places sorted by distance from the
+       map's current centre, refreshed on moveend. -->
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
           crossorigin="anonymous"></script>
@@ -221,6 +214,6 @@
           crossorigin="anonymous"></script>
 
   <script src="/static/map2.js?v=14" type="module"></script>
-  <script src="/static/theme-toggle.js?v=20260824-1" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
 </body>
 </html>

@@ -230,14 +230,19 @@
 #mc-lookup-btn:hover { background: var(--mw-line); }
 .mc-lookup-result { font-size: 11px; margin-top: 4px; color: var(--mw-text-2); }
 
-/* Refresh / Top-players buttons -- the top button's label text (Top
-   Operators on both boards) comes from
-   mc.js's PROTOCOLS table, not from CSS. */
+/* Refresh / Top-players / Places buttons -- the top button's label text
+   (Top Operators on both boards) comes from mc.js's PROTOCOLS table,
+   not from CSS. #mc-places-btn (frontend/map2.js only -- this page's
+   Places Worth Going expand toggle, see map2.css's .mc-places-section)
+   shares this same rule rather than a rule of its own so a fourth
+   action button reads as exactly the same kind of control as the
+   other two, not a new one. */
 .mc-scoreboard .mc-actions {
   margin-top: 4px;
 }
 .mc-scoreboard #mc-refresh-btn,
-.mc-scoreboard #mc-top-btn {
+.mc-scoreboard #mc-top-btn,
+.mc-scoreboard #mc-places-btn {
   background: var(--mw-raised);
   color: var(--mw-accent);
   border: 1px solid var(--mw-line-strong);
@@ -248,7 +253,8 @@
   width: 100%;
 }
 .mc-scoreboard #mc-refresh-btn:hover,
-.mc-scoreboard #mc-top-btn:hover {
+.mc-scoreboard #mc-top-btn:hover,
+.mc-scoreboard #mc-places-btn:hover {
   background: var(--mw-line);
 }
 

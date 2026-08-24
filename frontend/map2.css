@@ -7,11 +7,13 @@
  * so the panel is pixel-identical to its Leaflet original. This file
  * only carries what is unique to the MapLibre map itself: the #map
  * sizing MapLibre needs, the layer switcher, and the Places Worth
- * Going markers + slide-out panel. theme.css is loaded first (see
- * map2.html) so every panel below reads its colours from --mw-* tokens
- * rather than hardcoding them -- chrome follows the theme, team
- * colours never do (those live in frontend/map2.js and are gameplay,
- * not branding).
+ * Going markers + in-panel expand section (.mc-places-section, below
+ * the territory panel rule -- built into the territory panel itself by
+ * map2.js's buildScoreboardControl, not a floating panel of its own).
+ * theme.css is loaded first (see map2.html) so every panel below reads
+ * its colours from --mw-* tokens rather than hardcoding them -- chrome
+ * follows the theme, team colours never do (those live in
+ * frontend/map2.js and are gameplay, not branding).
  * See frontend/map2.js for the map itself.
  */
 
@@ -30,18 +32,21 @@
  * places it explicitly in the same visual corner instead -- same 10px
  * gutter Leaflet's control corners use.
  *
- * z-index used to sit above the Places panel deliberately, back when
- * the only way into Places was a sliver tab that being buried would
- * hide entirely. That access now lives at the bottom-right corner
- * (.mw-places-tab, below), independent of this panel, so this no
- * longer needs to win: see .mw-places-panel's own z-index for why it
- * now sits ABOVE this one instead while open -- this box is simply
- * whatever the top stacking context leaves for it. */
+ * max-height/overflow-y are what make expanding Places (.mc-places-
+ * section, below) safe on a short viewport: without a cap the card
+ * would just keep growing downward and run off the bottom of the
+ * screen with no way to reach whatever scrolled past. mc.css itself
+ * carries no such cap -- on the Leaflet page (frontend/index.html) this
+ * same class sits inside Leaflet's own control corner with no Places
+ * section to expand, so it has never needed one; scoped here rather
+ * than added to the shared file so that page is untouched. */
 .mc-scoreboard#mc-scoreboard-position {
   position: absolute;
   top: calc(var(--mw-nav-h) + 10px);
   right: 10px;
   z-index: 20;
+  max-height: calc(100vh - var(--mw-nav-h) - 20px);
+  overflow-y: auto;
 }
 
 .mw-layers {
@@ -99,133 +104,63 @@
   cursor: default;
 }
 
-/* Places Worth Going: slide-out panel (docs/features/places.md) --
- * anchored off the right edge, out of view until opened. The tab stays
- * visible at all times as the one thing that opens it; the panel
- * itself only ever slides, it is never removed from the DOM (map2.js
- * keeps writing to #mw-places-list whether or not the panel is open,
- * so the list is current the instant it opens).
+/* Places Worth Going (docs/features/places.md): NOT a floating panel of
+ * its own -- two separate floating-panel attempts both ended up either
+ * clipped behind the territory panel or (once moved to the bottom-right
+ * corner) with its own header hidden behind the fixed nav bar. Built
+ * directly into the territory panel instead (map2.js's
+ * buildScoreboardControl): a fourth .mc-actions button, styled exactly
+ * like Refresh map/Top Operators next to it (mc.css's shared
+ * #mc-refresh-btn/#mc-top-btn/#mc-places-btn rule -- see that file),
+ * that expands #mc-places-section in place below it. Nested inside a
+ * card that already has nothing else fighting it for the corner, and
+ * already scrolls as a whole if it overflows the viewport (see
+ * .mc-scoreboard#mc-scoreboard-position's max-height above), so there
+ * is nothing left for this to hide behind.
  *
- * Previously pinned to a fixed `top` offset chosen to clear the ported
- * territory panel (.mc-scoreboard) below it -- that panel's height is
- * NOT fixed (board-switch row, roster/history/top buttons, collapsed
- * vs expanded), so every time it grew the tab went back to being a
- * clipped sliver behind it, twice in one night. Anchoring from the
- * BOTTOM instead of the top sidesteps the problem structurally rather
- * than re-guessing a bigger number: nothing in the bottom-right corner
- * competes for space the way the top-right one does, so this needs no
- * coordination with the territory panel's height ever again. Same
- * corner-anchoring pattern as .mw-layers (bottom-left, see above) --
- * reused rather than invented, right down to the shadow and radius, so
- * this reads as the map's other floating control, not a new visual
- * language. Horizontal text (not the old vertical-rl sliver) and a
- * plain "Places" label read at a glance the way "Layers" already does.
- */
-.mw-places-tab {
-  position: absolute;
-  bottom: 12px;
-  right: 12px;
-  z-index: 6;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--mw-panel);
-  color: var(--mw-text-1);
-  border: 1px solid var(--mw-line);
-  border-radius: 8px;
-  padding: 10px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+ * #mw-places-list itself is never removed from the DOM regardless of
+ * whether the section is open (map2.js keeps writing to it on every
+ * moveend), so the list is current the instant a reader expands it. */
+.mc-places-section {
+  display: none;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--mw-raised);
 }
-.mw-places-tab::after {
-  content: '\203A';
-  font-weight: 400;
-  color: var(--mw-text-6);
-}
-.mw-places-tab:hover,
-.mw-places-tab:focus-visible {
-  color: var(--mw-gold);
+.mc-places-section.open {
+  display: block;
 }
 
-.mw-places-panel {
-  position: absolute;
-  /* Was top:0 -- flush with the true viewport top, behind the fixed
-   * nav bar (.mw-nav, z-index 1000 -- see coverage.css). The panel's
-   * own header and close button sat in that same band, so they were
-   * never actually visible OR clickable, at any width, for as long as
-   * this panel has existed. #map and the territory panel both already
-   * start at var(--mw-nav-h) for the same reason; this just joins
-   * them. */
-  top: var(--mw-nav-h);
-  right: 0;
-  bottom: 0;
-  /* Above the territory panel's z-index:20 (see that rule's own
-   * comment): both occupy the same top-right corner, and while this
-   * is a sliding drawer with its own header and close button, those
-   * must be reachable the instant it opens, not hidden behind
-   * whatever else happens to be in that corner. Closing the drawer
-   * (its own close button, or the always-visible bottom-right tab)
-   * hands the corner straight back to the territory panel -- nothing
-   * about that panel is destroyed or reset while covered, see
-   * setMcCollapsed/buildScoreboardControl. */
-  z-index: 25;
-  width: min(320px, 82vw);
-  background: var(--mw-panel);
-  color: var(--mw-text-1);
-  border-left: 1px solid var(--mw-line);
-  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.45);
-  transform: translateX(100%);
-  transition: transform 0.2s ease;
-  display: flex;
-  flex-direction: column;
-}
-.mw-places-panel.open {
-  transform: translateX(0);
-}
-
-.mw-places-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--mw-line);
+.mc-places-section-title {
+  font-size: 11px;
   font-weight: 600;
-  font-size: 13px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--mw-text-6);
+  margin-bottom: 4px;
 }
-
-.mw-places-close {
-  background: none;
-  border: none;
-  color: var(--mw-text-1);
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 4px;
-}
-.mw-places-close:hover { color: var(--mw-gold); }
 
 .mw-places-list {
   list-style: none;
   margin: 0;
-  padding: 4px 0;
+  padding: 0;
+  /* A capped, independently-scrolling region rather than letting a
+   * long list alone dictate the whole card's height -- the outer
+   * scoreboard card still has its own max-height/overflow as a second
+   * safety net (see above), this just keeps a short viewport from
+   * needing to scroll the entire card just to see two more places. */
+  max-height: 240px;
   overflow-y: auto;
-  flex: 1;
 }
 
 .mw-places-list li {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 9px 16px;
-  border-bottom: 1px solid var(--mw-line);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--mw-raised);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
 }
 .mw-places-list li:hover {
   background: rgba(255, 255, 255, 0.04);
@@ -233,8 +168,8 @@
 
 .mw-places-list .mw-place-icon {
   flex: none;
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
 }
 
 .mw-places-list .mw-place-name {
@@ -249,13 +184,13 @@
   flex: none;
   font-variant-numeric: tabular-nums;
   color: var(--mw-text-6);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .mw-places-empty {
-  padding: 16px;
+  padding: 8px 0;
   color: var(--mw-text-6);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 /* Marker click popup (MapLibre's own .maplibregl-popup-content already
