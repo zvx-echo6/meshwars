@@ -769,12 +769,13 @@ async function main() {
       // layer this style has ever had -- MapLibre refuses to add ANY
       // symbol layer using text-field without a glyphs template in the
       // style, even one that never renders (board/overlay layers below
-      // are all fill/line/hillshade, no text). MapLibre's own public
-      // glyph server -- self-hosted glyph generation is a much heavier
-      // asset pipeline than a few place-name labels justifies, and this
-      // page already fetches its basemap tiles from two other public
-      // hosts (OpenStreetMap, CARTO) the same way.
-      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+      // are all fill/line/hillshade, no text). Served from our own
+      // /static mount (frontend/fonts/, see its README.md) rather than
+      // MapLibre's public demo glyph server -- the OSM/CARTO basemap
+      // tiles below are still fetched from their own public hosts, but
+      // the place labels the game itself put on the map should not
+      // depend on someone else's demo infrastructure staying up.
+      glyphs: '/static/fonts/{fontstack}/{range}.pbf',
       sources: {
         [BASEMAP_GOLD_ID]: {
           type: 'raster',
