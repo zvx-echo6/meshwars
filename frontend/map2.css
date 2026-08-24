@@ -28,10 +28,15 @@
  * own positioning: on the Leaflet page it sits inside Leaflet's own
  * "topright" control corner, which does not exist here, so this file
  * places it explicitly in the same visual corner instead -- same 10px
- * gutter Leaflet's control corners use. z-index sits above the Places
- * panel (below): both are anchored to the right edge, and the ported
- * panel is the one the owner asked to keep the richer/primary of the
- * two, so opening Places does not bury it. */
+ * gutter Leaflet's control corners use.
+ *
+ * z-index used to sit above the Places panel deliberately, back when
+ * the only way into Places was a sliver tab that being buried would
+ * hide entirely. That access now lives at the bottom-right corner
+ * (.mw-places-tab, below), independent of this panel, so this no
+ * longer needs to win: see .mw-places-panel's own z-index for why it
+ * now sits ABOVE this one instead while open -- this box is simply
+ * whatever the top stacking context leaves for it. */
 .mc-scoreboard#mc-scoreboard-position {
   position: absolute;
   top: calc(var(--mw-nav-h) + 10px);
@@ -150,7 +155,16 @@
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 7;
+  /* Above the territory panel's z-index:20 (see that rule's own
+   * comment): both occupy the same top-right corner, and while this
+   * is a sliding drawer with its own header and close button, those
+   * must be reachable the instant it opens, not hidden behind
+   * whatever else happens to be in that corner. Closing the drawer
+   * (its own close button, or the always-visible bottom-right tab)
+   * hands the corner straight back to the territory panel -- nothing
+   * about that panel is destroyed or reset while covered, see
+   * setMcCollapsed/buildScoreboardControl. */
+  z-index: 25;
   width: min(320px, 82vw);
   background: var(--mw-panel);
   color: var(--mw-text-1);
