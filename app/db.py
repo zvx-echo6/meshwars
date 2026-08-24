@@ -657,7 +657,20 @@ CREATE TABLE IF NOT EXISTS api_client (
 --
 -- Brand new table, no existing deployed shape to ALTER, so CREATE
 -- TABLE IF NOT EXISTS here is sufficient on its own -- same reasoning
--- as player_cell_repeater_credit above; no MIGRATIONS entry needed.
+-- as player_cell_repeater_credit above; no MIGRATIONS entry needed for
+-- the table itself (see MIGRATIONS below for `rotates`, added after
+-- this table's first landing -- a DB that already ran that first
+-- migration needs an ALTER, so CREATE TABLE IF NOT EXISTS alone is not
+-- enough for `rotates` the way it is for the table as a whole).
+--
+-- rotates: 1 if this place is in the weekly rotation draw (landmarks,
+-- and parks smaller than one grid cell), 0 if it is always active
+-- (summits, and parks at or above one grid cell -- including a park
+-- PAD-US matched no boundary for, which stays permanent rather than
+-- rotating for a data gap; see app/place_rotation.py). Set at load
+-- time by app/places_seed.py, never by the rotation engine itself --
+-- rotation only ever chooses AMONG rotates=1 rows, never flips the
+-- flag.
 CREATE TABLE IF NOT EXISTS place (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ref_type    TEXT NOT NULL CHECK (ref_type IN ('summit', 'park', 'landmark')),
@@ -669,10 +682,67 @@ CREATE TABLE IF NOT EXISTS place (
     source      TEXT NOT NULL,      -- 'SOTA' | 'POTA' | 'POTA/PAD-US' | 'OSM'
     area_m2     REAL,               -- park only, and only when PAD-US matched a boundary
     geom        TEXT,               -- park only: matched boundary as WKT, NULL otherwise
+    rotates     INTEGER NOT NULL DEFAULT 0,  -- 1 = weekly rotation candidate, 0 = always active
     created_at  INTEGER NOT NULL,
     UNIQUE (ref_type, ref_code)
 );
 CREATE INDEX IF NOT EXISTS idx_place_latlon ON place(lat, lon);
+
+-- Which grid cell(s) (app/grid.py cell_id) a place scores when painted.
+-- One row for a summit, a landmark, or a park too small to need the
+-- boundary test (the cell containing its point) -- several rows for a
+-- park whose boundary is bigger than one cell, one row per cell that
+-- is more than half inside that boundary (see app/places_seed.py's
+-- _park_cells()). This is the pre-computed answer to "does painting
+-- this cell activate this place", computed once at load time so the
+-- scoring path (app/place_scoring.py) is a single indexed lookup on
+-- cell_id rather than a geometry test on every accepted ping.
+CREATE TABLE IF NOT EXISTS place_cell (
+    place_id    INTEGER NOT NULL,
+    cell_id     TEXT NOT NULL,
+    PRIMARY KEY (place_id, cell_id),
+    FOREIGN KEY (place_id) REFERENCES place(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_place_cell_cell ON place_cell(cell_id);
+
+-- One row per (place, player, week) credit actually awarded -- the
+-- UNIQUE constraint IS the "one credit per reference per person per
+-- week" rule; app/place_scoring.py relies on a duplicate insert
+-- failing rather than checking existence twice. `points` is copied
+-- onto the row at award time (same reasoning as mc_checkin_award.points
+-- in app/checkin.py) so a later change to a place's point value, or to
+-- the weekly cap, never rewrites what someone already earned.
+-- week_start is the Wednesday date (YYYY-MM-DD, America/Boise -- see
+-- app/place_rotation.week_start_for_ts) the credit belongs to, the
+-- same clock app/checkin.py's net_date already uses.
+CREATE TABLE IF NOT EXISTS place_activation (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    place_id    INTEGER NOT NULL,
+    player_id   INTEGER NOT NULL,
+    week_start  TEXT NOT NULL,
+    points      INTEGER NOT NULL,
+    awarded_at  INTEGER NOT NULL,
+    UNIQUE (place_id, player_id, week_start)
+);
+CREATE INDEX IF NOT EXISTS idx_place_activation_week_player ON place_activation(week_start, player_id);
+CREATE INDEX IF NOT EXISTS idx_place_activation_place ON place_activation(place_id);
+
+-- The resolved weekly rotation draw, one row per (week, chosen place).
+-- A draw is deterministic (app/place_rotation.py seeds its RNG from
+-- week_start alone) so it COULD be recomputed on every read instead of
+-- stored -- this table exists so it is computed exactly once and then
+-- stable, the same reason mc_tile_capture_log exists alongside the
+-- decayed-score model: re-deriving the same answer from the same seed
+-- twice is wasted work, not a correctness requirement, but a stored
+-- row also means a place already shown to a player this week can never
+-- retroactively change because e.g. a new place was added to the seed
+-- mid-week. Only rotates=1 places ever appear here -- summits and
+-- large parks are always active and never need a row.
+CREATE TABLE IF NOT EXISTS place_week (
+    week_start  TEXT NOT NULL,
+    place_id    INTEGER NOT NULL,
+    PRIMARY KEY (week_start, place_id)
+);
 """
 
 
@@ -797,6 +867,15 @@ MIGRATIONS = [
     # as metadata; attribution still keys on node_ref because that is
     # all a position packet carries.
     "ALTER TABLE player_node ADD COLUMN public_key TEXT",
+    # `place` first landed (see above) without `rotates` -- any DB that
+    # ran that migration before this one needs the column added by
+    # hand; SQLite's ADD COLUMN default backfills every existing row to
+    # 0 (always active) in the same statement, which is safe: a place
+    # loaded before rotation existed gets re-classified correctly the
+    # next time app/places_seed.py runs (it upserts `rotates` on every
+    # row, not just new ones), so a stale 0 here is corrected within
+    # one seed load, never a lasting misclassification.
+    "ALTER TABLE place ADD COLUMN rotates INTEGER NOT NULL DEFAULT 0",
 ]
 
 PRAGMAS = [
@@ -853,6 +932,23 @@ def init_db() -> None:
                     continue  # already applied, nothing to do
                 log.error("schema patch failed: %s -- statement: %s", e, stmt)
                 raise
+
+        # Places Worth Going seed (app/places_seed.py): reference data
+        # shipped with the code, same as app/reference/places.csv, but
+        # loaded into `place`/`place_cell` rather than kept in memory --
+        # see that module's docstring for why. Imported here rather than
+        # at module level to avoid a circular import (places_seed does
+        # not import this module back, but keeping the import local
+        # keeps db.py's own import graph exactly what it was before this
+        # landed). A failure here must not take the whole app down --
+        # the place tables just stay empty (or stale) and the places
+        # feature quietly has no data, logged loudly, rather than the
+        # server failing to boot over a reference-data problem.
+        try:
+            from .places_seed import load_places_seed
+            load_places_seed(conn)
+        except Exception:
+            log.exception("places_seed: load failed -- places feature will have no/stale data")
     finally:
         conn.close()
 

@@ -7,3 +7,10 @@ pygeohash==1.2.0
 pydantic==2.9.2
 pydantic-settings==2.5.2
 sse-starlette==2.1.3
+# Places Worth Going (docs/features/places.md): the >50%-of-a-cell park
+# boundary test (app/places_seed.py) needs real polygon/multipolygon
+# intersection, including parks with holes -- pure-Python clipping
+# would be a lot of code to get right for that, and shapely's wheel
+# bundles its own GEOS, so `pip install` is all a build needs (no apt
+# packages, nothing beyond what the Dockerfile already runs).
+shapely==2.1.2
