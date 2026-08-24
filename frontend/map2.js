@@ -10,9 +10,7 @@
  * follows that theme (light raster under gold, dark under neon, both
  * defined up front and toggled by visibility rather than rebuilt --
  * rebuilding the style loses the reader's pan/zoom), three self-hosted
- * PMTiles overlays (public lands, USFS roads/trails), a contour overlay
- * generated client-side from the same DEM used for hillshade (via
- * mlcontour -- no tileset of its own), all behind a small
+ * PMTiles overlays (public lands, USFS roads/trails), all behind a small
  * layer-switcher panel (also visibility-toggled, so flipping a checkbox
  * never refetches a source), Places Worth Going markers and a slide-out
  * panel, and the territory scoreboard/roster/history/top-players panel
@@ -74,7 +72,6 @@ const BOARD_LINE_WIDTH = { gold: 1, neon: 2 };
 // setupLayerSwitcher.
 const LAYER_TOGGLES = [
   ['mw-layer-hillshade', [HILLSHADE_ID], 0],
-  ['mw-layer-contours', ['contours-line'], 0],
   ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 4],
   ['mw-layer-usfs-roads', ['usfs-roads-line'], 6],
   ['mw-layer-usfs-trails', ['usfs-trails-line'], 6],
@@ -220,41 +217,6 @@ const NARROW_BREAKPOINT_PX = 600;
 // vector overlay archives below.
 const pmtilesProtocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile);
-
-// Contours are generated in the browser from the same DEM archive as
-// the hillshade above -- no second tileset to build or serve. mlcontour
-// (loaded from unpkg in map2.html, global `mlcontour`) reads DEM tiles
-// through its own dem:// protocol and rasterizes contour lines into
-// vector tiles on demand through a contour:// protocol; setupMaplibre
-// registers both with MapLibre. This has to happen once, before the map
-// style below is built, same as the pmtiles protocol above.
-const demSourceInstance = new mlcontour.DemSource({
-  url: `pmtiles://${DEM_URL}`,
-  encoding: 'terrarium',
-  maxzoom: 12,
-  worker: true,
-  cacheSize: 100,
-});
-demSourceInstance.setupMaplibre(maplibregl);
-
-// zoom -> [minor, major] contour interval in feet. navi's table,
-// verbatim -- the multiplier passed alongside it in setupContourLayer
-// below converts the DEM's native metres to feet to match.
-const CONTOUR_THRESHOLDS = {
-  3: [5000, 25000],
-  4: [2500, 10000],
-  5: [1000, 5000],
-  6: [1000, 5000],
-  7: [500, 2500],
-  8: [500, 2500],
-  9: [250, 1000],
-  10: [200, 1000],
-  11: [200, 1000],
-  12: [100, 500],
-  13: [100, 500],
-  14: [50, 200],
-  15: [20, 100],
-};
 
 function boundsToPolygon(cell) {
   const { south, west, north, east } = cell;
@@ -1497,42 +1459,16 @@ function setupOverlayLayers(map) {
   }, 'board-fill');
 }
 
-// Contour source: vector tiles generated in the browser from the DEM
-// via mlcontour (demSourceInstance, set up above), not a second pmtiles
-// archive -- contourProtocolUrl hands back a contour://{z}/{x}/{y}
-// template already carrying the threshold table and the metres->feet
-// multiplier, so this is otherwise a plain vector source.
-// Contours are terrain reference, not a feature layer: thin, low
-// opacity, and a muted tone picked to read on both the light OSM
-// basemap and the dark CARTO one rather than being tuned to either.
-// The library tags every generated line with a `level` property (1 for
-// the heavier contour of a zoom's [minor, major] pair, 0 for the
-// lighter one -- confirmed in the library's own tile output, not
-// assumed), so major contours get a bit more width and opacity than
-// minor ones for free via that property.
-function setupContourLayer(map) {
-  map.addSource('contours', {
-    type: 'vector',
-    tiles: [demSourceInstance.contourProtocolUrl({
-      multiplier: 3.28084,
-      thresholds: CONTOUR_THRESHOLDS,
-    })],
-    maxzoom: 16,
-  });
-  map.addLayer({
-    id: 'contours-line',
-    type: 'line',
-    source: 'contours',
-    'source-layer': 'contours',
-    minzoom: 0,
-    layout: { visibility: 'none' },
-    paint: {
-      'line-color': '#8f8168',
-      'line-width': ['match', ['get', 'level'], 1, 1, 0.6],
-      'line-opacity': ['match', ['get', 'level'], 1, 0.55, 0.3],
-    },
-  }, 'board-fill');
-}
+// A contour layer used to be set up here, generated client-side from
+// the same DEM archive as the hillshade above via mlcontour. Dropped
+// 2026-08-24: it cost 2.9 seconds of main-thread blocking in a single
+// 5-second pan (33fps -> 9fps) and re-downloaded the DEM a second time
+// through its own dem:// protocol even though the hillshade had already
+// fetched it. A pre-rendered-tile alternative was also tried and
+// abandoned -- baking contours at every interval across one state
+// produced 12GB of intermediates with the finest pass still unfinished.
+// Hillshade alone carries the terrain now. Do not re-add this without
+// solving the cost, not just the symptom.
 
 // A checked box over a layer with no data at the current zoom reads as
 // broken -- there is nothing wrong, the tiles just do not exist below
@@ -1821,7 +1757,6 @@ async function main() {
     });
 
     setupOverlayLayers(map);
-    setupContourLayer(map);
     registerPlaceIcons(map);
     setupPlacesLayer(map);
     setupLayerSwitcher(map);
