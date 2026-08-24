@@ -40,7 +40,7 @@ const TEAM_ORDER = Object.keys(TEAM_COLORS);
 // changed shape. That shows up as a region silently missing rather than
 // as an error. Bump TILE_REV whenever an archive on navi is replaced, so
 // the URL changes and nothing stale can survive.
-const TILE_REV = '20260824a';
+const TILE_REV = '20260824b';
 const DEM_URL = `https://navi.echo6.co/tiles/planet-dem.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `https://navi.echo6.co/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `https://navi.echo6.co/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
@@ -223,9 +223,9 @@ const ROUTE_LINE_WIDTH = [
 // lands are untouched.
 const BLM_ROUTE_LINE_WIDTH = [
   'interpolate', ['linear'], ['zoom'],
-  4, 1.4,
-  9, 2.2,
-  14, 3.5,
+  4, 0.9,
+  9, 1.4,
+  14, 2.1,
 ];
 
 function setupOverlayLayers(map) {
