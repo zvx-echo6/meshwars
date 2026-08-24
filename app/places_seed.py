@@ -162,9 +162,28 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
 
     Safe to call every startup: existing rows are updated in place by
     the UNIQUE(ref_type, ref_code) upsert (name/lat/lon/points/source/
-    area_m2/geom/rotates refreshed, created_at and id preserved), and
-    place_cell for a place is fully replaced each time so a boundary
-    that changed on re-seed cannot leave stale cells behind.
+    area_m2/geom/rotates/active refreshed, created_at and id
+    preserved), and place_cell for a place is fully replaced each time
+    so a boundary that changed on re-seed cannot leave stale cells
+    behind.
+
+    RECONCILE, NOT JUST INSERT -- every row this pass upserts is also
+    remembered by id, and once the CSV is fully read, any place row
+    that is currently active but was NOT touched this pass (i.e. it
+    left the seed -- pruned, or reclassified out of the US filter) is
+    marked active=0 rather than deleted. Deleting it would either
+    cascade-orphan place_activation/place_week (losing a player's
+    already-earned points and the name their history points at) or
+    require a non-destructive FK just to avoid that -- inactive is
+    simpler and keeps the row's name resolvable forever. A place that
+    LEFT and later RETURNS to the seed (id preserved via the ref_type/
+    ref_code upsert) is reactivated by the same upsert that touches it.
+    Every read path that draws or scores a place (app/places_api.py's
+    two routes, app/place_scoring.credit_places, app/place_rotation's
+    draw and always-active set) filters WHERE active = 1; nothing that
+    only sums place_activation.points (Explorer score, team totals)
+    needs to, since those rows already carry their own frozen points
+    and never join back to `place` for eligibility.
     """
     stats = {
         "excluded": {"summit": 0, "park": 0, "landmark": 0},
@@ -175,6 +194,10 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         # the >50% rule, always active) vs below one cell (scores its
         # point, rotates like a landmark).
         "park_matched_larger": 0, "park_matched_smaller": 0,
+        # Reconcile outcome: rows flipped active->inactive this pass
+        # because they were not present in this load at all (never
+        # deleted -- see the reconcile note above).
+        "deactivated": 0,
     }
 
     if not os.path.exists(_DATA_PATH):
@@ -196,13 +219,14 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     if row is not None and row[0] == fingerprint:
         log.info("places_seed: CSV unchanged since last load (%s), skipping", fingerprint)
         counts = conn.execute(
-            "SELECT ref_type, COUNT(*) FROM place GROUP BY ref_type"
+            "SELECT ref_type, COUNT(*) FROM place WHERE active = 1 GROUP BY ref_type"
         ).fetchall()
         stats["kept"] = {r[0]: r[1] for r in counts}
         return stats
 
     now = int(time.time())
     t0 = time.monotonic()
+    seen_ids: set[int] = set()
     conn.execute("BEGIN IMMEDIATE")
     try:
         with open(_DATA_PATH, encoding="utf-8", newline="") as fh:
@@ -257,22 +281,47 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
 
                 cur = conn.execute(
                     "INSERT INTO place(ref_type, ref_code, name, lat, lon, points, source, "
-                    "area_m2, geom, rotates, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+                    "area_m2, geom, rotates, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,1,?) "
                     "ON CONFLICT(ref_type, ref_code) DO UPDATE SET "
                     "name=excluded.name, lat=excluded.lat, lon=excluded.lon, "
                     "points=excluded.points, source=excluded.source, "
-                    "area_m2=excluded.area_m2, geom=excluded.geom, rotates=excluded.rotates "
+                    "area_m2=excluded.area_m2, geom=excluded.geom, rotates=excluded.rotates, "
+                    # Reactivate on the spot: a place that left the seed
+                    # and later comes back (a re-pull picks it up again)
+                    # is live again the moment this upsert touches it,
+                    # same id, same UNIQUE(ref_type, ref_code) row.
+                    "active=1 "
                     "RETURNING id",
                     (ref_type, row["ref_code"], row["name"], lat, lon, points, row["source"],
                      area_m2, geom_wkt, 1 if rotates else 0, now),
                 )
                 place_id = cur.fetchone()[0]
+                seen_ids.add(place_id)
 
                 conn.execute("DELETE FROM place_cell WHERE place_id = ?", (place_id,))
                 conn.executemany(
                     "INSERT OR IGNORE INTO place_cell(place_id, cell_id) VALUES (?, ?)",
                     [(place_id, c) for c in cells],
                 )
+
+        # Reconcile: any place that is currently active but was not
+        # touched by this pass has left the seed. Deactivate rather
+        # than delete -- see load_places_seed()'s docstring. A temp
+        # table (rather than one giant "id NOT IN (?,?,?...)") because
+        # seen_ids can run past SQLite's default bound-parameter limit
+        # (~32k rows kept here, well over the ~999 default) -- inserted
+        # one row per statement via executemany, so no single statement
+        # is ever parameter-bound by the size of the seed.
+        conn.execute("CREATE TEMP TABLE _places_seed_seen (id INTEGER PRIMARY KEY)")
+        conn.executemany(
+            "INSERT INTO _places_seed_seen(id) VALUES (?)", [(pid,) for pid in seen_ids]
+        )
+        cur = conn.execute(
+            "UPDATE place SET active = 0 "
+            "WHERE active = 1 AND id NOT IN (SELECT id FROM _places_seed_seen)"
+        )
+        stats["deactivated"] = cur.rowcount
+        conn.execute("DROP TABLE _places_seed_seen")
 
         conn.execute(
             "INSERT INTO cursor(k, v) VALUES ('places_seed_csv_fingerprint', ?) "
@@ -288,11 +337,11 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     log.info(
         "places_seed: loaded summit=%d park=%d landmark=%d (excluded non-US: summit=%d park=%d landmark=%d) "
         "park boundary matched=%d unmatched=%d (of matched: larger-than-cell=%d smaller-than-cell=%d) "
-        "in %.1fs",
+        "deactivated=%d (left the seed, kept as history) in %.1fs",
         stats["kept"]["summit"], stats["kept"]["park"], stats["kept"]["landmark"],
         stats["excluded"]["summit"], stats["excluded"]["park"], stats["excluded"]["landmark"],
         stats["park_matched"], stats["park_unmatched"],
         stats["park_matched_larger"], stats["park_matched_smaller"],
-        elapsed,
+        stats["deactivated"], elapsed,
     )
     return stats

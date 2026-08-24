@@ -20,6 +20,9 @@ Rules encoded here, from docs/features/places.md:
   - A rotating place only credits while it is live this week
     (app/place_rotation.live_place_ids); an always-active place
     (summit, or a park at/above one grid cell) always qualifies.
+  - A place that has left the seed (place.active = 0, set by
+    app/places_seed.py's reconcile pass) never credits, even if a
+    stale place_cell or place_week row still points at it.
   - Aircraft excluded, same as the exploration awards.
 """
 from __future__ import annotations
@@ -90,6 +93,7 @@ def credit_places(
     rows = conn.execute(
         "SELECT id, points FROM place "
         f" WHERE id IN ({marks}) "
+        "   AND active = 1 "
         "   AND (rotates = 0 OR EXISTS ("
         "         SELECT 1 FROM place_week w WHERE w.week_start = ? AND w.place_id = place.id))"
         " ORDER BY points DESC",

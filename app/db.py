@@ -683,10 +683,23 @@ CREATE TABLE IF NOT EXISTS place (
     area_m2     REAL,               -- park only, and only when PAD-US matched a boundary
     geom        TEXT,               -- park only: matched boundary as WKT, NULL otherwise
     rotates     INTEGER NOT NULL DEFAULT 0,  -- 1 = weekly rotation candidate, 0 = always active
+    -- 1 = currently in the seed CSV, 0 = pruned from a later seed
+    -- rebuild. Never deleted: place_activation (and, once resolved,
+    -- place_week) FK/reference place.id, and a player who legitimately
+    -- scored a reference that later left the seed keeps those points --
+    -- their Explorer score and any frozen month must not change because
+    -- the seed got re-tuned. An inactive place just stops being drawn
+    -- and stops being scoreable going forward (every read path that
+    -- draws or scores a place filters WHERE active = 1); its row and
+    -- name survive purely so old place_activation rows still resolve.
+    -- Set by app/places_seed.py's reconcile pass at load time, never by
+    -- any other code path.
+    active      INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL,
     UNIQUE (ref_type, ref_code)
 );
 CREATE INDEX IF NOT EXISTS idx_place_latlon ON place(lat, lon);
+CREATE INDEX IF NOT EXISTS idx_place_active ON place(active);
 
 -- Which grid cell(s) (app/grid.py cell_id) a place scores when painted.
 -- One row for a summit, a landmark, or a park too small to need the
@@ -876,6 +889,16 @@ MIGRATIONS = [
     # row, not just new ones), so a stale 0 here is corrected within
     # one seed load, never a lasting misclassification.
     "ALTER TABLE place ADD COLUMN rotates INTEGER NOT NULL DEFAULT 0",
+    # `active` added after `place` first landed, same situation as
+    # `rotates` just above: any DB that already ran this migration set
+    # needs the column added by hand. Defaults every existing row to 1
+    # (active), which is safe even for a row that should actually be
+    # inactive -- the very next places_seed reconcile pass (which now
+    # runs on every load, not just a fingerprint-changed one) corrects
+    # it within one startup, never a lasting misclassification. See
+    # app/places_seed.py's load_places_seed() for the reconcile itself.
+    "ALTER TABLE place ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+    "CREATE INDEX IF NOT EXISTS idx_place_active ON place(active)",
 ]
 
 PRAGMAS = [

@@ -8,10 +8,12 @@ every other route the site's OWN pages call (/get-nodes, /live-tracks,
 of route: shaped for map2's own rendering needs, free to change with
 the page, and requiring no key, same as /get-nodes.
 
-Both routes only ever return LIVE places -- always-active (rotates=0)
-plus this week's resolved rotating set (app/place_rotation.
-resolve_week) -- never a rotating place that is not currently drawable,
-so the map can never show a marker a player cannot actually score.
+Both routes only ever return LIVE places -- active (place.active = 1,
+app/places_seed.py's reconcile flag) AND either always-active
+(rotates=0) or in this week's resolved rotating set (app/place_rotation.
+resolve_week) -- never a place that has left the seed, and never a
+rotating place that is not currently drawable, so the map can never show
+a marker a player cannot actually score.
 """
 from __future__ import annotations
 
@@ -40,7 +42,7 @@ DEFAULT_NEAR_RESULTS = 20
 
 def _live_where(week_start: str) -> str:
     return (
-        "(p.rotates = 0 OR EXISTS ("
+        "p.active = 1 AND (p.rotates = 0 OR EXISTS ("
         "  SELECT 1 FROM place_week w WHERE w.week_start = ? AND w.place_id = p.id))"
     )
 

@@ -14,12 +14,12 @@ NOW = int(time.time())
 WEEK = week_start_for_ts(NOW)
 
 
-def _place(conn, place_id, ref_type, lat, lon, points, rotates=0):
+def _place(conn, place_id, ref_type, lat, lon, points, rotates=0, active=1):
     conn.execute(
         "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
-        "rotates, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "rotates, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (place_id, ref_type, f"ref-{place_id}", f"place-{place_id}", lat, lon,
-         points, "TEST", rotates, NOW),
+         points, "TEST", rotates, active, NOW),
     )
     cid = cell_id(lat, lon)
     conn.execute("INSERT INTO place_cell(place_id, cell_id) VALUES (?, ?)", (place_id, cid))
@@ -124,3 +124,18 @@ def test_place_worth_more_than_remaining_cap_is_skipped_not_partial(conn):
     fits_cell = _place(conn, 101, "landmark", 51.0, -121.0, points=5)
     credited2 = credit_places(conn, player_id=7, cell_id=fits_cell, ts=NOW, repeater_ids=["r1"])
     assert credited2 == [(101, 5)]
+
+
+def test_inactive_place_cannot_be_scored(conn):
+    """A place that has left the seed (app/places_seed.py's reconcile
+    pass sets active=0, never deletes) must not credit even though its
+    place_cell row still maps the painted cell to it -- the same stale-
+    row situation a real seed reload leaves behind.
+    """
+    cid = _place(conn, 1, "summit", 43.0, -116.0, points=100, active=0)
+    credited = credit_places(conn, player_id=8, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    assert credited == []
+    count = conn.execute(
+        "SELECT COUNT(*) FROM place_activation WHERE place_id = ?", (1,)
+    ).fetchone()[0]
+    assert count == 0

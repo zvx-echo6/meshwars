@@ -83,3 +83,165 @@ def test_park_cells_excludes_a_sliver():
 
     cells = _park_cells(poly, lat)
     assert cid not in cells
+
+
+# ---------------------------------------------------------------------
+# Reconcile: load_places_seed() must make `place` match the CSV exactly
+# -- a place pruned from a later seed rebuild goes inactive, never
+# deleted, so place_activation rows that already point at it keep
+# resolving (docs/features/places.md's Explorer Score must not change
+# just because the seed got re-tuned).
+# ---------------------------------------------------------------------
+
+import csv as _csv
+import time
+
+import app.places_seed as places_seed_module
+from app.places_seed import load_places_seed
+
+_CSV_FIELDS = ["ref_type", "ref_code", "name", "lat", "lon", "points", "source", "area_m2", "geom"]
+
+
+def _seed_row(ref_type, ref_code, lat=43.0, lon=-116.0, points=None):
+    if points is None:
+        points = {"summit": 100, "park": 25, "landmark": 5}[ref_type]
+    return {
+        "ref_type": ref_type, "ref_code": ref_code, "name": ref_code,
+        "lat": lat, "lon": lon, "points": points, "source": "TEST",
+        "area_m2": "", "geom": "",
+    }
+
+
+def _write_seed_csv(path, rows):
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=_CSV_FIELDS)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+
+def test_reconcile_deactivates_a_place_pruned_from_the_seed(conn, tmp_path, monkeypatch):
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    _write_seed_csv(csv_path, [
+        _seed_row("summit", "W7I/SW-001"),
+        _seed_row("landmark", "n1", lat=44.0, lon=-117.0),
+    ])
+    load_places_seed(conn)
+    before = conn.execute(
+        "SELECT id, active FROM place WHERE ref_type='summit' AND ref_code='W7I/SW-001'"
+    ).fetchone()
+    assert before["active"] == 1
+    summit_id = before["id"]
+
+    # Re-tuned seed: the summit is pruned out, only the landmark remains.
+    _write_seed_csv(csv_path, [
+        _seed_row("landmark", "n1", lat=44.0, lon=-117.0),
+    ])
+    stats = load_places_seed(conn)
+
+    after = conn.execute("SELECT active FROM place WHERE id = ?", (summit_id,)).fetchone()
+    assert after is not None, "pruned place must survive the reload, not be deleted"
+    assert after["active"] == 0
+    assert stats["deactivated"] == 1
+
+    still_landmark = conn.execute(
+        "SELECT active FROM place WHERE ref_type='landmark' AND ref_code='n1'"
+    ).fetchone()
+    assert still_landmark["active"] == 1
+
+
+def test_reconcile_reports_active_counts_matching_the_csv_exactly(conn, tmp_path, monkeypatch):
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    _write_seed_csv(csv_path, [
+        _seed_row("summit", "W7I/SW-001"),
+        _seed_row("summit", "W7I/SW-002", lat=43.1, lon=-116.1),
+        _seed_row("landmark", "n1", lat=44.0, lon=-117.0),
+    ])
+    load_places_seed(conn)
+
+    # Prune both summits out; the seed rebuild that motivated this fix
+    # pruned ~24k summits in one pass -- two is enough to prove the
+    # table ends up with EXACTLY what the CSV contains, no extras.
+    _write_seed_csv(csv_path, [
+        _seed_row("landmark", "n1", lat=44.0, lon=-117.0),
+    ])
+    load_places_seed(conn)
+
+    counts = dict(conn.execute(
+        "SELECT ref_type, COUNT(*) FROM place WHERE active = 1 GROUP BY ref_type"
+    ).fetchall())
+    assert counts == {"landmark": 1}
+    total_rows = conn.execute("SELECT COUNT(*) FROM place").fetchone()[0]
+    assert total_rows == 3  # both pruned summits still exist, just inactive
+
+
+def test_place_returning_to_the_seed_is_reactivated(conn, tmp_path, monkeypatch):
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    _write_seed_csv(csv_path, [_seed_row("summit", "W7I/SW-001")])
+    load_places_seed(conn)
+    place_id = conn.execute(
+        "SELECT id FROM place WHERE ref_code = 'W7I/SW-001'"
+    ).fetchone()[0]
+
+    _write_seed_csv(csv_path, [])  # pruned out
+    load_places_seed(conn)
+    assert conn.execute(
+        "SELECT active FROM place WHERE id = ?", (place_id,)
+    ).fetchone()[0] == 0
+
+    _write_seed_csv(csv_path, [_seed_row("summit", "W7I/SW-001")])  # back in a later rebuild
+    load_places_seed(conn)
+    row = conn.execute("SELECT id, active FROM place WHERE ref_code = 'W7I/SW-001'").fetchone()
+    assert row["id"] == place_id, "same ref_type/ref_code must reuse the same row, not duplicate"
+    assert row["active"] == 1
+
+
+def test_past_activation_against_a_pruned_place_still_resolves_and_counts(conn, tmp_path, monkeypatch):
+    """A player who legitimately scored a summit that later left the
+    seed must keep the points and the name -- Explorer Score must not
+    change just because the seed was re-tuned.
+    """
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    _write_seed_csv(csv_path, [_seed_row("summit", "W7I/SW-001", points=100)])
+    load_places_seed(conn)
+    place_id = conn.execute(
+        "SELECT id FROM place WHERE ref_code = 'W7I/SW-001'"
+    ).fetchone()[0]
+
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (place_id, 42, "2026-08-19", 100, now),
+    )
+
+    # Seed rebuild prunes the summit out.
+    _write_seed_csv(csv_path, [])
+    load_places_seed(conn)
+    assert conn.execute(
+        "SELECT active FROM place WHERE id = ?", (place_id,)
+    ).fetchone()[0] == 0
+
+    # Explorer Score sum (app/public_api.py's own query shape) is
+    # untouched -- it never joins back to `place` at all.
+    explorer_total = conn.execute(
+        "SELECT SUM(points) FROM place_activation WHERE player_id = ?", (42,)
+    ).fetchone()[0]
+    assert explorer_total == 100
+
+    # The name still resolves via a join, for any UI that wants to show
+    # "what did I score" history against a now-inactive place.
+    name = conn.execute(
+        "SELECT p.name FROM place_activation a JOIN place p ON p.id = a.place_id "
+        "WHERE a.player_id = ?",
+        (42,),
+    ).fetchone()[0]
+    assert name == "W7I/SW-001"

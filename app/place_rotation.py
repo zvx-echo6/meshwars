@@ -209,7 +209,7 @@ def _compute_week(
     }
 
     by_cell: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
-    for row in conn.execute("SELECT id, lat, lon FROM place WHERE rotates = 1"):
+    for row in conn.execute("SELECT id, lat, lon FROM place WHERE rotates = 1 AND active = 1"):
         key = region_cell_key(row["lat"], row["lon"], lat_deg, lon_deg)
         by_cell.setdefault(key, []).append((row["id"], row["lat"], row["lon"]))
 
@@ -330,11 +330,28 @@ def preview_week(conn: sqlite3.Connection, week_start: str) -> tuple[list[int], 
 
 def live_place_ids(conn: sqlite3.Connection, week_start: str) -> set[int]:
     """Every place that scores right now: always-active (rotates=0)
-    plus this week's resolved rotating set. Resolves (and persists) the
-    week's draw if it has not been already -- the first read of a new
-    week is what commits it, same as ensure_active_season commits a new
-    season on first read past its boundary.
+    plus this week's resolved rotating set, both restricted to
+    place.active = 1 (app/places_seed.py's reconcile flag). Resolves
+    (and persists) the week's draw if it has not been already -- the
+    first read of a new week is what commits it, same as
+    ensure_active_season commits a new season on first read past its
+    boundary.
+
+    The rotating half is filtered by active here rather than trusted
+    as-is: place_week is only ever appended to (resolve_week's INSERT
+    OR IGNORE), so a place drawn earlier this week that a later seed
+    reconcile has since deactivated must not still count as live --
+    its place_week row survives (place_week is never rewritten after a
+    week resolves) but no longer resolves to a scoreable place.
     """
-    always = {r[0] for r in conn.execute("SELECT id FROM place WHERE rotates = 0")}
-    rotating = set(resolve_week(conn, week_start))
+    always = {r[0] for r in conn.execute("SELECT id FROM place WHERE rotates = 0 AND active = 1")}
+    rotating_ids = resolve_week(conn, week_start)
+    rotating: set[int] = set()
+    if rotating_ids:
+        marks = ",".join("?" * len(rotating_ids))
+        rotating = {
+            r[0] for r in conn.execute(
+                f"SELECT id FROM place WHERE active = 1 AND id IN ({marks})", rotating_ids
+            )
+        }
     return always | rotating
