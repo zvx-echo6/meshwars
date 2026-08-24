@@ -300,10 +300,7 @@ function setupOverlayLayers(map) {
     minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
-      // Teal -- distinct from BLM's rust-orange and from every team
-      // colour (red/green/blue/purple/yellow/orange/pink), and reads on
-      // both the light OSM basemap and the dark CARTO one.
-      'line-color': '#0e7c86',
+      'line-color': '#b06a3a',
       'line-width': ROUTE_LINE_WIDTH,
     },
   }, 'board-fill');
@@ -315,12 +312,7 @@ function setupOverlayLayers(map) {
     minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
-      // Bronze/goldenrod -- a third distinct hue from both BLM orange
-      // and USFS-roads teal, muted enough not to collide with the
-      // brighter team yellow (#ffdc00). Dashed on top of that colour
-      // difference so roads and trails stay tellable apart even for a
-      // colour-blind reader.
-      'line-color': '#a67c00',
+      'line-color': '#7a5a2a',
       'line-width': ROUTE_LINE_WIDTH,
       'line-dasharray': [2, 2],
     },
@@ -333,11 +325,7 @@ function setupOverlayLayers(map) {
     minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
-      // Measured directly against the Utah case that started this pass:
-      // at Moab, changing only colour+width from #8a6a4a/0.7 to
-      // #c2410c/1.6 made the whole BLM network unmistakable under the
-      // public-lands wash. #c2410c is that proven colour.
-      'line-color': '#c2410c',
+      'line-color': '#8a6a4a',
       'line-width': ROUTE_LINE_WIDTH,
     },
   }, 'board-fill');
