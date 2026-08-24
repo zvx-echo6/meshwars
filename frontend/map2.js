@@ -164,8 +164,20 @@ const PARK_BOUNDARY_LINE_OPACITY = { gold: 0.7, neon: 0.85 };
 // ones), a size tuned to read at zoom 13 close-in tiles into a solid
 // mass at zoom 9's region view if left constant. Same curve for both
 // themes -- the per-theme PX values above already carry the theme
-// difference.
-const PLACE_ICON_SIZE_ZOOM = ['interpolate', ['linear'], ['zoom'], 9, 0.6, 11, 0.85, 13, 1.1];
+// difference. Summits alone carry PLACE_TYPE_MIN_ZOOM 0, so they are
+// the only tier drawn below zoom 10 -- interpolate clamps to the
+// lowest stop's value for any zoom below it, so the original curve
+// (first stop at 9) rendered every summit at that same size all the
+// way out to a whole-state view, where they read as chunky triangles
+// blanketing the terrain. Stops now reach down to zoom 3 (global/
+// regional) at a small fraction of the zoom-13 size -- just enough to
+// say "a peak is here" -- and grow through the mid zooms up to the
+// same zoom-11/13 values as before, so close-in legibility is
+// unchanged. Since icon-size scales the whole rasterized icon
+// (drawPlaceIcon bakes the outline into the same raster at
+// PLACE_ICON_OUTLINE's width), the outline thins proportionally with
+// the fill at low zoom for free -- no separate outline curve needed.
+const PLACE_ICON_SIZE_ZOOM = ['interpolate', ['linear'], ['zoom'], 3, 0.1, 6, 0.2, 8, 0.32, 9, 0.6, 11, 0.85, 13, 1.1];
 
 const PLACE_TYPES = ['summit', 'park', 'landmark'];
 
