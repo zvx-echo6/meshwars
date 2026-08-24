@@ -196,6 +196,19 @@ function watchTheme(map) {
 // Each layer below does still get an explicit `minzoom` so its low end
 // is declared rather than accidental; the values mirror the tiles, they
 // are not a style choice.
+//
+// All three route layers share this width ramp: the old flat 0.7-0.8px
+// was measured to disappear under the public-lands wash even where the
+// data was dense (Utah, 4,875 BLM features in view at Moab z9 and still
+// invisible). Never below ~1px so a route has real ink at the low zooms
+// this map opens at, growing toward 3px by street zoom.
+const ROUTE_LINE_WIDTH = [
+  'interpolate', ['linear'], ['zoom'],
+  4, 1,
+  9, 1.6,
+  17, 3,
+];
+
 function setupOverlayLayers(map) {
   map.addSource('public-lands', {
     type: 'vector',
@@ -210,6 +223,21 @@ function setupOverlayLayers(map) {
     url: `pmtiles://${BLM_TRAILS_ROADS_URL}`,
   });
 
+  // PAD-US derived tiles carry no literal `Marine`/offshore flag -- the
+  // properties actually present are access, acres, agency, designation,
+  // gap_status, id, manager_type, name, owner_type (checked by decoding
+  // a tile with python3 + the pmtiles module rather than assumed). One
+  // pair stood out: agency 'BOEM' (Bureau of Ocean Energy Management)
+  // paired 1:1 with designation 'OCS' (Outer Continental Shelf) at every
+  // feature sampled world-wide at z4 -- these are offshore energy-lease
+  // planning areas, and their footprint (Gulf of Mexico to Arctic Alaska
+  // to American Samoa) is exactly what pushed this archive's bounds out
+  // to lat -15..75 and put stripes over the Pacific and Canada once the
+  // rebuild let the archive draw all the way down to z0. Filtering out
+  // designation 'OCS' drops that regression; this is a land navigation
+  // map and BOEM/OCS is the only agency+designation pair that is marine.
+  const NOT_MARINE_FILTER = ['!=', ['get', 'designation'], 'OCS'];
+
   map.addLayer({
     id: 'public-lands-fill',
     type: 'fill',
@@ -217,9 +245,23 @@ function setupOverlayLayers(map) {
     'source-layer': 'public_lands',
     minzoom: 0,
     layout: { visibility: 'none' },
+    filter: NOT_MARINE_FILTER,
     paint: {
       'fill-color': '#4f7a4a',
-      'fill-opacity': 0.18,
+      // Public lands is context for the routes, not the subject -- at
+      // low zoom the old flat 0.18 turned into 16,000+ polygon outlines
+      // of green speckle (measured: 16,398 features in view at z4).
+      // Fading toward transparent as the camera pulls out keeps the
+      // boundary readable close in without it taking over the screen
+      // zoomed out. No minzoom/maxzoom cutoff -- a gradual fade, per
+      // spec.
+      'fill-opacity': [
+        'interpolate', ['linear'], ['zoom'],
+        4, 0.02,
+        6, 0.04,
+        9, 0.08,
+        13, 0.12,
+      ],
     },
   }, 'board-fill');
   map.addLayer({
@@ -229,10 +271,25 @@ function setupOverlayLayers(map) {
     'source-layer': 'public_lands',
     minzoom: 0,
     layout: { visibility: 'none' },
+    filter: NOT_MARINE_FILTER,
     paint: {
       'line-color': '#4f7a4a',
-      'line-width': 0.8,
-      'line-opacity': 0.5,
+      // Thinned from a flat 0.8 -- this is a boundary hint, not a route.
+      'line-width': [
+        'interpolate', ['linear'], ['zoom'],
+        4, 0.3,
+        9, 0.5,
+        14, 0.6,
+      ],
+      // Same zoom fade as the fill above, and still capped below the
+      // old flat 0.5 even fully zoomed in.
+      'line-opacity': [
+        'interpolate', ['linear'], ['zoom'],
+        4, 0.05,
+        6, 0.15,
+        9, 0.3,
+        13, 0.45,
+      ],
     },
   }, 'board-fill');
   map.addLayer({
@@ -243,8 +300,11 @@ function setupOverlayLayers(map) {
     minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
-      'line-color': '#b06a3a',
-      'line-width': 0.8,
+      // Teal -- distinct from BLM's rust-orange and from every team
+      // colour (red/green/blue/purple/yellow/orange/pink), and reads on
+      // both the light OSM basemap and the dark CARTO one.
+      'line-color': '#0e7c86',
+      'line-width': ROUTE_LINE_WIDTH,
     },
   }, 'board-fill');
   map.addLayer({
@@ -255,8 +315,13 @@ function setupOverlayLayers(map) {
     minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
-      'line-color': '#7a5a2a',
-      'line-width': 0.8,
+      // Bronze/goldenrod -- a third distinct hue from both BLM orange
+      // and USFS-roads teal, muted enough not to collide with the
+      // brighter team yellow (#ffdc00). Dashed on top of that colour
+      // difference so roads and trails stay tellable apart even for a
+      // colour-blind reader.
+      'line-color': '#a67c00',
+      'line-width': ROUTE_LINE_WIDTH,
       'line-dasharray': [2, 2],
     },
   }, 'board-fill');
@@ -268,8 +333,12 @@ function setupOverlayLayers(map) {
     minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
-      'line-color': '#8a6a4a',
-      'line-width': 0.7,
+      // Measured directly against the Utah case that started this pass:
+      // at Moab, changing only colour+width from #8a6a4a/0.7 to
+      // #c2410c/1.6 made the whole BLM network unmistakable under the
+      // public-lands wash. #c2410c is that proven colour.
+      'line-color': '#c2410c',
+      'line-width': ROUTE_LINE_WIDTH,
     },
   }, 'board-fill');
 }
