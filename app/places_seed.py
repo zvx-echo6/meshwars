@@ -336,10 +336,15 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # would skip forever after upgrading to this fix: the file never
     # changes again, so "unchanged since last load" would stay true
     # indefinitely and the stale rows this fix exists to clean up would
-    # never actually get cleaned up. Bump this only when the reconcile
-    # logic itself changes in a way that requires re-running it against
-    # an already-fingerprinted CSV.
-    _RECONCILE_VERSION = 1
+    # never actually get cleaned up. Bump this whenever the reconcile
+    # mechanics OR the per-row _classify_row rules change in a way that
+    # requires re-running against an already-fingerprinted CSV -- the
+    # named-summits-only filter (2026-08-24) is exactly that case: the
+    # CSV's bytes are unchanged, only which rows get kept changed, so a
+    # DB fingerprinted before this filter landed needs the version bump
+    # to actually deactivate the newly-excluded summits rather than
+    # trusting a fingerprint recorded under the old, looser rule.
+    _RECONCILE_VERSION = 2
     st = os.stat(_DATA_PATH)
     fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}"
     row = conn.execute("SELECT v FROM cursor WHERE k = 'places_seed_csv_fingerprint'").fetchone()
