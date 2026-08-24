@@ -209,6 +209,18 @@ const ROUTE_LINE_WIDTH = [
   17, 3,
 ];
 
+// BLM gets its own ramp and colour, distinct from the USFS/public-lands
+// ones above -- the shared brown was too faint and too thin to spot at
+// the mid zooms (z6-z10) people actually browse Utah at; it only read
+// once you were most of the way zoomed to the ground. USFS and public
+// lands are untouched.
+const BLM_ROUTE_LINE_WIDTH = [
+  'interpolate', ['linear'], ['zoom'],
+  4, 1.4,
+  9, 2.2,
+  14, 3.5,
+];
+
 function setupOverlayLayers(map) {
   map.addSource('public-lands', {
     type: 'vector',
@@ -326,7 +338,13 @@ function setupOverlayLayers(map) {
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#8a6a4a',
-      'line-width': ROUTE_LINE_WIDTH,
+      'line-width': BLM_ROUTE_LINE_WIDTH,
+      'line-opacity': [
+        'interpolate', ['linear'], ['zoom'],
+        4, 0.85,
+        9, 0.95,
+        14, 1,
+      ],
     },
   }, 'board-fill');
 }
