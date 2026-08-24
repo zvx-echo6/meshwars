@@ -699,7 +699,12 @@ CREATE TABLE IF NOT EXISTS place (
     UNIQUE (ref_type, ref_code)
 );
 CREATE INDEX IF NOT EXISTS idx_place_latlon ON place(lat, lon);
-CREATE INDEX IF NOT EXISTS idx_place_active ON place(active);
+-- idx_place_active is NOT created here: on a DB that already ran the
+-- CREATE TABLE above (before `active` existed), this executescript()
+-- runs before MIGRATIONS' ALTER TABLE below adds the column, so an
+-- index on it here would fail startup on every existing deployment
+-- with "no such column: active". Created by MIGRATIONS instead, after
+-- the ALTER that guarantees the column exists first.
 
 -- Which grid cell(s) (app/grid.py cell_id) a place scores when painted.
 -- One row for a summit, a landmark, or a park too small to need the
