@@ -276,14 +276,10 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     retakes: dict[int, int] = {}
     per_team_attacks: dict[str, dict[int, int]] = {}
     per_team_retakes: dict[str, dict[int, int]] = {}
-    virgin: dict[int, int] = {}
     for c in caps:
         pid, tm = c["player_id"], c["team"]
         if c["from_team"] is None:
-            # Claimed from nobody. Aircraft excluded: Explorer is about
-            # reach and effort, and a plane trivialises both.
-            if not c["by_air"]:
-                virgin[pid] = virgin.get(pid, 0) + 1
+            # Claimed from nobody -- not an attack or a retake, either.
             continue
         attacks[pid] = attacks.get(pid, 0) + 1
         per_team_attacks.setdefault(tm, {})[pid] = per_team_attacks.setdefault(tm, {}).get(pid, 0) + 1
@@ -295,8 +291,28 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
                detail="squares taken from other teams"))
     add(_award("top_defender", *(_top(retakes) or (None, 0)), names=names,
                detail="squares taken back"))
-    add(_award("explorer", *(_top(virgin) or (None, 0)), names=names,
-               detail="squares nobody had claimed"))
+
+    # ---- explorer: most Explorer Score points earned this month -------
+    # Places Worth Going (docs/features/places.md) points, from
+    # place_activation.points, scoped by awarded_at falling inside the
+    # month -- the same time-only scoping mc_scoring.team_place_points()
+    # and the /api/v1/players Explorer Score already use. place_activation
+    # has no protocol column (a scoring ping credits places the same way
+    # regardless of which board sent it -- see app/place_scoring.py), so
+    # this does not filter by protocol either, matching that existing
+    # convention rather than inventing a new one.
+    #
+    # Used to be "most squares nobody had ever claimed" -- a proxy for
+    # exploring, back when there was nothing else to measure it with. Now
+    # that Places Worth Going exists, points earned from actual named
+    # destinations are the real thing that proxy was standing in for.
+    explorer_pts: dict[int, float] = dict(conn.execute(
+        "SELECT player_id, SUM(points) FROM place_activation "
+        " WHERE awarded_at >= ? AND awarded_at < ? GROUP BY player_id",
+        (start, end),
+    ).fetchall())
+    add(_award("explorer", *(_top(explorer_pts) or (None, 0)), names=names,
+               detail="points earned from places"))
 
     for team in settings.teams_list:
         add(_award("team_attacker", *(_top(per_team_attacks.get(team, {})) or (None, 0)),
@@ -306,10 +322,16 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
 
     # ---- frontier: how much ground you claimed out past the towns -----
     # Counted, not measured. The furthest single square rewarded one
-    # lucky turn-off; a count rewards actually working the back country,
-    # and reads the same way Explorer does so the two stack cleanly --
-    # every Frontier square is beyond a town's edge and therefore also a
-    # virgin claim, so it counts toward both.
+    # lucky turn-off; a count rewards actually working the back country.
+    #
+    # No virgin-ground restriction: that only ever existed to keep
+    # Frontier a strict subset of the old squares-nobody-had-claimed
+    # Explorer. Now that Explorer counts place points instead, the two
+    # measure different things -- Frontier counts ground out past the
+    # towns, Explorer counts destinations reached -- so every out-of-town
+    # capture counts here, attack or retake or virgin claim alike.
+    # Aircraft are still excluded, same as everywhere else that measures
+    # reach and effort.
     #
     # Still expect empty months: twenty miles past a town is where mesh
     # coverage runs out, and a square out there has to hear a repeater
@@ -317,7 +339,7 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     frontier: dict[int, int] = {}
     furthest: dict[int, float] = {}
     for c in caps:
-        if c["from_team"] is not None or c["by_air"]:
+        if c["by_air"]:
             continue
         lat, lon = cell_center(c["cell_id"])
         d = places.distance_to_nearest_town_m(lat, lon)
