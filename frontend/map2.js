@@ -36,16 +36,25 @@ const TEAM_COLORS = {
 
 const TEAM_ORDER = Object.keys(TEAM_COLORS);
 
-// The archives on navi get rebuilt in place, keeping the same filename,
-// and a browser that already holds byte ranges of the previous file will
-// happily keep serving them -- pointing into a file that has since
-// changed shape. That shows up as a region silently missing rather than
-// as an error. Bump TILE_REV whenever an archive on navi is replaced, so
-// the URL changes and nothing stale can survive.
-const TILE_REV = '20260824d';
+// USFS roads/trails and public lands now ship with the game itself
+// (same-origin /tiles/, see app/api.py's tiles_dir mount) rather than
+// being fetched from navi at runtime -- navi's archives got rebuilt in
+// place, keeping the same filename, and a browser that already held
+// byte ranges of the previous file would happily keep serving them
+// against a file that had since changed shape underneath it. That
+// showed up as a region silently missing rather than as an error.
+// Bump TILE_REV whenever a served archive changes, so the URL changes
+// and nothing stale can survive.
+//
+// The DEM/hillshade source is the one archive still on navi: the
+// pre-baked hillshade pmtiles (meshwars-hillshade.pmtiles) wasn't
+// finished baking yet when the other two moved local. Point it local
+// too once that bake lands and is copied over -- see docs/ for the
+// same navi-rebuild caveat this comment used to describe for all three.
+const TILE_REV = '20260824e';
 const DEM_URL = `https://navi.echo6.co/tiles/planet-dem.pmtiles?r=${TILE_REV}`;
-const PUBLIC_LANDS_URL = `https://navi.echo6.co/tiles/public-lands.pmtiles?r=${TILE_REV}`;
-const USFS_TRAILS_ROADS_URL = `https://navi.echo6.co/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
+const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
+const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
 const BASEMAP_GOLD_ID = 'basemap-gold';
 const BASEMAP_NEON_ID = 'basemap-neon';

@@ -718,6 +718,20 @@ def mount(app: FastAPI) -> None:
     if frontend_dir.exists():
         app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
+        # Terrain/overlay PMTiles archives (USFS roads+trails, public
+        # lands) -- previously fetched cross-origin from navi at runtime,
+        # which broke every time navi's archives were rebuilt in place: a
+        # browser holding byte ranges of the old file kept serving them
+        # against a file that had since changed shape underneath it.
+        # Same-origin now, so no CORS is needed. Starlette's StaticFiles
+        # (via FileResponse) answers Range requests on its own, which is
+        # what PMTiles' range-based reads depend on. Skipped entirely
+        # when the directory isn't there (e.g. a dev checkout that
+        # hasn't set up TILES_DIR) -- same pattern as /static above.
+        tiles_dir = Path(settings.tiles_dir)
+        if tiles_dir.exists():
+            app.mount("/tiles", StaticFiles(directory=str(tiles_dir)), name="tiles")
+
         # The MapLibre map (frontend/map2.html + map2.js/.css) -- built
         # alongside the original Leaflet map at /map-legacy below, and
         # now the front page in its own right rather than a staging-only
