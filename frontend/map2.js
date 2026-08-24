@@ -176,10 +176,15 @@ function boundsToPolygon(cell) {
   };
 }
 
-async function fetchBoard() {
-  const res = await fetch('/api/mc/board');
+// MeshCore's /api/mc/board returns the cell array directly; Meshtastic's
+// /get-nodes returns {coverage, repeaters} -- same reasoning and same
+// unwrap as mc.js's fetchBoardCells. Both cell shapes (south/west/
+// north/east/owner_team/cell_id) match boundsToPolygon either way.
+async function fetchBoard(c) {
+  const res = await fetch(c.boardEndpoint);
   if (!res.ok) throw new Error(`board fetch failed: ${res.status}`);
-  const cells = await res.json();
+  const data = await res.json();
+  const cells = Array.isArray(data) ? data : (Array.isArray(data.coverage) ? data.coverage : []);
   return {
     type: 'FeatureCollection',
     features: cells.map(boundsToPolygon),
@@ -199,40 +204,76 @@ async function fetchBoard() {
 // map2.css (#mc-scoreboard-position) the way Leaflet's own topright
 // control corner used to position it for free.
 //
-// NOT ported: the Meshtastic/MeshCore board SWITCH (.mc-switch-row) at
-// the top of mc.js's panel. This map draws exactly one board (MeshCore,
-// via the board/board-fill source+layer in main() below) -- adding the
-// switch back would mean teaching this page to also fetch and render
-// the Meshtastic board through a second MapLibre source, a real feature
-// this page does not have, not a markup port. Every string this panel
-// shows (board title, button labels, endpoints) is the MeshCore half of
-// mc.js's PROTOCOLS table, inlined below as MC.
+// The Meshtastic/MeshCore board SWITCH (.mc-switch-row) at the top of
+// mc.js's panel IS ported below (see PROTOCOLS, cfg(), setBoardMode()).
+// Both boards read the same board/board-fill MapLibre source -- there
+// is no second source, just a re-fetch into the one already created in
+// main() -- so switching carries the source's tolerance: 0 setting
+// (see main()'s map.addSource('board', ...)) for free on both boards,
+// nothing to duplicate. Every string this panel shows (board title,
+// button labels, endpoints) comes from whichever half of PROTOCOLS is
+// active, same table shape as mc.js's own PROTOCOLS.
 //
-// Also not ported: per-cell click popups (mc.js's bindCellPopup /
-// buildCellPopupHtml, showing a square's owner/captures/repeaters on
-// click). This page's board-fill layer has no click handler at all
-// today, on either the old minimal panel or this one -- flagged in the
-// deploy report as a real gap, not silently carried over or silently
-// dropped.
-const MC = {
-  boardTitle: 'MeshCore Territory',
-  topButtonLabel: 'Top Operators',
-  topCaptureLabel: 'Wardrivers',
-  topCheckinLabel: 'NetOps',
-  lookupPlaceholder: 'player name',
-  lookupHelp: 'Search by player name.',
-  scoresEndpoint: '/api/mc/scores',
-  historyEndpoint: '/api/mc/history',
-  rosterEndpoint: '/api/mc/players',
-  findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
-  topEndpoint: '/api/mc/top',
-  topCheckinEndpoint: '/api/mc/top-checkins',
-  seasonEndpoint: '/api/mc/season',
+// Also not ported: per-cell click popups. Correction to an earlier note
+// here -- mc.js's Leaflet page (bindCellPopup / buildCellPopupHtml)
+// DOES have these, showing a square's owner/captures/repeaters on
+// click; this page's board-fill layer still has no click handler at
+// all. That is a real gap between the two pages, not a gap shared by
+// both -- flagged in the deploy report, not implemented in this pass.
+const PROTOCOLS = {
+  meshcore: {
+    protocol: 'mc',
+    boardTitle: 'MeshCore Territory',
+    topButtonLabel: 'Top Operators',
+    topCaptureLabel: 'Wardrivers',
+    topCheckinLabel: 'NetOps',
+    lookupPlaceholder: 'player name',
+    lookupHelp: 'Search by player name.',
+    boardEndpoint: '/api/mc/board',
+    scoresEndpoint: '/api/mc/scores',
+    historyEndpoint: '/api/mc/history',
+    rosterEndpoint: '/api/mc/players',
+    findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
+    topEndpoint: '/api/mc/top',
+    topCheckinEndpoint: '/api/mc/top-checkins',
+    seasonEndpoint: '/api/mc/season',
+  },
+  meshtastic: {
+    protocol: 'mt',
+    boardTitle: 'Meshtastic Territory',
+    topButtonLabel: 'Top Operators',
+    topCaptureLabel: 'Wardrivers',
+    topCheckinLabel: 'NetOps',
+    lookupPlaceholder: 'player name',
+    lookupHelp: 'Search by player name.',
+    boardEndpoint: '/get-nodes',
+    scoresEndpoint: '/scores',
+    historyEndpoint: '/history',
+    rosterEndpoint: '/teams',
+    findEndpoint: (q) => `/find?name=${encodeURIComponent(q)}`,
+    topEndpoint: '/top',
+    topCheckinEndpoint: '/top-checkins',
+    seasonEndpoint: '/season',
+  },
 };
 
 const REFRESH_INTERVAL_MS = 30000;
 
 // ---- module state (territory panel) ----
+let mode = 'meshcore'; // key into PROTOCOLS -- set from /config's
+                        // mc_default_view before the panel is built
+                        // (see fetchBootConfig/main), same source of
+                        // truth mc.js's loadConfig() reads. The board
+                        // choice itself is never written to
+                        // localStorage on either page -- mc.js persists
+                        // only the map view itself (its 'mapView' key),
+                        // never which board was showing, and this page
+                        // does not persist the map view at all yet.
+function cfg() {
+  return PROTOCOLS[mode];
+}
+let scoreboardTitleEl = null;
+let scoreboardTopBtn = null;
 let scoreboardBody = null;
 let scoreboardPanelEl = null;
 let scoreboardHeaderBtn = null;
@@ -364,7 +405,7 @@ function tickCountdown() {
 
 async function loadScoreboard() {
   try {
-    const res = await fetch(MC.scoresEndpoint);
+    const res = await fetch(cfg().scoresEndpoint);
     if (!res.ok) return;
     const data = await res.json();
     renderScoreboard(data);
@@ -375,19 +416,30 @@ async function loadScoreboard() {
 }
 
 async function fetchHistorySeasons() {
-  const res = await fetch(MC.historyEndpoint);
+  const res = await fetch(cfg().historyEndpoint);
   if (!res.ok) return [];
   const data = await res.json();
   return Array.isArray(data) ? data : [];
 }
 
-// MeshCore's /api/mc/players is a flat list; grouped here into
-// Map<team, [{display_name}]> -- the shape the roster modal renders.
+// Normalizes both roster shapes into a common Map<team, [{display_name}]>
+// -- MeshCore's /api/mc/players is a flat list this groups itself;
+// Meshtastic's /teams is already grouped, just keyed differently. Same
+// split as mc.js's fetchRosterByTeam.
 async function fetchRosterByTeam() {
+  const c = cfg();
   const byTeam = new Map();
-  const res = await fetch(MC.rosterEndpoint);
+  const res = await fetch(c.rosterEndpoint);
   if (!res.ok) return byTeam;
-  const players = await res.json();
+  const data = await res.json();
+  if (c.protocol !== 'mc') {
+    const teams = (data && data.teams) || {};
+    Object.keys(teams).forEach((team) => {
+      byTeam.set(team, (teams[team] || []).map((p) => ({ display_name: p.display_name })));
+    });
+    return byTeam;
+  }
+  const players = data;
   if (!Array.isArray(players)) return byTeam;
   players.forEach((p) => {
     const team = p.team || 'UNKNOWN';
@@ -406,7 +458,7 @@ async function doPlayerFind(value) {
   resultEl.textContent = 'Searching...';
 
   try {
-    const res = await fetch(MC.findEndpoint(query));
+    const res = await fetch(cfg().findEndpoint(query));
     if (res.status === 404) {
       resultEl.textContent = `Not found: ${query}`;
       return;
@@ -550,17 +602,18 @@ async function openRosterModal() {
 let topModalTab = 'captures';
 
 function topTabSpecs() {
+  const c = cfg();
   return {
     captures: {
-      label: MC.topCaptureLabel,
-      endpoint: MC.topEndpoint,
+      label: c.topCaptureLabel,
+      endpoint: c.topEndpoint,
       valueKey: 'captures',
       valueHeader: 'Captures',
       emptyText: 'No capture activity yet.',
     },
     checkins: {
-      label: MC.topCheckinLabel,
-      endpoint: MC.topCheckinEndpoint,
+      label: c.topCheckinLabel,
+      endpoint: c.topCheckinEndpoint,
       valueKey: 'points',
       valueHeader: 'Points',
       emptyText: 'No check-in activity yet.',
@@ -692,7 +745,7 @@ function renderWinnerBanner(banner) {
 
 async function refreshWinnerBanner() {
   try {
-    const res = await fetch(MC.seasonEndpoint);
+    const res = await fetch(cfg().seasonEndpoint);
     if (!res.ok) { renderWinnerBanner(null); return; }
     const data = await res.json();
     renderWinnerBanner(data.winner_banner || null);
@@ -707,17 +760,27 @@ async function refreshWinnerBanner() {
 // Board switch, collapsible header with live summary, seven-team
 // scoreboard with color dots, season countdown, player lookup, History/
 // Roster, Refresh, and a ranked-players button -- everything mc.js's
-// buildScoreboardControl built, minus the board-switch row (see this
-// section's header comment). Built once and appended straight into
-// <body>; map2.css positions it (#mc-scoreboard-position) the way
-// Leaflet's own topright control corner used to for mc.js.
+// buildScoreboardControl builds, including the board-switch row
+// (.mc-switch-row, same markup/classes/order as mc.js -- row one of the
+// card, outside .mc-panel-content so it survives the phone collapse).
+// Built once and appended straight into <body>; map2.css positions it
+// (#mc-scoreboard-position) the way Leaflet's own topright control
+// corner used to for mc.js. The title span and top-players button start
+// empty/unlabeled, same as mc.js's own markup -- setBoardMode (called
+// once right after this, with the /config-derived default mode) fills
+// them in via applyProtocolChrome(), so there is never a MeshCore-
+// labeled flash before a Meshtastic default takes over.
 function buildScoreboardControl(map) {
   const div = document.createElement('div');
   div.id = 'mc-scoreboard-position';
   div.className = 'mc-scoreboard';
   div.innerHTML = `
+    <div class="mc-switch-row" id="mc-switch-row">
+      <button type="button" id="mc-toggle-meshtastic" class="mc-switch-btn">Meshtastic</button>
+      <button type="button" id="mc-toggle-meshcore" class="mc-switch-btn">MeshCore</button>
+    </div>
     <button type="button" class="mc-row mc-title mc-header-btn" id="mc-header-btn" aria-expanded="true">
-      <span class="mc-header-title-text" id="mc-header-title-text">${escapeHtml(MC.boardTitle)}</span>
+      <span class="mc-header-title-text" id="mc-header-title-text"></span>
       <span class="mc-header-right">
         <span class="mc-header-summary" id="mc-header-summary"></span>
         <span class="mc-header-caret" aria-hidden="true">&#9662;</span>
@@ -727,7 +790,7 @@ function buildScoreboardControl(map) {
       <div class="mc-scoreboard-body"></div>
       <div class="mc-row mc-countdown">Ends in&nbsp;<span id="mc-countdown">--</span></div>
       <div class="mc-row mc-lookup-row">
-        <input type="text" id="mc-lookup-input" placeholder="${escapeHtml(MC.lookupPlaceholder)}" title="${escapeHtml(MC.lookupHelp)}" />
+        <input type="text" id="mc-lookup-input" placeholder="player name" />
         <button type="button" id="mc-lookup-btn">Find</button>
       </div>
       <div id="mc-lookup-result" class="mc-lookup-result"></div>
@@ -736,7 +799,7 @@ function buildScoreboardControl(map) {
         <button type="button" id="mc-refresh-btn">Refresh map</button>
       </div>
       <div class="mc-row mc-actions">
-        <button type="button" id="mc-top-btn">${escapeHtml(MC.topButtonLabel)}</button>
+        <button type="button" id="mc-top-btn"></button>
       </div>
     </div>
   `;
@@ -746,6 +809,7 @@ function buildScoreboardControl(map) {
   scoreboardPanelEl = div;
   scoreboardHeaderBtn = div.querySelector('#mc-header-btn');
   scoreboardSummaryEl = div.querySelector('#mc-header-summary');
+  scoreboardTitleEl = div.querySelector('#mc-header-title-text');
   scoreboardLookupInput = div.querySelector('#mc-lookup-input');
 
   // Leaflet's L.DomEvent.disableClickPropagation/disableScrollPropagation
@@ -756,7 +820,23 @@ function buildScoreboardControl(map) {
     div.addEventListener(evt, (e) => e.stopPropagation());
   });
 
-  const topBtn = div.querySelector('#mc-top-btn');
+  scoreboardTopBtn = div.querySelector('#mc-top-btn');
+  const topBtn = scoreboardTopBtn;
+
+  // Board switch -- row one of the card, always visible, never inside
+  // .mc-panel-content, so it survives the phone collapse below. Does
+  // NOT touch the camera: setBoardMode only swaps which board's data
+  // is fetched into the existing 'board' source and refreshes the
+  // panel's numbers, same as the constraint the owner gave for this
+  // port -- the view stays exactly where the visitor left it.
+  div.querySelector('#mc-toggle-meshtastic').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setBoardMode('meshtastic', map);
+  });
+  div.querySelector('#mc-toggle-meshcore').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setBoardMode('meshcore', map);
+  });
 
   div.querySelector('#mc-header-btn').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -794,6 +874,43 @@ function buildScoreboardControl(map) {
   });
 
   return div;
+}
+
+// ===== Board switch (mode) =====
+//
+// Ported from mc.js's updateToggleButtons/applyProtocolChrome/setMode.
+// Text-only chrome update -- title, top-players button label, lookup
+// placeholder/help, and clearing any stale Find result -- plus a data
+// refresh into the panel and the existing 'board' source. Deliberately
+// does not touch the camera (no fitBounds/flyTo, unlike mc.js's own
+// setMode) per this port's explicit constraint: switching boards must
+// never move the map out from under a visitor.
+function updateToggleButtons() {
+  const btnMeshtastic = document.getElementById('mc-toggle-meshtastic');
+  const btnMeshcore = document.getElementById('mc-toggle-meshcore');
+  if (btnMeshtastic) btnMeshtastic.classList.toggle('active', mode === 'meshtastic');
+  if (btnMeshcore) btnMeshcore.classList.toggle('active', mode === 'meshcore');
+}
+
+function applyProtocolChrome() {
+  const c = cfg();
+  if (scoreboardTitleEl) scoreboardTitleEl.textContent = c.boardTitle;
+  if (scoreboardTopBtn) scoreboardTopBtn.textContent = c.topButtonLabel;
+  if (scoreboardLookupInput) {
+    scoreboardLookupInput.placeholder = c.lookupPlaceholder;
+    scoreboardLookupInput.title = c.lookupHelp;
+  }
+  const resultEl = document.getElementById('mc-lookup-result');
+  if (resultEl) resultEl.textContent = '';
+}
+
+function setBoardMode(newMode, map) {
+  mode = newMode === 'meshtastic' ? 'meshtastic' : 'meshcore';
+  applyProtocolChrome();
+  updateToggleButtons();
+  loadBoardData(map);
+  loadScoreboard();
+  refreshWinnerBanner();
 }
 
 // ---- Places Worth Going (docs/features/places.md) ----------------------
@@ -1294,7 +1411,7 @@ function setupLayerSwitcher(map) {
 
 async function loadBoardData(map) {
   try {
-    const board = await fetchBoard();
+    const board = await fetchBoard(cfg());
     map.getSource('board').setData(board);
   } catch (err) {
     console.error('MeshWars map2: failed to load board', err);
@@ -1307,30 +1424,38 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 // frontend/play-area-map.js: the play area is an operator setting that
 // has moved before, and a hardcoded copy in this file would silently
 // disagree with the server a month later. If /config is unreachable or
-// the numbers are missing/non-finite, return null so the map is built
-// with no maxBounds rather than an invented box -- a wrong boundary is
-// worse than none, and the server is the authority on where play
-// happens.
-async function fetchPlayAreaBounds() {
+// the numbers are missing/non-finite, playAreaBounds comes back null so
+// the map is built with no maxBounds rather than an invented box -- a
+// wrong boundary is worse than none, and the server is the authority on
+// where play happens.
+//
+// Also reads mc_default_view -- the same field mc.js's loadConfig()
+// reads for its own default board -- so both pages agree on which board
+// a fresh visitor sees first. One /config fetch serves both needs
+// rather than two.
+async function fetchBootConfig() {
   try {
     const res = await fetch('/config');
-    if (!res.ok) return null;
-    const cfg = await res.json();
-    const pa = cfg && cfg.play_area;
-    if (!pa || !finite(pa.north) || !finite(pa.south) ||
-        !finite(pa.west) || !finite(pa.east)) {
-      return null;
-    }
+    if (!res.ok) return { playAreaBounds: null, defaultMode: 'meshcore' };
+    const cfgData = await res.json();
+    const pa = cfgData && cfgData.play_area;
     // MapLibre bounds are [lng, lat] pairs, southwest first.
-    return [[pa.west, pa.south], [pa.east, pa.north]];
+    const playAreaBounds = (pa && finite(pa.north) && finite(pa.south) &&
+      finite(pa.west) && finite(pa.east))
+      ? [[pa.west, pa.south], [pa.east, pa.north]]
+      : null;
+    const raw = String(cfgData.mc_default_view || '').trim().toLowerCase();
+    const defaultMode = raw === 'meshtastic' ? 'meshtastic' : 'meshcore';
+    return { playAreaBounds, defaultMode };
   } catch {
-    return null;
+    return { playAreaBounds: null, defaultMode: 'meshcore' };
   }
 }
 
 async function main() {
   const bootTheme = currentTheme();
-  const playAreaBounds = await fetchPlayAreaBounds();
+  const { playAreaBounds, defaultMode } = await fetchBootConfig();
+  mode = defaultMode;
   if (!playAreaBounds) {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
   }
@@ -1504,9 +1629,11 @@ async function main() {
     watchTheme(map);
     applyBasemapTheme(map);
 
-    loadBoardData(map);
-    loadScoreboard();
-    refreshWinnerBanner();
+    // Same call mc.js's boot() makes (setMode(defaultMode)) -- fills in
+    // the panel's title/toggle state for the /config-derived `mode` set
+    // in main() above, and does the same board/scoreboard/banner load
+    // the periodic refresh below repeats every 30s.
+    setBoardMode(mode, map);
     loadPlacesViewport(map);
     loadPlacesPanel(map);
 
