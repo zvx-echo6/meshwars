@@ -42,18 +42,54 @@ PLAY AREA (from the running service's /config, NOT app/config.py's
 narrower Idaho-only defaults -- production overrides those via .env):
   north 49.29  south 25.8  west -125.0  east -93.5
 
-OSM TAG LIST -- the approved narrowed list (docs/features/places.md).
-fire_station and post_office were cut by Matt and must NOT be restored:
+OSM TAG LIST -- the approved narrowed list (docs/features/places.md),
+BROADENED 2026-08-24 with outdoor/natural destinations. fire_station
+and post_office were cut by Matt and must NOT be restored:
   amenity=townhall, amenity=courthouse, amenity=library
   tourism=museum, tourism=viewpoint, tourism=attraction
   tourism=information WHERE information=visitor_centre
   historic=memorial, historic=monument, historic=marker
   highway=trailhead
+  -- added 2026-08-24, "places worth going" rebalance:
+  natural=hot_spring, natural=arch, natural=cave_entrance, natural=waterfall
+  historic=mine, historic=ruins, historic=fort, historic=battlefield, historic=wreck
+  man_made=lighthouse
+  man_made=tower WHERE tower:type=observation (fire lookouts)
+  tourism=alpine_hut, tourism=wilderness_hut
+  leisure=nature_reserve WHERE geometry is a node or a small way (skipped
+    if it would duplicate the parks tier -- see _landmark_match's area gate)
 A landmark also needs a `name` tag -- an unnamed node matching one of
 these tags is not a "named destination" and is skipped.
 
 POINTS (flat, by ref_type -- not derived from SOTA's own points column
 or PAD-US acreage): landmark 5, park 25, summit 100.
+
+SUMMIT THRESHOLD (added 2026-08-24, "places worth going" rebalance):
+SOTA's own Points column is elevation-derived (a 1-10 scale keyed to a
+summit's prominence within its region) and is exactly the "is this a
+real mountain, not a bump" signal the earlier unfiltered pull lacked --
+every SOTA summit became a marker regardless of size, and summits render
+as the largest symbol, so 26,600 of them buried the map. Matt's brief
+was "high SOTA value, no easy picks" -- SUMMIT_MIN_POINTS is set to 10
+(SOTA's own scale only takes even values 2/4/6/8/10 plus 1, so 10 is
+literally the top of the scale, not an arbitrary round number), which
+keeps 1,865 US in-bbox summits nationwide (measured against every
+threshold from >=1 to >=10 before picking) -- the true top tier, one a
+100-point place should cost an expedition to reach. Spread was checked
+before picking, not assumed: at >=10 all 15 SOTA associations that have
+ANY 10-point summit in the play area still have at least 6 (the
+Dakotas is the thinnest; California the thickest at 353); the only
+associations with zero are K0M/W0I/W0M/W0N (Minnesota/Iowa/Missouri/
+Nebraska) and those are flat-state associations that already have zero
+10-AND-8-point summits -- not something this threshold newly excludes.
+Idaho (W7I), where the active players are, keeps 78 at >=10; the next
+threshold down, >=8, keeps 472 in Idaho (6,487 nationwide) if that ever
+needs revisiting. This filter runs in fetch_sota() below, on SOTA's
+Points column, BEFORE the bbox/name checks -- not a separate stage,
+since it only needs the one column already being read. The `points`
+column written to the seed CSV is unrelated and unchanged by this: it
+is always the flat game value (100 for every surviving summit), never
+SOTA's own points value.
 """
 from __future__ import annotations
 
@@ -61,6 +97,7 @@ import argparse
 import csv
 import datetime
 import io
+import math
 import sys
 import urllib.request
 
@@ -70,6 +107,13 @@ SOTA_URL = "https://storage.sota.org.uk/summitslist.csv"
 POTA_URL = "https://pota.app/all_parks_ext.csv"
 
 POINTS = {"summit": 100, "park": 25, "landmark": 5}
+
+# SOTA's own elevation-derived Points column (1-10, effectively
+# 1/2/4/6/8/10 -- see module docstring "SUMMIT THRESHOLD"). Only
+# summits at or above this SOTA points value become a `place` row at
+# all; the ones that survive still carry the flat game value of 100,
+# not this number.
+SUMMIT_MIN_SOTA_POINTS = 10
 
 SEED_FIELDS = [
     "ref_type", "ref_code", "name", "lat", "lon", "points", "source",
@@ -98,6 +142,7 @@ def fetch_sota(out_path: str) -> None:
     reader = csv.DictReader(lines)
 
     kept = 0
+    skipped_low_points = 0
     with open(out_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(SEED_FIELDS)
@@ -105,7 +150,11 @@ def fetch_sota(out_path: str) -> None:
             try:
                 lat = float(row["Latitude"])
                 lon = float(row["Longitude"])
+                sota_points = int(row["Points"])
             except (KeyError, ValueError):
+                continue
+            if sota_points < SUMMIT_MIN_SOTA_POINTS:
+                skipped_low_points += 1
                 continue
             if not in_bbox(lat, lon):
                 continue
@@ -116,7 +165,8 @@ def fetch_sota(out_path: str) -> None:
             w.writerow(["summit", code, name, f"{lat:.6f}", f"{lon:.6f}",
                         POINTS["summit"], "SOTA", "", ""])
             kept += 1
-    print(f"sota: wrote {kept} summits -> {out_path}", file=sys.stderr)
+    print(f"sota: wrote {kept} summits (SOTA Points >= {SUMMIT_MIN_SOTA_POINTS}; "
+          f"{skipped_low_points} below threshold worldwide) -> {out_path}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------
@@ -154,21 +204,62 @@ def fetch_pota(out_path: str) -> None:
 # --------------------------------------------------------------------
 # Stage 3: OSM landmarks -- run on navi
 # --------------------------------------------------------------------
+# A 300 m game-grid square is 90,000 m^2 -- same cell app/places_seed.py
+# scores a park against. Used below only as the "small area" gate for
+# leisure=nature_reserve ways, so a big reserve that would duplicate the
+# parks tier is skipped rather than double-counted as a landmark too.
+SQUARE_AREA_M2 = 300.0 * 300.0
+
 LANDMARK_TAGS = {
     ("amenity", "townhall"), ("amenity", "courthouse"), ("amenity", "library"),
     ("tourism", "museum"), ("tourism", "viewpoint"), ("tourism", "attraction"),
     ("historic", "memorial"), ("historic", "monument"), ("historic", "marker"),
     ("highway", "trailhead"),
+    # added 2026-08-24, "places worth going" rebalance -- outdoor/natural
+    # destinations, to counter the civic-heavy original list:
+    ("natural", "hot_spring"), ("natural", "arch"),
+    ("natural", "cave_entrance"), ("natural", "waterfall"),
+    ("historic", "mine"), ("historic", "ruins"), ("historic", "fort"),
+    ("historic", "battlefield"), ("historic", "wreck"),
+    ("man_made", "lighthouse"),
+    ("tourism", "alpine_hut"), ("tourism", "wilderness_hut"),
 }
 
 
-def _landmark_match(tags) -> bool:
+def _matched_tag(tags) -> str | None:
+    """Returns 'key=value' for the specific tag that made this object a
+    landmark, or None if it does not match -- used both by
+    _landmark_match (boolean gate) and by extract_landmarks' per-tag
+    reporting Counter."""
     for k, v in LANDMARK_TAGS:
         if tags.get(k) == v:
-            return True
+            return f"{k}={v}"
     if tags.get("tourism") == "information" and tags.get("information") == "visitor_centre":
-        return True
-    return False
+        return "tourism=information+visitor_centre"
+    # Fire lookouts: man_made=tower is far too broad alone (cell towers,
+    # water towers), so it only counts with tower:type=observation.
+    if tags.get("man_made") == "tower" and tags.get("tower:type") == "observation":
+        return "man_made=tower+observation"
+    # leisure=nature_reserve matches here on tags alone; the node-vs-way
+    # "is it small" gate (skip if it would duplicate the parks tier) is
+    # applied in the way() handler below, where the geometry is known.
+    if tags.get("leisure") == "nature_reserve":
+        return "leisure=nature_reserve"
+    return None
+
+
+def _landmark_match(tags) -> bool:
+    return _matched_tag(tags) is not None
+
+
+def _bbox_area_m2(lats: list, lons: list) -> float:
+    """Rough bounding-box area for a way's node coordinates -- not a
+    true polygon area, but enough to tell a pocket nature reserve from
+    one that is PAD-US-scale and belongs in the parks tier instead."""
+    mean_lat = sum(lats) / len(lats)
+    lat_m = (max(lats) - min(lats)) * 111_320.0
+    lon_m = (max(lons) - min(lons)) * 111_320.0 * math.cos(math.radians(mean_lat))
+    return lat_m * lon_m
 
 
 def extract_landmarks(pbf_path: str, out_path: str) -> None:
@@ -177,8 +268,12 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
         osmium tags-filter -o filtered.pbf --overwrite \\
             /mnt/nas/nav/western-us-11states.osm.pbf \\
             amenity=townhall,courthouse,library \\
-            tourism=museum,viewpoint,attraction,information \\
-            historic=memorial,monument,marker highway=trailhead
+            tourism=museum,viewpoint,attraction,information,alpine_hut,wilderness_hut \\
+            historic=memorial,monument,marker,mine,ruins,fort,battlefield,wreck \\
+            highway=trailhead \\
+            natural=hot_spring,arch,cave_entrance,waterfall \\
+            man_made=lighthouse,tower \\
+            leisure=nature_reserve
 
     then: python3 build_places_seed.py extract-landmarks filtered.pbf landmarks.csv
 
@@ -186,23 +281,32 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
     node coordinates -- not a true area centroid, but these are point-of-
     interest buildings and small grounds (museums, trailheads, town
     halls), not large irregular polygons, so the difference is noise at
-    game-grid (300 m) scale. Relations are skipped: multipolygon assembly
-    for ~359 objects out of ~19,000 was not worth the added dependency
-    surface, and none of these tags commonly appear on relations.
+    game-grid (300 m) scale. leisure=nature_reserve ways are the one
+    exception where a real bounding-box area is computed (_bbox_area_m2),
+    since reserves genuinely do span from a pocket wetland to a national-
+    forest-scale unit that already belongs in the parks tier -- see the
+    SQUARE_AREA_M2 gate in way() below. Relations are skipped:
+    multipolygon assembly for ~359 objects out of ~19,000 was not worth
+    the added dependency surface, and none of these tags commonly appear
+    on relations.
     """
     import osmium
+    from collections import Counter
 
     class Handler(osmium.SimpleHandler):
         def __init__(self):
             super().__init__()
             self.rows = []
             self.seen_names_skipped = 0
+            self.large_reserves_skipped = 0
+            self.tag_counts = Counter()
 
         def node(self, n):
             if not n.location.valid():
                 return
             tags = n.tags
-            if not _landmark_match(tags):
+            matched = _matched_tag(tags)
+            if matched is None:
                 return
             name = tags.get("name")
             if not name:
@@ -212,10 +316,12 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
             if not in_bbox(lat, lon):
                 return
             self.rows.append(("n", n.id, name, lat, lon))
+            self.tag_counts[matched] += 1
 
         def way(self, w):
             tags = w.tags
-            if not _landmark_match(tags):
+            matched = _matched_tag(tags)
+            if matched is None:
                 return
             name = tags.get("name")
             if not name:
@@ -228,11 +334,16 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
                     lons.append(nd.location.lon)
             if not lats:
                 return
+            if tags.get("leisure") == "nature_reserve":
+                if _bbox_area_m2(lats, lons) > SQUARE_AREA_M2:
+                    self.large_reserves_skipped += 1
+                    return
             lat = sum(lats) / len(lats)
             lon = sum(lons) / len(lons)
             if not in_bbox(lat, lon):
                 return
             self.rows.append(("w", w.id, name, lat, lon))
+            self.tag_counts[matched] += 1
 
     h = Handler()
     # locations=True resolves way node coordinates against the file's own
@@ -254,7 +365,12 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
                         POINTS["landmark"], "OSM", "", ""])
             kept += 1
     print(f"landmarks: wrote {kept} named landmarks ({h.seen_names_skipped} "
-          f"unnamed matches skipped) -> {out_path}", file=sys.stderr)
+          f"unnamed matches skipped, {h.large_reserves_skipped} large nature "
+          f"reserves skipped as parks-tier duplicates) -> {out_path}", file=sys.stderr)
+    print("landmarks: per-tag match counts (pre-dedup, a node/way can only "
+          "match one tag):", file=sys.stderr)
+    for tag, n in h.tag_counts.most_common():
+        print(f"  {tag}: {n}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------
