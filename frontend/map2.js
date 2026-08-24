@@ -10,8 +10,10 @@
  * theme-toggle.js, same as every other page), a basemap that follows
  * that theme (light raster under gold, dark under neon, both defined up
  * front and toggled by visibility rather than rebuilt -- rebuilding the
- * style loses the reader's pan/zoom), and four self-hosted PMTiles
- * overlays (public lands, USFS roads/trails, BLM routes) behind a small
+ * style loses the reader's pan/zoom), three self-hosted PMTiles
+ * overlays (public lands, USFS roads/trails) and a contour overlay
+ * generated client-side from the same DEM used for hillshade (via
+ * mlcontour -- no tileset of its own), all behind a small
  * layer-switcher panel, also visibility-toggled so flipping a checkbox
  * never refetches a source.
  *
@@ -40,11 +42,10 @@ const TEAM_ORDER = Object.keys(TEAM_COLORS);
 // changed shape. That shows up as a region silently missing rather than
 // as an error. Bump TILE_REV whenever an archive on navi is replaced, so
 // the URL changes and nothing stale can survive.
-const TILE_REV = '20260824c';
+const TILE_REV = '20260824d';
 const DEM_URL = `https://navi.echo6.co/tiles/planet-dem.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `https://navi.echo6.co/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `https://navi.echo6.co/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
-const BLM_TRAILS_ROADS_URL = `https://navi.echo6.co/tiles/blm-trails-roads.pmtiles?r=${TILE_REV}`;
 
 const BASEMAP_GOLD_ID = 'basemap-gold';
 const BASEMAP_NEON_ID = 'basemap-neon';
@@ -64,10 +65,10 @@ const HILLSHADE_EXAGGERATION = { gold: 0.6, neon: 0.85 };
 // setupLayerSwitcher.
 const LAYER_TOGGLES = [
   ['mw-layer-hillshade', [HILLSHADE_ID], 0],
-  ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 0],
-  ['mw-layer-usfs-roads', ['usfs-roads-line'], 0],
-  ['mw-layer-usfs-trails', ['usfs-trails-line'], 0],
-  ['mw-layer-blm-routes', ['blm-routes-line'], 0],
+  ['mw-layer-contours', ['contours-line'], 0],
+  ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 4],
+  ['mw-layer-usfs-roads', ['usfs-roads-line'], 6],
+  ['mw-layer-usfs-trails', ['usfs-trails-line'], 6],
 ];
 
 // pmtiles.js registers no protocol on its own -- this wires the
@@ -77,6 +78,41 @@ const LAYER_TOGGLES = [
 // vector overlay archives below.
 const pmtilesProtocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile);
+
+// Contours are generated in the browser from the same DEM archive as
+// the hillshade above -- no second tileset to build or serve. mlcontour
+// (loaded from unpkg in map2.html, global `mlcontour`) reads DEM tiles
+// through its own dem:// protocol and rasterizes contour lines into
+// vector tiles on demand through a contour:// protocol; setupMaplibre
+// registers both with MapLibre. This has to happen once, before the map
+// style below is built, same as the pmtiles protocol above.
+const demSourceInstance = new mlcontour.DemSource({
+  url: `pmtiles://${DEM_URL}`,
+  encoding: 'terrarium',
+  maxzoom: 12,
+  worker: true,
+  cacheSize: 100,
+});
+demSourceInstance.setupMaplibre(maplibregl);
+
+// zoom -> [minor, major] contour interval in feet. navi's table,
+// verbatim -- the multiplier passed alongside it in setupContourLayer
+// below converts the DEM's native metres to feet to match.
+const CONTOUR_THRESHOLDS = {
+  3: [5000, 25000],
+  4: [2500, 10000],
+  5: [1000, 5000],
+  6: [1000, 5000],
+  7: [500, 2500],
+  8: [500, 2500],
+  9: [250, 1000],
+  10: [200, 1000],
+  11: [200, 1000],
+  12: [100, 500],
+  13: [100, 500],
+  14: [50, 200],
+  15: [20, 100],
+};
 
 function boundsToPolygon(cell) {
   const { south, west, north, east } = cell;
@@ -180,52 +216,37 @@ function watchTheme(map) {
   });
 }
 
-// The four self-hosted overlay sources + layers. All defined up front
-// (called once, at map load) so every checkbox toggle below only ever
-// flips a layout property -- no addSource/addLayer after this point.
-// Inserted beforeId 'board-fill' so they always sit under the team
-// squares, no matter the draw order MapLibre would otherwise pick.
+// The self-hosted overlay sources + layers: public lands and USFS
+// roads/trails. All defined up front (called once, at map load) so
+// every checkbox toggle below only ever flips a layout property -- no
+// addSource/addLayer after this point. Inserted beforeId 'board-fill'
+// so they always sit under the team squares, no matter the draw order
+// MapLibre would otherwise pick.
 // Measured data ranges, from the tile headers (not a style choice):
-//   usfs roads     z0  - z14
-//   usfs trails    z0  - z14
-//   public-lands   z0  - z12
-//   blm routes     z0  - z12
-// All four now start at z0. The usfs and public-lands archives used to
-// report z6 and z4 floors respectively -- that was never a limit of the
-// source data, it was tippecanoe flags baked into the old archives. Both
-// have since been rebuilt from the source geodatabases on navi, and the
-// rebuilt archives simply start at zero like blm always did.
-// None of the four gets a `maxzoom` -- MapLibre overzooms a vector
-// layer fine, reusing the highest tile it has, so each should keep
-// drawing all the way to the map's own maxZoom (17) rather than
-// stopping early. (Unlike the raster DEM hillshade above, which tore
-// on overzoom and is deliberately cut off at 13 -- left alone.)
-// Each layer below does still get an explicit `minzoom` so its low end
-// is declared rather than accidental; the values mirror the tiles, they
-// are not a style choice.
+//   usfs roads     z6  - z14
+//   usfs trails    z6  - z14
+//   public-lands   z4  - z12
+// These floors are real limits of navi's archives (tippecanoe flags
+// baked in at build time), not a style choice, so each layer below
+// declares an explicit `minzoom` matching them, and LAYER_TOGGLES
+// carries the same numbers so the switcher greys out an entry (with a
+// "from zoom N" label) below its floor rather than leaving a ticked box
+// that silently draws nothing; see setupLayerSwitcher.
+// Neither gets a `maxzoom` -- MapLibre overzooms a vector layer fine,
+// reusing the highest tile it has, so each should keep drawing all the
+// way to the map's own maxZoom (17) rather than stopping early.
+// (Unlike the raster DEM hillshade above, which tore on overzoom and is
+// deliberately cut off at 13 -- left alone.)
 //
-// All three route layers share this width ramp: the old flat 0.7-0.8px
-// was measured to disappear under the public-lands wash even where the
-// data was dense (Utah, 4,875 BLM features in view at Moab z9 and still
-// invisible). Never below ~1px so a route has real ink at the low zooms
-// this map opens at, growing toward 3px by street zoom.
+// Both route layers share this width ramp: the old flat 0.7-0.8px was
+// measured to disappear under the public-lands wash even where the
+// data was dense. Never below ~1px so a route has real ink at the low
+// zooms this map opens at, growing toward 3px by street zoom.
 const ROUTE_LINE_WIDTH = [
   'interpolate', ['linear'], ['zoom'],
   4, 1,
   9, 1.6,
   17, 3,
-];
-
-// BLM gets its own ramp and colour, distinct from the USFS/public-lands
-// ones above -- the shared brown was too faint and too thin to spot at
-// the mid zooms (z6-z10) people actually browse Utah at; it only read
-// once you were most of the way zoomed to the ground. USFS and public
-// lands are untouched.
-const BLM_ROUTE_LINE_WIDTH = [
-  'interpolate', ['linear'], ['zoom'],
-  4, 0.9,
-  9, 1.4,
-  14, 2.1,
 ];
 
 function setupOverlayLayers(map) {
@@ -236,10 +257,6 @@ function setupOverlayLayers(map) {
   map.addSource('usfs-trails-roads', {
     type: 'vector',
     url: `pmtiles://${USFS_TRAILS_ROADS_URL}`,
-  });
-  map.addSource('blm-trails-roads', {
-    type: 'vector',
-    url: `pmtiles://${BLM_TRAILS_ROADS_URL}`,
   });
 
   // PAD-US derived tiles carry no literal `Marine`/offshore flag -- the
@@ -262,7 +279,7 @@ function setupOverlayLayers(map) {
     type: 'fill',
     source: 'public-lands',
     'source-layer': 'public_lands',
-    minzoom: 0,
+    minzoom: 4,
     layout: { visibility: 'none' },
     filter: NOT_MARINE_FILTER,
     paint: {
@@ -288,7 +305,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'public-lands',
     'source-layer': 'public_lands',
-    minzoom: 0,
+    minzoom: 4,
     layout: { visibility: 'none' },
     filter: NOT_MARINE_FILTER,
     paint: {
@@ -316,7 +333,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'usfs-trails-roads',
     'source-layer': 'roads',
-    minzoom: 0,
+    minzoom: 6,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#b06a3a',
@@ -328,7 +345,7 @@ function setupOverlayLayers(map) {
     type: 'line',
     source: 'usfs-trails-roads',
     'source-layer': 'trails',
-    minzoom: 0,
+    minzoom: 6,
     layout: { visibility: 'none' },
     paint: {
       'line-color': '#7a5a2a',
@@ -336,22 +353,41 @@ function setupOverlayLayers(map) {
       'line-dasharray': [2, 2],
     },
   }, 'board-fill');
+}
+
+// Contour source: vector tiles generated in the browser from the DEM
+// via mlcontour (demSourceInstance, set up above), not a second pmtiles
+// archive -- contourProtocolUrl hands back a contour://{z}/{x}/{y}
+// template already carrying the threshold table and the metres->feet
+// multiplier, so this is otherwise a plain vector source.
+// Contours are terrain reference, not a feature layer: thin, low
+// opacity, and a muted tone picked to read on both the light OSM
+// basemap and the dark CARTO one rather than being tuned to either.
+// The library tags every generated line with a `level` property (1 for
+// the heavier contour of a zoom's [minor, major] pair, 0 for the
+// lighter one -- confirmed in the library's own tile output, not
+// assumed), so major contours get a bit more width and opacity than
+// minor ones for free via that property.
+function setupContourLayer(map) {
+  map.addSource('contours', {
+    type: 'vector',
+    tiles: [demSourceInstance.contourProtocolUrl({
+      multiplier: 3.28084,
+      thresholds: CONTOUR_THRESHOLDS,
+    })],
+    maxzoom: 16,
+  });
   map.addLayer({
-    id: 'blm-routes-line',
+    id: 'contours-line',
     type: 'line',
-    source: 'blm-trails-roads',
-    'source-layer': 'blm_routes',
+    source: 'contours',
+    'source-layer': 'contours',
     minzoom: 0,
     layout: { visibility: 'none' },
     paint: {
-      'line-color': '#8a6a4a',
-      'line-width': BLM_ROUTE_LINE_WIDTH,
-      'line-opacity': [
-        'interpolate', ['linear'], ['zoom'],
-        4, 0.85,
-        9, 0.95,
-        14, 1,
-      ],
+      'line-color': '#8f8168',
+      'line-width': ['match', ['get', 'level'], 1, 1, 0.6],
+      'line-opacity': ['match', ['get', 'level'], 1, 0.55, 0.3],
     },
   }, 'board-fill');
 }
@@ -369,10 +405,6 @@ function setupOverlayLayers(map) {
 // from the checkbox's own `checked` state, which this function may
 // force off while unavailable -- so zooming back in restores the tick
 // on its own rather than the user having to redo it.
-// Dormant right now: every archive in LAYER_TOGGLES starts at z0, so
-// `available` below is always true -- kept because it is data-driven off
-// LAYER_TOGGLES, not deleted, for whichever future layer does not start
-// at zero.
 function setupLayerSwitcher(map) {
   const entries = [];
 
@@ -611,6 +643,7 @@ async function main() {
     });
 
     setupOverlayLayers(map);
+    setupContourLayer(map);
     setupLayerSwitcher(map);
     watchTheme(map);
     applyBasemapTheme(map);

@@ -21,7 +21,7 @@
         href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
         crossorigin="anonymous" />
   <link rel="stylesheet" href="/static/theme.css?v=20260823-19" />
-  <link rel="stylesheet" href="/static/map2.css?v=10" />
+  <link rel="stylesheet" href="/static/map2.css?v=11" />
 </head>
 <body>
 
@@ -40,6 +40,9 @@
         <label><input type="checkbox" id="mw-layer-hillshade" checked> Hillshade</label>
       </li>
       <li>
+        <label><input type="checkbox" id="mw-layer-contours"> Contours</label>
+      </li>
+      <li>
         <label><input type="checkbox" id="mw-layer-public-lands"> Public lands</label>
       </li>
       <li>
@@ -47,9 +50,6 @@
       </li>
       <li>
         <label><input type="checkbox" id="mw-layer-usfs-trails"> USFS trails</label>
-      </li>
-      <li>
-        <label><input type="checkbox" id="mw-layer-blm-routes"> BLM routes</label>
       </li>
     </ul>
   </div>
@@ -63,8 +63,10 @@
           crossorigin="anonymous"></script>
   <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
           crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@acalcutt/maplibre-contour-pmtiles@0.1.2/dist/maplibre-contour-pmtiles.min.js"
+          crossorigin="anonymous"></script>
 
-  <script src="/static/map2.js?v=10" type="module"></script>
+  <script src="/static/map2.js?v=11" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260823-19" type="module"></script>
 </body>
 </html>
