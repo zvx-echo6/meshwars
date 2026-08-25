@@ -110,6 +110,7 @@
         <li><a href="#seasons">Seasons</a></li>
         <li><a href="#net">The weekly net</a></li>
         <li><a href="#streaks">Streaks</a></li>
+        <li><a href="#places">Places Worth Going</a></li>
         <li><a href="#months">Monthly results</a></li>
         <li><a href="#honors">The honors</a></li>
         <li><a href="#registering">Registering a radio</a></li>
@@ -204,6 +205,41 @@
           <p><strong>Your streak survives a season boundary.</strong> The points it earned reset with everything else, but the run itself is a record of showing up, not territory. Streaks are counted per board &mdash; a MeshCore run and a Meshtastic run are separate.</p>
         </section>
 
+        <section id="places">
+          <h2>Places Worth Going</h2>
+          <p>Some squares aren't just squares. A summit, a park or a landmark inside one makes that square worth more than the ground around it. None of it is invented for the game: summits come from Summits On The Air, parks from Parks On The Air with their boundaries filled in from PAD-US where one exists, and landmarks from OpenStreetMap.</p>
+
+          <h3>Scored by effort, not by category</h3>
+          <p>What a place is worth depends on how far it made you go, not what kind of place it is. Anywhere inside a town's own limits &mdash; summit, park or landmark alike &mdash; is worth five points, the same nickel whether you drove up a peak or walked to the courthouse. Step outside a town and the category starts to matter.</p>
+          <table class="rules-table rules-table-compare">
+            <thead><tr><th></th><th>Inside a town</th><th>Outside a town</th></tr></thead>
+            <tbody>
+              <tr><th>Landmark</th><td>5</td><td>10</td></tr>
+              <tr><th>Park</th><td>5</td><td>25</td></tr>
+              <tr><th>Summit</th><td>5</td><td>100</td></tr>
+            </tbody>
+          </table>
+          <p>That is on purpose. A summit you can park a car next to and a hot spring at the end of an hour of dirt road are both "a summit" and "a landmark" by category, but they are not the same errand. Scoring by effort instead of by category means the game rewards the drive, not the label: twenty remote landmarks, four remote parks or a single remote summit all reach the same weekly ceiling, while a town's own places are worth showing up for but not worth grinding.</p>
+
+          <h3>The weekly cap</h3>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>Per place</th><td>one credit, per person, per week</td></tr>
+              <tr><th>Weekly ceiling</th><td>100 points per person, whatever the mix</td></tr>
+              <tr><th>To score</th><td>a scoring ping, same as claiming a square &mdash; being there is not enough</td></tr>
+              <tr><th>Aircraft</th><td>excluded, same as everywhere else that measures reach</td></tr>
+            </tbody>
+          </table>
+          <p>Points go to your own Explorer Score and to your team's total, the same shape check-in points already have.</p>
+
+          <h3>Which square scores</h3>
+          <p>A landmark or a summit scores the single square its point falls in. A park with a mapped boundary at least the size of a grid square scores every square more than half inside that boundary &mdash; skirt its edge and only the squares mostly inside it count. A park smaller than a square, or without a boundary on file at all, scores the square containing its point instead, the same as a landmark. About a third of the seeded parks have no boundary data on file; they still score, just by that simpler rule.</p>
+
+          <h3>The weekly rotation</h3>
+          <p>Summits and every park with a real, mapped boundary are always live. Landmarks, and the small parks whose mapped boundary doesn't fill a whole square, rotate instead: only some of them are live in any given week, chosen the same way for every player, with a minimum spacing between live picks so a dense downtown can't be farmed by visiting one block. A park with no boundary on file isn't treated as small for rotation, even though it scores like one &mdash; the game doesn't actually know its size, so it stays always active instead of guessing, the same as a summit.</p>
+          <p>The rotation turns over on the same Wednesday reset as the net and everything else &mdash; one clock for the whole game. A landmark that's live this week may not be next week, and that's deliberate: the point is to keep sending you somewhere new, not to hand out a fixed list once and let it go stale.</p>
+        </section>
+
         <section id="months">
           <h2>Monthly results</h2>
           <p>Each calendar month, Boise time, gets its own result on the <a href="/results">results page</a>.</p>
@@ -220,8 +256,8 @@
             <dt>Top Attacker</dt><dd>Took the most squares off other teams. Claiming empty ground does not count here.</dd>
             <dt>Top Defender</dt><dd>Won back the most squares their team had lost. A capture counts as a defence when the previous capture of that same square took it from the team now taking it back.</dd>
             <dt>Team Attacker &amp; Team Defender</dt><dd>The same two awards, given within each team, so a strong team does not sweep everything.</dd>
-            <dt>Explorer</dt><dd>Claimed the most squares nobody had ever claimed. Easy early in a season when the whole map is new, genuinely hard once it fills in.</dd>
-            <dt>Frontier</dt><dd>Claimed the most squares more than twenty miles beyond the edge of any town. Every Frontier square is also an Explorer square, so going remote counts toward both. Twenty miles out is where coverage runs out, so expect months where nobody earns it.</dd>
+            <dt>Explorer</dt><dd>Earned the most <a href="#places">Places Worth Going</a> points that month. Used to mean the most squares nobody had ever claimed &mdash; a proxy for exploring, back before there was anything better to measure it with.</dd>
+            <dt>Frontier</dt><dd>Claimed the most squares more than twenty miles beyond the edge of any town. No longer restricted to squares nobody had claimed before &mdash; that rule only existed to keep Frontier a subset of the old Explorer. Now the two measure different things: Frontier counts ground out past the towns, Explorer counts destinations reached, and any out-of-town capture counts here, attack, retake or first claim alike. Twenty miles out is where coverage runs out, so expect months where nobody earns it.</dd>
             <dt>Top NetOp</dt><dd>Earned the most points from checking in to the weekly net.</dd>
             <dt>Most Consistent</dt><dd>Held the longest run of consecutive nets during the month.</dd>
             <dt>Quick Fingers</dt><dd>Checked in fastest after the net opened, averaged across the month. Needs at least two check-ins &mdash; one lucky night does not win it.</dd>
