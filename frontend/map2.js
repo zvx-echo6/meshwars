@@ -2,7 +2,7 @@
  * MeshWars: front page (/), also reachable at /map2. Boots a MapLibre GL
  * map -- the renderer swap for the original Leaflet page, now kept at
  * /map-legacy (frontend/mc.js) -- and draws it with a self-hosted
- * PMTiles DEM for hillshade, which Leaflet has no equivalent for.
+ * PMTiles hillshade layer, which Leaflet has no equivalent for.
  *
  * Also carries: the site's theme system (theme.css + theme-toggle.js,
  * same as every other page, but defaulting to the neon/dark theme here
@@ -36,23 +36,25 @@ const TEAM_COLORS = {
 
 const TEAM_ORDER = Object.keys(TEAM_COLORS);
 
-// USFS roads/trails and public lands now ship with the game itself
-// (same-origin /tiles/, see app/api.py's tiles_dir mount) rather than
-// being fetched from navi at runtime -- navi's archives got rebuilt in
-// place, keeping the same filename, and a browser that already held
-// byte ranges of the previous file would happily keep serving them
-// against a file that had since changed shape underneath it. That
-// showed up as a region silently missing rather than as an error.
-// Bump TILE_REV whenever a served archive changes, so the URL changes
-// and nothing stale can survive.
+// All three overlay archives -- public lands, USFS roads/trails, and
+// the hillshade below -- now ship with the game itself (same-origin
+// /tiles/, see app/api.py's tiles_dir mount) rather than being fetched
+// from navi at runtime -- navi's archives got rebuilt in place, keeping
+// the same filename, and a browser that already held byte ranges of
+// the previous file would happily keep serving them against a file
+// that had since changed shape underneath it. That showed up as a
+// region silently missing rather than as an error. Bump TILE_REV
+// whenever a served archive changes, so the URL changes and nothing
+// stale can survive.
 //
-// The DEM/hillshade source is the one archive still on navi: the
-// pre-baked hillshade pmtiles (meshwars-hillshade.pmtiles) wasn't
-// finished baking yet when the other two moved local. Point it local
-// too once that bake lands and is copied over -- see docs/ for the
-// same navi-rebuild caveat this comment used to describe for all three.
-const TILE_REV = '20260824e';
-const DEM_URL = `https://navi.echo6.co/tiles/planet-dem.pmtiles?r=${TILE_REV}`;
+// The hillshade source used to be planet-dem.pmtiles, the one archive
+// still on navi: a raw elevation DEM shaded in the browser at ~11.3MB
+// per view, ninety-five percent of the page's weight. It is now
+// meshwars-hillshade.pmtiles -- finished imagery, pre-rendered once
+// across the play area at the dark theme's exaggeration -- so navi is
+// out of the runtime path entirely.
+const TILE_REV = '20260825a';
+const DEM_URL = `/tiles/meshwars-hillshade.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
@@ -60,14 +62,10 @@ const BASEMAP_GOLD_ID = 'basemap-gold';
 const BASEMAP_NEON_ID = 'basemap-neon';
 const HILLSHADE_ID = 'hillshade';
 
-// Hillshade reads weaker against the dark neon ground, so it gets a
-// slightly higher exaggeration there. Keyed by theme name.
-const HILLSHADE_EXAGGERATION = { gold: 0.6, neon: 0.85 };
-
 // Team territory washes into the dark neon basemap/hillshade at the
 // gold theme's weights, so it gets more fill opacity and a heavier
 // outline there. Gold is untouched -- it already reads fine. Keyed by
-// theme name, same pattern as HILLSHADE_EXAGGERATION above.
+// theme name.
 const BOARD_FILL_OPACITY = { gold: 0.45, neon: 0.65 };
 const BOARD_LINE_WIDTH = { gold: 1, neon: 2 };
 
@@ -220,10 +218,10 @@ const MAX_FIT_ZOOM = 13;
 const NARROW_BREAKPOINT_PX = 600;
 
 // pmtiles.js registers no protocol on its own -- this wires the
-// pmtiles:// URL scheme into MapLibre's request pipeline so a
-// raster-dem source can point straight at a single .pmtiles archive
-// instead of a z/x/y tile template. The same protocol also serves the
-// vector overlay archives below.
+// pmtiles:// URL scheme into MapLibre's request pipeline so a raster
+// source can point straight at a single .pmtiles archive instead of a
+// z/x/y tile template. The same protocol also serves the vector
+// overlay archives below.
 const pmtilesProtocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile);
 
@@ -1298,16 +1296,18 @@ function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === 'neon' ? 'neon' : 'gold';
 }
 
-// Flips which raster basemap is visible and re-tunes the hillshade
-// exaggeration for it. Never rebuilds the style or touches the board's
-// team-colour expression -- that stays constant across themes on
-// purpose (gameplay, not branding).
+// Flips which raster basemap is visible. Never rebuilds the style or
+// touches the board's team-colour expression -- that stays constant
+// across themes on purpose (gameplay, not branding). The hillshade
+// layer used to get a per-theme exaggeration re-tune here too, but
+// that was a raster-dem paint property computed in the browser; the
+// pre-rendered hillshade imagery has its exaggeration baked in at
+// build time and carries no such property to set.
 function applyBasemapTheme(map) {
   const theme = currentTheme();
   const neon = theme === 'neon';
   map.setLayoutProperty(BASEMAP_GOLD_ID, 'visibility', neon ? 'none' : 'visible');
   map.setLayoutProperty(BASEMAP_NEON_ID, 'visibility', neon ? 'visible' : 'none');
-  map.setPaintProperty(HILLSHADE_ID, 'hillshade-exaggeration', HILLSHADE_EXAGGERATION[theme]);
   map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
   map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
   map.setPaintProperty('park-boundaries-fill', 'fill-opacity', PARK_BOUNDARY_FILL_OPACITY[theme]);
@@ -1347,9 +1347,13 @@ function watchTheme(map) {
 // that silently draws nothing; see setupLayerSwitcher.
 // Neither gets a `maxzoom` -- MapLibre overzooms a vector layer fine,
 // reusing the highest tile it has, so each should keep drawing all the
-// way to the map's own maxZoom (17) rather than stopping early.
-// (Unlike the raster DEM hillshade above, which tore on overzoom and is
-// deliberately cut off at 13 -- left alone.)
+// way to the map's own maxZoom (17) rather than stopping early. The
+// hillshade above now overzooms the same uncapped way: it used to be a
+// raster-dem source that tore along tile seams past its data's z12
+// ceiling (deliberately cut off at 13 to make that predictable), but
+// plain raster imagery just reuses and stretches its last real tile
+// like these vector layers do, so nothing tears and there is nothing
+// to cap.
 //
 // Both route layers share this width ramp: the old flat 0.7-0.8px was
 // measured to disappear under the public-lands wash even where the
@@ -1651,10 +1655,16 @@ async function main() {
           attribution: '© OpenStreetMap contributors © CARTO',
           maxzoom: 20,
         },
-        dem: {
-          type: 'raster-dem',
+        // meshwars-hillshade.pmtiles is finished imagery (WEBP tiles,
+        // z0-12), not elevation data -- there is nothing left for the
+        // browser to shade, so this is a plain raster source, not
+        // raster-dem, and carries no `encoding`. maxzoom marks the
+        // archive's real ceiling; MapLibre reuses and stretches that
+        // z12 tile above it (see the HILLSHADE_ID layer below and the
+        // overzoom comment near ROUTE_LINE_WIDTH).
+        'hillshade-source': {
+          type: 'raster',
           url: `pmtiles://${DEM_URL}`,
-          encoding: 'terrarium',
           tileSize: 256,
           maxzoom: 12,
         },
@@ -1674,21 +1684,17 @@ async function main() {
         },
         {
           id: HILLSHADE_ID,
-          type: 'hillshade',
-          source: 'dem',
-          // The DEM source itself only reaches z12 (that correctly
-          // describes the data, left alone above). Above z12 MapLibre
-          // was reusing whichever z12 parent tiles happened to already
-          // be cached, stretched, and never fetching the rest -- so the
-          // hillshade teared along tile seams with nothing erroring to
-          // say so. Cutting the LAYER off at 13 makes that predictable
-          // (uniformly gone instead of half-there), and hillshade is
-          // meaningless at street zoom anyway: the whole view sits
-          // inside one elevation sample by then.
-          maxzoom: 13,
-          paint: {
-            'hillshade-exaggeration': HILLSHADE_EXAGGERATION[bootTheme],
-          },
+          type: 'raster',
+          source: 'hillshade-source',
+          // No `maxzoom` here (see the overzoom comment near
+          // ROUTE_LINE_WIDTH) -- the map's own maxZoom is 17, and a
+          // plain raster layer just keeps reusing the source's last
+          // real z12 tile above that rather than vanishing. No `paint`
+          // either: exaggeration was a raster-dem-only paint property,
+          // computed live from elevation. This archive's exaggeration
+          // (0.85, the dark theme's former value) is baked into the
+          // pixels at build time, so there is nothing to set here and
+          // no theme to key it by.
         },
       ],
     },
