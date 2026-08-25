@@ -1,6 +1,6 @@
 ---
 title: Places Worth Going
-status: built on feat/places, not deployed — schema, seed, rotation, scoring, API, map markers and panel, admin preview all land there; CT 119 (production) still runs without it
+status: deployed to production (CT 119) since commit 90a0ea2 — schema, seed, rotation, scoring, API, map markers and panel, admin preview all live
 ---
 
 # Places Worth Going
