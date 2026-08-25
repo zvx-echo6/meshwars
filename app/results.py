@@ -47,7 +47,6 @@ PLAYER_AWARDS = [
     ("top_attacker", "Top Attacker"),
     ("top_defender", "Top Defender"),
     ("top_netop", "Top NetOp"),
-    ("most_consistent", "Most Consistent"),
     ("quick_fingers", "Quick Fingers"),
     ("explorer", "Explorer"),
     ("frontier", "Frontier"),
@@ -57,6 +56,19 @@ PER_TEAM_AWARDS = [
     ("team_defender", "Team Defender"),
 ]
 AWARD_LABELS = dict(TEAM_AWARDS + PLAYER_AWARDS + PER_TEAM_AWARDS)
+
+# Retired: no longer computed for new months, but a month frozen while it
+# still existed keeps its month_award row forever (frozen months are
+# never rewritten), so its label stays here rather than falling back to
+# the raw award key on the page.
+#
+# most_consistent (longest run of consecutive nets) came down 2026-08-25:
+# a month is about four nets, and nearly everyone who shows up hits all
+# four, so it was a tie among most of the field and told you nothing.
+# Check-in streaks already pay points for showing up every week (5 per
+# consecutive week, capped at 25) -- the same thing measured somewhere it
+# can actually vary.
+AWARD_LABELS["most_consistent"] = "Most Consistent"
 
 # Display order. compute_month() emits awards in this order naturally,
 # but a frozen month is read back out of a table with no inherent order,
@@ -171,7 +183,7 @@ def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlit
     team -- the same live-team choice mc_scoring.team_checkin_points()
     makes, so a month's figures and a season's always agree."""
     return conn.execute(
-        "SELECT a.player_id, a.net_date, a.points, a.streak, a.message_ts, "
+        "SELECT a.player_id, a.net_date, a.points, a.message_ts, "
         "       p.team AS team, p.display_name AS display_name "
         "  FROM mc_checkin_award a "
         "  JOIN player p ON p.player_id = a.player_id "
@@ -357,12 +369,9 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
 
     # ---- check-in awards ----------------------------------------------
     points: dict[int, float] = {}
-    streaks: dict[int, int] = {}
     offsets: dict[int, list[float]] = {}
     for r in chk:
         points[r["player_id"]] = points.get(r["player_id"], 0.0) + r["points"]
-        if r["streak"] is not None:
-            streaks[r["player_id"]] = max(streaks.get(r["player_id"], 0), r["streak"])
         if r["message_ts"] is not None:
             offsets.setdefault(r["player_id"], []).append(
                 r["message_ts"] - _net_window_open(r["net_date"])
@@ -370,8 +379,6 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
 
     add(_award("top_netop", *(_top(points, 0.001) or (None, 0)), names=names,
                detail="points from weekly net check-ins"))
-    add(_award("most_consistent", *(_top(streaks) or (None, 0)), names=names,
-               detail="nets checked into in a row"))
 
     # Quick Fingers, and the guard that makes it survivable. An award for
     # being fastest on a scheduled event invites a cron job, so a player
