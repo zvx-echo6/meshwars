@@ -100,6 +100,17 @@ def credit_places(
         (*place_ids, week_start),
     ).fetchall()
     if not rows:
+        # This cell does map to a place (or places) -- just none of
+        # them qualify right now: inactive (left the seed) or a
+        # rotating place that isn't this week's draw. Silent otherwise,
+        # this is exactly the "why didn't that award" question an
+        # operator can't answer by staring at an empty place_activation
+        # table -- log it so they don't have to re-derive it by hand.
+        log.debug(
+            "place_scoring: cell %s maps to place(s) %s but none are "
+            "active+live this week (%s)",
+            cell_id, place_ids, week_start,
+        )
         return []
 
     already_points = conn.execute(
@@ -109,19 +120,36 @@ def credit_places(
     ).fetchone()[0]
     remaining = WEEKLY_CAP_POINTS - already_points
     if remaining <= 0:
+        log.debug(
+            "place_scoring: player %d already at/over the %d weekly cap "
+            "(%d) -- cell %s credits nothing (week %s)",
+            player_id, WEEKLY_CAP_POINTS, already_points, cell_id, week_start,
+        )
         return []
 
     credited: list[tuple[int, int]] = []
     for row in rows:
         place_id, points = row["id"], row["points"]
         if points > remaining:
-            continue  # doesn't fit this week's remaining budget -- no partial credit
+            # doesn't fit this week's remaining budget -- no partial credit
+            log.debug(
+                "place_scoring: place %d (%d pts) doesn't fit player %d's "
+                "remaining %d-point budget this week (%s) -- skipped",
+                place_id, points, player_id, remaining, week_start,
+            )
+            continue
         exists = conn.execute(
             "SELECT 1 FROM place_activation WHERE place_id = ? AND player_id = ? AND week_start = ?",
             (place_id, player_id, week_start),
         ).fetchone()
         if exists is not None:
-            continue  # already credited this reference this week
+            # already credited this reference this week
+            log.debug(
+                "place_scoring: place %d already credited to player %d this "
+                "week (%s) -- skipped",
+                place_id, player_id, week_start,
+            )
+            continue
         conn.execute(
             "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
             "VALUES (?, ?, ?, ?, ?)",
