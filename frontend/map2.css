@@ -193,9 +193,37 @@
   font-size: 12px;
 }
 
-/* Marker click popup (MapLibre's own .maplibregl-popup-content already
- * themes via its default styling; this only sizes the text we put
- * inside it). */
+/* MapLibre popup chrome (dark theme). MapLibre's own .maplibregl-popup-
+ * content does NOT theme itself -- it ships a hardcoded white background
+ * with default (black-ish) text -- unlike Leaflet, where coverage.css
+ * already overrides .leaflet-popup-content-wrapper/.leaflet-popup-tip
+ * for the /map-legacy page. Both popups built by map2.js (the cell
+ * popup's .mc-tile-popup and the place popup's .mw-place-popup) reuse
+ * mc.css/this file's own light-on-dark text colors, so without this
+ * block they were a white box with unreadable grey/light text and a
+ * white tip. Mirrors coverage.css's Leaflet block: same tokens, same
+ * shape, just MapLibre's class names. Applies to both popups (no
+ * className scoping) since they share one map and should look alike. */
+.maplibregl-popup-content {
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+}
+.maplibregl-popup-tip {
+  border-top-color: var(--mw-panel);
+  border-bottom-color: var(--mw-panel);
+  border-left-color: var(--mw-panel);
+  border-right-color: var(--mw-panel);
+}
+.maplibregl-popup-close-button {
+  color: var(--mw-text-4);
+  font-size: 16px;
+}
+.maplibregl-popup-close-button:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--mw-text-1);
+}
+
 .mw-place-popup .mw-place-popup-name {
   font-weight: 600;
   margin-bottom: 2px;
