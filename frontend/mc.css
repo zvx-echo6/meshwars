@@ -68,6 +68,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   width: 100%;
   background: none;
   border: none;
@@ -76,9 +77,16 @@
   cursor: default;
   text-align: left;
 }
+.mc-header-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 .mc-header-right {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
 }
 .mc-header-summary {
   display: none;
