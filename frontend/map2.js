@@ -1246,9 +1246,20 @@ async function loadPlacesViewport(map) {
   try {
     const bounds = map.getBounds();
     const data = await fetchPlacesInViewport(bounds, map.getZoom());
+    // One park, one mark: a park's centroid marker is suppressed
+    // exactly where its own outline is also coming back, so the two
+    // can never both draw at once. Driven by the actual ids present in
+    // data.park_boundaries -- not a re-derived zoom check -- so this
+    // cannot drift out of sync with MIN_BOUNDARY_ZOOM (it IS whatever
+    // that gate produced this response) and it degrades correctly when
+    // app/places_api.py's MAX_BOUNDARY_RESULTS cap silently drops a
+    // park's boundary from the response: that id is then simply absent
+    // from boundaryIds, so its marker is not filtered and the park
+    // stays visible as a dot rather than disappearing from the map.
+    const boundaryIds = new Set(data.park_boundaries.features.map((f) => f.properties.id));
     map.getSource('places').setData({
       type: 'FeatureCollection',
-      features: data.places.map(placeToFeature),
+      features: data.places.filter((p) => !boundaryIds.has(p.id)).map(placeToFeature),
     });
     // park_boundaries is always present (an empty FeatureCollection
     // below MIN_BOUNDARY_ZOOM, or with no boundary-backed park in
