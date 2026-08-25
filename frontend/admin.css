@@ -438,6 +438,34 @@ body {
 .adm-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
 .adm-form input { flex: 1 1 180px; }
 
+/* Notice section's body field -- the only textarea in the panel, so
+   sized and colored to match the plain <input>s around it (same
+   background/border/radius the browser default gives those) rather
+   than introducing a second input language for one field. */
+.adm-textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--mw-text-1);
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  resize: vertical;
+}
+
+.adm-check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  color: var(--mw-text-4);
+}
+.adm-check { width: auto; margin: 0; }
+
 @media (max-width: 620px) {
   .adm-player-meta { margin-left: 0; width: 100%; }
 }

@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     # Storage
     db_path: str = "/data/game.db"
 
+    # Terrain/overlay PMTiles archives (USFS roads+trails, public lands)
+    # served under /tiles -- see mount() in app/api.py. A bind mount
+    # rather than the meshwars-data volume: these are large, static, and
+    # copied in from outside docker, so they should survive a container
+    # or volume rebuild without being re-copied. If the directory isn't
+    # there, the /tiles mount is simply skipped (same pattern as the
+    # /static mount's frontend_dir.exists() check).
+    tiles_dir: str = "/tiles-data"
+
     # Polling
     poll_interval_seconds: int = 45
     upstream_rate_per_sec: float = 5.0  # global rate cap to upstream meshview

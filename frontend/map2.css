@@ -1,62 +1,52 @@
-/* MeshWars: staging-only MapLibre map page (/map2). Deliberately
- * separate from coverage.css/mc.css -- this page has no nav bar and no
- * modals, just the map, a plain scores panel, a layer switcher and a
- * theme toggle. theme.css is loaded before this file (see map2.html)
- * so every panel below reads its colours from --mw-* tokens rather
- * than hardcoding them -- chrome follows the theme, team colours never
- * do (those live in frontend/map2.js and are gameplay, not branding).
+/* MeshWars: front page (/), also reachable at /map2. Loads coverage.css
+ * (page layout, the loading overlay, the no-JS fallback, the site nav
+ * bar, Leaflet chrome overrides that simply match nothing here) and
+ * mc.css (the territory panel/modals/winner banner, ported into
+ * map2.js -- see that file's "Territory panel" section) ahead of this
+ * file, same as frontend/index.html -- reused rather than duplicated,
+ * so the panel is pixel-identical to its Leaflet original. This file
+ * only carries what is unique to the MapLibre map itself: the #map
+ * sizing MapLibre needs, the layer switcher, and the Places Worth
+ * Going markers + in-panel expand section (.mc-places-section, below
+ * the territory panel rule -- built into the territory panel itself by
+ * map2.js's buildScoreboardControl, not a floating panel of its own).
+ * theme.css is loaded first (see map2.html) so every panel below reads
+ * its colours from --mw-* tokens rather than hardcoding them -- chrome
+ * follows the theme, team colours never do (those live in
+ * frontend/map2.js and are gameplay, not branding).
  * See frontend/map2.js for the map itself.
  */
 
-html, body {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  width: 100%;
-  background: var(--mw-page);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-}
-
 #map {
   position: absolute;
-  top: 0;
+  top: var(--mw-nav-h);
   left: 0;
   right: 0;
   bottom: 0;
 }
 
-/* Sits in the map's top-left, offset clear of MapLibre's own
- * NavigationControl (zoom/compass), which map2.js also anchors
- * top-left. */
-.mw-map-controls {
+/* Territory panel (mc.css's .mc-scoreboard, built by map2.js's
+ * buildScoreboardControl -- see that file). mc.css carries none of its
+ * own positioning: on the Leaflet page it sits inside Leaflet's own
+ * "topright" control corner, which does not exist here, so this file
+ * places it explicitly in the same visual corner instead -- same 10px
+ * gutter Leaflet's control corners use.
+ *
+ * max-height/overflow-y are what make expanding Places (.mc-places-
+ * section, below) safe on a short viewport: without a cap the card
+ * would just keep growing downward and run off the bottom of the
+ * screen with no way to reach whatever scrolled past. mc.css itself
+ * carries no such cap -- on the Leaflet page (frontend/index.html) this
+ * same class sits inside Leaflet's own control corner with no Places
+ * section to expand, so it has never needed one; scoped here rather
+ * than added to the shared file so that page is untouched. */
+.mc-scoreboard#mc-scoreboard-position {
   position: absolute;
-  top: 12px;
-  left: 58px;
-  z-index: 5;
-}
-
-.mw-theme-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 29px;
-  height: 29px;
-  padding: 0;
-  background: var(--mw-panel);
-  border: 1px solid var(--mw-line);
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--mw-text-5);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
-  transition: opacity 0.15s ease, color 0.15s ease;
-}
-.mw-theme-btn svg { display: block; }
-.mw-theme-btn:hover,
-.mw-theme-btn:focus-visible {
-  color: var(--mw-gold);
-}
-.mw-theme-btn[aria-pressed="true"] {
-  color: var(--mw-gold);
+  top: calc(var(--mw-nav-h) + 10px);
+  right: 10px;
+  z-index: 20;
+  max-height: calc(100vh - var(--mw-nav-h) - 20px);
+  overflow-y: auto;
 }
 
 .mw-layers {
@@ -114,58 +104,192 @@ html, body {
   cursor: default;
 }
 
-.mw-scores {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 5;
-  background: var(--mw-panel);
-  color: var(--mw-text-1);
-  border: 1px solid var(--mw-line);
-  border-radius: 8px;
-  padding: 10px 14px;
-  min-width: 160px;
-  font-size: 13px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+/* Places Worth Going (docs/features/places.md): NOT a floating panel of
+ * its own -- two separate floating-panel attempts both ended up either
+ * clipped behind the territory panel or (once moved to the bottom-right
+ * corner) with its own header hidden behind the fixed nav bar. Built
+ * directly into the territory panel instead (map2.js's
+ * buildScoreboardControl): a fourth .mc-actions button, styled exactly
+ * like Refresh map/Top Operators next to it (mc.css's shared
+ * #mc-refresh-btn/#mc-top-btn/#mc-places-btn rule -- see that file),
+ * that expands #mc-places-section in place below it. Nested inside a
+ * card that already has nothing else fighting it for the corner, and
+ * already scrolls as a whole if it overflows the viewport (see
+ * .mc-scoreboard#mc-scoreboard-position's max-height above), so there
+ * is nothing left for this to hide behind.
+ *
+ * #mw-places-list itself is never removed from the DOM regardless of
+ * whether the section is open (map2.js keeps writing to it on every
+ * moveend), so the list is current the instant a reader expands it. */
+.mc-places-section {
+  display: none;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--mw-raised);
+}
+.mc-places-section.open {
+  display: block;
 }
 
-.mw-scores-title {
+.mc-places-section-title {
+  font-size: 11px;
   font-weight: 600;
-  margin-bottom: 6px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  font-size: 11px;
   color: var(--mw-text-6);
+  margin-bottom: 4px;
 }
 
-.mw-scores-list {
+.mw-places-list {
   list-style: none;
   margin: 0;
   padding: 0;
+  /* A capped, independently-scrolling region rather than letting a
+   * long list alone dictate the whole card's height -- the outer
+   * scoreboard card still has its own max-height/overflow as a second
+   * safety net (see above), this just keeps a short viewport from
+   * needing to scroll the entire card just to see two more places. */
+  max-height: 240px;
+  overflow-y: auto;
 }
 
-.mw-scores-list li {
+.mw-places-list li {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 2px 0;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--mw-raised);
+  cursor: pointer;
+  font-size: 12px;
+}
+.mw-places-list li:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
-.mw-score-dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  margin-right: 6px;
+.mw-places-list .mw-place-icon {
+  flex: none;
+  width: 9px;
+  height: 9px;
 }
 
-.mw-score-name {
-  display: flex;
-  align-items: center;
+.mw-places-list .mw-place-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.mw-score-value {
+.mw-places-list .mw-place-meta {
+  flex: none;
   font-variant-numeric: tabular-nums;
+  color: var(--mw-text-6);
+  font-size: 11px;
+}
+
+.mw-places-empty {
+  padding: 8px 0;
+  color: var(--mw-text-6);
+  font-size: 12px;
+}
+
+/* Marker click popup (MapLibre's own .maplibregl-popup-content already
+ * themes via its default styling; this only sizes the text we put
+ * inside it). */
+.mw-place-popup .mw-place-popup-name {
   font-weight: 600;
+  margin-bottom: 2px;
+}
+.mw-place-popup .mw-place-popup-meta {
+  font-size: 12px;
+  color: var(--mw-text-6);
+}
+
+/* ===== Update notice (operator-authored, admin panel) =====
+   Same dimmed-backdrop/dark-card shape as mc.css's .mc-modal (see
+   map2.js's ensureModal), kept as its own small block rather than
+   reusing that modal: this one is built and torn down by map2.js's
+   loadNotice() on its own timer (once, at boot, only if unread), not
+   opened by a nav button, and .mc-modal's own display:none/flex toggle
+   would fight a second consumer appending into the same element. Only
+   theme tokens below -- no literal colors -- so it reads correctly on
+   both the gold and neon skins without any theme-specific rule here. */
+.mw-notice-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2100; /* above .mc-modal's 2000 -- a release notice outranks a stats popup */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 16px;
+}
+
+.mw-notice-modal-inner {
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 8px;
+  width: min(520px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+}
+
+.mw-notice-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--mw-line);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--mw-accent);
+}
+
+.mw-notice-modal-close {
+  flex: none;
+  cursor: pointer;
+  color: var(--mw-text-4);
+  font-size: 22px;
+  line-height: 1;
+  background: none;
+  border: none;
+  padding: 0;
+}
+.mw-notice-modal-close:hover { color: var(--mw-text-1); }
+
+.mw-notice-modal-body {
+  padding: 16px 18px 20px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--mw-text-2);
+  /* Plain text is written in with .textContent (map2.js) -- this is
+     what turns the operator's line breaks back into visible ones
+     without ever parsing the body as markup. */
+  white-space: pre-wrap;
+}
+
+/* The body is plain text on purpose and can never carry its own link,
+   so this fixed footer is the one way out to more detail, present on
+   every notice. A rule above it separates it from the body the same
+   way .mw-notice-modal-header's rule separates the title -- and keeps
+   it visually apart from .mw-notice-modal-close up in the header, so
+   "read on" and "close" never read as the same control. */
+.mw-notice-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--mw-line);
+}
+
+.mw-notice-modal-rules-link {
+  color: var(--mw-accent);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+.mw-notice-modal-rules-link:hover,
+.mw-notice-modal-rules-link:focus-visible {
+  text-decoration: underline;
 }

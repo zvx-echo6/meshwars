@@ -4,33 +4,172 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0C0B0A" />
-  <!-- Applied before any stylesheet paints, so a reader who chose the
-       neon skin never sees a frame of gold first. Deliberately inline
-       and tiny: a fetched script here would block first paint, which is
-       the thing this exists to avoid. Mirrors theme-toggle.js, which
-       owns everything after load. -->
-  <script>
-    try { if (localStorage.getItem('mwTheme') === 'neon') {
-      document.documentElement.setAttribute('data-theme', 'neon');
-    } } catch (e) {}
-  </script>
-  <title>MeshWars — Staging Map (MapLibre)</title>
-  <meta name="robots" content="noindex, nofollow">
+  <!-- Applied before any stylesheet paints, so a reader never sees a
+       frame of the wrong theme first. Deliberately inline and tiny: a
+       fetched script here would block first paint, which is the thing
+       this exists to avoid. Mirrors theme-toggle.js, which owns
+       everything after load.
 
+       This is the ONE page where an absent stored choice does not mean
+       gold: the front page's map reads better dark by default (the
+       owner's explicit call), so a never-chosen visitor lands on neon
+       here specifically. An explicit choice always wins regardless --
+       theme-toggle.js's apply() now writes 'gold' explicitly rather
+       than clearing the key, so "never chosen" and "chose gold" are
+       distinguishable here where every other page's boot snippet still
+       only checks for 'neon'. -->
+  <script>
+    try {
+      var t = localStorage.getItem('mwTheme');
+      if (t === 'neon' || t === null) {
+        document.documentElement.setAttribute('data-theme', 'neon');
+      }
+    } catch (e) {}
+  </script>
+  <title>MeshWars — Live Territory Map</title>
+  <meta name="description" content="MeshWars is a live mesh map: a real-world capture-the-flag game where seven teams claim ground on Meshtastic and MeshCore mesh coverage.">
+  <link rel="canonical" href="https://meshwars.com/">
+
+  <!-- Google reads a site's search-results favicon from the home page
+       specifically, and documents it must be square and a multiple of
+       48px (48/96/144/192...) -- it is unreliable about anything smaller,
+       so the 16/32px pair below is for browser tabs only. 48x48 and
+       192x192 are already on disk (see frontend/assets/favicon/) and
+       declared here for Google; do not remove the smaller sizes, browsers
+       still use those. -->
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="MeshWars — Live Territory Map">
+  <meta property="og:description" content="Watch seven teams compete for real-world territory over mesh radio, live on the map.">
+  <meta property="og:url" content="https://meshwars.com/">
+  <meta property="og:image" content="https://meshwars.com/static/assets/social/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="MeshWars — Live Territory Map">
+  <meta name="twitter:description" content="Watch seven teams compete for real-world territory over mesh radio, live on the map.">
+  <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
+
+  <!-- Truthful and minimal: describes the game and links to the actual
+       open-source repo it runs from. No invented ratings, prices,
+       authorship, or organization -- none of those exist for this
+       project. Same content (page-specific "url") on all three public
+       pages; see frontend/about.html and frontend/join.html. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "https://meshwars.com/#org",
+        "name": "MeshWars",
+        "alternateName": "Mesh Wars",
+        "url": "https://meshwars.com/",
+        "logo": "https://meshwars.com/static/assets/logo/meshwars-horizontal.png",
+        "sameAs": [
+          "https://github.com/zvx-echo6/meshwars"
+        ]
+      },
+      {
+        "@type": "WebSite",
+        "@id": "https://meshwars.com/#website",
+        "name": "MeshWars",
+        "alternateName": "Mesh Wars",
+        "url": "https://meshwars.com/",
+        "publisher": { "@id": "https://meshwars.com/#org" }
+      },
+      {
+        "@type": "Game",
+        "@id": "https://meshwars.com/#game",
+        "name": "MeshWars",
+        "alternateName": "Mesh Wars",
+        "url": "https://meshwars.com/",
+        "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+        "genre": ["Location-based game", "Capture the flag"],
+        "publisher": { "@id": "https://meshwars.com/#org" },
+        "isBasedOn": {
+          "@type": "SoftwareSourceCode",
+          "name": "MeshWars",
+          "codeRepository": "https://github.com/zvx-echo6/meshwars",
+          "programmingLanguage": "Python",
+          "license": "https://opensource.org/licenses/MIT"
+        }
+      }
+    ]
+  }
+  </script>
+
+  <!-- Cache-busting: /static assets are served cacheable while this HTML
+       page is no-cache. Without a version string, a returning visitor can
+       get fresh HTML paired with a stale cached stylesheet/script. Bump
+       v=20260824-1 on EVERY /static CSS/JS reference shared with the
+       other pages (theme.css, coverage.css, mc.css, theme-toggle.js)
+       whenever any of those files change, and bump the small integer
+       version below on map2.css/map2.js specifically whenever either of
+       those two changes -- do not touch the pinned external
+       MapLibre/pmtiles CDN links. -->
   <link rel="stylesheet"
         href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
         crossorigin="anonymous" />
-  <link rel="stylesheet" href="/static/theme.css?v=20260823-19" />
-  <link rel="stylesheet" href="/static/map2.css?v=11" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260824-2" />
+  <link rel="stylesheet" href="/static/coverage.css?v=20260824-2" />
+  <link rel="stylesheet" href="/static/mc.css?v=20260825-1" />
+  <link rel="stylesheet" href="/static/map2.css?v=17" />
 </head>
 <body>
 
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/" class="active">Map</a>
+      <a href="/results">Results</a>
+      <a href="/rules">Rules</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the gold theme" aria-label="Switch to the gold theme">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+      </button>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <!-- This page is a MapLibre map with essentially no indexable text --
+       with JavaScript off (a crawler, or a person who disabled it) this
+       is the only content anyone gets. Genuinely descriptive, not
+       cloaking: it says exactly what the page shows when JS is running.
+       See frontend/index.html for the same pattern on this page's
+       predecessor (now at /map-legacy). -->
+  <noscript>
+    <div class="mw-noscript">
+      <p>MeshWars is a real-world capture-the-flag game played over mesh radio. Seven teams claim roughly 300 meter map squares by reaching Meshtastic or MeshCore mesh coverage from them; this page normally shows a live map of who holds what. Enable JavaScript to see it, or read more on the <a href="/about">About page</a>.</p>
+    </div>
+  </noscript>
+
+  <!-- Built once here (not by map2.js at runtime, unlike the territory
+       panel and its History/Roster/Top modal -- this has no interactive
+       chrome to wire up, just content map2.js swaps in/out). Same
+       element, same position, same styling as frontend/index.html's
+       copy (mc.css's .mc-winner-banner) -- see map2.js's
+       renderWinnerBanner. -->
+  <div id="mc-winner-banner" class="mc-winner-banner"></div>
+
   <div id="map"></div>
 
-  <div id="mw-map-controls" class="mw-map-controls">
-    <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
-      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
-    </button>
+  <div id="loading-overlay">
+    <div class="loading-inner">
+      <div class="loading-spinner"></div>
+      <div class="loading-text">Loading map…</div>
+    </div>
   </div>
 
   <div id="mw-layers" class="mw-layers">
@@ -38,9 +177,6 @@
     <ul class="mw-layers-list">
       <li>
         <label><input type="checkbox" id="mw-layer-hillshade" checked> Hillshade</label>
-      </li>
-      <li>
-        <label><input type="checkbox" id="mw-layer-contours"> Contours</label>
       </li>
       <li>
         <label><input type="checkbox" id="mw-layer-public-lands"> Public lands</label>
@@ -51,22 +187,28 @@
       <li>
         <label><input type="checkbox" id="mw-layer-usfs-trails"> USFS trails</label>
       </li>
+      <li>
+        <label><input type="checkbox" id="mw-layer-places" checked> Places</label>
+      </li>
     </ul>
   </div>
 
-  <div id="mw-scores" class="mw-scores">
-    <div class="mw-scores-title">Territory</div>
-    <ul id="mw-scores-list" class="mw-scores-list"></ul>
-  </div>
+  <!-- Places Worth Going (docs/features/places.md) has no static markup
+       here -- it is a third action button plus an expand section built
+       straight into the territory panel by map2.js's
+       buildScoreboardControl, same as Refresh map/Top Operators next to
+       it, not a separate floating panel of its own (that only left the
+       list hidden behind the territory panel or, worse, behind the
+       fixed nav bar -- see the git history on this file if that's ever
+       tempting again). Listing LIVE places sorted by distance from the
+       map's current centre, refreshed on moveend. -->
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
           crossorigin="anonymous"></script>
   <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
           crossorigin="anonymous"></script>
-  <script src="https://unpkg.com/@acalcutt/maplibre-contour-pmtiles@0.1.2/dist/maplibre-contour-pmtiles.min.js"
-          crossorigin="anonymous"></script>
 
-  <script src="/static/map2.js?v=11" type="module"></script>
-  <script src="/static/theme-toggle.js?v=20260823-19" type="module"></script>
+  <script src="/static/map2.js?v=28" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
 </body>
 </html>

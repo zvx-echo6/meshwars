@@ -13,9 +13,14 @@
 // is the whole reason this file is twenty lines rather than a parallel
 // stylesheet.
 //
-// Gold is the default and stays unnamed in storage: only an explicit
-// choice of neon is written, so a reader who never touches the button is
-// never carrying a preference they did not make.
+// Both choices are written to storage explicitly (gold used to mean
+// "remove the key," rather than a fixed value) -- frontend/map2.html's
+// boot snippet (the front page) needs to tell "never chosen" apart from
+// "explicitly chose gold," since it defaults to the dark/neon theme
+// specifically when nothing has been chosen yet, and an explicit gold
+// pick has to keep winning over that default. Every other page's boot
+// snippet is unaffected: it still only ever checks for the literal
+// string 'neon', same as currentTheme() below.
 // =====================================================================
 const KEY = 'mwTheme';
 const NEON = 'neon';
@@ -27,13 +32,23 @@ export function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === NEON ? NEON : 'gold';
 }
 
-function apply(theme) {
+// persist:false (only used by the boot-time call at the bottom of this
+// file) applies the attribute/button/meta-tag state without writing to
+// storage. That boot-time call runs on EVERY page load, not just a
+// click -- if it persisted too, the very first pageview of any page
+// other than the front page would write an explicit 'gold' before the
+// reader ever touched the toggle, which would then read back on the
+// front page as "chose gold" and permanently defeat that page's
+// dark-by-default boot snippet. Only an actual click on the button
+// (the listener below) is a real choice worth persisting.
+function apply(theme, { persist = true } = {}) {
   const neon = theme === NEON;
   document.documentElement.setAttribute('data-theme', neon ? NEON : 'gold');
-  try {
-    if (neon) localStorage.setItem(KEY, NEON);
-    else localStorage.removeItem(KEY);
-  } catch (e) { /* private mode: the choice just does not persist */ }
+  if (persist) {
+    try {
+      localStorage.setItem(KEY, neon ? NEON : 'gold');
+    } catch (e) { /* private mode: the choice just does not persist */ }
+  }
 
   // The address bar and task switcher paint from this, not from the
   // stylesheet, so a themed page with an unthemed browser chrome looks
@@ -57,5 +72,6 @@ if (btn) {
 }
 
 // Run once on load so the button's pressed state and the theme-color
-// meta agree with whatever the <head> snippet already applied.
-apply(currentTheme());
+// meta agree with whatever the <head> snippet already applied -- never
+// persisted (see apply()'s own comment above).
+apply(currentTheme(), { persist: false });

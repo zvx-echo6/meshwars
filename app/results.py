@@ -46,8 +46,6 @@ TEAM_AWARDS = [
 PLAYER_AWARDS = [
     ("top_attacker", "Top Attacker"),
     ("top_defender", "Top Defender"),
-    ("top_netop", "Top NetOp"),
-    ("most_consistent", "Most Consistent"),
     ("quick_fingers", "Quick Fingers"),
     ("explorer", "Explorer"),
     ("frontier", "Frontier"),
@@ -57,6 +55,27 @@ PER_TEAM_AWARDS = [
     ("team_defender", "Team Defender"),
 ]
 AWARD_LABELS = dict(TEAM_AWARDS + PLAYER_AWARDS + PER_TEAM_AWARDS)
+
+# Retired: no longer computed for new months, but a month frozen while it
+# still existed keeps its month_award row forever (frozen months are
+# never rewritten), so its label stays here rather than falling back to
+# the raw award key on the page.
+#
+# most_consistent (longest run of consecutive nets) came down 2026-08-25:
+# a month is about four nets, and nearly everyone who shows up hits all
+# four, so it was a tie among most of the field and told you nothing.
+# Check-in streaks already pay points for showing up every week (5 per
+# consecutive week, capped at 25) -- the same thing measured somewhere it
+# can actually vary.
+AWARD_LABELS["most_consistent"] = "Most Consistent"
+
+# top_netop (most points from weekly net check-ins) came down 2026-08-25:
+# the streak bonus pays 5 points per consecutive week, capped at 25, so
+# whoever started their streak earliest pulls ahead by an amount a
+# newcomer can never close in a single month. That makes the award a
+# record of seniority rather than a contest -- players still earn streak
+# points, only the award for topping them is gone.
+AWARD_LABELS["top_netop"] = "Top NetOp"
 
 # Display order. compute_month() emits awards in this order naturally,
 # but a frozen month is read back out of a table with no inherent order,
@@ -171,7 +190,7 @@ def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlit
     team -- the same live-team choice mc_scoring.team_checkin_points()
     makes, so a month's figures and a season's always agree."""
     return conn.execute(
-        "SELECT a.player_id, a.net_date, a.points, a.streak, a.message_ts, "
+        "SELECT a.player_id, a.net_date, a.points, a.message_ts, "
         "       p.team AS team, p.display_name AS display_name "
         "  FROM mc_checkin_award a "
         "  JOIN player p ON p.player_id = a.player_id "
@@ -276,14 +295,10 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     retakes: dict[int, int] = {}
     per_team_attacks: dict[str, dict[int, int]] = {}
     per_team_retakes: dict[str, dict[int, int]] = {}
-    virgin: dict[int, int] = {}
     for c in caps:
         pid, tm = c["player_id"], c["team"]
         if c["from_team"] is None:
-            # Claimed from nobody. Aircraft excluded: Explorer is about
-            # reach and effort, and a plane trivialises both.
-            if not c["by_air"]:
-                virgin[pid] = virgin.get(pid, 0) + 1
+            # Claimed from nobody -- not an attack or a retake, either.
             continue
         attacks[pid] = attacks.get(pid, 0) + 1
         per_team_attacks.setdefault(tm, {})[pid] = per_team_attacks.setdefault(tm, {}).get(pid, 0) + 1
@@ -295,8 +310,28 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
                detail="squares taken from other teams"))
     add(_award("top_defender", *(_top(retakes) or (None, 0)), names=names,
                detail="squares taken back"))
-    add(_award("explorer", *(_top(virgin) or (None, 0)), names=names,
-               detail="squares nobody had claimed"))
+
+    # ---- explorer: most Explorer Score points earned this month -------
+    # Places Worth Going (docs/features/places.md) points, from
+    # place_activation.points, scoped by awarded_at falling inside the
+    # month -- the same time-only scoping mc_scoring.team_place_points()
+    # and the /api/v1/players Explorer Score already use. place_activation
+    # has no protocol column (a scoring ping credits places the same way
+    # regardless of which board sent it -- see app/place_scoring.py), so
+    # this does not filter by protocol either, matching that existing
+    # convention rather than inventing a new one.
+    #
+    # Used to be "most squares nobody had ever claimed" -- a proxy for
+    # exploring, back when there was nothing else to measure it with. Now
+    # that Places Worth Going exists, points earned from actual named
+    # destinations are the real thing that proxy was standing in for.
+    explorer_pts: dict[int, float] = dict(conn.execute(
+        "SELECT player_id, SUM(points) FROM place_activation "
+        " WHERE awarded_at >= ? AND awarded_at < ? GROUP BY player_id",
+        (start, end),
+    ).fetchall())
+    add(_award("explorer", *(_top(explorer_pts) or (None, 0)), names=names,
+               detail="points earned from places"))
 
     for team in settings.teams_list:
         add(_award("team_attacker", *(_top(per_team_attacks.get(team, {})) or (None, 0)),
@@ -306,10 +341,16 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
 
     # ---- frontier: how much ground you claimed out past the towns -----
     # Counted, not measured. The furthest single square rewarded one
-    # lucky turn-off; a count rewards actually working the back country,
-    # and reads the same way Explorer does so the two stack cleanly --
-    # every Frontier square is beyond a town's edge and therefore also a
-    # virgin claim, so it counts toward both.
+    # lucky turn-off; a count rewards actually working the back country.
+    #
+    # No virgin-ground restriction: that only ever existed to keep
+    # Frontier a strict subset of the old squares-nobody-had-claimed
+    # Explorer. Now that Explorer counts place points instead, the two
+    # measure different things -- Frontier counts ground out past the
+    # towns, Explorer counts destinations reached -- so every out-of-town
+    # capture counts here, attack or retake or virgin claim alike.
+    # Aircraft are still excluded, same as everywhere else that measures
+    # reach and effort.
     #
     # Still expect empty months: twenty miles past a town is where mesh
     # coverage runs out, and a square out there has to hear a repeater
@@ -317,7 +358,7 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     frontier: dict[int, int] = {}
     furthest: dict[int, float] = {}
     for c in caps:
-        if c["from_team"] is not None or c["by_air"]:
+        if c["by_air"]:
             continue
         lat, lon = cell_center(c["cell_id"])
         d = places.distance_to_nearest_town_m(lat, lon)
@@ -334,22 +375,12 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
                    detail="squares past the towns, furthest %.0f mi out" % furthest[won[0]]))
 
     # ---- check-in awards ----------------------------------------------
-    points: dict[int, float] = {}
-    streaks: dict[int, int] = {}
     offsets: dict[int, list[float]] = {}
     for r in chk:
-        points[r["player_id"]] = points.get(r["player_id"], 0.0) + r["points"]
-        if r["streak"] is not None:
-            streaks[r["player_id"]] = max(streaks.get(r["player_id"], 0), r["streak"])
         if r["message_ts"] is not None:
             offsets.setdefault(r["player_id"], []).append(
                 r["message_ts"] - _net_window_open(r["net_date"])
             )
-
-    add(_award("top_netop", *(_top(points, 0.001) or (None, 0)), names=names,
-               detail="points from weekly net check-ins"))
-    add(_award("most_consistent", *(_top(streaks) or (None, 0)), names=names,
-               detail="nets checked into in a row"))
 
     # Quick Fingers, and the guard that makes it survivable. An award for
     # being fastest on a scheduled event invites a cron job, so a player

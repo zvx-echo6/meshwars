@@ -629,6 +629,200 @@ CREATE TABLE IF NOT EXISTS api_client (
     -- read, and that one is accurate to within the same minute.
     request_count INTEGER NOT NULL DEFAULT 0
 );
+
+-- ---------------------------------------------------------------------
+-- "Places Worth Going" -- see docs/features/places.md for the design
+-- and scripts/build_places_seed.py for how this table gets its data.
+-- Seed only in this migration: no scoring/activation table yet, and
+-- nothing reads this one back out until that lands.
+-- ---------------------------------------------------------------------
+
+-- One row per named destination: a SOTA summit, a POTA park, or an
+-- OpenStreetMap landmark off the narrowed tag list. ref_code is the
+-- source's own identifier (SOTA summit code, POTA reference, or an
+-- "n<id>"/"w<id>" OSM object reference) -- stable, so re-running the
+-- seed script updates a place in place rather than duplicating it.
+--
+-- area_m2 and geom are NULL for a summit or a landmark (those score
+-- the single square their point falls in -- see the design note) and
+-- for a park POTA-to-PAD-US matching could not find a boundary for.
+-- Where a park DOES have a matched boundary, area_m2 is PAD-US's own
+-- whole-unit acreage (converted to m^2) and geom is that boundary as
+-- WKT, clipped to a radius around the park's centre point and
+-- simplified for storage -- see build_places_seed.py's match_parks()
+-- for exactly how much, and why a park's boundary is stored as WKT
+-- text rather than a second geometry table: one flat row per place is
+-- enough for the scoring stage to test "is this square more than half
+-- inside geom" later without a join.
+--
+-- Brand new table, no existing deployed shape to ALTER, so CREATE
+-- TABLE IF NOT EXISTS here is sufficient on its own -- same reasoning
+-- as player_cell_repeater_credit above; no MIGRATIONS entry needed for
+-- the table itself (see MIGRATIONS below for `rotates`, added after
+-- this table's first landing -- a DB that already ran that first
+-- migration needs an ALTER, so CREATE TABLE IF NOT EXISTS alone is not
+-- enough for `rotates` the way it is for the table as a whole).
+--
+-- rotates: 1 if this place is in the weekly rotation draw (landmarks,
+-- and parks smaller than one grid cell), 0 if it is always active
+-- (summits, and parks at or above one grid cell -- including a park
+-- PAD-US matched no boundary for, which stays permanent rather than
+-- rotating for a data gap; see app/place_rotation.py). Set at load
+-- time by app/places_seed.py, never by the rotation engine itself --
+-- rotation only ever chooses AMONG rotates=1 rows, never flips the
+-- flag.
+CREATE TABLE IF NOT EXISTS place (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref_type    TEXT NOT NULL CHECK (ref_type IN ('summit', 'park', 'landmark')),
+    ref_code    TEXT NOT NULL,      -- source's own id: SOTA code, POTA reference, or n<id>/w<id> from OSM
+    name        TEXT NOT NULL,
+    lat         REAL NOT NULL,
+    lon         REAL NOT NULL,
+    -- Effort-scored, not flat by ref_type (changed 2026-08-25 -- see
+    -- points_reason just below): 5 inside a Census place's limits for
+    -- any ref_type, else 10 (landmark) / 25 (park) / 50-100 (summit,
+    -- scaled by elevation_ft below -- changed 2026-08-25, see that
+    -- column's own comment). Computed once at seed-build time by
+    -- scripts/build_places_seed.py's score_points() against
+    -- app/reference/places.csv's town anchors; this column is still
+    -- the only thing app/place_scoring.py and the rotation draw read
+    -- to award or rank a place.
+    points      INTEGER NOT NULL,
+    source      TEXT NOT NULL,      -- 'SOTA' | 'POTA' | 'POTA/PAD-US' | 'OSM'
+    area_m2     REAL,               -- park only, and only when PAD-US matched a boundary
+    geom        TEXT,               -- park only: matched boundary as WKT, NULL otherwise
+    -- summit only, NULL for park/landmark. SOTA's own AltFt, carried
+    -- through the seed CSV (scripts/build_places_seed.py's fetch_sota())
+    -- purely so a remote summit's score can be derived from it
+    -- (score_points()'s elevation scaling, 50 at
+    -- SUMMIT_ELEV_FLOOR_FT up to 100 at SUMMIT_ELEV_CEIL_FT) and so an
+    -- operator can see WHY a summit scored what it did without
+    -- re-deriving it -- same purpose points_reason already serves,
+    -- just numeric rather than a category. Added 2026-08-25 alongside
+    -- that scaling; `place` had no elevation before this, since the
+    -- old flat-100 model never needed one.
+    elevation_ft REAL,
+    rotates     INTEGER NOT NULL DEFAULT 0,  -- 1 = weekly rotation candidate, 0 = always active
+    -- WHY `points` got the value it did: 'in_city' (inside a Census
+    -- place's effective_radius_m, worth 5 regardless of ref_type),
+    -- 'remote' (park/landmark outside every anchor, worth the
+    -- ref_type's flat value), or 'remote_scaled' (summit outside every
+    -- anchor, worth its elevation_ft-scaled value -- see that column's
+    -- comment above).
+    -- Written by app/places_seed.py's loader from the seed CSV's own
+    -- points_reason column; nothing at runtime branches on it -- it
+    -- exists purely so the admin panel and any future re-tuning can see
+    -- WHY a place scores what it does without re-deriving it. Nullable
+    -- because a DB migrated from before this column existed has no
+    -- value to backfill for an already-loaded row; the next places_seed
+    -- reconcile pass (which re-upserts every row, not just new ones)
+    -- fills it in within one load.
+    points_reason TEXT,
+    -- 1 = currently in the seed CSV, 0 = pruned from a later seed
+    -- rebuild. Never deleted: place_activation (and, once resolved,
+    -- place_week) FK/reference place.id, and a player who legitimately
+    -- scored a reference that later left the seed keeps those points --
+    -- their Explorer score and any frozen month must not change because
+    -- the seed got re-tuned. An inactive place just stops being drawn
+    -- and stops being scoreable going forward (every read path that
+    -- draws or scores a place filters WHERE active = 1); its row and
+    -- name survive purely so old place_activation rows still resolve.
+    -- Set by app/places_seed.py's reconcile pass at load time, never by
+    -- any other code path.
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL,
+    UNIQUE (ref_type, ref_code)
+);
+CREATE INDEX IF NOT EXISTS idx_place_latlon ON place(lat, lon);
+-- idx_place_active is NOT created here: on a DB that already ran the
+-- CREATE TABLE above (before `active` existed), this executescript()
+-- runs before MIGRATIONS' ALTER TABLE below adds the column, so an
+-- index on it here would fail startup on every existing deployment
+-- with "no such column: active". Created by MIGRATIONS instead, after
+-- the ALTER that guarantees the column exists first.
+
+-- Which grid cell(s) (app/grid.py cell_id) a place scores when painted.
+-- One row for a summit, a landmark, or a park too small to need the
+-- boundary test (the cell containing its point) -- several rows for a
+-- park whose boundary is bigger than one cell, one row per cell that
+-- is more than half inside that boundary (see app/places_seed.py's
+-- _park_cells()). This is the pre-computed answer to "does painting
+-- this cell activate this place", computed once at load time so the
+-- scoring path (app/place_scoring.py) is a single indexed lookup on
+-- cell_id rather than a geometry test on every accepted ping.
+CREATE TABLE IF NOT EXISTS place_cell (
+    place_id    INTEGER NOT NULL,
+    cell_id     TEXT NOT NULL,
+    PRIMARY KEY (place_id, cell_id),
+    FOREIGN KEY (place_id) REFERENCES place(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_place_cell_cell ON place_cell(cell_id);
+
+-- One row per (place, player, week) credit actually awarded -- the
+-- UNIQUE constraint IS the "one credit per reference per person per
+-- week" rule; app/place_scoring.py relies on a duplicate insert
+-- failing rather than checking existence twice. `points` is copied
+-- onto the row at award time (same reasoning as mc_checkin_award.points
+-- in app/checkin.py) so a later change to a place's point value, or to
+-- the weekly cap, never rewrites what someone already earned.
+-- week_start is the Wednesday date (YYYY-MM-DD, America/Boise -- see
+-- app/place_rotation.week_start_for_ts) the credit belongs to, the
+-- same clock app/checkin.py's net_date already uses.
+CREATE TABLE IF NOT EXISTS place_activation (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    place_id    INTEGER NOT NULL,
+    player_id   INTEGER NOT NULL,
+    week_start  TEXT NOT NULL,
+    points      INTEGER NOT NULL,
+    awarded_at  INTEGER NOT NULL,
+    UNIQUE (place_id, player_id, week_start)
+);
+CREATE INDEX IF NOT EXISTS idx_place_activation_week_player ON place_activation(week_start, player_id);
+CREATE INDEX IF NOT EXISTS idx_place_activation_place ON place_activation(place_id);
+
+-- The resolved weekly rotation draw, one row per (week, chosen place).
+-- A draw is deterministic (app/place_rotation.py seeds its RNG from
+-- week_start alone) so it COULD be recomputed on every read instead of
+-- stored -- this table exists so it is computed exactly once and then
+-- stable, the same reason mc_tile_capture_log exists alongside the
+-- decayed-score model: re-deriving the same answer from the same seed
+-- twice is wasted work, not a correctness requirement, but a stored
+-- row also means a place already shown to a player this week can never
+-- retroactively change because e.g. a new place was added to the seed
+-- mid-week. Only rotates=1 places ever appear here -- summits and
+-- large parks are always active and never need a row.
+CREATE TABLE IF NOT EXISTS place_week (
+    week_start  TEXT NOT NULL,
+    place_id    INTEGER NOT NULL,
+    PRIMARY KEY (week_start, place_id)
+);
+
+-- ---------------------------------------------------------------------
+-- The one-time update notice: operator-authored, shown to players once
+-- per version_key, edited from the admin panel's Notice section (see
+-- app/admin_ops.py's admin_notice/admin_notice_save and
+-- frontend/admin.js). A player sees it on first map load and never
+-- again once dismissed, UNLESS version_key changes -- the dismissal
+-- itself lives in the player's own browser (localStorage, keyed on
+-- version_key -- see frontend/map2.js), never in this table, so this
+-- row only has to say what the CURRENT notice is, not who has seen it.
+--
+-- Singleton row (id fixed to 1 by the CHECK), upserted the same way
+-- app/db.py's own set_cursor() upserts the `cursor` table -- there is
+-- only ever one current notice, not a history of past ones. The repo's
+-- CHANGELOG.md is where release history actually lives; re-publishing
+-- here overwrites what was here before on purpose. Toggling `active`
+-- off retires the notice (nothing renders for players) without losing
+-- the drafted title/body/version_key, so turning it back on later does
+-- not mean retyping it.
+CREATE TABLE IF NOT EXISTS notice (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    version_key TEXT NOT NULL DEFAULT '',
+    title       TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -753,6 +947,42 @@ MIGRATIONS = [
     # as metadata; attribution still keys on node_ref because that is
     # all a position packet carries.
     "ALTER TABLE player_node ADD COLUMN public_key TEXT",
+    # `place` first landed (see above) without `rotates` -- any DB that
+    # ran that migration before this one needs the column added by
+    # hand; SQLite's ADD COLUMN default backfills every existing row to
+    # 0 (always active) in the same statement, which is safe: a place
+    # loaded before rotation existed gets re-classified correctly the
+    # next time app/places_seed.py runs (it upserts `rotates` on every
+    # row, not just new ones), so a stale 0 here is corrected within
+    # one seed load, never a lasting misclassification.
+    "ALTER TABLE place ADD COLUMN rotates INTEGER NOT NULL DEFAULT 0",
+    # `active` added after `place` first landed, same situation as
+    # `rotates` just above: any DB that already ran this migration set
+    # needs the column added by hand. Defaults every existing row to 1
+    # (active), which is safe even for a row that should actually be
+    # inactive -- the very next places_seed reconcile pass (which now
+    # runs on every load, not just a fingerprint-changed one) corrects
+    # it within one startup, never a lasting misclassification. See
+    # app/places_seed.py's load_places_seed() for the reconcile itself.
+    "ALTER TABLE place ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+    "CREATE INDEX IF NOT EXISTS idx_place_active ON place(active)",
+    # `points_reason` added 2026-08-25 alongside the effort-based scoring
+    # model (see `place`'s own CREATE TABLE comment above) -- any DB that
+    # already ran this migration set needs the column added by hand.
+    # Nullable, backfilled to NULL for existing rows: the very next
+    # places_seed load re-upserts every row (including points_reason)
+    # from the CSV, so a stale NULL here never lasts more than one
+    # startup for a row still in the seed.
+    "ALTER TABLE place ADD COLUMN points_reason TEXT",
+    # `elevation_ft` added 2026-08-25 alongside summit elevation scaling
+    # (see `place`'s own CREATE TABLE comment above) -- same situation
+    # as points_reason just above: any DB that already ran this
+    # migration set needs the column added by hand. Nullable, backfilled
+    # to NULL for existing rows (correct for every non-summit row
+    # permanently, and for a summit row until the next reconcile fills
+    # it in from the CSV, same one-startup window points_reason's own
+    # migration note describes).
+    "ALTER TABLE place ADD COLUMN elevation_ft REAL",
 ]
 
 PRAGMAS = [
@@ -809,6 +1039,23 @@ def init_db() -> None:
                     continue  # already applied, nothing to do
                 log.error("schema patch failed: %s -- statement: %s", e, stmt)
                 raise
+
+        # Places Worth Going seed (app/places_seed.py): reference data
+        # shipped with the code, same as app/reference/places.csv, but
+        # loaded into `place`/`place_cell` rather than kept in memory --
+        # see that module's docstring for why. Imported here rather than
+        # at module level to avoid a circular import (places_seed does
+        # not import this module back, but keeping the import local
+        # keeps db.py's own import graph exactly what it was before this
+        # landed). A failure here must not take the whole app down --
+        # the place tables just stay empty (or stale) and the places
+        # feature quietly has no data, logged loudly, rather than the
+        # server failing to boot over a reference-data problem.
+        try:
+            from .places_seed import load_places_seed
+            load_places_seed(conn)
+        except Exception:
+            log.exception("places_seed: load failed -- places feature will have no/stale data")
     finally:
         conn.close()
 

@@ -16,6 +16,11 @@ EXPOSE 8090
 
 ENV PYTHONUNBUFFERED=1
 ENV DB_PATH=/data/game.db
+# Where the terrain/overlay PMTiles archives (USFS roads+trails, public
+# lands) live -- a bind mount, not the meshwars-data volume, see
+# docker-compose.yml. Absent entirely on a checkout that hasn't set one
+# up yet; the /tiles mount in app/api.py just doesn't appear then.
+ENV TILES_DIR=/tiles-data
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://localhost:8090/health || exit 1

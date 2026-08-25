@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 import time
+from datetime import datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -35,6 +36,7 @@ from .config import settings
 from .db import connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .node_ref import normalize_sender_name
+from .place_rotation import preview_week, week_start_for_date, week_start_for_ts
 
 log = logging.getLogger("admin_ops")
 
@@ -262,6 +264,76 @@ async def admin_overview(request: Request):
         conn.close()
 
 
+@router.get("/api/admin/places/preview")
+async def admin_places_preview(request: Request, week_start: str | None = None):
+    """Preview the Places Worth Going rotation draw for a week WITHOUT
+    persisting it (app/place_rotation.preview_week) -- operator only, so
+    the density and spacing can be sanity-checked before (or long after)
+    a week actually happens. Never writes place_week; the real draw for
+    the CURRENT week is still resolved lazily, the first time a scoring
+    ping or a places API call needs it (see place_rotation.resolve_week).
+
+    `week_start` is any date string; it is snapped to that date's own
+    Wednesday via week_start_for_ts (the same clock the whole feature
+    uses), so an operator does not have to already know which Wednesday
+    a given day belongs to. Omitted, it previews the current week.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    if week_start:
+        try:
+            snapped = week_start_for_date(datetime.fromisoformat(week_start).date())
+        except ValueError:
+            return JSONResponse({"error": "week_start must be an ISO date, e.g. 2026-08-19"}, status_code=400)
+    else:
+        snapped = week_start_for_ts(int(time.time()))
+
+    conn = connect()
+    try:
+        chosen_ids, region_report = preview_week(conn, snapped)
+        sample_rows = []
+        if chosen_ids:
+            marks = ",".join("?" * min(len(chosen_ids), 20))
+            sample_rows = conn.execute(
+                "SELECT ref_type, name, points, points_reason, lat, lon "
+                f"FROM place WHERE id IN ({marks})",
+                chosen_ids[:20],
+            ).fetchall()
+        by_type = {}
+        if chosen_ids:
+            for r in conn.execute(
+                "SELECT ref_type, COUNT(*) c FROM place "
+                f"WHERE id IN ({','.join('?' * len(chosen_ids))}) GROUP BY ref_type",
+                chosen_ids,
+            ):
+                by_type[r["ref_type"]] = r["c"]
+    finally:
+        conn.close()
+
+    cells_with_candidates = [v for v in region_report.values() if v["candidates"] > 0]
+    candidate_counts = [v["candidates"] for v in cells_with_candidates] or [0]
+    top_cells = sorted(
+        ({"cell": k, **v} for k, v in region_report.items() if v["candidates"] > 0),
+        key=lambda x: -x["candidates"],
+    )[:10]
+
+    return JSONResponse({
+        "week_start": snapped,
+        "live_rotating_count": len(chosen_ids),
+        "region_cells_with_candidates": len(cells_with_candidates),
+        "region_cells_with_a_live_pick": sum(1 for v in cells_with_candidates if v["chosen"] > 0),
+        "candidates_per_cell": {
+            "min": min(candidate_counts), "max": max(candidate_counts),
+            "mean": round(sum(candidate_counts) / len(candidate_counts), 2),
+        },
+        "densest_cells": top_cells,
+        "by_type": by_type,
+        "sample": [dict(r) for r in sample_rows],
+    })
+
+
 @router.get("/api/admin/player/{player_id}/diagnostics")
 async def admin_player_diagnostics(request: Request, player_id: int):
     """One player's ingest counters by day, newest first.
@@ -423,6 +495,109 @@ async def admin_checkin_binding(request: Request):
         conn.close()
     log.info("admin: check-in fallback name %r -> player %d", normalized, player_id)
     return JSONResponse({"player_id": player_id, "sender_name": normalized})
+
+
+@router.get("/api/admin/notice")
+async def admin_notice(request: Request):
+    """The one-time update notice's current saved state, for the admin
+    panel's Notice section to load into its form. Singleton row (see
+    app/db.py's `notice` table) -- there is only ever one to fetch, and
+    a DB that has never had one saved gets all-empty/inactive defaults
+    rather than a 404, so the form just opens blank.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT version_key, title, body, active, updated_at FROM notice WHERE id = 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return JSONResponse({
+            "version_key": "", "title": "", "body": "", "active": False, "updated_at": None,
+        })
+    return JSONResponse({
+        "version_key": row["version_key"],
+        "title": row["title"],
+        "body": row["body"],
+        "active": bool(row["active"]),
+        "updated_at": row["updated_at"],
+    })
+
+
+@router.post("/api/admin/notice")
+async def admin_notice_save(request: Request):
+    """Save the one-time update notice.
+
+    Singleton row, upserted by the fixed id -- re-saving the same
+    version_key updates what is already published (fixing a typo, say)
+    without re-showing it to anyone who already dismissed it; only a
+    NEW version_key does that, because the version_key IS the
+    localStorage dismissal key the player-facing map checks (see
+    app/notice_api.py's GET /api/notice and frontend/map2.js).
+
+    All three text fields are required even to save a draft -- there is
+    one form, not a partial/full distinction, and `active` is what
+    actually controls whether it's live. Setting active=false is the
+    "make it easy to clear" path the admin UI's quick button uses: it
+    resends whatever is already saved with active flipped off, so
+    retiring a notice never requires retyping it.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    version_key = (body.get("version_key") or "").strip()
+    title = (body.get("title") or "").strip()
+    notice_body = (body.get("body") or "").strip()
+    active = bool(body.get("active"))
+
+    if not version_key or len(version_key) > 40:
+        return JSONResponse(
+            {"error": "version_key is required, 40 characters max"}, status_code=400)
+    if not title or len(title) > 200:
+        return JSONResponse({"error": "title is required, 200 characters max"}, status_code=400)
+    if not notice_body or len(notice_body) > 4000:
+        return JSONResponse({"error": "body is required, 4000 characters max"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO notice(id, version_key, title, body, active, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  version_key = excluded.version_key, "
+            "  title = excluded.title, "
+            "  body = excluded.body, "
+            "  active = excluded.active, "
+            "  updated_at = excluded.updated_at",
+            (version_key, title, notice_body, int(active), now),
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    log.info("admin: notice saved (version_key=%r, active=%s)", version_key, active)
+    return JSONResponse({
+        "version_key": version_key,
+        "title": title,
+        "body": notice_body,
+        "active": active,
+        "updated_at": now,
+    })
 
 
 @router.post("/api/admin/month/freeze")

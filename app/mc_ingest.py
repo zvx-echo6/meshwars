@@ -27,6 +27,7 @@ from . import mc_scoring, results
 from .config import settings
 from .db import _WRITE_LOCK, connect
 from .grid import cell_center, cell_id, distance_m, in_play_area, valid_coord
+from .place_scoring import credit_places
 
 log = logging.getLogger("mc_ingest")
 
@@ -772,6 +773,21 @@ class McIngestor:
             except Exception:
                 log.exception(
                     "mc scoring: apply_paint failed for player %d cell %s",
+                    player_id, cell,
+                )
+
+            # Places Worth Going (app/place_scoring.py). Same write
+            # transaction, own try/except so a places bug can never cost
+            # a batch its square scoring above. Gated on repeater_ids
+            # and by_air, not on apply_paint()'s outcome -- see
+            # credit_places()'s docstring for why the two are allowed to
+            # disagree (a square-scoring "cooldown" ping still credits a
+            # place).
+            try:
+                credit_places(conn, player_id, cell, ts, repeater_ids, by_air)
+            except Exception:
+                log.exception(
+                    "place scoring: credit_places failed for player %d cell %s",
                     player_id, cell,
                 )
 

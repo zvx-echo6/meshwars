@@ -1,21 +1,22 @@
 /*
- * MeshWars: staging-only MapLibre GL map page (/map2). A proof-of-concept
- * renderer swap for the existing Leaflet page at / (frontend/mc.js) --
- * this file does NOT touch that page or its data model, it just asks the
- * same /api/mc/board and /api/mc/scores endpoints for the same data and
- * draws it with MapLibre GL + a self-hosted PMTiles DEM for hillshade,
- * which Leaflet has no equivalent for.
+ * MeshWars: front page (/), also reachable at /map2. Boots a MapLibre GL
+ * map -- the renderer swap for the original Leaflet page, now kept at
+ * /map-legacy (frontend/mc.js) -- and draws it with a self-hosted
+ * PMTiles hillshade layer, which Leaflet has no equivalent for.
  *
- * Extended (staging only) with: the site's theme system (theme.css +
- * theme-toggle.js, same as every other page), a basemap that follows
- * that theme (light raster under gold, dark under neon, both defined up
- * front and toggled by visibility rather than rebuilt -- rebuilding the
- * style loses the reader's pan/zoom), three self-hosted PMTiles
- * overlays (public lands, USFS roads/trails) and a contour overlay
- * generated client-side from the same DEM used for hillshade (via
- * mlcontour -- no tileset of its own), all behind a small
- * layer-switcher panel, also visibility-toggled so flipping a checkbox
- * never refetches a source.
+ * Also carries: the site's theme system (theme.css + theme-toggle.js,
+ * same as every other page, but defaulting to the neon/dark theme here
+ * specifically -- see the boot snippet in map2.html), a single dark
+ * basemap shared by both themes (gold used to sit on a light OSM
+ * raster, which washed the baked hillshade out under a dark interface
+ * -- gold is now the colour of the chrome and the pins, not of the
+ * ground; see BASEMAP_ID), three self-hosted
+ * PMTiles overlays (public lands, USFS roads/trails), all behind a small
+ * layer-switcher panel (also visibility-toggled, so flipping a checkbox
+ * never refetches a source), Places Worth Going markers and a slide-out
+ * panel, and the territory scoreboard/roster/history/top-players panel
+ * and winner banner ported from frontend/mc.js -- see the "Territory
+ * panel" section below for what that port did and did not carry over.
  *
  * Team colours are gameplay, not branding: they are the same constant
  * regardless of theme and never touched by the theme code below.
@@ -36,24 +37,58 @@ const TEAM_COLORS = {
 
 const TEAM_ORDER = Object.keys(TEAM_COLORS);
 
-// The archives on navi get rebuilt in place, keeping the same filename,
-// and a browser that already holds byte ranges of the previous file will
-// happily keep serving them -- pointing into a file that has since
-// changed shape. That shows up as a region silently missing rather than
-// as an error. Bump TILE_REV whenever an archive on navi is replaced, so
-// the URL changes and nothing stale can survive.
-const TILE_REV = '20260824d';
-const DEM_URL = `https://navi.echo6.co/tiles/planet-dem.pmtiles?r=${TILE_REV}`;
-const PUBLIC_LANDS_URL = `https://navi.echo6.co/tiles/public-lands.pmtiles?r=${TILE_REV}`;
-const USFS_TRAILS_ROADS_URL = `https://navi.echo6.co/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
+// All three overlay archives -- public lands, USFS roads/trails, and
+// the hillshade below -- now ship with the game itself (same-origin
+// /tiles/, see app/api.py's tiles_dir mount) rather than being fetched
+// from navi at runtime -- navi's archives got rebuilt in place, keeping
+// the same filename, and a browser that already held byte ranges of
+// the previous file would happily keep serving them against a file
+// that had since changed shape underneath it. That showed up as a
+// region silently missing rather than as an error. Bump TILE_REV
+// whenever a served archive changes, so the URL changes and nothing
+// stale can survive.
+//
+// The hillshade source used to be planet-dem.pmtiles, the one archive
+// still on navi: a raw elevation DEM shaded in the browser at ~11.3MB
+// per view, ninety-five percent of the page's weight. It is now
+// meshwars-hillshade-alpha.pmtiles -- finished imagery, pre-rendered
+// once across the play area at the dark theme's exaggeration -- so
+// navi is out of the runtime path entirely. This is the second bake:
+// the first (meshwars-hillshade.pmtiles, kept on disk as a rollback)
+// stored opaque greyscale, which painted flat ground the same opaque
+// grey as a shadowed ridge and washed out the whole map. This archive
+// carries a real alpha channel -- converted losslessly from the same
+// greyscale pixels, no DEM work re-run -- so flat ground is
+// transparent again and only the relief itself darkens or lightens.
+const TILE_REV = '20260825b';
+const DEM_URL = `/tiles/meshwars-hillshade-alpha.pmtiles?r=${TILE_REV}`;
+const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
+const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
-const BASEMAP_GOLD_ID = 'basemap-gold';
-const BASEMAP_NEON_ID = 'basemap-neon';
+// Both themes now share ONE dark basemap (CARTO dark_all) -- gold used
+// to point at the stock light OSM raster, which put a bright white map
+// under a dark interface and washed the baked hillshade out. Gold is
+// now the colour of the chrome and the place pins (PLACE_COLORS), not
+// of the ground, so there is nothing left for a second basemap source
+// to differ on; the old basemap-gold/basemap-neon pair (two sources,
+// two layers, toggled by visibility in applyBasemapTheme) collapsed to
+// this single always-visible source/layer.
+const BASEMAP_ID = 'basemap';
 const HILLSHADE_ID = 'hillshade';
 
-// Hillshade reads weaker against the dark neon ground, so it gets a
-// slightly higher exaggeration there. Keyed by theme name.
-const HILLSHADE_EXAGGERATION = { gold: 0.6, neon: 0.85 };
+// Team territory washes into the dark basemap/hillshade -- both themes
+// now need the weight that used to be neon-only when gold still sat on
+// a light basemap. Kept as a per-theme map (not a single constant) so
+// the two can still be told apart if a future theme needs to.
+const BOARD_FILL_OPACITY = { gold: 0.65, neon: 0.65 };
+const BOARD_LINE_WIDTH = { gold: 2, neon: 2 };
+
+// The baked hillshade archive carries real alpha -- transparent on flat
+// ground, black/white toward shadow/highlight. Both themes sit on the
+// same dark basemap now, so both get the full-strength value that used
+// to be neon-only; gold's old 0.7 existed only to keep a light basemap
+// from washing out, which no longer applies.
+const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
 
 // Each checkbox id -> the style layer id(s) it toggles, and the
 // minimum zoom its underlying data starts at (measured from the tile
@@ -65,54 +100,208 @@ const HILLSHADE_EXAGGERATION = { gold: 0.6, neon: 0.85 };
 // setupLayerSwitcher.
 const LAYER_TOGGLES = [
   ['mw-layer-hillshade', [HILLSHADE_ID], 0],
-  ['mw-layer-contours', ['contours-line'], 0],
   ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 4],
   ['mw-layer-usfs-roads', ['usfs-roads-line'], 6],
   ['mw-layer-usfs-trails', ['usfs-trails-line'], 6],
+  // park-boundaries-fill/line are included here too -- see
+  // setupPlacesLayer -- so unchecking "Places" hides a park's outline
+  // along with its glyph instead of leaving the outline drawn with no
+  // marker to explain it. One toggle, both layers it actually governs.
+  // minZoom 0 (always available): place markers have no hard zoom
+  // cutoff any more -- they fade by icon-opacity instead (see
+  // PLACE_ICON_OPACITY_ZOOM) -- so there is no zoom below which
+  // checking this box would show literally nothing to grey it out for.
+  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels', 'park-boundaries-fill', 'park-boundaries-line'], 0],
 ];
 
+// Places Worth Going (docs/features/places.md). Three flat-colour
+// shapes (summit=triangle, park=circle, landmark=diamond) was the
+// original design; live feedback was that landmarks were grey and
+// nearly invisible while parks, at their old size, dominated the map,
+// and that a legend of three shapes in three greys asked a reader to
+// learn a code. A circular pin with a glyph inside it was the next
+// attempt; the user watching it live on the actual map rejected the
+// circle itself -- "i want just the icon instead" -- so this is now a
+// bare glyph silhouette (mountain/tree/star -- see PLACE_GLYPHS) with
+// no enclosing shape at all, drawn straight onto the basemap and given
+// its own outline/halo (PLACE_ICON_OUTLINE) for contrast in place of
+// the pin fill that used to provide it. The glyph is now the ONLY
+// thing separating the three tiers -- both colour and reveal zoom are
+// now shared across all three (see below) precisely so nothing but the
+// silhouette itself is left to tell them apart. Colour deliberately
+// follows each theme's own accent family (gold on classic, cyan on
+// neon) rather than staying constant across themes the way team
+// colours do -- a place is a separate scoring layer from square
+// ownership (TEAM_COLORS above), so reusing red/green/blue here would
+// read as if a place belonged to a team, but there is no reason for it
+// to fight the theme the way a team colour would. All three tiers
+// share the SAME shade -- the lightest, most saturated end of the
+// family (theme.css's --mw-gold-light / neon's cyan-light token) --
+// chosen purely for visibility against busy terrain at a tiny size;
+// there is no dimmer shade held back for a "less important" tier,
+// because the previous attempt at that (a shade ladder across tiers)
+// is exactly what made landmarks hard to see in the first place.
+const PLACE_COLORS = {
+  gold: '#EDD39F',   // theme.css --mw-gold-light (classic)
+  neon: '#2BE8E0',   // theme.css --mw-gold (neon's deeper cyan token -- see
+                      // PLACE_ICON_OUTLINE below for why not -light)
+};
+
+// Base pixel size (not degrees -- this must stay a constant SCREEN
+// size across zoom, like any map marker, unlike the board squares
+// which are drawn to true ground scale). ONE size, not one per tier --
+// an earlier version sized summit largest/park mid/landmark smallest as
+// a secondary hierarchy cue, explicitly dropped watching it live: with
+// colour already shared (see PLACE_COLORS above) and the glyph the only
+// intended differentiator, a size difference on top just made summit
+// read as "more important" again through the back door. Equal NOMINAL
+// size does not by itself mean equal APPARENT size -- see PLACE_GLYPHS'
+// own per-shape normalization below, which is doing the real work of
+// making the three look like siblings; this constant is just the
+// shared budget they each normalize into. Neon gets a larger baseline
+// than gold -- a marker sized to read against gold's light basemap
+// washes out against neon's dark hillshade and the orange territory
+// squares underneath; same per-theme pattern as BOARD_FILL_OPACITY/
+// BOARD_LINE_WIDTH below. Zoom-interpolated on top of this via
+// PLACE_ICON_SIZE_ZOOM -- see there for why.
+const PLACE_ICON_PX = { gold: 22, neon: 30 };
+
+// Outline/halo stroked around each glyph's own edge in drawPlaceIcon.
+// With the enclosing pin gone, this is now the ONLY thing separating a
+// bare gold or cyan glyph from a dark hillshade and the orange
+// territory squares underneath -- it used to just edge a solid pin
+// fill, a lighter job. Both values were strengthened over the pin-era
+// numbers (was width 1/1.5, opacity .55/.95) to do that heavier job:
+// gold gets a stronger dark outline (still soft, but no longer barely
+// there) against its light basemap; neon keeps its light halo, opaque
+// now rather than near-opaque, same problem BOARD_FILL_OPACITY/
+// BOARD_LINE_WIDTH solved for the board layer, same per-theme pattern.
+const PLACE_ICON_OUTLINE = {
+  gold: { color: 'rgba(0,0,0,0.65)', width: 1.5 },
+  // Was a light/white halo (rgba(244,241,232,1), width 2) -- on the
+  // shared dark basemap a pale glyph with a pale outline has nothing
+  // to contain it and reads as a glow, not a shape. Same dark-outline
+  // treatment as gold now holds the cyan glyph's edge instead.
+  neon: { color: 'rgba(0,0,0,0.65)', width: 1.5 },
+};
+
+// Park boundaries (app/places_api.py's `park_boundaries` -- a matched
+// PAD-US polygon at or above one grid cell, docs/features/places.md).
+// A big park still keeps its own glyph, fading in by
+// PLACE_ICON_OPACITY_ZOOM the same as every other place (see
+// setupPlacesLayer) -- the outline is drawn ON TOP of that, only once
+// zoomed in enough for the shape to mean anything, so the park is
+// still findable by its glyph before the outline itself has appeared.
+// MIN_BOUNDARY_ZOOM must match app/places_api.py's own
+// constant of the same name -- it is both the client's own layer
+// minzoom AND the zoom this page starts asking the server for boundary
+// geometry at all (fetchPlacesInViewport passes map.getZoom() in the
+// `zoom` param), so a mismatch here would either fetch boundary data
+// that never draws or draw a layer that never has data.
+const MIN_BOUNDARY_ZOOM = 11;
+
+// Colour reuses PLACE_COLORS[theme] (the same shade every glyph now
+// draws in, park included -- see PLACE_COLORS above) rather than
+// inventing a new one -- this is the same park, just drawn two ways at
+// once. Fill stays close to nothing
+// on purpose: a boundary is a quiet outline, not a second filled area
+// competing with the team squares (BOARD_FILL_OPACITY, 0.45/0.65) or
+// reading like the public-lands overlay (a flat, unrelated green wash,
+// see setupOverlayLayers) -- per-theme values follow the same
+// BOARD_FILL_OPACITY/PLACE_ICON_OUTLINE pattern: neon needs a touch
+// more of both to hold up against the dark hillshade, gold already
+// reads fine at the lower value.
+const PARK_BOUNDARY_FILL_OPACITY = { gold: 0.05, neon: 0.08 };
+const PARK_BOUNDARY_LINE_WIDTH = { gold: 1, neon: 1.5 };
+const PARK_BOUNDARY_LINE_OPACITY = { gold: 0.7, neon: 0.85 };
+
+// Marker screen size is also zoom-interpolated, on top of the
+// per-theme base pixel size above: with ~80,000 places now seeded
+// (43,639 parks + 30,408 landmarks + 6,487 summits, plus rotating live
+// ones), a size tuned to read at zoom 13 close-in tiles into a solid
+// mass at a whole-region view if left constant. Same curve for both
+// themes -- the per-theme PX value above already carries the theme
+// difference.
+//
+// CAPPED AT 1.0, deliberately never higher -- this is the fix for a
+// real blur bug, not a style choice. registerPlaceIcons rasterizes
+// each glyph once, at PLACE_ICON_PX * the screen's own devicePixelRatio
+// (see there), and icon-size then scales THAT raster for display: at
+// icon-size 1.0 the raster is shown at its own native resolution
+// (crisp on any dpr, since it was authored at that dpr already), but
+// any icon-size ABOVE 1.0 stretches it past native resolution and
+// blurs, exactly like blowing up a small image -- an earlier version
+// of this curve peaked at 1.15 (a 15% upscale at zoom 13 and, since
+// interpolate clamps past its last stop, at every zoom above that too,
+// including the map's own 17 maximum), which is precisely why the
+// glyphs read as blurry zoomed in. Peaking at 1.0 here means the
+// rasterized size (PLACE_ICON_PX) IS the size needed at the closest
+// zoom the map allows -- every zoom below that only ever shrinks the
+// same raster down, never up, so there is no zoom level, including 15
+// and 17, where this can go soft.
+const PLACE_ICON_SIZE_ZOOM = ['interpolate', ['linear'], ['zoom'], 3, 0.15, 6, 0.35, 8, 0.55, 9, 0.75, 10, 0.9, 11, 0.95, 13, 1.0];
+
+const PLACE_TYPES = ['summit', 'park', 'landmark'];
+
+// All three tiers reveal at the SAME zoom, and there is no hard cutoff
+// at all any more: the layer's own minzoom is left at the map's own
+// floor (see main()'s `minZoom: 4`), and decluttering a whole-region
+// view of ~80,000 places is instead handled entirely by icon-opacity
+// (PLACE_ICON_OPACITY_ZOOM below) -- fading out, not disappearing at a
+// boundary. Two earlier attempts at the regional-declutter problem both
+// got explicitly overridden watching this live: a staggered per-tier
+// reveal zoom (summit from 0, park from 10, landmark from 8/11) read as
+// three different tiers with three different rules; a single shared
+// reveal zoom plus a dot-below/glyph-above size threshold fixed the
+// "three different rules" complaint but replaced it with a new one --
+// "trees turn to circles when zooming out" -- because a `step`
+// expression is a discontinuous jump: one frame is a glyph, the next is
+// a completely different shape. icon-opacity is a paint property
+// MapLibre interpolates smoothly every frame at zero extra cost (no
+// separate image per opacity step the way the dot/glyph swap needed
+// one), so nothing ever changes SHAPE, only how visible it is -- there
+// is no discontinuity for a "pop" or a "the trees broke" read to happen
+// at all.
+//
+// Stops (0 at the map's own zoom 4 floor, ramped up to full by 10, held
+// at 1 above that -- interpolate clamps past the last stop):
+//   4 -> 0     (map's own minimum: fully invisible, nothing to declutter)
+//   6 -> 0.05  (whole-region view: barely perceptible, reads as empty)
+//   8 -> 0.35  (a sub-region has narrowed into view: starting to show)
+//   9 -> 0.7
+//   10 -> 1    (full strength from here up -- "somewhere you'd go")
+// Chosen by looking at the zoom-6/10/13 reference screenshots: zoom 6
+// needed to still read as an honest empty regional view (same result
+// the old hard zoom-8 cutoff gave), while zoom 10 and 13 both needed to
+// be at full strength, matching every earlier round's legibility work
+// -- so the curve had to reach 1.0 by 10, not somewhere past it.
+const PLACE_ICON_OPACITY_ZOOM = ['interpolate', ['linear'], ['zoom'], 4, 0, 6, 0.05, 8, 0.35, 9, 0.7, 10, 1];
+
+// Below this zoom the map is showing a whole region and place NAMES
+// would overlap into noise; icons still draw at every zoom (subject to
+// the viewport fetch's own result cap), just unlabeled until the
+// reader has zoomed in enough for a name to mean something.
+const PLACE_LABEL_MIN_ZOOM = 12;
+
+// Cap on how far the map is ever allowed to zoom in when framing a
+// player search result (doPlayerFind) -- same cap and same reasoning
+// as frontend/mc.js's MAX_FIT_ZOOM: a single player holding one or two
+// 300m cells has a tiny bounds box, and fitting to it with no cap zooms
+// in far enough to fill the screen with one giant colored square and no
+// context.
+const MAX_FIT_ZOOM = 13;
+
+// Matches the breakpoint mc.css's collapsible-header media query uses
+// for "phone-width" (see setMcCollapsed below).
+const NARROW_BREAKPOINT_PX = 600;
+
 // pmtiles.js registers no protocol on its own -- this wires the
-// pmtiles:// URL scheme into MapLibre's request pipeline so a
-// raster-dem source can point straight at a single .pmtiles archive
-// instead of a z/x/y tile template. The same protocol also serves the
-// vector overlay archives below.
+// pmtiles:// URL scheme into MapLibre's request pipeline so a raster
+// source can point straight at a single .pmtiles archive instead of a
+// z/x/y tile template. The same protocol also serves the vector
+// overlay archives below.
 const pmtilesProtocol = new pmtiles.Protocol();
 maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile);
-
-// Contours are generated in the browser from the same DEM archive as
-// the hillshade above -- no second tileset to build or serve. mlcontour
-// (loaded from unpkg in map2.html, global `mlcontour`) reads DEM tiles
-// through its own dem:// protocol and rasterizes contour lines into
-// vector tiles on demand through a contour:// protocol; setupMaplibre
-// registers both with MapLibre. This has to happen once, before the map
-// style below is built, same as the pmtiles protocol above.
-const demSourceInstance = new mlcontour.DemSource({
-  url: `pmtiles://${DEM_URL}`,
-  encoding: 'terrarium',
-  maxzoom: 12,
-  worker: true,
-  cacheSize: 100,
-});
-demSourceInstance.setupMaplibre(maplibregl);
-
-// zoom -> [minor, major] contour interval in feet. navi's table,
-// verbatim -- the multiplier passed alongside it in setupContourLayer
-// below converts the DEM's native metres to feet to match.
-const CONTOUR_THRESHOLDS = {
-  3: [5000, 25000],
-  4: [2500, 10000],
-  5: [1000, 5000],
-  6: [1000, 5000],
-  7: [500, 2500],
-  8: [500, 2500],
-  9: [250, 1000],
-  10: [200, 1000],
-  11: [200, 1000],
-  12: [100, 500],
-  13: [100, 500],
-  14: [50, 200],
-  15: [20, 100],
-};
 
 function boundsToPolygon(cell) {
   const { south, west, north, east } = cell;
@@ -135,45 +324,1209 @@ function boundsToPolygon(cell) {
   };
 }
 
-async function fetchBoard() {
-  const res = await fetch('/api/mc/board');
+// MeshCore's /api/mc/board returns the cell array directly; Meshtastic's
+// /get-nodes returns {coverage, repeaters} -- same reasoning and same
+// unwrap as mc.js's fetchBoardCells. Both cell shapes (south/west/
+// north/east/owner_team/cell_id) match boundsToPolygon either way.
+async function fetchBoard(c) {
+  const res = await fetch(c.boardEndpoint);
   if (!res.ok) throw new Error(`board fetch failed: ${res.status}`);
-  const cells = await res.json();
+  const data = await res.json();
+  const cells = Array.isArray(data) ? data : (Array.isArray(data.coverage) ? data.coverage : []);
   return {
     type: 'FeatureCollection',
     features: cells.map(boundsToPolygon),
   };
 }
 
-async function fetchScores() {
-  const res = await fetch('/api/mc/scores');
-  if (!res.ok) throw new Error(`scores fetch failed: ${res.status}`);
+// ===== Territory panel (ported from frontend/mc.js) =====
+//
+// The scoreboard/roster/history/top-players/player-lookup panel and the
+// winner banner, both of which lived only on the Leaflet page (frontend/
+// mc.js's buildScoreboardControl et al.) until this page became the
+// front page. Same markup, same mc.css/coverage.css classes (loaded by
+// map2.html alongside map2.css), same information -- rebuilt here
+// because mc.js's version anchors itself via L.control/L.DomUtil/
+// L.DomEvent, none of which exist without a Leaflet map. The panel div
+// is built once and appended straight to <body>, positioned by
+// map2.css (#mc-scoreboard-position) the way Leaflet's own topright
+// control corner used to position it for free.
+//
+// The Meshtastic/MeshCore board SWITCH (.mc-switch-row) at the top of
+// mc.js's panel IS ported below (see PROTOCOLS, cfg(), setBoardMode()).
+// Both boards read the same board/board-fill MapLibre source -- there
+// is no second source, just a re-fetch into the one already created in
+// main() -- so switching carries the source's tolerance: 0 setting
+// (see main()'s map.addSource('board', ...)) for free on both boards,
+// nothing to duplicate. Every string this panel shows (board title,
+// button labels, endpoints) comes from whichever half of PROTOCOLS is
+// active, same table shape as mc.js's own PROTOCOLS.
+//
+// Also not ported: per-cell click popups. Correction to an earlier note
+// here -- mc.js's Leaflet page (bindCellPopup / buildCellPopupHtml)
+// DOES have these, showing a square's owner/captures/repeaters on
+// click; this page's board-fill layer still has no click handler at
+// all. That is a real gap between the two pages, not a gap shared by
+// both -- flagged in the deploy report, not implemented in this pass.
+const PROTOCOLS = {
+  meshcore: {
+    protocol: 'mc',
+    boardTitle: 'MeshCore Territory',
+    topButtonLabel: 'Top Operators',
+    topCaptureLabel: 'Wardrivers',
+    topCheckinLabel: 'NetOps',
+    topExplorerLabel: 'Explorer',
+    lookupPlaceholder: 'player name',
+    lookupHelp: 'Search by player name.',
+    boardEndpoint: '/api/mc/board',
+    scoresEndpoint: '/api/mc/scores',
+    historyEndpoint: '/api/mc/history',
+    rosterEndpoint: '/api/mc/players',
+    findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
+    topEndpoint: '/api/mc/top',
+    topCheckinEndpoint: '/api/mc/top-checkins',
+    topExplorerEndpoint: '/api/mc/top-explorer',
+    seasonEndpoint: '/api/mc/season',
+  },
+  meshtastic: {
+    protocol: 'mt',
+    boardTitle: 'Meshtastic Territory',
+    topButtonLabel: 'Top Operators',
+    topCaptureLabel: 'Wardrivers',
+    topCheckinLabel: 'NetOps',
+    topExplorerLabel: 'Explorer',
+    lookupPlaceholder: 'player name',
+    lookupHelp: 'Search by player name.',
+    boardEndpoint: '/get-nodes',
+    scoresEndpoint: '/scores',
+    historyEndpoint: '/history',
+    rosterEndpoint: '/teams',
+    findEndpoint: (q) => `/find?name=${encodeURIComponent(q)}`,
+    topEndpoint: '/top',
+    topCheckinEndpoint: '/top-checkins',
+    topExplorerEndpoint: '/top-explorer',
+    seasonEndpoint: '/season',
+  },
+};
+
+const REFRESH_INTERVAL_MS = 30000;
+
+// ---- module state (territory panel) ----
+let mode = 'meshcore'; // key into PROTOCOLS -- set from /config's
+                        // mc_default_view before the panel is built
+                        // (see fetchBootConfig/main), same source of
+                        // truth mc.js's loadConfig() reads. The board
+                        // choice itself is never written to
+                        // localStorage on either page -- mc.js persists
+                        // only the map view itself (its 'mapView' key),
+                        // never which board was showing, and this page
+                        // does not persist the map view at all yet.
+function cfg() {
+  return PROTOCOLS[mode];
+}
+let scoreboardTitleEl = null;
+let scoreboardTopBtn = null;
+let scoreboardBody = null;
+let scoreboardPanelEl = null;
+let scoreboardHeaderBtn = null;
+let scoreboardSummaryEl = null;
+let scoreboardLookupInput = null;
+let scoreboardEndsAt = null;
+
+function formatTs(ts) {
+  if (!ts) return 'unknown';
+  try {
+    return new Date(ts * 1000).toLocaleString();
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
+function formatCountdown(secondsRemaining) {
+  if (secondsRemaining <= 0) return 'closing';
+  const days = Math.floor(secondsRemaining / 86400);
+  const hours = Math.floor((secondsRemaining % 86400) / 3600);
+  const mins = Math.floor((secondsRemaining % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+// A team's number, wherever it's shown: squares held PLUS check-in
+// points (app/mc_scoring.py's team_totals()) -- the combined figure
+// that actually decides the season now, not squares alone. Falls back
+// to tiles-only for the all-zero seed row renderScoreboard(null) hands
+// out before the first real fetch, which has no checkin_points/total
+// fields at all yet.
+function teamTotal(t) {
+  if (typeof t.total === 'number') return t.total;
+  return t.tiles ?? 0;
+}
+
+function teamBreakdown(t) {
+  const tiles = t.tiles ?? 0;
+  const pts = t.checkin_points ?? 0;
+  const squareWord = tiles === 1 ? 'square' : 'squares';
+  const pointWord = pts === 1 ? 'point' : 'points';
+  return `${tiles} ${squareWord} + ${pts} check-in ${pointWord}`;
+}
+
+function teamBreakdownCompact(t) {
+  const tiles = t.tiles ?? 0;
+  const pts = t.checkin_points ?? 0;
+  return `${tiles}+${pts}`;
+}
+
+function bindBreakdownToggle(el) {
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const showingBreakdown = el.classList.toggle('mc-showing-breakdown');
+    el.textContent = showingBreakdown ? el.dataset.compact : el.dataset.total;
+  });
+}
+
+function attachBreakdownToggle(el, totalText, compactText) {
+  el.dataset.total = totalText;
+  el.dataset.compact = compactText;
+  el.textContent = totalText;
+  bindBreakdownToggle(el);
+}
+
+function leadingTeam(teams) {
+  let best = null;
+  teams.forEach((t) => {
+    if (!best || teamTotal(t) > teamTotal(best)) best = t;
+  });
+  return best;
+}
+
+function setMcCollapsed(collapsed) {
+  if (!scoreboardPanelEl || !scoreboardHeaderBtn) return;
+  scoreboardPanelEl.classList.toggle('mc-collapsed', collapsed);
+  scoreboardHeaderBtn.setAttribute('aria-expanded', String(!collapsed));
+}
+
+function renderScoreboard(data) {
+  if (!scoreboardBody) return;
+  scoreboardBody.replaceChildren();
+
+  const teams = (data && Array.isArray(data.teams) && data.teams.length)
+    ? data.teams
+    : TEAM_ORDER.map((t) => ({ team: t, tiles: 0 }));
+
+  if (scoreboardSummaryEl) {
+    const lead = leadingTeam(teams);
+    scoreboardSummaryEl.textContent = lead ? `${lead.team} ${teamTotal(lead)}` : '';
+  }
+
+  const ordered = teams.slice().sort((a, b) => (
+    teamTotal(b) - teamTotal(a) ||
+    TEAM_ORDER.indexOf(a.team) - TEAM_ORDER.indexOf(b.team)
+  ));
+
+  ordered.forEach((entry) => {
+    const row = document.createElement('div');
+    row.className = 'mc-row';
+
+    const dot = document.createElement('span');
+    dot.className = 'mc-dot';
+    dot.style.background = TEAM_COLORS[entry.team] || '#888';
+    row.appendChild(dot);
+
+    const label = document.createElement('span');
+    label.className = 'mc-team-label';
+    label.textContent = `${entry.team}: `;
+    row.appendChild(label);
+
+    const count = document.createElement('span');
+    count.className = 'mc-team-count';
+    count.title = teamBreakdown(entry);
+    attachBreakdownToggle(count, String(teamTotal(entry)), teamBreakdownCompact(entry));
+    row.appendChild(count);
+
+    scoreboardBody.appendChild(row);
+  });
+}
+
+function tickCountdown() {
+  const el = document.getElementById('mc-countdown');
+  if (!el || !scoreboardEndsAt) return;
+  const now = Math.floor(Date.now() / 1000);
+  el.textContent = formatCountdown(scoreboardEndsAt - now);
+}
+
+async function loadScoreboard() {
+  try {
+    const res = await fetch(cfg().scoresEndpoint);
+    if (!res.ok) return;
+    const data = await res.json();
+    renderScoreboard(data);
+    scoreboardEndsAt = data.ends_at || null;
+  } catch (err) {
+    console.warn('MeshWars map2: scoreboard refresh failed', err);
+  }
+}
+
+async function fetchHistorySeasons() {
+  const res = await fetch(cfg().historyEndpoint);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+// Normalizes both roster shapes into a common Map<team, [{display_name}]>
+// -- MeshCore's /api/mc/players is a flat list this groups itself;
+// Meshtastic's /teams is already grouped, just keyed differently. Same
+// split as mc.js's fetchRosterByTeam.
+async function fetchRosterByTeam() {
+  const c = cfg();
+  const byTeam = new Map();
+  const res = await fetch(c.rosterEndpoint);
+  if (!res.ok) return byTeam;
+  const data = await res.json();
+  if (c.protocol !== 'mc') {
+    const teams = (data && data.teams) || {};
+    Object.keys(teams).forEach((team) => {
+      byTeam.set(team, (teams[team] || []).map((p) => ({ display_name: p.display_name })));
+    });
+    return byTeam;
+  }
+  const players = data;
+  if (!Array.isArray(players)) return byTeam;
+  players.forEach((p) => {
+    const team = p.team || 'UNKNOWN';
+    if (!byTeam.has(team)) byTeam.set(team, []);
+    byTeam.get(team).push({ display_name: p.display_name });
+  });
+  return byTeam;
+}
+
+// ===== Player search (Find) =====
+//
+// Find used to stop here once a player's cells were located -- a player
+// holding no cells got a one-line "holds no cells right now" and
+// nothing else, which meant Find was really "top-of-board locator", not
+// a real player lookup: it never showed points, and it went blank
+// entirely for anyone with checkin/Explorer points but zero captures.
+// This is now this page's only way for a player OUTSIDE the Top
+// Operators rankings to see their own numbers, so it must not go blank
+// for them. Point breakdown reuses the exact same "tap to see the
+// split" affordance team totals already use (mc-tally-count/
+// bindBreakdownToggle, see openHistoryModal above) rather than
+// inventing a new interaction or any new CSS.
+async function doPlayerFind(value) {
+  const resultEl = document.getElementById('mc-lookup-result');
+  if (!resultEl) return;
+  const query = (value || '').trim();
+  if (!query) { resultEl.replaceChildren(); return; }
+  resultEl.textContent = 'Searching...';
+
+  try {
+    const res = await fetch(cfg().findEndpoint(query));
+    if (res.status === 404) {
+      resultEl.textContent = `Not found: ${query}`;
+      return;
+    }
+    if (!res.ok) {
+      resultEl.textContent = 'Search failed.';
+      return;
+    }
+    const data = await res.json();
+
+    // Zoom the map only when they currently hold cells -- unchanged
+    // from before this pass, just no longer gating whether the point
+    // breakdown below renders too.
+    if (data.bounds && data.tiles_held && window.__mwMap) {
+      const b = data.bounds;
+      // MapLibre bounds are [[west, south], [east, north]] -- Leaflet's
+      // equivalent call (mc.js's doPlayerFind) uses [lat, lng] order
+      // instead; only the coordinate order changes here, not the
+      // padding or the MAX_FIT_ZOOM cap.
+      window.__mwMap.fitBounds([[b.west, b.south], [b.east, b.north]], { padding: 24, maxZoom: MAX_FIT_ZOOM });
+    }
+
+    const plural = data.tiles_held === 1 ? '' : 's';
+    const holdsText = data.tiles_held
+      ? `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`
+      : `${data.display_name} (${data.team}) holds no cells right now.`;
+
+    const captures = data.tiles_held || 0; // capture points == squares currently held, same figure team_tile_counts() sums per team
+    const checkins = data.checkin_points || 0;
+    const explorer = data.explorer_points || 0;
+    const total = data.total_points ?? (captures + checkins + explorer);
+    const compact = `${captures}+${checkins}+${explorer}`;
+    const splitTitle = `${captures} capture + ${checkins} check-in + ${explorer} Explorer points`;
+
+    const activityBits = [];
+    if (data.last_checkin_net_date) activityBits.push(`last check-in ${data.last_checkin_net_date}`);
+    if (data.last_position_ts) activityBits.push(`last seen ${formatTs(data.last_position_ts)}`);
+    // Plain text, no new class -- inherits .mc-lookup-result's own
+    // font-size/color like everything else in this box already does.
+    const activityText = activityBits.length ? ` (${escapeHtml(activityBits.join(', '))})` : '';
+
+    resultEl.innerHTML =
+      `<div>${escapeHtml(holdsText)}</div>` +
+      `<div>Points: <span class="mc-tally-count" data-total="${escapeHtml(total)}" data-compact="${escapeHtml(compact)}" title="${escapeHtml(splitTitle)}">${escapeHtml(total)}</span>${activityText}</div>`;
+    resultEl.querySelectorAll('.mc-tally-count').forEach(bindBreakdownToggle);
+  } catch (err) {
+    resultEl.textContent = 'Search failed.';
+  }
+}
+
+// ===== Modal (History / Roster / Top) =====
+
+let mcModalEl = null;
+let mcModalTitleEl = null;
+let mcModalBodyEl = null;
+
+function ensureModal() {
+  if (mcModalEl) return;
+  mcModalEl = document.createElement('div');
+  mcModalEl.id = 'mc-modal';
+  mcModalEl.className = 'mc-modal';
+  mcModalEl.innerHTML = `
+    <div class="mc-modal-inner">
+      <div class="mc-modal-header">
+        <span id="mc-modal-title"></span>
+        <button type="button" class="mc-modal-close" id="mc-modal-close">&times;</button>
+      </div>
+      <div id="mc-modal-body"></div>
+    </div>
+  `;
+  document.body.appendChild(mcModalEl);
+  mcModalTitleEl = mcModalEl.querySelector('#mc-modal-title');
+  mcModalBodyEl = mcModalEl.querySelector('#mc-modal-body');
+  mcModalEl.querySelector('#mc-modal-close').addEventListener('click', closeMcModal);
+  mcModalEl.addEventListener('click', (e) => {
+    if (e.target === mcModalEl) closeMcModal();
+  });
+}
+
+function openMcModal(title) {
+  ensureModal();
+  mcModalTitleEl.textContent = title;
+  mcModalBodyEl.replaceChildren();
+  const loading = document.createElement('div');
+  loading.className = 'mc-modal-loading';
+  loading.textContent = 'Loading...';
+  mcModalBodyEl.appendChild(loading);
+  mcModalEl.style.display = 'flex';
+  return mcModalBodyEl;
+}
+
+function closeMcModal() {
+  if (mcModalEl) mcModalEl.style.display = 'none';
+}
+
+function showModalMessage(body, className, text) {
+  body.replaceChildren();
+  const el = document.createElement('div');
+  el.className = className;
+  el.textContent = text;
+  body.appendChild(el);
+}
+
+async function openHistoryModal() {
+  const body = openMcModal('Past Seasons');
+  try {
+    const seasons = await fetchHistorySeasons();
+    if (!seasons.length) {
+      showModalMessage(body, 'mc-modal-empty', 'No completed seasons yet.');
+      return;
+    }
+    const rows = seasons.map((s) => {
+      const started = s.started_at ? new Date(s.started_at * 1000).toLocaleDateString() : '?';
+      const ended = s.ends_at ? new Date(s.ends_at * 1000).toLocaleDateString() : '?';
+      const teams = Array.isArray(s.teams) ? s.teams : [];
+      const tallyText = teams
+        .filter((t) => teamTotal(t) > 0)
+        .map((t) => `${escapeHtml(t.team)} <span class="mc-tally-count" data-total="${escapeHtml(teamTotal(t))}" data-compact="${escapeHtml(teamBreakdownCompact(t))}" title="${escapeHtml(teamBreakdown(t))}">${escapeHtml(teamTotal(t))}</span>`)
+        .join(', ') || 'no tiles recorded';
+      return `<tr>
+        <td>#${escapeHtml(s.id)}</td>
+        <td>${escapeHtml(started)} &ndash; ${escapeHtml(ended)}</td>
+        <td class="mc-winner-cell">${escapeHtml(s.winner || '-')}</td>
+        <td>${tallyText}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `<table class="mc-history-table">
+      <thead><tr><th>Season</th><th>Dates</th><th>Winner</th><th>Final tallies</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+    body.querySelectorAll('.mc-tally-count').forEach(bindBreakdownToggle);
+  } catch (err) {
+    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+  }
+}
+
+async function openRosterModal() {
+  const body = openMcModal('Player Roster');
+  try {
+    const byTeam = await fetchRosterByTeam();
+    if (byTeam.size === 0) {
+      showModalMessage(body, 'mc-modal-empty', 'No players yet.');
+      return;
+    }
+    const teamOrder = TEAM_ORDER.filter((t) => byTeam.has(t))
+      .concat([...byTeam.keys()].filter((t) => !TEAM_ORDER.includes(t)));
+    const sections = teamOrder.map((team) => {
+      const list = (byTeam.get(team) || []).slice()
+        .sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''));
+      const rows = list.map((p) => `<tr><td>${escapeHtml(p.display_name)}</td></tr>`).join('');
+      const color = TEAM_COLORS[team] || '#888';
+      return `<div class="mc-roster-team">
+        <h3 style="color:${color};">${escapeHtml(team)} &mdash; ${list.length}</h3>
+        <table class="mc-roster-table"><tbody>${rows}</tbody></table>
+      </div>`;
+    }).join('');
+    body.innerHTML = `<div class="mc-roster-grid">${sections}</div>`;
+  } catch (err) {
+    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+  }
+}
+
+let topModalTab = 'captures';
+
+function topTabSpecs() {
+  const c = cfg();
+  return {
+    captures: {
+      label: c.topCaptureLabel,
+      endpoint: c.topEndpoint,
+      valueKey: 'captures',
+      valueHeader: 'Captures',
+      emptyText: 'No capture activity yet.',
+    },
+    checkins: {
+      label: c.topCheckinLabel,
+      endpoint: c.topCheckinEndpoint,
+      valueKey: 'points',
+      valueHeader: 'Points',
+      emptyText: 'No check-in activity yet.',
+      extraKey: 'streak',
+      extraHeader: 'Streak',
+    },
+    explorer: {
+      label: c.topExplorerLabel,
+      endpoint: c.topExplorerEndpoint,
+      valueKey: 'points',
+      valueHeader: 'Points',
+      emptyText: 'No Explorer activity yet.',
+    },
+  };
+}
+
+async function renderTopModalTab() {
+  const tabBody = mcModalBodyEl.querySelector('#mc-top-tab-body');
+  if (!tabBody) return;
+  const spec = topTabSpecs()[topModalTab];
+  tabBody.innerHTML = '<div class="mc-modal-loading">Loading...</div>';
+
+  try {
+    const res = await fetch(spec.endpoint);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) {
+      tabBody.innerHTML = '';
+      const el = document.createElement('div');
+      el.className = 'mc-modal-empty';
+      el.textContent = spec.emptyText;
+      tabBody.appendChild(el);
+      return;
+    }
+    const trs = rows.map((r, i) => {
+      const color = TEAM_COLORS[r.team] || '#888';
+      const extra = spec.extraKey
+        ? `<td>${escapeHtml(r[spec.extraKey] == null ? '—' : `${r[spec.extraKey]}x`)}</td>`
+        : '';
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${escapeHtml(r.display_name)}</td>
+        <td><span class="mc-dot" style="background:${color}"></span>${escapeHtml(r.team)}</td>
+        <td>${escapeHtml(r[spec.valueKey])}</td>
+        ${extra}
+      </tr>`;
+    }).join('');
+    const extraHead = spec.extraHeader ? `<th>${escapeHtml(spec.extraHeader)}</th>` : '';
+    tabBody.innerHTML = `<table class="mc-history-table">
+      <thead><tr><th>#</th><th>Player</th><th>Team</th><th>${escapeHtml(spec.valueHeader)}</th>${extraHead}</tr></thead>
+      <tbody>${trs}</tbody>
+    </table>`;
+  } catch (err) {
+    tabBody.innerHTML = '';
+    const el = document.createElement('div');
+    el.className = 'mc-modal-error';
+    el.textContent = `Failed to load: ${err.message}`;
+    tabBody.appendChild(el);
+  }
+}
+
+async function openTopModal() {
+  const specs = topTabSpecs();
+  topModalTab = 'captures';
+  const body = openMcModal('Season Rankings');
+  body.innerHTML = `
+    <div class="mc-modal-tabs">
+      <button type="button" class="mc-modal-tab active" data-tab="captures">${escapeHtml(specs.captures.label)}</button>
+      <button type="button" class="mc-modal-tab" data-tab="checkins">${escapeHtml(specs.checkins.label)}</button>
+      <button type="button" class="mc-modal-tab" data-tab="explorer">${escapeHtml(specs.explorer.label)}</button>
+    </div>
+    <div id="mc-top-tab-body"></div>
+  `;
+  body.querySelectorAll('.mc-modal-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.tab === topModalTab) return;
+      topModalTab = btn.dataset.tab;
+      body.querySelectorAll('.mc-modal-tab').forEach((b) => b.classList.toggle('active', b === btn));
+      renderTopModalTab();
+    });
+  });
+  await renderTopModalTab();
+}
+
+// ===== Winner banner =====
+//
+// Top-center overlay on the map itself (#mc-winner-banner in
+// map2.html) -- same element, same position, same behavior as the
+// Leaflet page's. Shows nothing once the season's display window
+// elapses, same as the backend already decides via winner_banner_active
+// / settings.winner_banner_hours -- this never has its own opinion
+// about when to hide it.
+function renderWinnerBanner(banner) {
+  const el = document.getElementById('mc-winner-banner');
+  if (!el) return;
+  if (!banner) {
+    el.style.display = 'none';
+    el.replaceChildren();
+    return;
+  }
+
+  el.replaceChildren();
+
+  const isTie = !banner.winner || banner.winner === 'TIE';
+  const tag = document.createElement('span');
+  tag.className = 'mc-winner-tag';
+  tag.style.background = isTie ? '#888' : (TEAM_COLORS[banner.winner] || '#888');
+  tag.textContent = isTie ? 'TIE' : `${banner.winner} WINS`;
+  el.appendChild(tag);
+
+  const counts = document.createElement('span');
+  counts.className = 'mc-winner-counts';
+  const teams = Array.isArray(banner.teams) ? banner.teams : [];
+  teams.forEach((t) => {
+    const entry = document.createElement('span');
+    entry.className = 'mc-winner-count-entry';
+    const dot = document.createElement('span');
+    dot.className = 'mc-dot';
+    dot.style.background = TEAM_COLORS[t.team] || '#888';
+    entry.appendChild(dot);
+    const countSpan = document.createElement('span');
+    countSpan.className = 'mc-winner-count';
+    countSpan.title = teamBreakdown(t);
+    attachBreakdownToggle(countSpan, String(teamTotal(t)), teamBreakdownCompact(t));
+    entry.appendChild(countSpan);
+    counts.appendChild(entry);
+  });
+  el.appendChild(counts);
+
+  const dates = document.createElement('span');
+  dates.className = 'mc-winner-dates';
+  dates.textContent = `Season #${banner.season_id}`;
+  el.appendChild(dates);
+
+  el.style.display = 'flex';
+}
+
+async function refreshWinnerBanner() {
+  try {
+    const res = await fetch(cfg().seasonEndpoint);
+    if (!res.ok) { renderWinnerBanner(null); return; }
+    const data = await res.json();
+    renderWinnerBanner(data.winner_banner || null);
+  } catch (err) {
+    console.warn('MeshWars map2: winner banner refresh failed', err);
+    renderWinnerBanner(null);
+  }
+}
+
+// ===== Scoreboard control =====
+//
+// Board switch, collapsible header with live summary, seven-team
+// scoreboard with color dots, season countdown, player lookup, History/
+// Roster, Refresh, and a ranked-players button -- everything mc.js's
+// buildScoreboardControl builds, including the board-switch row
+// (.mc-switch-row, same markup/classes/order as mc.js -- row one of the
+// card, outside .mc-panel-content so it survives the phone collapse).
+// Built once and appended straight into <body>; map2.css positions it
+// (#mc-scoreboard-position) the way Leaflet's own topright control
+// corner used to for mc.js. The title span and top-players button start
+// empty/unlabeled, same as mc.js's own markup -- setBoardMode (called
+// once right after this, with the /config-derived default mode) fills
+// them in via applyProtocolChrome(), so there is never a MeshCore-
+// labeled flash before a Meshtastic default takes over.
+function buildScoreboardControl(map) {
+  const div = document.createElement('div');
+  div.id = 'mc-scoreboard-position';
+  div.className = 'mc-scoreboard';
+  div.innerHTML = `
+    <div class="mc-switch-row" id="mc-switch-row">
+      <button type="button" id="mc-toggle-meshtastic" class="mc-switch-btn">Meshtastic</button>
+      <button type="button" id="mc-toggle-meshcore" class="mc-switch-btn">MeshCore</button>
+    </div>
+    <button type="button" class="mc-row mc-title mc-header-btn" id="mc-header-btn" aria-expanded="true">
+      <span class="mc-header-title-text" id="mc-header-title-text"></span>
+      <span class="mc-header-right">
+        <span class="mc-header-summary" id="mc-header-summary"></span>
+        <span class="mc-header-caret" aria-hidden="true">&#9662;</span>
+      </span>
+    </button>
+    <div class="mc-panel-content" id="mc-panel-content">
+      <div class="mc-scoreboard-body"></div>
+      <div class="mc-row mc-countdown">Ends in&nbsp;<span id="mc-countdown">--</span></div>
+      <div class="mc-row mc-lookup-row">
+        <input type="text" id="mc-lookup-input" placeholder="player name" />
+        <button type="button" id="mc-lookup-btn">Find</button>
+      </div>
+      <div id="mc-lookup-result" class="mc-lookup-result"></div>
+      <div class="mc-row"><a href="#" id="mc-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mc-roster-link">Roster</a></div>
+      <div class="mc-row mc-actions">
+        <button type="button" id="mc-refresh-btn">Refresh map</button>
+      </div>
+      <div class="mc-row mc-actions">
+        <button type="button" id="mc-top-btn"></button>
+      </div>
+      <div class="mc-row mc-actions">
+        <button type="button" id="mc-places-btn" aria-expanded="false" aria-controls="mc-places-section">Places</button>
+      </div>
+      <div id="mc-places-section" class="mc-places-section">
+        <div class="mc-row mc-places-section-title">Nearby Places</div>
+        <ul id="mw-places-list" class="mw-places-list"></ul>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(div);
+
+  scoreboardBody = div.querySelector('.mc-scoreboard-body');
+  scoreboardPanelEl = div;
+  scoreboardHeaderBtn = div.querySelector('#mc-header-btn');
+  scoreboardSummaryEl = div.querySelector('#mc-header-summary');
+  scoreboardTitleEl = div.querySelector('#mc-header-title-text');
+  scoreboardLookupInput = div.querySelector('#mc-lookup-input');
+
+  // Leaflet's L.DomEvent.disableClickPropagation/disableScrollPropagation
+  // stopped clicks/scrolls on a control from reaching the map underneath
+  // it -- there is no map-wide equivalent to opt out of on MapLibre, so
+  // this stops the same events at the panel's own root instead.
+  ['click', 'dblclick', 'mousedown', 'touchstart', 'wheel'].forEach((evt) => {
+    div.addEventListener(evt, (e) => e.stopPropagation());
+  });
+
+  scoreboardTopBtn = div.querySelector('#mc-top-btn');
+  const topBtn = scoreboardTopBtn;
+
+  // Board switch -- row one of the card, always visible, never inside
+  // .mc-panel-content, so it survives the phone collapse below. Does
+  // NOT touch the camera: setBoardMode only swaps which board's data
+  // is fetched into the existing 'board' source and refreshes the
+  // panel's numbers, same as the constraint the owner gave for this
+  // port -- the view stays exactly where the visitor left it.
+  div.querySelector('#mc-toggle-meshtastic').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setBoardMode('meshtastic', map);
+  });
+  div.querySelector('#mc-toggle-meshcore').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setBoardMode('meshcore', map);
+  });
+
+  div.querySelector('#mc-header-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    setMcCollapsed(!scoreboardPanelEl.classList.contains('mc-collapsed'));
+  });
+
+  div.querySelector('#mc-history-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    openHistoryModal();
+  });
+  div.querySelector('#mc-roster-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    openRosterModal();
+  });
+
+  const lookupBtn = div.querySelector('#mc-lookup-btn');
+  const doLookup = () => doPlayerFind(scoreboardLookupInput.value);
+  lookupBtn.addEventListener('click', doLookup);
+  scoreboardLookupInput.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') doLookup();
+  });
+  scoreboardLookupInput.addEventListener('keyup', (e) => e.stopPropagation());
+  scoreboardLookupInput.addEventListener('keypress', (e) => e.stopPropagation());
+
+  div.querySelector('#mc-refresh-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    loadBoardData(map);
+    loadScoreboard();
+  });
+
+  topBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openTopModal();
+  });
+
+  // Places Worth Going (docs/features/places.md): a fourth row in the
+  // same .mc-actions stack as Refresh map/Top Operators, expanding the
+  // live-places list IN PLACE below it rather than sliding out a
+  // separate panel -- the previous floating panel sat in the same
+  // top-right corner as this one and, depending on the day, ended up
+  // clipped behind it or behind the fixed nav bar. Nested inside this
+  // card there is nothing left for it to hide behind. Top Operators
+  // (topBtn, above) opens a modal instead of expanding in place, so
+  // there is no real "both expanded" state to reconcile -- the modal
+  // covers the whole screen regardless of whether this section is open,
+  // and closing the modal leaves this section exactly as it was.
+  const placesBtn = div.querySelector('#mc-places-btn');
+  const placesSection = div.querySelector('#mc-places-section');
+  placesBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = !placesSection.classList.contains('open');
+    placesSection.classList.toggle('open', open);
+    placesBtn.setAttribute('aria-expanded', String(open));
+    placesBtn.textContent = open ? 'Hide places' : 'Places';
+  });
+
+  return div;
+}
+
+// ===== Board switch (mode) =====
+//
+// Ported from mc.js's updateToggleButtons/applyProtocolChrome/setMode.
+// Text-only chrome update -- title, top-players button label, lookup
+// placeholder/help, and clearing any stale Find result -- plus a data
+// refresh into the panel and the existing 'board' source. Deliberately
+// does not touch the camera (no fitBounds/flyTo, unlike mc.js's own
+// setMode) per this port's explicit constraint: switching boards must
+// never move the map out from under a visitor.
+function updateToggleButtons() {
+  const btnMeshtastic = document.getElementById('mc-toggle-meshtastic');
+  const btnMeshcore = document.getElementById('mc-toggle-meshcore');
+  if (btnMeshtastic) btnMeshtastic.classList.toggle('active', mode === 'meshtastic');
+  if (btnMeshcore) btnMeshcore.classList.toggle('active', mode === 'meshcore');
+}
+
+function applyProtocolChrome() {
+  const c = cfg();
+  if (scoreboardTitleEl) scoreboardTitleEl.textContent = c.boardTitle;
+  if (scoreboardTopBtn) scoreboardTopBtn.textContent = c.topButtonLabel;
+  if (scoreboardLookupInput) {
+    scoreboardLookupInput.placeholder = c.lookupPlaceholder;
+    scoreboardLookupInput.title = c.lookupHelp;
+  }
+  const resultEl = document.getElementById('mc-lookup-result');
+  if (resultEl) resultEl.textContent = '';
+}
+
+function setBoardMode(newMode, map) {
+  mode = newMode === 'meshtastic' ? 'meshtastic' : 'meshcore';
+  applyProtocolChrome();
+  updateToggleButtons();
+  loadBoardData(map);
+  loadScoreboard();
+  refreshWinnerBanner();
+}
+
+// ---- Places Worth Going (docs/features/places.md) ----------------------
+
+function placeToFeature(p) {
+  return {
+    type: 'Feature',
+    properties: { id: p.id, type: p.type, name: p.name, points: p.points },
+    geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
+  };
+}
+
+async function fetchPlacesInViewport(bounds, zoom) {
+  const params = new URLSearchParams({
+    north: bounds.getNorth(), south: bounds.getSouth(),
+    west: bounds.getWest(), east: bounds.getEast(),
+    // Server only computes/returns park_boundaries at all once zoom is
+    // present and >= its own MIN_BOUNDARY_ZOOM (app/places_api.py) --
+    // sent unconditionally rather than only above the threshold so the
+    // two constants staying in sync is visible by reading either file,
+    // not by remembering to gate the param here too.
+    zoom,
+  });
+  const res = await fetch(`/api/places?${params}`);
+  if (!res.ok) throw new Error(`places fetch failed: ${res.status}`);
   return res.json();
 }
 
-function renderScores(data) {
-  const list = document.getElementById('mw-scores-list');
+async function fetchPlacesNear(lat, lon) {
+  const params = new URLSearchParams({ lat, lon, limit: 30 });
+  const res = await fetch(`/api/places/near?${params}`);
+  if (!res.ok) throw new Error(`places/near fetch failed: ${res.status}`);
+  return res.json();
+}
+
+// One canvas path per tier, drawn centered on (cx, cy) and scaled to
+// fit within radius g (the glyph budget -- see drawPlaceIcon). Bold,
+// simple, single-fill-pass silhouettes on
+// purpose: these render as small as ~22-30 CSS px (see PLACE_ICON_PX)
+// at low zoom, so any silhouette with fine detail (a snow-capped peak,
+// individual pine needles, a five-point star with thin arms) turns to
+// mud at that size. Each is picked to be unmistakable from the
+// other two even as a blurry thumbnail: the mountain is wide and low
+// (twin overlapping peaks), the tree is tall and narrow with a trunk
+// stub, the star is the only one with concave points -- three
+// different silhouette OUTLINES, not just three different fills of the
+// same rough blob, so they stay apart at every zoom the fade
+// (PLACE_ICON_OPACITY_ZOOM) leaves them at all visible.
+const PLACE_GLYPHS = {
+  // Twin overlapping peaks -- wide and flat, both peaks sharing roughly
+  // the same baseline. Reads as "range" rather than "single point" even
+  // tiny, and its wide/short silhouette is the opposite of the tree's
+  // tall/narrow one below.
+  summit(ctx, cx, cy, g) {
+    const baseY = cy + g * 0.6;
+    ctx.moveTo(cx - g, baseY);
+    ctx.lineTo(cx - g * 0.32, cy - g * 0.4);
+    ctx.lineTo(cx + g * 0.08, baseY);
+    ctx.closePath();
+    ctx.moveTo(cx - g * 0.22, baseY);
+    ctx.lineTo(cx + g * 0.32, cy - g * 0.85);
+    ctx.lineTo(cx + g, baseY);
+    ctx.closePath();
+  },
+  // A stacked, three-tier conifer over a short trunk block -- two
+  // earlier attempts both failed watching this live: a single wide
+  // triangle plus a trunk line read as an up-arrow (a triangle-over-a-
+  // stem is exactly that common icon's shape, regardless of the
+  // triangle's own proportions), and a rounded 3-circle "bush" canopy
+  // read as a face/skull (the gaps between the circles' outlines
+  // become eye-shaped holes once stroked). Three flat-bottomed
+  // triangles, each apex overlapping down into the tier above so the
+  // wider shoulders of every lower tier show as a visible STEP, is the
+  // classic layered-Christmas-tree silhouette -- multiple distinct
+  // tiers read as "tree" precisely because neither an arrow nor a
+  // mountain (two peaks, not three stacked/shrinking ones) has that
+  // shape, and there is no smooth rounded outline for it to be
+  // mistaken for a face.
+  park(ctx, cx, cy, g) {
+    const trunkW = g * 0.2, trunkTop = cy + g * 0.55, trunkBottom = cy + g * 0.85;
+    ctx.moveTo(cx - trunkW, trunkBottom);
+    ctx.lineTo(cx + trunkW, trunkBottom);
+    ctx.lineTo(cx + trunkW, trunkTop);
+    ctx.lineTo(cx - trunkW, trunkTop);
+    ctx.closePath();
+    ctx.moveTo(cx, cy - g);
+    ctx.lineTo(cx + g * 0.45, cy - g * 0.25);
+    ctx.lineTo(cx - g * 0.45, cy - g * 0.25);
+    ctx.closePath();
+    ctx.moveTo(cx, cy - g * 0.5);
+    ctx.lineTo(cx + g * 0.68, cy + g * 0.15);
+    ctx.lineTo(cx - g * 0.68, cy + g * 0.15);
+    ctx.closePath();
+    ctx.moveTo(cx, cy - g * 0.12);
+    ctx.lineTo(cx + g * 0.9, trunkTop);
+    ctx.lineTo(cx - g * 0.9, trunkTop);
+    ctx.closePath();
+  },
+  // Standard five-point star -- the only glyph with concave points, so
+  // it never reads as a rounded blob the way a shrunk mountain or tree
+  // can. Normalized against the other two by actual pixel-area, not by
+  // eye: measured via an offscreen canvas at a shared reference budget
+  // (fill each glyph, count non-transparent pixels), summit and park
+  // land within 2% of each other already (their different silhouette
+  // shapes happen to use their own bounding box about equally
+  // efficiently) -- landmark at outerR=g came in far under both, and at
+  // an earlier 0.8g (tuned back when PLACE_ICON_PX still gave landmark
+  // its own, larger, per-tier size) came in at little more than half
+  // their filled area. 0.95 is the measured match: close to full
+  // radius, because a star's concave notches always cost real filled
+  // area a solid triangle does not pay for the same reach -- matching
+  // envelope size, not raw fill density, is what actually reads as
+  // "the same size" for a spiky shape next to a solid one. Confirmed by
+  // eye afterward, side by side at equal size, not just by the numbers.
+  landmark(ctx, cx, cy, g) {
+    const outerR = g * 0.95, innerR = g * 0.95 * 0.42, spikes = 5;
+    let rot = -Math.PI / 2;
+    const step = Math.PI / spikes;
+    ctx.moveTo(cx + Math.cos(rot) * outerR, cy + Math.sin(rot) * outerR);
+    for (let i = 0; i < spikes; i++) {
+      rot += step;
+      ctx.lineTo(cx + Math.cos(rot) * innerR, cy + Math.sin(rot) * innerR);
+      rot += step;
+      ctx.lineTo(cx + Math.cos(rot) * outerR, cy + Math.sin(rot) * outerR);
+    }
+    ctx.closePath();
+  },
+};
+
+// Draws a tiny raster icon for one place tier on an offscreen canvas
+// and hands it to MapLibre via map.addImage -- no sprite sheet or
+// external asset file, generated at runtime instead, same
+// self-contained spirit as everything else this page ships with. A
+// symbol layer (not a fill layer of ground polygons the way the board
+// squares are drawn) is what keeps these a constant PIXEL size across
+// zoom: a place marker is a marker, not a to-scale shape on the ground.
+//
+// No enclosing pin or circle any more -- the glyph itself (from
+// PLACE_GLYPHS, filled with `color`) IS the whole icon, with `outline`
+// (a {color, width} pair, PLACE_ICON_OUTLINE) stroked around its own
+// edge as a halo for contrast against the basemap, the same job a
+// solid pin fill used to do for free. No dot fallback any more either
+// (see PLACE_ICON_OPACITY_ZOOM) -- the glyph is the ONLY thing this
+// function ever draws now.
+//
+// dpr is the screen's own window.devicePixelRatio, passed in by
+// registerPlaceIcons rather than hardcoded -- THE FIX for a real blur
+// bug, not a style choice. This used to hardcode "2" for both the
+// canvas resolution (dim = sizePx*2) and the pixelRatio handed to
+// map.addImage, regardless of the actual screen: on any display
+// reporting a higher devicePixelRatio (most phones report 3, many
+// laptops report 2.5+), MapLibre renders its own tiles at that
+// screen's real pixel density but this raster was never authored at
+// more than 2x, so a real hidpi screen was upscaling a raster that was
+// already lower-resolution than the screen needed -- exactly the
+// "blurry when zoomed in" symptom, and the worse the screen, the worse
+// the blur. Rasterizing at the screen's OWN dpr (floored at 2 so a
+// standard 1x display still gets a generously large source image, per
+// PLACE_ICON_SIZE_ZOOM's own no-upscale-past-1.0 fix alongside this
+// one) means the source image always has at least as many physical
+// pixels as the screen can show, so icon-size <= 1.0 never has to
+// stretch past native resolution on ANY screen.
+function drawPlaceIcon(type, color, sizePx, outline, dpr) {
+  const canvas = document.createElement('canvas');
+  const dim = sizePx * dpr;
+  canvas.width = dim;
+  canvas.height = dim;
+  const ctx = canvas.getContext('2d');
+  const cx = dim / 2, cy = dim / 2;
+  // Glyph budget leaves just enough margin for the outline stroke
+  // itself not to clip against the canvas edge -- there is no pin fill
+  // eating into this any more, so the glyph gets almost the whole
+  // canvas footprint. Outline width is scaled by dpr the same way the
+  // glyph itself is (CSS px -> device px), not by the old fixed *2.
+  const g = dim / 2 - outline.width * dpr - 1;
+
+  ctx.fillStyle = color;
+  ctx.strokeStyle = outline.color;
+  ctx.lineWidth = outline.width * dpr;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  PLACE_GLYPHS[type](ctx, cx, cy, g);
+  ctx.fill();
+  ctx.stroke();
+
+  return { data: ctx.getImageData(0, 0, dim, dim).data, width: dim, height: dim };
+}
+
+// Registers both themes' icon images up front (place-icon-<type>-gold/
+// -neon) so applyBasemapTheme can flip which set each places-icons-
+// <type> layer points at with a plain setLayoutProperty, the same
+// visibility-swap-not-rebuild pattern the gold/neon basemap rasters
+// use -- see applyBasemapTheme. dpr is read ONCE here (not inside
+// drawPlaceIcon per call) and handed to both the canvas resolution and
+// map.addImage's own pixelRatio option -- these two MUST agree, since
+// pixelRatio is what tells MapLibre how many raster pixels correspond
+// to one CSS pixel; passing a mismatched pair would reintroduce the
+// same blur this whole function exists to fix, just via a different
+// mismatch. Floored at 2 rather than passed through raw: a floor of 1
+// would make a completely ordinary 1x monitor the WORST-resolution
+// source of all three, when it is by far the most common screen this
+// page will actually render on.
+function registerPlaceIcons(map) {
+  const dpr = Math.max(2, window.devicePixelRatio || 1);
+  for (const theme of Object.keys(PLACE_ICON_PX)) {
+    const color = PLACE_COLORS[theme];
+    const sizePx = PLACE_ICON_PX[theme];
+    const outline = PLACE_ICON_OUTLINE[theme];
+    for (const type of PLACE_TYPES) {
+      const icon = drawPlaceIcon(type, color, sizePx, outline, dpr);
+      map.addImage(`place-icon-${type}-${theme}`, icon, { pixelRatio: dpr });
+    }
+  }
+}
+
+function setupPlacesLayer(map) {
+  map.addSource('places', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+
+  // Park boundaries (see PARK_BOUNDARY_* above and
+  // app/places_api.py's park_boundaries) -- a separate source/pair of
+  // layers from the marker source above, added first so 'board-fill'
+  // (the team squares) still draws over it, same beforeId pattern
+  // setupOverlayLayers uses for public lands/USFS. Fill and line paint
+  // are set to the gold values here as a safe initial default, same as
+  // places-icons-* above defaulting to currentTheme() before the boot
+  // sequence's first applyBasemapTheme call actually themes it.
+  map.addSource('park-boundaries', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
+  map.addLayer({
+    id: 'park-boundaries-fill',
+    type: 'fill',
+    source: 'park-boundaries',
+    minzoom: MIN_BOUNDARY_ZOOM,
+    paint: {
+      'fill-color': PLACE_COLORS[currentTheme()],
+      'fill-opacity': PARK_BOUNDARY_FILL_OPACITY.gold,
+    },
+  }, 'board-fill');
+  map.addLayer({
+    id: 'park-boundaries-line',
+    type: 'line',
+    source: 'park-boundaries',
+    minzoom: MIN_BOUNDARY_ZOOM,
+    paint: {
+      'line-color': PLACE_COLORS[currentTheme()],
+      'line-width': PARK_BOUNDARY_LINE_WIDTH.gold,
+      'line-opacity': PARK_BOUNDARY_LINE_OPACITY.gold,
+    },
+  }, 'board-fill');
+
+  // One symbol layer per tier, not one shared layer, so each tier's
+  // icon-image can point at its own glyph (PLACE_GLYPHS[type]) while
+  // still filtering the same shared `places` source -- a single
+  // "Places" toggle still controls all three together (see
+  // LAYER_TOGGLES). No minzoom set (defaults to the map's own floor,
+  // see main()'s `minZoom: 4`) -- there is no hard cutoff any more,
+  // regional decluttering is entirely icon-opacity's job now (see
+  // PLACE_ICON_OPACITY_ZOOM), which fades smoothly rather than
+  // switching anything on or off at a boundary.
+  for (const type of PLACE_TYPES) {
+    map.addLayer({
+      id: `places-icons-${type}`,
+      type: 'symbol',
+      source: 'places',
+      filter: ['==', ['get', 'type'], type],
+      layout: {
+        // Theme is filled in properly by applyBasemapTheme right after
+        // this layer is added (see boot sequence); this initial value
+        // is just a safe default before that first call.
+        'icon-image': `place-icon-${type}-${currentTheme()}`,
+        'icon-allow-overlap': true,
+        'icon-size': PLACE_ICON_SIZE_ZOOM,
+      },
+      paint: {
+        'icon-opacity': PLACE_ICON_OPACITY_ZOOM,
+      },
+    });
+  }
+
+  map.addLayer({
+    id: 'places-labels',
+    type: 'symbol',
+    source: 'places',
+    minzoom: PLACE_LABEL_MIN_ZOOM,
+    layout: {
+      'text-field': ['get', 'name'],
+      'text-font': ['Noto Sans Regular'],
+      'text-size': 11,
+      'text-anchor': 'top',
+      'text-offset': [0, 0.9],
+      'text-optional': true,
+      'text-allow-overlap': false,
+    },
+  });
+  // MapLibre paint properties do not read CSS custom properties, so the
+  // theme-aware label colour is set directly from the same tokens
+  // theme.css defines -- resolved once here rather than hardcoded,
+  // matching applyBasemapTheme()'s own pattern of reading data-theme.
+  const textColor = currentTheme() === 'neon' ? '#e8e8e8' : '#1a1a1a';
+  map.setPaintProperty('places-labels', 'text-color', textColor);
+  map.setPaintProperty('places-labels', 'text-halo-color', currentTheme() === 'neon' ? '#0C0B0A' : '#ffffff');
+  map.setPaintProperty('places-labels', 'text-halo-width', 1.2);
+
+  const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, offset: 12 });
+  for (const type of PLACE_TYPES) {
+    const layerId = `places-icons-${type}`;
+    map.on('click', layerId, (e) => {
+      const f = e.features[0];
+      if (!f) return;
+      const { name, type: t, points } = f.properties;
+      popup.setLngLat(f.geometry.coordinates).setHTML(
+        `<div class="mw-place-popup">`
+        + `<div class="mw-place-popup-name">${escapeHtml(name)}</div>`
+        + `<div class="mw-place-popup-meta">${escapeHtml(t)} &middot; ${points} pts</div>`
+        + `</div>`
+      ).addTo(map);
+    });
+    map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+async function loadPlacesViewport(map) {
+  try {
+    const bounds = map.getBounds();
+    const data = await fetchPlacesInViewport(bounds, map.getZoom());
+    // One park, one mark: a park's centroid marker is suppressed
+    // exactly where its own outline is also coming back, so the two
+    // can never both draw at once. Driven by the actual ids present in
+    // data.park_boundaries -- not a re-derived zoom check -- so this
+    // cannot drift out of sync with MIN_BOUNDARY_ZOOM (it IS whatever
+    // that gate produced this response) and it degrades correctly when
+    // app/places_api.py's MAX_BOUNDARY_RESULTS cap silently drops a
+    // park's boundary from the response: that id is then simply absent
+    // from boundaryIds, so its marker is not filtered and the park
+    // stays visible as a dot rather than disappearing from the map.
+    const boundaryIds = new Set(data.park_boundaries.features.map((f) => f.properties.id));
+    map.getSource('places').setData({
+      type: 'FeatureCollection',
+      features: data.places.filter((p) => !boundaryIds.has(p.id)).map(placeToFeature),
+    });
+    // park_boundaries is always present (an empty FeatureCollection
+    // below MIN_BOUNDARY_ZOOM, or with no boundary-backed park in
+    // view) -- see app/places_api.py's places_in_viewport docstring --
+    // so this can set it unconditionally rather than checking first.
+    map.getSource('park-boundaries').setData(data.park_boundaries);
+  } catch (err) {
+    console.error('MeshWars map2: failed to load places', err);
+  }
+}
+
+function renderPlacesPanel(data) {
+  const list = document.getElementById('mw-places-list');
+  if (!list) return;
   list.innerHTML = '';
-  const byTeam = new Map((data.teams || []).map((t) => [t.team, t]));
-  for (const team of TEAM_ORDER) {
-    const entry = byTeam.get(team) || { total: 0 };
+  if (!data.places.length) {
     const li = document.createElement('li');
-
-    const name = document.createElement('span');
-    name.className = 'mw-score-name';
-    const dot = document.createElement('span');
-    dot.className = 'mw-score-dot';
-    dot.style.background = TEAM_COLORS[team];
-    name.appendChild(dot);
-    name.appendChild(document.createTextNode(team));
-
-    const value = document.createElement('span');
-    value.className = 'mw-score-value';
-    value.textContent = entry.total ?? 0;
-
-    li.appendChild(name);
-    li.appendChild(value);
+    li.className = 'mw-places-empty';
+    li.textContent = 'No live places within range of this view.';
     list.appendChild(li);
+    return;
+  }
+  for (const p of data.places) {
+    const li = document.createElement('li');
+    const miles = (p.distance_m / 1609.344).toFixed(1);
+    li.innerHTML =
+      `<span class="mw-place-icon" style="background:${PLACE_COLORS[currentTheme()]}"></span>`
+      + `<span class="mw-place-name">${escapeHtml(p.name)}</span>`
+      + `<span class="mw-place-meta">${p.points}pt &middot; ${miles}mi</span>`;
+    li.addEventListener('click', () => {
+      window.__mwMap && window.__mwMap.flyTo({ center: [p.lon, p.lat], zoom: Math.max(window.__mwMap.getZoom(), 14) });
+    });
+    list.appendChild(li);
+  }
+}
+
+async function loadPlacesPanel(map) {
+  try {
+    const center = map.getCenter();
+    const data = await fetchPlacesNear(center.lat, center.lng);
+    renderPlacesPanel(data);
+  } catch (err) {
+    console.error('MeshWars map2: failed to load places panel', err);
   }
 }
 
@@ -188,21 +1541,37 @@ function teamMatchExpression() {
 }
 
 // Mirrors theme-toggle.js's currentTheme(): gold is the default and the
-// only other value the toggle ever writes is 'neon'.
+// only other value the toggle ever writes is 'neon'. (map2.html's own
+// boot snippet defaults the FRONT PAGE to neon specifically when no
+// choice has been stored yet -- see that file -- but once data-theme is
+// set, reading it back here works exactly the same either way.)
 function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === 'neon' ? 'neon' : 'gold';
 }
 
-// Flips which raster basemap is visible and re-tunes the hillshade
-// exaggeration for it. Never rebuilds the style or touches the board's
-// team-colour expression -- that stays constant across themes on
-// purpose (gameplay, not branding).
+// No basemap layer left to flip visibility on -- both themes share the
+// one dark BASEMAP_ID layer now (see its comment above). Never touches
+// the board's team-colour expression -- that stays constant across
+// themes on purpose (gameplay, not branding). The hillshade layer used
+// to get a per-theme exaggeration re-tune here too; that was a
+// raster-dem paint property computed in the browser, and the
+// pre-rendered hillshade imagery has its exaggeration baked in at
+// build time with no such property left to set. raster-opacity is a
+// different paint property that survives the switch to baked imagery
+// (see HILLSHADE_OPACITY), so it's still tuned here per theme.
 function applyBasemapTheme(map) {
   const theme = currentTheme();
-  const neon = theme === 'neon';
-  map.setLayoutProperty(BASEMAP_GOLD_ID, 'visibility', neon ? 'none' : 'visible');
-  map.setLayoutProperty(BASEMAP_NEON_ID, 'visibility', neon ? 'visible' : 'none');
-  map.setPaintProperty(HILLSHADE_ID, 'hillshade-exaggeration', HILLSHADE_EXAGGERATION[theme]);
+  map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
+  map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
+  map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
+  map.setPaintProperty('park-boundaries-fill', 'fill-opacity', PARK_BOUNDARY_FILL_OPACITY[theme]);
+  map.setPaintProperty('park-boundaries-fill', 'fill-color', PLACE_COLORS[theme]);
+  map.setPaintProperty('park-boundaries-line', 'line-width', PARK_BOUNDARY_LINE_WIDTH[theme]);
+  map.setPaintProperty('park-boundaries-line', 'line-opacity', PARK_BOUNDARY_LINE_OPACITY[theme]);
+  map.setPaintProperty('park-boundaries-line', 'line-color', PLACE_COLORS[theme]);
+  for (const type of PLACE_TYPES) {
+    map.setLayoutProperty(`places-icons-${type}`, 'icon-image', `place-icon-${type}-${theme}`);
+  }
 }
 
 // theme-toggle.js sets data-theme on <html> directly; observing the
@@ -234,9 +1603,13 @@ function watchTheme(map) {
 // that silently draws nothing; see setupLayerSwitcher.
 // Neither gets a `maxzoom` -- MapLibre overzooms a vector layer fine,
 // reusing the highest tile it has, so each should keep drawing all the
-// way to the map's own maxZoom (17) rather than stopping early.
-// (Unlike the raster DEM hillshade above, which tore on overzoom and is
-// deliberately cut off at 13 -- left alone.)
+// way to the map's own maxZoom (17) rather than stopping early. The
+// hillshade above now overzooms the same uncapped way: it used to be a
+// raster-dem source that tore along tile seams past its data's z12
+// ceiling (deliberately cut off at 13 to make that predictable), but
+// plain raster imagery just reuses and stretches its last real tile
+// like these vector layers do, so nothing tears and there is nothing
+// to cap.
 //
 // Both route layers share this width ramp: the old flat 0.7-0.8px was
 // measured to disappear under the public-lands wash even where the
@@ -355,42 +1728,16 @@ function setupOverlayLayers(map) {
   }, 'board-fill');
 }
 
-// Contour source: vector tiles generated in the browser from the DEM
-// via mlcontour (demSourceInstance, set up above), not a second pmtiles
-// archive -- contourProtocolUrl hands back a contour://{z}/{x}/{y}
-// template already carrying the threshold table and the metres->feet
-// multiplier, so this is otherwise a plain vector source.
-// Contours are terrain reference, not a feature layer: thin, low
-// opacity, and a muted tone picked to read on both the light OSM
-// basemap and the dark CARTO one rather than being tuned to either.
-// The library tags every generated line with a `level` property (1 for
-// the heavier contour of a zoom's [minor, major] pair, 0 for the
-// lighter one -- confirmed in the library's own tile output, not
-// assumed), so major contours get a bit more width and opacity than
-// minor ones for free via that property.
-function setupContourLayer(map) {
-  map.addSource('contours', {
-    type: 'vector',
-    tiles: [demSourceInstance.contourProtocolUrl({
-      multiplier: 3.28084,
-      thresholds: CONTOUR_THRESHOLDS,
-    })],
-    maxzoom: 16,
-  });
-  map.addLayer({
-    id: 'contours-line',
-    type: 'line',
-    source: 'contours',
-    'source-layer': 'contours',
-    minzoom: 0,
-    layout: { visibility: 'none' },
-    paint: {
-      'line-color': '#8f8168',
-      'line-width': ['match', ['get', 'level'], 1, 1, 0.6],
-      'line-opacity': ['match', ['get', 'level'], 1, 0.55, 0.3],
-    },
-  }, 'board-fill');
-}
+// A contour layer used to be set up here, generated client-side from
+// the same DEM archive as the hillshade above via mlcontour. Dropped
+// 2026-08-24: it cost 2.9 seconds of main-thread blocking in a single
+// 5-second pan (33fps -> 9fps) and re-downloaded the DEM a second time
+// through its own dem:// protocol even though the hillshade had already
+// fetched it. A pre-rendered-tile alternative was also tried and
+// abandoned -- baking contours at every interval across one state
+// produced 12GB of intermediates with the finest pass still unfinished.
+// Hillshade alone carries the terrain now. Do not re-add this without
+// solving the cost, not just the symptom.
 
 // A checked box over a layer with no data at the current zoom reads as
 // broken -- there is nothing wrong, the tiles just do not exist below
@@ -469,19 +1816,159 @@ function setupLayerSwitcher(map) {
 
 async function loadBoardData(map) {
   try {
-    const board = await fetchBoard();
+    const board = await fetchBoard(cfg());
     map.getSource('board').setData(board);
   } catch (err) {
     console.error('MeshWars map2: failed to load board', err);
   }
 }
 
-async function loadScores() {
+// ===== Update notice (operator-authored, admin panel) =====
+//
+// One-time release notice, authored and toggled from the admin panel's
+// Notice section (app/admin_ops.py's admin_notice_save) and read here
+// from the tiny, unauthenticated GET /api/notice (app/notice_api.py).
+// A player sees it once per version_key: dismissal is remembered in
+// this browser's localStorage, never on the server, so bumping the
+// version key server-side is what re-shows it to everyone, including
+// anyone who already dismissed the previous one.
+//
+// SECURITY: title/body are operator-authored, not player-authored, but
+// still written to the DOM with .textContent only, never innerHTML --
+// see .mw-notice-modal-body's white-space: pre-wrap in map2.css, which
+// is what turns the operator's plain line breaks back into visible
+// ones without this ever parsing the body as markup.
+const NOTICE_DISMISSED_KEY = 'mwNoticeDismissed';
+
+function noticeAlreadyDismissed(versionKey) {
   try {
-    const scores = await fetchScores();
-    renderScores(scores);
+    return localStorage.getItem(NOTICE_DISMISSED_KEY) === versionKey;
+  } catch {
+    return false;
+  }
+}
+
+function rememberNoticeDismissed(versionKey) {
+  try {
+    localStorage.setItem(NOTICE_DISMISSED_KEY, versionKey);
+  } catch {
+    // Storage unavailable (private browsing, quota) -- the notice just
+    // shows again next load, which is the safe direction to fail in.
+  }
+}
+
+let noticeModalEl = null;
+let noticeReturnFocusEl = null;
+
+function onNoticeKeydown(e) {
+  if (e.key === 'Escape' && noticeModalEl) {
+    closeNoticeModal(noticeModalEl.dataset.versionKey);
+  }
+}
+
+// Always reachable: a close button, Escape, and a click on the dimmed
+// backdrop all call this. Nothing about this modal can leave the map
+// permanently covered -- there is no state where none of the three work.
+function closeNoticeModal(versionKey) {
+  if (versionKey) rememberNoticeDismissed(versionKey);
+  if (noticeModalEl) {
+    noticeModalEl.remove();
+    noticeModalEl = null;
+  }
+  document.removeEventListener('keydown', onNoticeKeydown);
+  // Returns focus to whatever had it before the modal opened (the body,
+  // in practice, since this only ever opens once on boot) -- no focus
+  // trap is installed in the first place, so Tab already never got
+  // stuck; this just avoids dropping focus onto <body> instead of
+  // wherever it reasonably belongs.
+  if (noticeReturnFocusEl && typeof noticeReturnFocusEl.focus === 'function') {
+    noticeReturnFocusEl.focus();
+  }
+  noticeReturnFocusEl = null;
+}
+
+function showNoticeModal(notice) {
+  noticeReturnFocusEl = document.activeElement;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'mw-notice-modal';
+  wrap.dataset.versionKey = notice.version_key;
+
+  const inner = document.createElement('div');
+  inner.className = 'mw-notice-modal-inner';
+  inner.setAttribute('role', 'dialog');
+  inner.setAttribute('aria-modal', 'true');
+  inner.setAttribute('aria-labelledby', 'mw-notice-title');
+
+  const header = document.createElement('div');
+  header.className = 'mw-notice-modal-header';
+  const titleEl = document.createElement('span');
+  titleEl.id = 'mw-notice-title';
+  titleEl.textContent = notice.title;
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'mw-notice-modal-close';
+  closeBtn.setAttribute('aria-label', 'Close');
+  closeBtn.textContent = '×';
+  header.appendChild(titleEl);
+  header.appendChild(closeBtn);
+
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'mw-notice-modal-body';
+  bodyEl.textContent = notice.body;
+
+  // The body stays plain text on purpose (see the block comment above),
+  // so it can never itself carry a link -- this is the one fixed way
+  // out to more detail, present on every notice regardless of what the
+  // operator wrote. Kept in its own footer row, below the body and away
+  // from .mw-notice-modal-close up in the header, so the two controls
+  // read as distinct: one leaves you here to read on, the other leaves
+  // the page.
+  const footer = document.createElement('div');
+  footer.className = 'mw-notice-modal-footer';
+  const rulesLink = document.createElement('a');
+  rulesLink.className = 'mw-notice-modal-rules-link';
+  rulesLink.href = '/rules';
+  rulesLink.textContent = 'Read the rules';
+  footer.appendChild(rulesLink);
+
+  inner.appendChild(header);
+  inner.appendChild(bodyEl);
+  inner.appendChild(footer);
+  wrap.appendChild(inner);
+  document.body.appendChild(wrap);
+  noticeModalEl = wrap;
+
+  closeBtn.addEventListener('click', () => closeNoticeModal(notice.version_key));
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap) closeNoticeModal(notice.version_key);
+  });
+  // Clicking through to the rules is its own way of having seen the
+  // notice -- remember it dismissed (same as the close button/Escape/
+  // backdrop) so it does not pop again when the player comes back from
+  // /rules, without pre-empting the real navigation the anchor already
+  // performs.
+  rulesLink.addEventListener('click', () => rememberNoticeDismissed(notice.version_key));
+  document.addEventListener('keydown', onNoticeKeydown);
+
+  closeBtn.focus();
+}
+
+// Fired off from main() without being awaited -- see that call site's
+// own comment. Failure of any kind (network, bad JSON, no notice
+// published) just means nothing renders; it never blocks or delays the
+// map itself.
+async function loadNotice() {
+  try {
+    const res = await fetch('/api/notice');
+    if (!res.ok) return;
+    const data = await res.json();
+    const notice = data && data.notice;
+    if (!notice || !notice.version_key || !notice.title || !notice.body) return;
+    if (noticeAlreadyDismissed(notice.version_key)) return;
+    showNoticeModal(notice);
   } catch (err) {
-    console.error('MeshWars map2: failed to load scores', err);
+    console.error('MeshWars map2: failed to load notice', err);
   }
 }
 
@@ -491,30 +1978,43 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 // frontend/play-area-map.js: the play area is an operator setting that
 // has moved before, and a hardcoded copy in this file would silently
 // disagree with the server a month later. If /config is unreachable or
-// the numbers are missing/non-finite, return null so the map is built
-// with no maxBounds rather than an invented box -- a wrong boundary is
-// worse than none, and the server is the authority on where play
-// happens.
-async function fetchPlayAreaBounds() {
+// the numbers are missing/non-finite, playAreaBounds comes back null so
+// the map is built with no maxBounds rather than an invented box -- a
+// wrong boundary is worse than none, and the server is the authority on
+// where play happens.
+//
+// Also reads mc_default_view -- the same field mc.js's loadConfig()
+// reads for its own default board -- so both pages agree on which board
+// a fresh visitor sees first. One /config fetch serves both needs
+// rather than two.
+async function fetchBootConfig() {
   try {
     const res = await fetch('/config');
-    if (!res.ok) return null;
-    const cfg = await res.json();
-    const pa = cfg && cfg.play_area;
-    if (!pa || !finite(pa.north) || !finite(pa.south) ||
-        !finite(pa.west) || !finite(pa.east)) {
-      return null;
-    }
+    if (!res.ok) return { playAreaBounds: null, defaultMode: 'meshcore' };
+    const cfgData = await res.json();
+    const pa = cfgData && cfgData.play_area;
     // MapLibre bounds are [lng, lat] pairs, southwest first.
-    return [[pa.west, pa.south], [pa.east, pa.north]];
+    const playAreaBounds = (pa && finite(pa.north) && finite(pa.south) &&
+      finite(pa.west) && finite(pa.east))
+      ? [[pa.west, pa.south], [pa.east, pa.north]]
+      : null;
+    const raw = String(cfgData.mc_default_view || '').trim().toLowerCase();
+    const defaultMode = raw === 'meshtastic' ? 'meshtastic' : 'meshcore';
+    return { playAreaBounds, defaultMode };
   } catch {
-    return null;
+    return { playAreaBounds: null, defaultMode: 'meshcore' };
   }
 }
 
 async function main() {
-  const bootTheme = currentTheme();
-  const playAreaBounds = await fetchPlayAreaBounds();
+  // Not awaited: a single small GET against a one-row table, kicked off
+  // in parallel with the map's own boot rather than gating first paint
+  // on it -- see loadNotice()'s own comment for why a failure here is
+  // silent.
+  loadNotice();
+
+  const { playAreaBounds, defaultMode } = await fetchBootConfig();
+  mode = defaultMode;
   if (!playAreaBounds) {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
   }
@@ -534,15 +2034,20 @@ async function main() {
     maxPitch: 0,
     style: {
       version: 8,
+      // Only needed once Places Worth Going's name labels
+      // (places-labels, setupPlacesLayer) added the first `text-field`
+      // layer this style has ever had -- MapLibre refuses to add ANY
+      // symbol layer using text-field without a glyphs template in the
+      // style, even one that never renders (board/overlay layers below
+      // are all fill/line/hillshade, no text). Served from our own
+      // /static mount (frontend/fonts/, see its README.md) rather than
+      // MapLibre's public demo glyph server -- the OSM/CARTO basemap
+      // tiles below are still fetched from their own public hosts, but
+      // the place labels the game itself put on the map should not
+      // depend on someone else's demo infrastructure staying up.
+      glyphs: '/static/fonts/{fontstack}/{range}.pbf',
       sources: {
-        [BASEMAP_GOLD_ID]: {
-          type: 'raster',
-          tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-          tileSize: 256,
-          attribution: '© OpenStreetMap contributors',
-          maxzoom: 19,
-        },
-        [BASEMAP_NEON_ID]: {
+        [BASEMAP_ID]: {
           type: 'raster',
           tiles: [
             'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
@@ -553,48 +2058,53 @@ async function main() {
           attribution: '© OpenStreetMap contributors © CARTO',
           maxzoom: 20,
         },
-        dem: {
-          type: 'raster-dem',
+        // meshwars-hillshade-alpha.pmtiles is finished imagery (WEBP
+        // tiles, z0-12, RGBA), not elevation data -- there is nothing
+        // left for the browser to shade, so this is a plain raster
+        // source, not raster-dem, and carries no `encoding`. maxzoom
+        // marks the archive's real ceiling; MapLibre reuses and
+        // stretches that z12 tile above it (see the HILLSHADE_ID layer
+        // below and the overzoom comment near ROUTE_LINE_WIDTH).
+        'hillshade-source': {
+          type: 'raster',
           url: `pmtiles://${DEM_URL}`,
-          encoding: 'terrarium',
           tileSize: 256,
           maxzoom: 12,
         },
       },
       layers: [
         {
-          id: BASEMAP_GOLD_ID,
+          id: BASEMAP_ID,
           type: 'raster',
-          source: BASEMAP_GOLD_ID,
-          layout: { visibility: bootTheme === 'neon' ? 'none' : 'visible' },
-        },
-        {
-          id: BASEMAP_NEON_ID,
-          type: 'raster',
-          source: BASEMAP_NEON_ID,
-          layout: { visibility: bootTheme === 'neon' ? 'visible' : 'none' },
+          source: BASEMAP_ID,
         },
         {
           id: HILLSHADE_ID,
-          type: 'hillshade',
-          source: 'dem',
-          // The DEM source itself only reaches z12 (that correctly
-          // describes the data, left alone above). Above z12 MapLibre
-          // was reusing whichever z12 parent tiles happened to already
-          // be cached, stretched, and never fetching the rest -- so the
-          // hillshade teared along tile seams with nothing erroring to
-          // say so. Cutting the LAYER off at 13 makes that predictable
-          // (uniformly gone instead of half-there), and hillshade is
-          // meaningless at street zoom anyway: the whole view sits
-          // inside one elevation sample by then.
-          maxzoom: 13,
-          paint: {
-            'hillshade-exaggeration': HILLSHADE_EXAGGERATION[bootTheme],
-          },
+          type: 'raster',
+          source: 'hillshade-source',
+          // No `maxzoom` here (see the overzoom comment near
+          // ROUTE_LINE_WIDTH) -- the map's own maxZoom is 17, and a
+          // plain raster layer just keeps reusing the source's last
+          // real z12 tile above that rather than vanishing. No
+          // `raster-dem` exaggeration to set either: this archive's
+          // exaggeration (0.85, the dark theme's former value) is baked
+          // into the pixels at build time. raster-opacity is set by
+          // applyBasemapTheme (HILLSHADE_OPACITY) instead, right after
+          // the map loads, so the basemap underneath -- roads, water,
+          // place labels -- still shows through everywhere the imagery's
+          // own alpha channel already leaves transparent.
         },
       ],
     },
   });
+
+  // Referenced by the places panel's click-to-fly-to handler
+  // (renderPlacesPanel) and by the territory panel's player-lookup
+  // fitBounds (doPlayerFind) -- both build their markup well after
+  // `map` goes out of this function's own scope, so they read the map
+  // back off window rather than main() threading it through another
+  // layer of closures.
+  window.__mwMap = map;
 
   // Camera is locked flat (see maxPitch above), so drop the compass/pitch
   // button from the nav control -- there is nothing left for it to do.
@@ -606,6 +2116,23 @@ async function main() {
   if (map.dragRotate) map.dragRotate.disable();
   if (map.touchZoomRotate) map.touchZoomRotate.disableRotation();
   if (map.keyboard) map.keyboard.disableRotation();
+
+  // Territory panel + winner banner (ported from frontend/mc.js -- see
+  // the "Territory panel" section above). Built here, alongside the
+  // NavigationControl above, rather than inside map.on('load') below:
+  // neither reads anything off the map style, so there is no reason to
+  // wait for it, and doing it here means the panel and its seeded
+  // all-zero rows are on screen the instant the page paints instead of
+  // popping in once tiles start arriving.
+  buildScoreboardControl(map);
+  renderScoreboard(null); // seed all-zero rows immediately, before the first fetch
+
+  // Territory panel starts collapsed on narrow screens only (phones) --
+  // it otherwise eats a lot of a phone screen. Desktop always starts
+  // (and stays) expanded; see setMcCollapsed / mc.css.
+  if (window.matchMedia(`(max-width: ${NARROW_BREAKPOINT_PX}px)`).matches) {
+    setMcCollapsed(true);
+  }
 
   map.on('load', () => {
     // Board source/layers are created empty and filled in once the
@@ -643,13 +2170,54 @@ async function main() {
     });
 
     setupOverlayLayers(map);
-    setupContourLayer(map);
+    registerPlaceIcons(map);
+    setupPlacesLayer(map);
     setupLayerSwitcher(map);
     watchTheme(map);
     applyBasemapTheme(map);
 
-    loadBoardData(map);
-    loadScores();
+    // Same call mc.js's boot() makes (setMode(defaultMode)) -- fills in
+    // the panel's title/toggle state for the /config-derived `mode` set
+    // in main() above, and does the same board/scoreboard/banner load
+    // the periodic refresh below repeats every 30s.
+    setBoardMode(mode, map);
+    loadPlacesViewport(map);
+    loadPlacesPanel(map);
+
+    const loadingOverlay = document.getElementById('loading-overlay');
+    if (loadingOverlay) {
+      loadingOverlay.classList.add('fade-out');
+      setTimeout(() => loadingOverlay.remove(), 500);
+    }
+
+    // Same 30s cadence as frontend/mc.js's own REFRESH_INTERVAL_MS --
+    // board squares, the scoreboard, and the winner banner all move on
+    // their own (other players capturing cells, a season rolling over),
+    // so this is a periodic re-fetch, never a re-fit of the camera: it
+    // must not fight a visitor's own panning/zooming, same as the
+    // Refresh map button (buildScoreboardControl) and unlike the
+    // player-lookup Find (doPlayerFind), which fits deliberately.
+    setInterval(() => {
+      loadBoardData(map);
+      loadScoreboard();
+      refreshWinnerBanner();
+    }, REFRESH_INTERVAL_MS);
+    setInterval(tickCountdown, 1000);
+
+    // Places refresh on moveend, debounced -- a drag or zoom fires many
+    // intermediate move events, and only the settled position (bbox for
+    // the map markers, centre for the "near here" panel) is worth a
+    // request. 250ms is short enough that a reader does not notice the
+    // lag, long enough that a multi-step pan/zoom gesture only fires
+    // this once at the end of it.
+    let placesRefreshTimer = null;
+    map.on('moveend', () => {
+      clearTimeout(placesRefreshTimer);
+      placesRefreshTimer = setTimeout(() => {
+        loadPlacesViewport(map);
+        loadPlacesPanel(map);
+      }, 250);
+    });
   });
 }
 
