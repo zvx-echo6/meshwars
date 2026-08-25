@@ -69,6 +69,16 @@ const HILLSHADE_ID = 'hillshade';
 const BOARD_FILL_OPACITY = { gold: 0.45, neon: 0.65 };
 const BOARD_LINE_WIDTH = { gold: 1, neon: 2 };
 
+// The baked hillshade archive is opaque WEBP imagery, not shaded-with-
+// transparency like the old raster-dem layer was -- left at full
+// opacity it paints over the basemap entirely, taking the roads, water
+// and place labels with it. raster-opacity is a paint property, so
+// unlike the baked-in exaggeration it can still be tuned per theme even
+// though the imagery itself can't: gold sits over the lighter OSM
+// basemap and wants a lighter touch, neon carries more against CARTO
+// dark. Keyed by theme name, same pattern as BOARD_FILL_OPACITY.
+const HILLSHADE_OPACITY = { gold: 0.35, neon: 0.42 };
+
 // Each checkbox id -> the style layer id(s) it toggles, and the
 // minimum zoom its underlying data starts at (measured from the tile
 // archives -- see the minzoom comment in setupOverlayLayers below).
@@ -1299,15 +1309,18 @@ function currentTheme() {
 // Flips which raster basemap is visible. Never rebuilds the style or
 // touches the board's team-colour expression -- that stays constant
 // across themes on purpose (gameplay, not branding). The hillshade
-// layer used to get a per-theme exaggeration re-tune here too, but
-// that was a raster-dem paint property computed in the browser; the
+// layer used to get a per-theme exaggeration re-tune here too; that was
+// a raster-dem paint property computed in the browser, and the
 // pre-rendered hillshade imagery has its exaggeration baked in at
-// build time and carries no such property to set.
+// build time with no such property left to set. raster-opacity is a
+// different paint property that survives the switch to baked imagery
+// (see HILLSHADE_OPACITY), so it's still tuned here per theme.
 function applyBasemapTheme(map) {
   const theme = currentTheme();
   const neon = theme === 'neon';
   map.setLayoutProperty(BASEMAP_GOLD_ID, 'visibility', neon ? 'none' : 'visible');
   map.setLayoutProperty(BASEMAP_NEON_ID, 'visibility', neon ? 'visible' : 'none');
+  map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
   map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
   map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
   map.setPaintProperty('park-boundaries-fill', 'fill-opacity', PARK_BOUNDARY_FILL_OPACITY[theme]);
@@ -1689,12 +1702,13 @@ async function main() {
           // No `maxzoom` here (see the overzoom comment near
           // ROUTE_LINE_WIDTH) -- the map's own maxZoom is 17, and a
           // plain raster layer just keeps reusing the source's last
-          // real z12 tile above that rather than vanishing. No `paint`
-          // either: exaggeration was a raster-dem-only paint property,
-          // computed live from elevation. This archive's exaggeration
-          // (0.85, the dark theme's former value) is baked into the
-          // pixels at build time, so there is nothing to set here and
-          // no theme to key it by.
+          // real z12 tile above that rather than vanishing. No
+          // `raster-dem` exaggeration to set either: this archive's
+          // exaggeration (0.85, the dark theme's former value) is baked
+          // into the pixels at build time. raster-opacity is set by
+          // applyBasemapTheme (HILLSHADE_OPACITY) instead, right after
+          // the map loads, so the basemap underneath -- roads, water,
+          // place labels -- still shows through the opaque imagery.
         },
       ],
     },
