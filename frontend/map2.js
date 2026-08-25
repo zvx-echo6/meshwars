@@ -50,11 +50,17 @@ const TEAM_ORDER = Object.keys(TEAM_COLORS);
 // The hillshade source used to be planet-dem.pmtiles, the one archive
 // still on navi: a raw elevation DEM shaded in the browser at ~11.3MB
 // per view, ninety-five percent of the page's weight. It is now
-// meshwars-hillshade.pmtiles -- finished imagery, pre-rendered once
-// across the play area at the dark theme's exaggeration -- so navi is
-// out of the runtime path entirely.
-const TILE_REV = '20260825a';
-const DEM_URL = `/tiles/meshwars-hillshade.pmtiles?r=${TILE_REV}`;
+// meshwars-hillshade-alpha.pmtiles -- finished imagery, pre-rendered
+// once across the play area at the dark theme's exaggeration -- so
+// navi is out of the runtime path entirely. This is the second bake:
+// the first (meshwars-hillshade.pmtiles, kept on disk as a rollback)
+// stored opaque greyscale, which painted flat ground the same opaque
+// grey as a shadowed ridge and washed out the whole map. This archive
+// carries a real alpha channel -- converted losslessly from the same
+// greyscale pixels, no DEM work re-run -- so flat ground is
+// transparent again and only the relief itself darkens or lightens.
+const TILE_REV = '20260825b';
+const DEM_URL = `/tiles/meshwars-hillshade-alpha.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
@@ -69,15 +75,17 @@ const HILLSHADE_ID = 'hillshade';
 const BOARD_FILL_OPACITY = { gold: 0.45, neon: 0.65 };
 const BOARD_LINE_WIDTH = { gold: 1, neon: 2 };
 
-// The baked hillshade archive is opaque WEBP imagery, not shaded-with-
-// transparency like the old raster-dem layer was -- left at full
-// opacity it paints over the basemap entirely, taking the roads, water
-// and place labels with it. raster-opacity is a paint property, so
-// unlike the baked-in exaggeration it can still be tuned per theme even
-// though the imagery itself can't: gold sits over the lighter OSM
-// basemap and wants a lighter touch, neon carries more against CARTO
-// dark. Keyed by theme name, same pattern as BOARD_FILL_OPACITY.
-const HILLSHADE_OPACITY = { gold: 0.35, neon: 0.42 };
+// The baked hillshade archive now carries real alpha -- transparent on
+// flat ground, black/white toward shadow/highlight the same way the
+// old raster-dem layer behaved -- so it no longer needs a heavy opacity
+// cut just to keep the basemap visible underneath. neon sits at 1.0,
+// full strength, because the pixels were baked at neon's own
+// exaggeration (0.85); gold's original exaggeration was lower (0.6),
+// and since that can no longer be tuned live -- it is baked into the
+// pixels now -- gold's opacity is scaled down instead to roughly the
+// same ratio (0.6/0.85) so it still reads lighter than neon. Keyed by
+// theme name, same pattern as BOARD_FILL_OPACITY.
+const HILLSHADE_OPACITY = { gold: 0.7, neon: 1.0 };
 
 // Each checkbox id -> the style layer id(s) it toggles, and the
 // minimum zoom its underlying data starts at (measured from the tile
@@ -1668,13 +1676,13 @@ async function main() {
           attribution: '© OpenStreetMap contributors © CARTO',
           maxzoom: 20,
         },
-        // meshwars-hillshade.pmtiles is finished imagery (WEBP tiles,
-        // z0-12), not elevation data -- there is nothing left for the
-        // browser to shade, so this is a plain raster source, not
-        // raster-dem, and carries no `encoding`. maxzoom marks the
-        // archive's real ceiling; MapLibre reuses and stretches that
-        // z12 tile above it (see the HILLSHADE_ID layer below and the
-        // overzoom comment near ROUTE_LINE_WIDTH).
+        // meshwars-hillshade-alpha.pmtiles is finished imagery (WEBP
+        // tiles, z0-12, RGBA), not elevation data -- there is nothing
+        // left for the browser to shade, so this is a plain raster
+        // source, not raster-dem, and carries no `encoding`. maxzoom
+        // marks the archive's real ceiling; MapLibre reuses and
+        // stretches that z12 tile above it (see the HILLSHADE_ID layer
+        // below and the overzoom comment near ROUTE_LINE_WIDTH).
         'hillshade-source': {
           type: 'raster',
           url: `pmtiles://${DEM_URL}`,
@@ -1708,7 +1716,8 @@ async function main() {
           // into the pixels at build time. raster-opacity is set by
           // applyBasemapTheme (HILLSHADE_OPACITY) instead, right after
           // the map loads, so the basemap underneath -- roads, water,
-          // place labels -- still shows through the opaque imagery.
+          // place labels -- still shows through everywhere the imagery's
+          // own alpha channel already leaves transparent.
         },
       ],
     },
