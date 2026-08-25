@@ -52,7 +52,7 @@ from . import mc_scoring
 from .api import _node_hex
 from .config import settings
 from .db import WriteSession, connect, set_cursor
-from .grid import cell_id, in_play_area, valid_coord
+from .grid import cell_center, cell_id, distance_m, in_play_area, valid_coord
 from .mc_ingest import RepeaterEntry, record_repeater_observations
 from .place_scoring import credit_places
 from .meshview_client import (
@@ -87,6 +87,13 @@ CURSOR_LAST_IMPORT_US = "last_position_import_us"  # microseconds, monotonic
 #     unregistered node's packets have no player to attribute a stat row
 #     to at all, so this also stays 0 for 'mt' (see the registration gate
 #     in _process_one_packet).
+#
+# pings_low_precision and pings_implausible_speed are new (2026-08-25,
+# see app/config.py's mt_min_precision_bits/mt_max_speed_mps): the two
+# Meshtastic-only game-integrity gates below. Both have a MeshCore column
+# of the same name in player_ingest_stat (app/db.py), permanently 0 for
+# protocol='mc' -- MeshCore's own precision/speed handling never rejects
+# a ping (see mc_max_speed_mps's comment in app/config.py).
 _STAT_COLUMNS = (
     "pings_accepted",
     "pings_no_contact",
@@ -95,6 +102,8 @@ _STAT_COLUMNS = (
     "pings_bad_coord",
     "pings_out_of_area",
     "pings_no_repeaters",
+    "pings_low_precision",
+    "pings_implausible_speed",
 )
 
 
@@ -110,8 +119,8 @@ def _bump_player_stat(conn, player_id: int, day: int, **counters: int) -> None:
         "INSERT INTO player_ingest_stat("
         "  player_id, protocol, day, batches, pings_accepted, pings_no_contact, "
         "  pings_wrong_owner, pings_duplicate, pings_bad_coord, pings_out_of_area, "
-        "  pings_no_repeaters) "
-        "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?) "
+        "  pings_no_repeaters, pings_low_precision, pings_implausible_speed) "
+        "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(player_id, protocol, day) DO UPDATE SET "
         "  pings_accepted = pings_accepted + excluded.pings_accepted, "
         "  pings_no_contact = pings_no_contact + excluded.pings_no_contact, "
@@ -119,13 +128,16 @@ def _bump_player_stat(conn, player_id: int, day: int, **counters: int) -> None:
         "  pings_duplicate = pings_duplicate + excluded.pings_duplicate, "
         "  pings_bad_coord = pings_bad_coord + excluded.pings_bad_coord, "
         "  pings_out_of_area = pings_out_of_area + excluded.pings_out_of_area, "
-        "  pings_no_repeaters = pings_no_repeaters + excluded.pings_no_repeaters",
+        "  pings_no_repeaters = pings_no_repeaters + excluded.pings_no_repeaters, "
+        "  pings_low_precision = pings_low_precision + excluded.pings_low_precision, "
+        "  pings_implausible_speed = pings_implausible_speed + excluded.pings_implausible_speed",
         (
             player_id, PROTOCOL, day,
             values["pings_accepted"], values["pings_no_contact"],
             values["pings_wrong_owner"], values["pings_duplicate"],
             values["pings_bad_coord"], values["pings_out_of_area"],
-            values["pings_no_repeaters"],
+            values["pings_no_repeaters"], values["pings_low_precision"],
+            values["pings_implausible_speed"],
         ),
     )
 
@@ -591,7 +603,7 @@ class Ingestor:
         player_id, team = entry
 
         pos = extract_position(packet)
-        if pos is None or not valid_coord(*pos):
+        if pos is None or not valid_coord(pos[0], pos[1]):
             async with WriteSession() as conn:
                 _bump_player_stat(conn, player_id, _stat_day(int(time.time())), pings_bad_coord=1)
                 conn.execute(
@@ -599,7 +611,7 @@ class Ingestor:
                     (packet_id, int(time.time())),
                 )
             return False
-        lat, lon = pos
+        lat, lon, precision_bits = pos
 
         # Play-area check comes immediately after coordinate validity and
         # before the cell/receptions work below -- same ordering
@@ -615,6 +627,35 @@ class Ingestor:
                 conn.execute(
                     "INSERT OR IGNORE INTO processed_packet(packet_id, processed_at) VALUES (?, ?)",
                     (packet_id, int(time.time())),
+                )
+            return False
+
+        # Precision gate (settings.mt_min_precision_bits -- see
+        # app/config.py for the box-size arithmetic and why missing
+        # precision_bits is rejected, not silently accepted). A radio
+        # that has truncated its position to a box the size of this
+        # gate's minimum -- or bigger -- cannot honestly paint one
+        # specific ~300m cell; letting it through would credit a square
+        # the radio may never actually have been near. Checked before the
+        # cell is even computed, same as bad_coord/out_of_area above,
+        # since a cell derived from an untrustworthy box is itself not
+        # trustworthy.
+        if precision_bits is None or precision_bits < settings.mt_min_precision_bits:
+            async with WriteSession() as conn:
+                _bump_player_stat(conn, player_id, _stat_day(int(time.time())), pings_low_precision=1)
+                conn.execute(
+                    "INSERT OR IGNORE INTO processed_packet(packet_id, processed_at) VALUES (?, ?)",
+                    (packet_id, int(time.time())),
+                )
+            if precision_bits is None:
+                log.warning(
+                    "mt ingest: rejecting player %d: position carried no precision_bits",
+                    player_id,
+                )
+            else:
+                log.warning(
+                    "mt ingest: rejecting player %d: precision_bits=%d below minimum %d",
+                    player_id, precision_bits, settings.mt_min_precision_bits,
                 )
             return False
 
@@ -707,10 +748,14 @@ class Ingestor:
             # sender/cell/ts). The scoring cooldown itself no longer
             # reads this table -- see mc_scoring.apply_paint(), which now
             # gates per feeder credited, not per ping painted.
+            # precision_bits is recorded here purely for audit (see
+            # app/db.py's player_cell_ping comment) -- by this point it
+            # has already passed the precision gate above.
             cur = conn.execute(
                 "INSERT OR IGNORE INTO player_cell_ping"
-                "(player_id, protocol, cell_id, ts, seen_at) VALUES (?, ?, ?, ?, ?)",
-                (player_id, PROTOCOL, cell, ts, int(time.time())),
+                "(player_id, protocol, cell_id, ts, seen_at, precision_bits) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (player_id, PROTOCOL, cell, ts, int(time.time()), precision_bits),
             )
             if cur.rowcount == 0:
                 _bump_player_stat(conn, player_id, day, pings_duplicate=1)
@@ -720,6 +765,40 @@ class Ingestor:
                 )
                 return False
 
+            # Speed gate (settings.mt_max_speed_mps -- see app/config.py
+            # for why this is a materially higher bar than MeshCore's
+            # mc_max_speed_mps, and why). Read BEFORE
+            # record_repeater_observations/player_last_fix are touched:
+            # unlike MeshCore's by_air (a label that never blocks
+            # anything -- the radio really did hear that repeater), an
+            # implausible jump here means the position itself -- and
+            # therefore the cell derived from it -- is not trusted, so
+            # this ping must credit nothing and must not become the new
+            # baseline other pings' speeds are measured against (letting
+            # a bad fix "anchor" player_last_fix would make the very next
+            # legitimate ping look like the impossible one instead).
+            last_fix = conn.execute(
+                "SELECT cell_id, ts FROM player_last_fix WHERE player_id = ? AND protocol = ?",
+                (player_id, PROTOCOL),
+            ).fetchone()
+            if last_fix is not None and ts > last_fix["ts"]:
+                elapsed = ts - last_fix["ts"]
+                prev_lat, prev_lon = cell_center(last_fix["cell_id"])
+                cur_lat, cur_lon = cell_center(cell)
+                speed = distance_m(prev_lat, prev_lon, cur_lat, cur_lon) / elapsed
+                if speed > settings.mt_max_speed_mps:
+                    _bump_player_stat(conn, player_id, day, pings_implausible_speed=1)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO processed_packet(packet_id, processed_at) VALUES (?, ?)",
+                        (packet_id, int(time.time())),
+                    )
+                    log.warning(
+                        "mt ingest: rejecting player %d: implausible speed %.1f m/s "
+                        "over %ds (cell %s -> %s)",
+                        player_id, speed, elapsed, last_fix["cell_id"], cell,
+                    )
+                    return False
+
             # Coverage evidence: which feeders can hear this cell, at
             # cell granularity only -- recorded for every ping that
             # reaches this point, including one whose feeders apply_paint
@@ -728,10 +807,6 @@ class Ingestor:
             record_repeater_observations(conn, PROTOCOL, cell, entries, ts)
 
             # Last known cell, monotonic on ts, same as MeshCore.
-            last_fix = conn.execute(
-                "SELECT cell_id, ts FROM player_last_fix WHERE player_id = ? AND protocol = ?",
-                (player_id, PROTOCOL),
-            ).fetchone()
             if last_fix is None:
                 conn.execute(
                     "INSERT INTO player_last_fix(player_id, protocol, cell_id, ts) "

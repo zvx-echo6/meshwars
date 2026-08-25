@@ -140,6 +140,72 @@ class Settings(BaseSettings):
     mt_points_per_feeder: float = 0.1    # points earned per distinct MQTT feeder that heard a ping
     mt_max_points_per_ping: float = 1.0  # ceiling on points from any one ping
 
+    # Minimum Meshtastic position precision a packet must carry to score.
+    # A Meshtastic node can report its position at reduced precision
+    # (Channel settings -> Precision, or a firmware default): the device
+    # transmits latitude_i/longitude_i as signed 1e-7-degree integers, but
+    # at reduced precision only the top `precision_bits` of that 32-bit
+    # value are real -- the low `32 - precision_bits` bits are zeroed
+    # before transmission, so the true position can be anywhere in a box
+    # 2**(32-precision_bits) raw units (1e-7 degree each) on a side. A
+    # grid cell here is ~300m (app/grid.py's CELL_LAT_DEG=0.0027 ~= 300m);
+    # accepting a box bigger than that lets a radio that has truncated
+    # away a kilometre or more of uncertainty paint a specific square it
+    # may never have been near.
+    #
+    # Box size in meters, converting via ~111,320 m per degree of
+    # LATITUDE (not longitude -- longitude is narrower everywhere off the
+    # equator, and inside this play area, ~40-44 N, a degree of longitude
+    # is only ~74% of a degree of latitude; using the wider figure is the
+    # conservative choice for a security gate, since it never understates
+    # the box):
+    #   precision_bits=17 -> 2**15 * 1e-7 * 111320 =~ 365 m (still >= the
+    #                        300 m cell -- not good enough)
+    #   precision_bits=18 -> 2**14 * 1e-7 * 111320 =~ 182 m (well under
+    #                        the 300 m cell -- the floor chosen below)
+    #   precision_bits=19 -> 2**13 * 1e-7 * 111320 =~  91 m
+    # 18 is the minimum: the first value whose box sits safely (roughly
+    # 40% smaller than the cell) under 300 m, rather than merely under it.
+    mt_min_precision_bits: int = 18
+
+    # A packet whose payload never carries precision_bits at all (older
+    # firmware, or a meshview fork that omits it) cannot be scored
+    # against the check above -- there is nothing to check. Investigated
+    # against 8,000 live position packets pulled straight from this
+    # deployment's meshview (2026-08-25): every single one that carried a
+    # usable latitude_i/longitude_i also carried precision_bits; the only
+    # packets missing it had no position fields at all (already caught by
+    # pings_bad_coord, upstream of this check). So "missing precision on
+    # an otherwise-real fix" is not something current firmware in this
+    # deployment actually does -- there is no population of legitimate
+    # older-firmware players this would silently shut out today. Given
+    # that, and that silently accepting a missing field would hand any
+    # future gap in what meshview reports right back to whoever wants to
+    # exploit it, missing precision_bits is treated as failing this gate
+    # (rejected, not accepted) -- see app/ingest.py's precision check.
+
+    # Speed gate for the Meshtastic path -- app/mc_ingest.py has had this
+    # for MeshCore (settings.mc_max_speed_mps) since that board shipped;
+    # this closes the same gap here, where live data has shown implied
+    # speeds of 220-1300 mph between a player's own consecutive fixes.
+    #
+    # Deliberately NOT the same 45 m/s (~100 mph) MeshCore uses, and not
+    # for lack of trying to reuse it: crossing MeshCore's threshold only
+    # marks a claim `by_air` (a soft label the exploration awards read --
+    # see mc_max_speed_mps's own comment) and never costs a square, so it
+    # can afford to be trigger-happy. Crossing this one REJECTS the fix
+    # outright and credits nothing, so it needs real headroom above
+    # anything a genuine player can do on the ground: this play area's
+    # interstates top out around 80 mph (~36 m/s), and two consecutive
+    # fixes landing in adjacent ~300 m cells a few seconds apart can
+    # already read as a deceptively high "speed" from cell-center
+    # geometry alone, before anyone drives anywhere. 90 m/s (~201 mph) is
+    # exactly double MeshCore's floor -- comfortable headroom over any
+    # real drive plus that grid-quantization noise -- and still sits well
+    # under the slowest impossible jump actually observed (220 mph =~ 98
+    # m/s), so nothing this gate is meant to catch gets missed either.
+    mt_max_speed_mps: float = 90.0
+
     # Play-area bounding box: Ontario, Oregon (NW) to Provo, Utah (SE).
     # Pings outside this box are rejected before they touch anything else.
     # Setting play_area_north == play_area_south disables the check

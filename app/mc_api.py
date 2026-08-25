@@ -219,9 +219,16 @@ def _diagnose_mt(alltime: dict, squares_held: int, last_heard_at: int | None, no
     by definition, was never received. So the first branch below names
     all of them rather than falsely diagnosing just one.
     """
+    # pings_low_precision/pings_implausible_speed (2026-08-25) count
+    # here too: both mean a real packet WAS picked up and rejected, not
+    # that nothing arrived -- leaving them out of `total` would make
+    # mt_never_seen fire for a node whose every fix trips one of those
+    # gates, which is actively wrong (see app/ingest.py for the gates
+    # themselves).
     total = (
         alltime["pings_accepted"] + alltime["pings_duplicate"]
         + alltime["pings_bad_coord"] + alltime["pings_out_of_area"]
+        + alltime["pings_low_precision"] + alltime["pings_implausible_speed"]
     )
 
     if total == 0:
@@ -246,6 +253,15 @@ def _diagnose_mt(alltime: dict, squares_held: int, last_heard_at: int | None, no
             "usable position. Check that it has a GPS fix, and that "
             "position precision on your channel isn't reduced to the "
             "point coordinates are stripped out."
+        )
+
+    if alltime["pings_low_precision"] == total:
+        return "mt_low_precision", (
+            "MeshWars is picking up packets from this node, but its "
+            "position precision is set too coarse to trust for a "
+            "300-metre square -- the radio is only reporting roughly "
+            "which kilometre it's in, not which square. Raise position "
+            "precision on your channel so squares can be credited."
         )
 
     if (
@@ -1187,7 +1203,8 @@ async def mc_cell(cell_id: str):
 
 _STAT_COLUMNS = (
     "batches, pings_accepted, pings_no_contact, pings_wrong_owner, "
-    "pings_duplicate, pings_bad_coord, pings_out_of_area, pings_no_repeaters"
+    "pings_duplicate, pings_bad_coord, pings_out_of_area, pings_no_repeaters, "
+    "pings_low_precision, pings_implausible_speed"
 )
 _STAT_ZERO_ROW = {
     "batches": 0, "pings_accepted": 0, "pings_no_contact": 0,
@@ -1222,6 +1239,7 @@ def _counters_out(row) -> dict:
 _STAT_ZERO_ROW_MT = {
     "pings_accepted": 0, "pings_duplicate": 0, "pings_bad_coord": 0,
     "pings_out_of_area": 0, "pings_no_repeaters": 0,
+    "pings_low_precision": 0, "pings_implausible_speed": 0,
 }
 
 
@@ -1232,6 +1250,8 @@ def _counters_out_mt(row) -> dict:
         "bad_coord": row["pings_bad_coord"],
         "out_of_area": row["pings_out_of_area"],
         "no_repeaters": row["pings_no_repeaters"],
+        "low_precision": row["pings_low_precision"],
+        "implausible_speed": row["pings_implausible_speed"],
     }
 
 
@@ -1386,7 +1406,9 @@ async def mc_status(request: Request) -> JSONResponse:
             "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
             "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
             "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
-            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters, "
+            "       COALESCE(SUM(pings_low_precision),0) AS pings_low_precision, "
+            "       COALESCE(SUM(pings_implausible_speed),0) AS pings_implausible_speed "
             "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ? "
             "    AND day BETWEEN ? AND ?",
             (player_id, MT_PROTOCOL, week_start, today),
@@ -1400,7 +1422,9 @@ async def mc_status(request: Request) -> JSONResponse:
             "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
             "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
             "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
-            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters, "
+            "       COALESCE(SUM(pings_low_precision),0) AS pings_low_precision, "
+            "       COALESCE(SUM(pings_implausible_speed),0) AS pings_implausible_speed "
             "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ?",
             (player_id, MT_PROTOCOL),
         ).fetchone()
@@ -1448,6 +1472,8 @@ async def mc_status(request: Request) -> JSONResponse:
         "pings_bad_coord": alltime_row_mt["pings_bad_coord"],
         "pings_out_of_area": alltime_row_mt["pings_out_of_area"],
         "pings_no_repeaters": alltime_row_mt["pings_no_repeaters"],
+        "pings_low_precision": alltime_row_mt["pings_low_precision"],
+        "pings_implausible_speed": alltime_row_mt["pings_implausible_speed"],
     }
     code_mt, message_mt = _diagnose_mt(alltime_mt, squares_held_mt, last_heard_at_mt, now_ts)
 
