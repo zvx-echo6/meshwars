@@ -6,10 +6,11 @@
  *
  * Also carries: the site's theme system (theme.css + theme-toggle.js,
  * same as every other page, but defaulting to the neon/dark theme here
- * specifically -- see the boot snippet in map2.html), a basemap that
- * follows that theme (light raster under gold, dark under neon, both
- * defined up front and toggled by visibility rather than rebuilt --
- * rebuilding the style loses the reader's pan/zoom), three self-hosted
+ * specifically -- see the boot snippet in map2.html), a single dark
+ * basemap shared by both themes (gold used to sit on a light OSM
+ * raster, which washed the baked hillshade out under a dark interface
+ * -- gold is now the colour of the chrome and the pins, not of the
+ * ground; see BASEMAP_ID), three self-hosted
  * PMTiles overlays (public lands, USFS roads/trails), all behind a small
  * layer-switcher panel (also visibility-toggled, so flipping a checkbox
  * never refetches a source), Places Worth Going markers and a slide-out
@@ -64,28 +65,30 @@ const DEM_URL = `/tiles/meshwars-hillshade-alpha.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
-const BASEMAP_GOLD_ID = 'basemap-gold';
-const BASEMAP_NEON_ID = 'basemap-neon';
+// Both themes now share ONE dark basemap (CARTO dark_all) -- gold used
+// to point at the stock light OSM raster, which put a bright white map
+// under a dark interface and washed the baked hillshade out. Gold is
+// now the colour of the chrome and the place pins (PLACE_COLORS), not
+// of the ground, so there is nothing left for a second basemap source
+// to differ on; the old basemap-gold/basemap-neon pair (two sources,
+// two layers, toggled by visibility in applyBasemapTheme) collapsed to
+// this single always-visible source/layer.
+const BASEMAP_ID = 'basemap';
 const HILLSHADE_ID = 'hillshade';
 
-// Team territory washes into the dark neon basemap/hillshade at the
-// gold theme's weights, so it gets more fill opacity and a heavier
-// outline there. Gold is untouched -- it already reads fine. Keyed by
-// theme name.
-const BOARD_FILL_OPACITY = { gold: 0.45, neon: 0.65 };
-const BOARD_LINE_WIDTH = { gold: 1, neon: 2 };
+// Team territory washes into the dark basemap/hillshade -- both themes
+// now need the weight that used to be neon-only when gold still sat on
+// a light basemap. Kept as a per-theme map (not a single constant) so
+// the two can still be told apart if a future theme needs to.
+const BOARD_FILL_OPACITY = { gold: 0.65, neon: 0.65 };
+const BOARD_LINE_WIDTH = { gold: 2, neon: 2 };
 
-// The baked hillshade archive now carries real alpha -- transparent on
-// flat ground, black/white toward shadow/highlight the same way the
-// old raster-dem layer behaved -- so it no longer needs a heavy opacity
-// cut just to keep the basemap visible underneath. neon sits at 1.0,
-// full strength, because the pixels were baked at neon's own
-// exaggeration (0.85); gold's original exaggeration was lower (0.6),
-// and since that can no longer be tuned live -- it is baked into the
-// pixels now -- gold's opacity is scaled down instead to roughly the
-// same ratio (0.6/0.85) so it still reads lighter than neon. Keyed by
-// theme name, same pattern as BOARD_FILL_OPACITY.
-const HILLSHADE_OPACITY = { gold: 0.7, neon: 1.0 };
+// The baked hillshade archive carries real alpha -- transparent on flat
+// ground, black/white toward shadow/highlight. Both themes sit on the
+// same dark basemap now, so both get the full-strength value that used
+// to be neon-only; gold's old 0.7 existed only to keep a light basemap
+// from washing out, which no longer applies.
+const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
 
 // Each checkbox id -> the style layer id(s) it toggles, and the
 // minimum zoom its underlying data starts at (measured from the tile
@@ -1541,20 +1544,18 @@ function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === 'neon' ? 'neon' : 'gold';
 }
 
-// Flips which raster basemap is visible. Never rebuilds the style or
-// touches the board's team-colour expression -- that stays constant
-// across themes on purpose (gameplay, not branding). The hillshade
-// layer used to get a per-theme exaggeration re-tune here too; that was
-// a raster-dem paint property computed in the browser, and the
+// No basemap layer left to flip visibility on -- both themes share the
+// one dark BASEMAP_ID layer now (see its comment above). Never touches
+// the board's team-colour expression -- that stays constant across
+// themes on purpose (gameplay, not branding). The hillshade layer used
+// to get a per-theme exaggeration re-tune here too; that was a
+// raster-dem paint property computed in the browser, and the
 // pre-rendered hillshade imagery has its exaggeration baked in at
 // build time with no such property left to set. raster-opacity is a
 // different paint property that survives the switch to baked imagery
 // (see HILLSHADE_OPACITY), so it's still tuned here per theme.
 function applyBasemapTheme(map) {
   const theme = currentTheme();
-  const neon = theme === 'neon';
-  map.setLayoutProperty(BASEMAP_GOLD_ID, 'visibility', neon ? 'none' : 'visible');
-  map.setLayoutProperty(BASEMAP_NEON_ID, 'visibility', neon ? 'visible' : 'none');
   map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
   map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
   map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
@@ -1985,7 +1986,6 @@ async function main() {
   // silent.
   loadNotice();
 
-  const bootTheme = currentTheme();
   const { playAreaBounds, defaultMode } = await fetchBootConfig();
   mode = defaultMode;
   if (!playAreaBounds) {
@@ -2020,14 +2020,7 @@ async function main() {
       // depend on someone else's demo infrastructure staying up.
       glyphs: '/static/fonts/{fontstack}/{range}.pbf',
       sources: {
-        [BASEMAP_GOLD_ID]: {
-          type: 'raster',
-          tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-          tileSize: 256,
-          attribution: '© OpenStreetMap contributors',
-          maxzoom: 19,
-        },
-        [BASEMAP_NEON_ID]: {
+        [BASEMAP_ID]: {
           type: 'raster',
           tiles: [
             'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
@@ -2054,16 +2047,9 @@ async function main() {
       },
       layers: [
         {
-          id: BASEMAP_GOLD_ID,
+          id: BASEMAP_ID,
           type: 'raster',
-          source: BASEMAP_GOLD_ID,
-          layout: { visibility: bootTheme === 'neon' ? 'none' : 'visible' },
-        },
-        {
-          id: BASEMAP_NEON_ID,
-          type: 'raster',
-          source: BASEMAP_NEON_ID,
-          layout: { visibility: bootTheme === 'neon' ? 'visible' : 'none' },
+          source: BASEMAP_ID,
         },
         {
           id: HILLSHADE_ID,
