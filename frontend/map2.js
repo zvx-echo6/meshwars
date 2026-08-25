@@ -143,7 +143,8 @@ const LAYER_TOGGLES = [
 // is exactly what made landmarks hard to see in the first place.
 const PLACE_COLORS = {
   gold: '#EDD39F',   // theme.css --mw-gold-light (classic)
-  neon: '#9DFDF6',   // theme.css --mw-gold-light (neon's cyan-light token)
+  neon: '#2BE8E0',   // theme.css --mw-gold (neon's deeper cyan token -- see
+                      // PLACE_ICON_OUTLINE below for why not -light)
 };
 
 // Base pixel size (not degrees -- this must stay a constant SCREEN
@@ -177,7 +178,11 @@ const PLACE_ICON_PX = { gold: 22, neon: 30 };
 // BOARD_LINE_WIDTH solved for the board layer, same per-theme pattern.
 const PLACE_ICON_OUTLINE = {
   gold: { color: 'rgba(0,0,0,0.65)', width: 1.5 },
-  neon: { color: 'rgba(244,241,232,1)', width: 2 },
+  // Was a light/white halo (rgba(244,241,232,1), width 2) -- on the
+  // shared dark basemap a pale glyph with a pale outline has nothing
+  // to contain it and reads as a glow, not a shape. Same dark-outline
+  // treatment as gold now holds the cyan glyph's edge instead.
+  neon: { color: 'rgba(0,0,0,0.65)', width: 1.5 },
 };
 
 // Park boundaries (app/places_api.py's `park_boundaries` -- a matched
