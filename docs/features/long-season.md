@@ -36,7 +36,9 @@ Each month awards:
 - **Top Attacker** — most squares taken off other teams
 - **Top Defender** — most squares won back (a capture counts as a defence when the previous capture of that same square took it from the team now taking it back)
 - **Team Attacker** and **Team Defender** — the same two, given within each team
-- **Explorer**
+- **Tourist** — most landmarks visited
+- **Park Hopper** — most parks visited
+- **Peak Tagger** — most summits visited
 - **Frontier**
 - **Quick Fingers** — fastest average check-in after the net opened
 
@@ -59,3 +61,4 @@ Worth recording so they are not undone:
 - Frontier measured the single furthest square and became a count of squares instead.
 - "Most Consistent" (longest run of nets) was dropped 2026-08-25. A month is about four nets, and nearly everyone who shows up hits all four, so it was a tie among most of the field and told you nothing — and streak points already reward showing up every week. Months frozen before it came down keep the winner they recorded.
 - "Top NetOp" (most check-in points) was dropped 2026-08-25. The streak bonus pays 5 points per consecutive week, capped at 25, so whoever started their streak earliest pulls ahead by a gap a newcomer cannot close in a single month — a record of seniority, not a contest. Players still earn streak points; only the award for topping them is gone. Months frozen before it came down keep the winner they recorded.
+- "Explorer" (most Places Worth Going points earned that month) was dropped 2026-08-25 and replaced with Tourist, Park Hopper, and Peak Tagger. Points are capped at 100 per person per week, so everyone who played seriously finished a month within the same narrow band — the award separated nobody, the same ceiling that retired Most Consistent. The three replacements count visits instead of points, one per place type, and ignore point values entirely; the weekly cap makes them mutually exclusive in practice, since one remote summit alone spends the whole week, so each describes a different way to play rather than a different view of the same grind. Months frozen before it came down keep the winner they recorded, and the Explorer label is kept on file so those months still display a real name.
