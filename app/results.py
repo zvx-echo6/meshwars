@@ -46,7 +46,6 @@ TEAM_AWARDS = [
 PLAYER_AWARDS = [
     ("top_attacker", "Top Attacker"),
     ("top_defender", "Top Defender"),
-    ("top_netop", "Top NetOp"),
     ("quick_fingers", "Quick Fingers"),
     ("explorer", "Explorer"),
     ("frontier", "Frontier"),
@@ -69,6 +68,14 @@ AWARD_LABELS = dict(TEAM_AWARDS + PLAYER_AWARDS + PER_TEAM_AWARDS)
 # consecutive week, capped at 25) -- the same thing measured somewhere it
 # can actually vary.
 AWARD_LABELS["most_consistent"] = "Most Consistent"
+
+# top_netop (most points from weekly net check-ins) came down 2026-08-25:
+# the streak bonus pays 5 points per consecutive week, capped at 25, so
+# whoever started their streak earliest pulls ahead by an amount a
+# newcomer can never close in a single month. That makes the award a
+# record of seniority rather than a contest -- players still earn streak
+# points, only the award for topping them is gone.
+AWARD_LABELS["top_netop"] = "Top NetOp"
 
 # Display order. compute_month() emits awards in this order naturally,
 # but a frozen month is read back out of a table with no inherent order,
@@ -368,17 +375,12 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
                    detail="squares past the towns, furthest %.0f mi out" % furthest[won[0]]))
 
     # ---- check-in awards ----------------------------------------------
-    points: dict[int, float] = {}
     offsets: dict[int, list[float]] = {}
     for r in chk:
-        points[r["player_id"]] = points.get(r["player_id"], 0.0) + r["points"]
         if r["message_ts"] is not None:
             offsets.setdefault(r["player_id"], []).append(
                 r["message_ts"] - _net_window_open(r["net_date"])
             )
-
-    add(_award("top_netop", *(_top(points, 0.001) or (None, 0)), names=names,
-               detail="points from weekly net check-ins"))
 
     # Quick Fingers, and the guard that makes it survivable. An award for
     # being fastest on a scheduled event invites a cron job, so a player

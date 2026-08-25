@@ -38,7 +38,6 @@ Each month awards:
 - **Team Attacker** and **Team Defender** — the same two, given within each team
 - **Explorer**
 - **Frontier**
-- **Top NetOp** — most check-in points
 - **Quick Fingers** — fastest average check-in after the net opened
 
 ## Naming
@@ -59,3 +58,4 @@ Worth recording so they are not undone:
 - A "Team of the Month" award existed alongside Month Winner and was deleted, because the two named the same team almost every month.
 - Frontier measured the single furthest square and became a count of squares instead.
 - "Most Consistent" (longest run of nets) was dropped 2026-08-25. A month is about four nets, and nearly everyone who shows up hits all four, so it was a tie among most of the field and told you nothing — and streak points already reward showing up every week. Months frozen before it came down keep the winner they recorded.
+- "Top NetOp" (most check-in points) was dropped 2026-08-25. The streak bonus pays 5 points per consecutive week, capped at 25, so whoever started their streak earliest pulls ahead by a gap a newcomer cannot close in a single month — a record of seniority, not a contest. Players still earn streak points; only the award for topping them is gone. Months frozen before it came down keep the winner they recorded.
