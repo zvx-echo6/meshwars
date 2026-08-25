@@ -19,7 +19,7 @@ harmless, not because the race it was written for is still live.)
 
 Several of the functions below (active_season, board_for, scores_for,
 history_for, cell_detail_for, find_for, top_for, top_checkin_for,
-season_team_tally, winner_banner_active, winner_banner_for,
+top_explorer_for, season_team_tally, winner_banner_active, winner_banner_for,
 latest_closed_season, team_list) take an explicit `protocol` argument
 and are called from here with MC_PROTOCOL -- and, now that the
 Meshtastic board runs on this same mc_season/mc_tile* model, also
@@ -681,6 +681,30 @@ def find_for(protocol: str, name: str) -> dict | None:
     route returns the exact same shape instead of a hand-copied
     near-duplicate, following the same *_for() pattern as
     board_for/scores_for/history_for/cell_detail_for above.
+
+    Also returns the player's own point breakdown -- capture points
+    (tiles_held, the same figure team_tile_counts() sums per team),
+    check-in points, and Explorer (Places Worth Going) points, plus
+    their total -- so a player who is not on any Top Operators ranking
+    still has a way to see their own numbers; this is the only lookup
+    on the site that works for ANY registered player rather than just
+    the top N of one ranking. Check-in points read mc_checkin_award the
+    same way top_checkin_for() below does; Explorer points read
+    place_activation the same TIME-windowed way
+    mc_scoring.team_place_points() and public_api._player_rows() do,
+    since that table has no season_id of its own. All three are 0 when
+    there is no active season for `protocol` (nothing to attribute
+    against), same degrade-to-zero find_for() already used for
+    tiles_held/bounds before this pass.
+
+    last_checkin_net_date and last_position_ts are cheap additions from
+    tables already read elsewhere for the same player (public_api's
+    _player_rows computes both the same way) -- a rough "when were they
+    last active" signal. A merged, multi-table recent-activity FEED
+    (captures + check-ins + Explorer activations interleaved by time)
+    was deliberately left out of this pass: it needs new unioned
+    queries this endpoint has never had to run before, not a reuse of
+    an existing one.
     """
     conn = connect()
     try:
@@ -691,14 +715,16 @@ def find_for(protocol: str, name: str) -> dict | None:
         ).fetchone()
         if not player:
             return None
+        pid = player["player_id"]
 
         cell_ids: list[str] = []
+        season = None
         try:
             season = active_season(conn, protocol)
             if season:
                 rows = conn.execute(
                     "SELECT cell_id FROM mc_tile WHERE season_id = ? AND last_player_id = ?",
-                    (season["id"], player["player_id"]),
+                    (season["id"], pid),
                 ).fetchall()
                 cell_ids = [r["cell_id"] for r in rows]
         except sqlite3.OperationalError as e:
@@ -716,11 +742,41 @@ def find_for(protocol: str, name: str) -> dict | None:
                 "east": max(easts),
             }
 
+        checkin_points = 0.0
+        last_checkin_net_date = None
+        explorer_points = 0.0
+        if season:
+            ci = conn.execute(
+                "SELECT SUM(points), MAX(net_date) FROM mc_checkin_award "
+                " WHERE season_id = ? AND player_id = ?",
+                (season["id"], pid),
+            ).fetchone()
+            checkin_points = ci[0] or 0.0
+            last_checkin_net_date = ci[1]
+            ep = conn.execute(
+                "SELECT SUM(points) FROM place_activation "
+                " WHERE player_id = ? AND awarded_at >= ? AND awarded_at <= ?",
+                (pid, season["started_at"], season["ends_at"]),
+            ).fetchone()
+            explorer_points = ep[0] or 0.0
+
+        last_fix = conn.execute(
+            "SELECT ts FROM player_last_fix WHERE protocol = ? AND player_id = ?",
+            (protocol, pid),
+        ).fetchone()
+
+        total_points = round(len(cell_ids) + checkin_points + explorer_points, 2)
+
         return {
             "display_name": player["display_name"],
             "team": player["team"],
             "tiles_held": len(cell_ids),
             "bounds": bounds,
+            "checkin_points": round(checkin_points, 2),
+            "explorer_points": round(explorer_points, 2),
+            "total_points": total_points,
+            "last_checkin_net_date": last_checkin_net_date,
+            "last_position_ts": last_fix["ts"] if last_fix else None,
         }
     finally:
         conn.close()
@@ -872,6 +928,69 @@ async def mc_top_checkins() -> list[dict]:
     this addition.
     """
     return top_checkin_for(MC_PROTOCOL)
+
+
+def top_explorer_for(protocol: str) -> list[dict]:
+    """Players ranked by Explorer Score (Places Worth Going points,
+    place_activation) earned in `protocol`'s active season. Top 20,
+    empty list if there's no data (or no active season) -- the
+    "Explorer" counterpart of top_for()/top_checkin_for() above, ranked
+    over the same active-season window those two already use so all
+    three Top Operators tabs describe the same period.
+
+    place_activation has no season_id or protocol column of its own --
+    a place credit is scoped by week_start, not by season or board (see
+    mc_scoring.team_place_points()'s docstring). So this scopes it two
+    ways, same as team_place_points() and public_api._player_rows()
+    already do: by TIME (awarded_at against the season's own
+    started_at/ends_at window) for which activations count, and by
+    player_node.protocol (via a subquery, not a direct JOIN, so a
+    player bound to more than one node on this protocol is not summed
+    twice) for which players belong to THIS board's ranking -- a
+    Meshtastic-only player does not show up in the MeshCore Explorer
+    tab just because they also hold MeshCore radio bindings, and vice
+    versa.
+
+    Follows the exact same *_for() pattern as
+    board_for/scores_for/history_for/find_for/top_for/top_checkin_for,
+    so app/api.py's Meshtastic route calls this directly instead of
+    duplicating the query.
+    """
+
+    def run(conn):
+        season = active_season(conn, protocol)
+        if not season:
+            return []
+        rows = conn.execute(
+            "SELECT p.display_name AS display_name, p.team AS team, "
+            "       SUM(a.points) AS points "
+            "  FROM place_activation a "
+            "  JOIN player p ON p.player_id = a.player_id "
+            " WHERE a.awarded_at >= ? AND a.awarded_at <= ? "
+            "   AND a.player_id IN (SELECT pn.player_id FROM player_node pn WHERE pn.protocol = ?) "
+            " GROUP BY a.player_id "
+            " ORDER BY points DESC "
+            " LIMIT 20",
+            (season["started_at"], season["ends_at"], protocol),
+        ).fetchall()
+        return [
+            {"display_name": r["display_name"], "team": r["team"],
+             "points": round(r["points"] or 0.0, 2)}
+            for r in rows
+        ]
+
+    result = _safe_query(run)
+    return result if result is not None else []
+
+
+@router.get("/api/mc/top-explorer")
+async def mc_top_explorer() -> list[dict]:
+    """Players ranked by Explorer Score in the active MeshCore season.
+    See top_explorer_for(). New route -- every existing /api/mc/* route's
+    request path, request shape, and response shape is unchanged by
+    this addition.
+    """
+    return top_explorer_for(MC_PROTOCOL)
 
 
 # Cap on how many repeater_observation rows cell_detail_for() returns

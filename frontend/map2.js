@@ -367,6 +367,7 @@ const PROTOCOLS = {
     topButtonLabel: 'Top Operators',
     topCaptureLabel: 'Wardrivers',
     topCheckinLabel: 'NetOps',
+    topExplorerLabel: 'Explorer',
     lookupPlaceholder: 'player name',
     lookupHelp: 'Search by player name.',
     boardEndpoint: '/api/mc/board',
@@ -376,6 +377,7 @@ const PROTOCOLS = {
     findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
     topEndpoint: '/api/mc/top',
     topCheckinEndpoint: '/api/mc/top-checkins',
+    topExplorerEndpoint: '/api/mc/top-explorer',
     seasonEndpoint: '/api/mc/season',
   },
   meshtastic: {
@@ -384,6 +386,7 @@ const PROTOCOLS = {
     topButtonLabel: 'Top Operators',
     topCaptureLabel: 'Wardrivers',
     topCheckinLabel: 'NetOps',
+    topExplorerLabel: 'Explorer',
     lookupPlaceholder: 'player name',
     lookupHelp: 'Search by player name.',
     boardEndpoint: '/get-nodes',
@@ -393,6 +396,7 @@ const PROTOCOLS = {
     findEndpoint: (q) => `/find?name=${encodeURIComponent(q)}`,
     topEndpoint: '/top',
     topCheckinEndpoint: '/top-checkins',
+    topExplorerEndpoint: '/top-explorer',
     seasonEndpoint: '/season',
   },
 };
@@ -590,11 +594,23 @@ async function fetchRosterByTeam() {
 }
 
 // ===== Player search (Find) =====
+//
+// Find used to stop here once a player's cells were located -- a player
+// holding no cells got a one-line "holds no cells right now" and
+// nothing else, which meant Find was really "top-of-board locator", not
+// a real player lookup: it never showed points, and it went blank
+// entirely for anyone with checkin/Explorer points but zero captures.
+// This is now this page's only way for a player OUTSIDE the Top
+// Operators rankings to see their own numbers, so it must not go blank
+// for them. Point breakdown reuses the exact same "tap to see the
+// split" affordance team totals already use (mc-tally-count/
+// bindBreakdownToggle, see openHistoryModal above) rather than
+// inventing a new interaction or any new CSS.
 async function doPlayerFind(value) {
   const resultEl = document.getElementById('mc-lookup-result');
   if (!resultEl) return;
   const query = (value || '').trim();
-  if (!query) { resultEl.textContent = ''; return; }
+  if (!query) { resultEl.replaceChildren(); return; }
   resultEl.textContent = 'Searching...';
 
   try {
@@ -608,20 +624,42 @@ async function doPlayerFind(value) {
       return;
     }
     const data = await res.json();
-    if (!data.bounds || !data.tiles_held) {
-      resultEl.textContent = `${data.display_name} (${data.team}) holds no cells right now.`;
-      return;
-    }
-    const b = data.bounds;
-    // MapLibre bounds are [[west, south], [east, north]] -- Leaflet's
-    // equivalent call (mc.js's doPlayerFind) uses [lat, lng] order
-    // instead; only the coordinate order changes here, not the padding
-    // or the MAX_FIT_ZOOM cap.
-    if (window.__mwMap) {
+
+    // Zoom the map only when they currently hold cells -- unchanged
+    // from before this pass, just no longer gating whether the point
+    // breakdown below renders too.
+    if (data.bounds && data.tiles_held && window.__mwMap) {
+      const b = data.bounds;
+      // MapLibre bounds are [[west, south], [east, north]] -- Leaflet's
+      // equivalent call (mc.js's doPlayerFind) uses [lat, lng] order
+      // instead; only the coordinate order changes here, not the
+      // padding or the MAX_FIT_ZOOM cap.
       window.__mwMap.fitBounds([[b.west, b.south], [b.east, b.north]], { padding: 24, maxZoom: MAX_FIT_ZOOM });
     }
+
     const plural = data.tiles_held === 1 ? '' : 's';
-    resultEl.textContent = `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`;
+    const holdsText = data.tiles_held
+      ? `${data.display_name} (${data.team}) holds ${data.tiles_held} cell${plural}.`
+      : `${data.display_name} (${data.team}) holds no cells right now.`;
+
+    const captures = data.tiles_held || 0; // capture points == squares currently held, same figure team_tile_counts() sums per team
+    const checkins = data.checkin_points || 0;
+    const explorer = data.explorer_points || 0;
+    const total = data.total_points ?? (captures + checkins + explorer);
+    const compact = `${captures}+${checkins}+${explorer}`;
+    const splitTitle = `${captures} capture + ${checkins} check-in + ${explorer} Explorer points`;
+
+    const activityBits = [];
+    if (data.last_checkin_net_date) activityBits.push(`last check-in ${data.last_checkin_net_date}`);
+    if (data.last_position_ts) activityBits.push(`last seen ${formatTs(data.last_position_ts)}`);
+    // Plain text, no new class -- inherits .mc-lookup-result's own
+    // font-size/color like everything else in this box already does.
+    const activityText = activityBits.length ? ` (${escapeHtml(activityBits.join(', '))})` : '';
+
+    resultEl.innerHTML =
+      `<div>${escapeHtml(holdsText)}</div>` +
+      `<div>Points: <span class="mc-tally-count" data-total="${escapeHtml(total)}" data-compact="${escapeHtml(compact)}" title="${escapeHtml(splitTitle)}">${escapeHtml(total)}</span>${activityText}</div>`;
+    resultEl.querySelectorAll('.mc-tally-count').forEach(bindBreakdownToggle);
   } catch (err) {
     resultEl.textContent = 'Search failed.';
   }
@@ -760,6 +798,13 @@ function topTabSpecs() {
       extraKey: 'streak',
       extraHeader: 'Streak',
     },
+    explorer: {
+      label: c.topExplorerLabel,
+      endpoint: c.topExplorerEndpoint,
+      valueKey: 'points',
+      valueHeader: 'Points',
+      emptyText: 'No Explorer activity yet.',
+    },
   };
 }
 
@@ -816,6 +861,7 @@ async function openTopModal() {
     <div class="mc-modal-tabs">
       <button type="button" class="mc-modal-tab active" data-tab="captures">${escapeHtml(specs.captures.label)}</button>
       <button type="button" class="mc-modal-tab" data-tab="checkins">${escapeHtml(specs.checkins.label)}</button>
+      <button type="button" class="mc-modal-tab" data-tab="explorer">${escapeHtml(specs.explorer.label)}</button>
     </div>
     <div id="mc-top-tab-body"></div>
   `;
