@@ -362,12 +362,15 @@ async function fetchBoard(c) {
 // button labels, endpoints) comes from whichever half of PROTOCOLS is
 // active, same table shape as mc.js's own PROTOCOLS.
 //
-// Also not ported: per-cell click popups. Correction to an earlier note
-// here -- mc.js's Leaflet page (bindCellPopup / buildCellPopupHtml)
-// DOES have these, showing a square's owner/captures/repeaters on
-// click; this page's board-fill layer still has no click handler at
-// all. That is a real gap between the two pages, not a gap shared by
-// both -- flagged in the deploy report, not implemented in this pass.
+// Per-cell click popups (bindCellPopup / buildCellPopupHtml in mc.js)
+// ARE ported now -- see buildCellPopupHtml/buildRepeaterSectionHtml
+// below and setupCellClickPopup, wired to the 'board-fill' layer in
+// main(). Correction to an earlier note here that called this "not
+// ported" and a gap flagged for later: promoting this map to the front
+// page silently dropped a real feature (a square's owner/captures/
+// repeaters on click), not a pre-existing gap shared by both pages.
+// cellEndpoint/repeaterLabel below are the same two PROTOCOLS entries
+// mc.js's table carries for exactly this popup.
 const PROTOCOLS = {
   meshcore: {
     protocol: 'mc',
@@ -378,8 +381,12 @@ const PROTOCOLS = {
     topExplorerLabel: 'Explorer',
     lookupPlaceholder: 'player name',
     lookupHelp: 'Search by player name.',
+    // See mc.js's own PROTOCOLS comment for why "Repeaters" is
+    // MeshCore's term for this evidence.
+    repeaterLabel: 'Repeaters heard',
     boardEndpoint: '/api/mc/board',
     scoresEndpoint: '/api/mc/scores',
+    cellEndpoint: (id) => `/api/mc/cell/${encodeURIComponent(id)}`,
     historyEndpoint: '/api/mc/history',
     rosterEndpoint: '/api/mc/players',
     findEndpoint: (q) => `/api/mc/find?name=${encodeURIComponent(q)}`,
@@ -397,8 +404,12 @@ const PROTOCOLS = {
     topExplorerLabel: 'Explorer',
     lookupPlaceholder: 'player name',
     lookupHelp: 'Search by player name.',
+    // Meshtastic's own vocabulary for the same evidence -- see mc.js's
+    // own PROTOCOLS comment.
+    repeaterLabel: 'MQTT feeders heard',
     boardEndpoint: '/get-nodes',
     scoresEndpoint: '/scores',
+    cellEndpoint: (id) => `/cell/${encodeURIComponent(id)}`,
     historyEndpoint: '/history',
     rosterEndpoint: '/teams',
     findEndpoint: (q) => `/find?name=${encodeURIComponent(q)}`,
@@ -1498,6 +1509,138 @@ function escapeHtml(s) {
   }[c]));
 }
 
+// ===== Cell click popup (ported from frontend/mc.js's bindCellPopup /
+// buildCellPopupHtml / buildRepeaterSectionHtml) =====
+//
+// Content and markup are copied verbatim from mc.js -- same
+// .mc-popup/.mc-popup-* classes (styled by mc.css, already loaded by
+// map2.html for the territory panel), same fields, same "no section at
+// all, not an empty-state message" rule for a cell with no recorded
+// repeater/feeder observations. Only the delivery differs: mc.js binds
+// a Leaflet popup per-rectangle at draw time and lazy-loads on
+// popupopen; this page has one board-fill fill layer for the whole
+// board (see main()'s map.addSource('board', ...)), so this fetches
+// per click instead, against whichever board is active at the moment
+// of the click (cfg() read fresh in the click handler, not captured at
+// draw time -- there is nothing analogous to draw time here).
+
+// See buildRepeaterSectionHtml's identical comment in mc.js: a cell
+// with no recorded observations gets no section at all, never an
+// invented or distance-guessed one.
+function buildRepeaterSectionHtml(detail, c) {
+  const repeaters = Array.isArray(detail.repeaters) ? detail.repeaters : [];
+  if (repeaters.length === 0) return '';
+
+  const rows = repeaters.map((r) => {
+    const counts = [];
+    if (r.direct_count) counts.push(`${r.direct_count} direct`);
+    if (r.heard_count) counts.push(`${r.heard_count} heard`);
+    const countText = counts.length ? counts.join(', ') : 'no hits';
+    return `<div class="mc-popup-capture-row">
+        ${escapeHtml(r.repeater_id)} &mdash; ${escapeHtml(countText)}, last heard ${escapeHtml(formatTs(r.last_seen))}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="mc-popup-section-title">${escapeHtml(c.repeaterLabel)}</div>
+    ${rows}
+  `;
+}
+
+function buildCellPopupHtml(cellId, detail, c) {
+  const scoreRows = TEAM_ORDER.map((team) => {
+    const score = detail.scores && detail.scores[team] !== undefined ? detail.scores[team] : 0;
+    return `<div class="mc-popup-score-row">
+        <span class="mc-dot" style="background:${TEAM_COLORS[team]}"></span>${escapeHtml(team)}: ${escapeHtml(score)}
+      </div>`;
+  }).join('');
+
+  const captures = Array.isArray(detail.recent_captures) ? detail.recent_captures : [];
+  const captureRows = captures.length
+    ? captures.map((cap) => {
+      const who = cap.by_display_name ? escapeHtml(cap.by_display_name) : 'unknown player';
+      const fromNote = cap.from_team ? ` (from ${escapeHtml(cap.from_team)})` : '';
+      return `<div class="mc-popup-capture-row">
+          ${escapeHtml(formatTs(cap.ts))} &mdash; ${who} for ${escapeHtml(cap.by_team)}${fromNote}
+        </div>`;
+    }).join('')
+    : '<div class="mc-popup-capture-row mc-popup-empty">No capture history.</div>';
+
+  return `
+    <div class="mc-popup">
+      <div class="mc-popup-header">
+        <span class="mc-dot" style="background:${TEAM_COLORS[detail.owner_team] || '#888'}"></span>
+        ${escapeHtml(cellId)}
+      </div>
+      <div class="mc-popup-row">Owner: ${escapeHtml(detail.owner_team || 'none')}</div>
+      <div class="mc-popup-row">Captured: ${escapeHtml(formatTs(detail.captured_at))}</div>
+      <div class="mc-popup-section-title">Scores</div>
+      ${scoreRows}
+      <div class="mc-popup-section-title">Recent captures</div>
+      ${captureRows}
+      ${buildRepeaterSectionHtml(detail, c)}
+    </div>
+  `;
+}
+
+// Wired to the 'board-fill' layer, the same source both boards' squares
+// draw from (see main()'s map.addSource('board', ...)) -- no second
+// click handler needed when the board switches, cfg() is read fresh
+// per click.
+//
+// Place-marker precedence: places-icons-* already binds its own click
+// handler (setupPlacesLayer above), and MapLibre's per-layer click
+// delegation queries each bound layer independently by pixel, not by
+// on-screen stacking order -- so a click that lands on a place marker
+// sitting on top of a board square would otherwise fire BOTH handlers.
+// A place is the more specific thing a visitor aimed at, so this bails
+// out (no cell popup) whenever the same point also hits a places-icons-
+// * feature, letting that handler's own popup win uncontested.
+//
+// Park boundary fill: park-boundaries-fill has no click handler of its
+// own, and MapLibre's layer-scoped queryRenderedFeatures for
+// 'board-fill' checks only that layer's geometry at the point -- it
+// does not care what else is drawn on top -- so the boundary fill
+// cannot swallow a board click no matter how large or visually
+// dominant it is. Verified by clicking inside a large boundary-backed
+// park during deploy verification.
+function setupCellClickPopup(map) {
+  const placeLayerIds = PLACE_TYPES.map((t) => `places-icons-${t}`);
+  const cellPopup = new maplibregl.Popup({
+    closeButton: true,
+    closeOnClick: true,
+    offset: 12,
+    maxWidth: '320px',
+    className: 'mc-tile-popup',
+  });
+
+  map.on('click', 'board-fill', (e) => {
+    if (map.queryRenderedFeatures(e.point, { layers: placeLayerIds }).length > 0) return;
+
+    const f = e.features[0];
+    if (!f) return;
+    const cellId = f.properties.cell_id;
+    const c = cfg();
+
+    cellPopup.setLngLat(e.lngLat).setHTML('<div class="mc-popup-loading">Loading…</div>').addTo(map);
+
+    fetch(c.cellEndpoint(cellId))
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((detail) => {
+        cellPopup.setHTML(buildCellPopupHtml(cellId, detail, c));
+      })
+      .catch((err) => {
+        console.warn('cell detail load failed:', err);
+        cellPopup.setHTML('<div class="mc-popup-loading">Failed to load cell detail.</div>');
+      });
+  });
+  map.on('mouseenter', 'board-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'board-fill', () => { map.getCanvas().style.cursor = ''; });
+}
+
 async function loadPlacesViewport(map) {
   try {
     const bounds = map.getBounds();
@@ -2204,6 +2347,7 @@ async function main() {
     setupOverlayLayers(map);
     registerPlaceIcons(map);
     setupPlacesLayer(map);
+    setupCellClickPopup(map);
     setupLayerSwitcher(map);
     watchTheme(map);
     applyBasemapTheme(map);
