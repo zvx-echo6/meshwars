@@ -254,12 +254,19 @@ CREATE TABLE IF NOT EXISTS player_last_fix (
 -- re-earning for a repeater already credited -- see
 -- player_cell_repeater_credit below, which is what the cooldown reads
 -- now (app/mc_scoring.py's apply_paint()).
+-- precision_bits: the Meshtastic position-precision value (see
+-- settings.mt_min_precision_bits) this specific ping carried, recorded
+-- here purely for audit -- nothing reads it back for scoring, which
+-- already happened (or didn't) in app/ingest.py before this row was
+-- written. NULL for every MeshCore row (no such concept) and for any
+-- Meshtastic row from before this column existed.
 CREATE TABLE IF NOT EXISTS player_cell_ping (
-    player_id  INTEGER NOT NULL,
-    protocol   TEXT NOT NULL,
-    cell_id    TEXT NOT NULL,
-    ts         INTEGER NOT NULL,
-    seen_at    INTEGER NOT NULL,
+    player_id       INTEGER NOT NULL,
+    protocol        TEXT NOT NULL,
+    cell_id         TEXT NOT NULL,
+    ts              INTEGER NOT NULL,
+    seen_at         INTEGER NOT NULL,
+    precision_bits  INTEGER,
     PRIMARY KEY (player_id, protocol, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_ping_seen ON player_cell_ping(seen_at);
@@ -323,6 +330,12 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     pings_bad_coord    INTEGER NOT NULL DEFAULT 0,
     pings_out_of_area  INTEGER NOT NULL DEFAULT 0,
     pings_no_repeaters INTEGER NOT NULL DEFAULT 0,
+    -- Meshtastic-only today (app/ingest.py) -- see settings.mt_min_precision_bits
+    -- and settings.mt_max_speed_mps. Always 0 for protocol='mc': MeshCore's
+    -- own speed check (app/mc_ingest.py) never rejects a ping, only marks
+    -- by_air, and MeshCore has no equivalent precision_bits concept at all.
+    pings_low_precision     INTEGER NOT NULL DEFAULT 0,
+    pings_implausible_speed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player_id, protocol, day)
 );
 
@@ -983,6 +996,19 @@ MIGRATIONS = [
     # it in from the CSV, same one-startup window points_reason's own
     # migration note describes).
     "ALTER TABLE place ADD COLUMN elevation_ft REAL",
+    # Game-integrity gates added 2026-08-25 (see app/config.py's
+    # mt_min_precision_bits/mt_max_speed_mps and app/ingest.py): every
+    # existing player_cell_ping/player_ingest_stat row predates both
+    # gates and is left exactly as scored -- these ALTERs only make the
+    # columns exist for a DB that already ran CREATE TABLE without them;
+    # nothing already credited is touched. precision_bits is nullable
+    # (genuinely unknown for a ping written before this column existed --
+    # nothing to backfill it from); the two new stat counters default to
+    # 0, correct for every day already tallied since neither gate was
+    # checking anything yet.
+    "ALTER TABLE player_cell_ping ADD COLUMN precision_bits INTEGER",
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_low_precision INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_implausible_speed INTEGER NOT NULL DEFAULT 0",
 ]
 
 PRAGMAS = [

@@ -133,29 +133,60 @@ def parse_meshtastic_payload_text(text: str) -> dict:
     return out
 
 
-def extract_position(packet: dict) -> tuple[float, float] | None:
-    """Pull (lat, lon) in degrees out of a meshview packet record.
+def _coerce_precision_bits(value: object) -> int | None:
+    """A plain int 0-32, or None. Meshtastic's Position.precision_bits is
+    an integer field; anything else (missing, wrong type, out of the
+    field's actual range) is not a precision this deployment can trust,
+    so it is treated the same as absent rather than guessed at.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int):
+        return None
+    if not (0 <= value <= 32):
+        return None
+    return value
+
+
+def extract_position(packet: dict) -> tuple[float, float, int | None] | None:
+    """Pull (lat, lon, precision_bits) out of a meshview packet record.
+
+    precision_bits is Meshtastic's own field describing how much of the
+    reported position to trust (see app/config.py's mt_min_precision_bits
+    for the full story of why this matters for scoring a ~300m grid
+    square) -- carried alongside lat/lon here, from whichever of these
+    shapes actually produced them, rather than parsed a second time by a
+    separate function, so the two can never read two different fields of
+    the same packet and disagree.
 
     Tries multiple shapes:
       1. packet has decoded fields: latitude_i / longitude_i (int * 1e7) or lat/lon.
       2. packet.payload_decoded contains lat/lon.
       3. packet has a nested 'position' object.
-    Returns None if no usable position can be found.
+      4. meshview's text-format protobuf string in `payload` (the shape
+         this deployment's meshview actually returns, confirmed live:
+         "latitude_i: ...\\nlongitude_i: ...\\n...\\nprecision_bits: 15").
+    Returns None if no usable position can be found. precision_bits is
+    None whenever the packet carries a position but no precision field --
+    see app/ingest.py for how that case is handled at scoring time.
     """
     # 1: top-level decoded ints
     lat_i = packet.get("latitude_i")
     lon_i = packet.get("longitude_i")
     if isinstance(lat_i, (int, float)) and isinstance(lon_i, (int, float)) and lat_i != 0:
-        return (lat_i / 1e7, lon_i / 1e7)
+        return (lat_i / 1e7, lon_i / 1e7, _coerce_precision_bits(packet.get("precision_bits")))
 
     # 1b: top-level decoded floats
     lat = packet.get("latitude") or packet.get("lat")
     lon = packet.get("longitude") or packet.get("lon") or packet.get("long")
     if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) and lat != 0:
+        precision_bits = _coerce_precision_bits(packet.get("precision_bits"))
         # Heuristic: if magnitude looks like a 1e7-scaled int, scale down
         if abs(lat) > 1000:
-            return (lat / 1e7, lon / 1e7)
-        return (float(lat), float(lon))
+            return (lat / 1e7, lon / 1e7, precision_bits)
+        return (float(lat), float(lon), precision_bits)
 
     # 2: nested payload_decoded / decoded
     for k in ("payload_decoded", "decoded", "position"):
@@ -172,7 +203,7 @@ def extract_position(packet: dict) -> tuple[float, float] | None:
         lat_i = parsed.get("latitude_i")
         lon_i = parsed.get("longitude_i")
         if isinstance(lat_i, (int, float)) and isinstance(lon_i, (int, float)) and lat_i != 0:
-            return (lat_i / 1e7, lon_i / 1e7)
+            return (lat_i / 1e7, lon_i / 1e7, _coerce_precision_bits(parsed.get("precision_bits")))
 
     return None
 
