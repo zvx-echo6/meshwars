@@ -161,3 +161,28 @@ def test_park_boundaries_also_thin_evenly_not_by_insertion_order(conn, monkeypat
     assert len(ids) == 20
     assert any(i <= 20 for i in ids), "first-inserted half must not be the only one dropped"
     assert any(i > 20 for i in ids), "second-inserted half must not be entirely truncated away"
+
+
+def test_park_boundary_properties_include_type_for_the_shared_popup(conn, monkeypatch):
+    """frontend/map2.js's boundary click handler feeds a boundary
+    feature's properties straight into the same showPlacePopup() a
+    place marker uses -- name/type/points. `type` must come back as
+    "park" (there is no ref_type column on the feature itself, since
+    the query is already scoped to ref_type = 'park') or that popup
+    would render "undefined" where a marker click shows "park".
+    """
+    monkeypatch.setattr(places_api_module, "connect", lambda: conn)
+
+    point_wkt = "POLYGON((-116.1 42.9,-116.1 43.1,-115.9 43.1,-115.9 42.9,-116.1 42.9))"
+    conn.execute(
+        "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+        "geom, rotates, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (1, "park", "ref-1", "Test Park", 43.0, -116.0, 50, "TEST",
+         point_wkt, 0, 1, int(time.time())),
+    )
+
+    features = places_api_module._park_boundaries_in_viewport(
+        conn, north=44.0, south=42.0, west=-117.0, east=-115.0
+    )
+
+    assert features[0]["properties"] == {"id": 1, "name": "Test Park", "points": 50, "type": "park"}

@@ -111,7 +111,11 @@ const LAYER_TOGGLES = [
   // cutoff any more -- they fade by icon-opacity instead (see
   // PLACE_ICON_OPACITY_ZOOM) -- so there is no zoom below which
   // checking this box would show literally nothing to grey it out for.
-  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels', 'park-boundaries-fill', 'park-boundaries-line', 'park-boundaries-labels'], 0],
+  // park-boundaries-hit (the invisible click zone around a boundary's
+  // edge -- see setupPlacesLayer) rides along too: unchecking "Places"
+  // must take its click handler out of play along with the outline it
+  // answers for, the same reasoning as -fill/-line/-labels above.
+  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels', 'park-boundaries-fill', 'park-boundaries-line', 'park-boundaries-hit', 'park-boundaries-labels'], 0],
 ];
 
 // Places Worth Going (docs/features/places.md). Three flat-colour
@@ -215,6 +219,14 @@ const PARK_BOUNDARY_FILL_OPACITY = { gold: 0.05, neon: 0.08 };
 const PARK_BOUNDARY_LINE_WIDTH = { gold: 1, neon: 1.5 };
 const PARK_BOUNDARY_LINE_OPACITY = { gold: 0.7, neon: 0.85 };
 
+// Screen-space hit width (px) for park-boundaries-hit, the invisible
+// line layer a park's outline click lands on -- see setupPlacesLayer.
+// Not per-theme like the values above: this layer never renders
+// (opacity 0), so there is nothing for a theme to affect, only a
+// generous, constant tap target around wherever the visible line
+// (PARK_BOUNDARY_LINE_WIDTH, 1-1.5px) actually sits.
+const PARK_BOUNDARY_HIT_WIDTH_PX = 24;
+
 // Marker screen size is also zoom-interpolated, on top of the
 // per-theme base pixel size above: with ~80,000 places now seeded
 // (43,639 parks + 30,408 landmarks + 6,487 summits, plus rotating live
@@ -242,6 +254,16 @@ const PARK_BOUNDARY_LINE_OPACITY = { gold: 0.7, neon: 0.85 };
 const PLACE_ICON_SIZE_ZOOM = ['interpolate', ['linear'], ['zoom'], 3, 0.15, 6, 0.35, 8, 0.55, 9, 0.75, 10, 0.9, 11, 0.95, 13, 1.0];
 
 const PLACE_TYPES = ['summit', 'park', 'landmark'];
+
+// The click layer id for each tier's marker, computed once here rather
+// than at every call site -- setupPlacesLayer's own marker click
+// handler, its park-boundary click handler, and setupCellClickPopup's
+// board handler all need the identical list, to answer the identical
+// question ("did this same pixel also hit a place marker, the single
+// most specific thing a click can land on?"). Duplicating the
+// `.map()` at each site risks the three drifting if PLACE_TYPES ever
+// changes.
+const PLACE_LAYER_IDS = PLACE_TYPES.map((t) => `places-icons-${t}`);
 
 // All three tiers reveal at the SAME zoom, and there is no hard cutoff
 // at all any more: the layer's own minzoom is left at the map's own
@@ -1398,6 +1420,29 @@ function setupPlacesLayer(map) {
       'line-opacity': PARK_BOUNDARY_LINE_OPACITY.gold,
     },
   }, 'board-fill');
+  // The click target for a park's outline -- see the click-precedence
+  // comment above setupCellClickPopup for why this exists as its own
+  // layer instead of binding straight to park-boundaries-line or
+  // park-boundaries-fill. Same source and geometry as the visible
+  // line, drawn with 'line-opacity': 0 (never rendered, so the actual
+  // outline's look -- PARK_BOUNDARY_LINE_WIDTH/OPACITY -- is untouched)
+  // but a much wider PARK_BOUNDARY_HIT_WIDTH_PX, because MapLibre's
+  // queryRenderedFeatures hit-tests a line layer against its own
+  // rendered stroke width, and the visible 1-1.5px line would be
+  // exactly the "fiddly to hit" outline the user is asking to get away
+  // from. A ring around the edge, not the whole polygon: see the
+  // precedence comment for why the fill was rejected as the click
+  // target despite being the easier hit zone to reach for.
+  map.addLayer({
+    id: 'park-boundaries-hit',
+    type: 'line',
+    source: 'park-boundaries',
+    minzoom: MIN_BOUNDARY_ZOOM,
+    paint: {
+      'line-width': PARK_BOUNDARY_HIT_WIDTH_PX,
+      'line-opacity': 0,
+    },
+  }, 'board-fill');
 
   // One symbol layer per tier, not one shared layer, so each tier's
   // icon-image can point at its own glyph (PLACE_GLYPHS[type]) while
@@ -1490,17 +1535,53 @@ function setupPlacesLayer(map) {
     map.on('click', layerId, (e) => {
       const f = e.features[0];
       if (!f) return;
-      const { name, type: t, points } = f.properties;
-      popup.setLngLat(f.geometry.coordinates).setHTML(
-        `<div class="mw-place-popup">`
-        + `<div class="mw-place-popup-name">${escapeHtml(name)}</div>`
-        + `<div class="mw-place-popup-meta">${escapeHtml(t)} &middot; ${points} pts</div>`
-        + `</div>`
-      ).addTo(map);
+      showPlacePopup(map, popup, f.properties, f.geometry.coordinates);
     });
     map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
     map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
   }
+
+  // A park's outline answering its own click -- see the file-level
+  // comment above park-boundaries-hit's addLayer call for why this
+  // binds to that invisible ring rather than the fill or the visible
+  // line. Calls the exact same showPlacePopup() the marker click above
+  // does, on purpose: a boundary is the same place as its marker, at a
+  // different zoom, and the two must never be able to drift into
+  // showing different content for it. `f.properties` now includes
+  // `type` -- see app/places_api.py's _park_boundaries_in_viewport --
+  // precisely so this call needs no special-casing here.
+  //
+  // Bails if a place marker was also hit at this point, same
+  // reasoning and same PLACE_LAYER_IDS check as setupCellClickPopup's
+  // board-fill handler below: a marker is the more specific thing a
+  // click can land on, so it must win over the park it happens to sit
+  // inside.
+  map.on('click', 'park-boundaries-hit', (e) => {
+    if (map.queryRenderedFeatures(e.point, { layers: PLACE_LAYER_IDS }).length > 0) return;
+    const f = e.features[0];
+    if (!f) return;
+    showPlacePopup(map, popup, f.properties, e.lngLat);
+  });
+  map.on('mouseenter', 'park-boundaries-hit', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'park-boundaries-hit', () => { map.getCanvas().style.cursor = ''; });
+}
+
+// Shared by setupPlacesLayer's two click handlers -- a place marker's
+// own click and a park boundary's click (park-boundaries-hit) -- so a
+// park never has two independent implementations of "what its popup
+// says" that could quietly drift apart. `lngLat` is where the popup
+// anchors: a marker click passes the marker's own coordinates
+// (f.geometry.coordinates, a Point), a boundary click passes the click
+// location itself (e.lngLat) since a polygon has no single point of
+// its own to anchor to.
+function showPlacePopup(map, popup, properties, lngLat) {
+  const { name, type: t, points } = properties;
+  popup.setLngLat(lngLat).setHTML(
+    `<div class="mw-place-popup">`
+    + `<div class="mw-place-popup-name">${escapeHtml(name)}</div>`
+    + `<div class="mw-place-popup-meta">${escapeHtml(t)} &middot; ${points} pts</div>`
+    + `</div>`
+  ).addTo(map);
 }
 
 function escapeHtml(s) {
@@ -1588,24 +1669,31 @@ function buildCellPopupHtml(cellId, detail, c) {
 // click handler needed when the board switches, cfg() is read fresh
 // per click.
 //
-// Place-marker precedence: places-icons-* already binds its own click
-// handler (setupPlacesLayer above), and MapLibre's per-layer click
-// delegation queries each bound layer independently by pixel, not by
-// on-screen stacking order -- so a click that lands on a place marker
-// sitting on top of a board square would otherwise fire BOTH handlers.
-// A place is the more specific thing a visitor aimed at, so this bails
-// out (no cell popup) whenever the same point also hits a places-icons-
-// * feature, letting that handler's own popup win uncontested.
+// Three things can now answer the same click, in this precedence:
+//   1. a place marker (places-icons-*)         -- most specific
+//   2. a park's boundary (park-boundaries-hit)  -- see setupPlacesLayer
+//   3. bare board (this handler)                -- least specific
+// MapLibre's per-layer click delegation queries each bound layer
+// independently by pixel, not by on-screen stacking order, so a click
+// landing on a marker OR a park edge sitting on top of a board square
+// would otherwise fire this handler too. This bails out (no cell
+// popup) whenever the same point also hits a places-icons-* feature or
+// park-boundaries-hit, letting that handler's own popup win
+// uncontested.
 //
-// Park boundary fill: park-boundaries-fill has no click handler of its
-// own, and MapLibre's layer-scoped queryRenderedFeatures for
-// 'board-fill' checks only that layer's geometry at the point -- it
-// does not care what else is drawn on top -- so the boundary fill
-// cannot swallow a board click no matter how large or visually
-// dominant it is. Verified by clicking inside a large boundary-backed
-// park during deploy verification.
+// Deliberately NOT bailing on park-boundaries-fill: that layer
+// covers a park's entire interior, and a boundary-backed park can run
+// to many square miles (Craters of the Moon, e.g.) -- if the fill took
+// precedence over the board the way the marker and the edge do, a
+// player standing anywhere inside a large park could never click a
+// square again, trading one dead click target for a much bigger one.
+// park-boundaries-hit is a thin ring around the actual edge
+// (PARK_BOUNDARY_HIT_WIDTH_PX, screen-space px, not geo-space), so
+// only a click genuinely near the park's boundary line competes with
+// the board at all; deep inside, this handler runs exactly as before.
+// Verified by clicking well inside a large boundary-backed park during
+// deploy verification -- the cell popup still opens there.
 function setupCellClickPopup(map) {
-  const placeLayerIds = PLACE_TYPES.map((t) => `places-icons-${t}`);
   const cellPopup = new maplibregl.Popup({
     closeButton: true,
     closeOnClick: true,
@@ -1615,7 +1703,8 @@ function setupCellClickPopup(map) {
   });
 
   map.on('click', 'board-fill', (e) => {
-    if (map.queryRenderedFeatures(e.point, { layers: placeLayerIds }).length > 0) return;
+    if (map.queryRenderedFeatures(e.point, { layers: PLACE_LAYER_IDS }).length > 0) return;
+    if (map.queryRenderedFeatures(e.point, { layers: ['park-boundaries-hit'] }).length > 0) return;
 
     const f = e.features[0];
     if (!f) return;

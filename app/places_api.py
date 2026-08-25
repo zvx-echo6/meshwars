@@ -171,7 +171,15 @@ def _park_boundaries_in_viewport(
             continue
         features.append({
             "type": "Feature",
-            "properties": {"id": r["id"], "name": r["name"], "points": r["points"]},
+            # "type": "park" is hardcoded, not read off the row, because
+            # the WHERE clause above already restricts this query to
+            # ref_type = 'park' -- every boundary this function can ever
+            # return IS a park. frontend/map2.js's boundary click handler
+            # feeds these properties straight into the same
+            # showPlacePopup() a place marker uses, and that popup reads
+            # name/type/points; without `type` a boundary click would
+            # show "undefined" where a marker click shows "park".
+            "properties": {"id": r["id"], "name": r["name"], "points": r["points"], "type": "park"},
             "geometry": shapely_mapping(geom),
         })
     return features
