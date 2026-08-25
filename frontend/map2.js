@@ -1423,17 +1423,19 @@ function setupPlacesLayer(map) {
       'line-opacity': PARK_BOUNDARY_LINE_OPACITY.gold,
     },
   }, 'board-fill');
-  // park-boundaries-fill IS the click target for a park's whole box now
-  // -- see the click-precedence comment above setupCellClickPopup. An
-  // earlier version added a separate invisible line layer as a wide hit
-  // ring around just the edge, so a click deep inside a large park
-  // (Craters of the Moon, e.g.) would fall through to the board
-  // untouched; that traded "can't click the name" for "can't click most
-  // of the park", which the user then asked to fix directly -- the
-  // board only actually has a square where someone painted one, so the
-  // fill can safely answer for every pixel of the park EXCEPT a painted
-  // square, which the board-fill handler below still claims. No ring
-  // layer needed once the fill itself carries the click.
+  // park-boundaries-fill (and, at the exact edge, park-boundaries-line
+  // -- see their shared click handler below) IS the click target for a
+  // park's whole box now -- see the click-precedence comment above
+  // setupCellClickPopup. An earlier version added a separate invisible
+  // line layer as a wide hit ring around just the edge, so a click deep
+  // inside a large park (Craters of the Moon, e.g.) would fall through
+  // to the board untouched; that traded "can't click the name" for
+  // "can't click most of the park", which the user then asked to fix
+  // directly -- the board only actually has a square where someone
+  // painted one, so the fill can safely answer for every pixel of the
+  // park EXCEPT a painted square, which the board-fill handler below
+  // still claims. No ring layer needed once the fill itself carries
+  // the click.
 
   // One symbol layer per tier, not one shared layer, so each tier's
   // icon-image can point at its own glyph (PLACE_GLYPHS[type]) while
@@ -1587,16 +1589,31 @@ function setupPlacesLayer(map) {
   // above, anchored at the click point itself (e.lngLat) since a
   // polygon has no single point of its own to anchor to the way a
   // marker or label does.
-  map.on('click', 'park-boundaries-fill', (e) => {
+  //
+  // Bound to BOTH park-boundaries-fill and park-boundaries-line, not
+  // fill alone: a line's stroke is centred on the boundary and extends
+  // PARK_BOUNDARY_LINE_WIDTH/2 outward past the fill's own rasterized
+  // edge, so a click landing exactly on the drawn line can render a
+  // park-boundaries-line feature at that pixel with no
+  // park-boundaries-fill feature there at all (observed directly
+  // during deploy verification -- a click on the exact boundary vertex
+  // hit only the line). One shared handler, bound twice, so a click
+  // answers identically whichever of the two the pixel happens to
+  // rasterize; the two layers share one source and geometry, so
+  // `f.properties` is identical either way.
+  const parkAreaClick = (e) => {
     if (map.queryRenderedFeatures(e.point, { layers: PLACE_LAYER_IDS }).length > 0) return;
     if (map.queryRenderedFeatures(e.point, { layers: ['park-boundaries-labels'] }).length > 0) return;
     if (map.queryRenderedFeatures(e.point, { layers: ['board-fill'] }).length > 0) return;
     const f = e.features[0];
     if (!f) return;
     showPlacePopup(map, popup, f.properties, e.lngLat);
-  });
-  map.on('mouseenter', 'park-boundaries-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', 'park-boundaries-fill', () => { map.getCanvas().style.cursor = ''; });
+  };
+  for (const layerId of ['park-boundaries-fill', 'park-boundaries-line']) {
+    map.on('click', layerId, parkAreaClick);
+    map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+  }
 }
 
 // Shared by setupPlacesLayer's three click handlers -- a place
