@@ -1917,8 +1917,24 @@ function showNoticeModal(notice) {
   bodyEl.className = 'mw-notice-modal-body';
   bodyEl.textContent = notice.body;
 
+  // The body stays plain text on purpose (see the block comment above),
+  // so it can never itself carry a link -- this is the one fixed way
+  // out to more detail, present on every notice regardless of what the
+  // operator wrote. Kept in its own footer row, below the body and away
+  // from .mw-notice-modal-close up in the header, so the two controls
+  // read as distinct: one leaves you here to read on, the other leaves
+  // the page.
+  const footer = document.createElement('div');
+  footer.className = 'mw-notice-modal-footer';
+  const rulesLink = document.createElement('a');
+  rulesLink.className = 'mw-notice-modal-rules-link';
+  rulesLink.href = '/rules';
+  rulesLink.textContent = 'Read the rules';
+  footer.appendChild(rulesLink);
+
   inner.appendChild(header);
   inner.appendChild(bodyEl);
+  inner.appendChild(footer);
   wrap.appendChild(inner);
   document.body.appendChild(wrap);
   noticeModalEl = wrap;
@@ -1927,6 +1943,12 @@ function showNoticeModal(notice) {
   wrap.addEventListener('click', (e) => {
     if (e.target === wrap) closeNoticeModal(notice.version_key);
   });
+  // Clicking through to the rules is its own way of having seen the
+  // notice -- remember it dismissed (same as the close button/Escape/
+  // backdrop) so it does not pop again when the player comes back from
+  // /rules, without pre-empting the real navigation the anchor already
+  // performs.
+  rulesLink.addEventListener('click', () => rememberNoticeDismissed(notice.version_key));
   document.addEventListener('keydown', onNoticeKeydown);
 
   closeBtn.focus();

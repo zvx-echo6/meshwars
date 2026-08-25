@@ -269,3 +269,27 @@
      without ever parsing the body as markup. */
   white-space: pre-wrap;
 }
+
+/* The body is plain text on purpose and can never carry its own link,
+   so this fixed footer is the one way out to more detail, present on
+   every notice. A rule above it separates it from the body the same
+   way .mw-notice-modal-header's rule separates the title -- and keeps
+   it visually apart from .mw-notice-modal-close up in the header, so
+   "read on" and "close" never read as the same control. */
+.mw-notice-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--mw-line);
+}
+
+.mw-notice-modal-rules-link {
+  color: var(--mw-accent);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+.mw-notice-modal-rules-link:hover,
+.mw-notice-modal-rules-link:focus-visible {
+  text-decoration: underline;
+}
