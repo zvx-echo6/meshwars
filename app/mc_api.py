@@ -43,6 +43,7 @@ from .db import connect
 from .grid import cell_bounds
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .mc_scoring import team_checkin_points, team_tile_counts
+from .places_api import _stable_tiebreak
 from . import results
 
 router = APIRouter()
@@ -1051,6 +1052,47 @@ def _repeater_observations(conn, protocol: str, cell_id: str) -> list[dict]:
     ]
 
 
+def _containing_park(conn: sqlite3.Connection, cell_id: str) -> dict | None:
+    """The boundary-backed park (if any) that owns this cell under the
+    >50%-of-cell rule (docs/features/places.md), for display in the
+    cell popup -- see frontend/map2.js's setupCellClickPopup. Reuses
+    app/places_seed.py's place_cell table rather than re-deriving
+    containment from geometry: place_cell is already exactly this
+    relationship, computed once at seed time from the unsimplified
+    boundary (app/places_seed.py's _park_cells), so this can never
+    disagree with what actually scored the square.
+
+    ref_type = 'park' AND geom IS NOT NULL AND rotates = 0 is the same
+    boundary-backed filter app/places_api.py's
+    _park_boundaries_in_viewport uses for what draws as an outline --
+    a cell mapped only via a summit/landmark's own point, or a small
+    matched park that fell back to its point cell (see _park_cells'
+    docstring), never surfaces here as "inside a park".
+
+    Two designations for the same physical ground both matched to a
+    park boundary (a state park and a coincident historic site, a
+    refuge and a coincident WMA -- both real in the PAD-US source data,
+    not a hypothetical) can both legitimately clear 50% of one cell at
+    once, since the >50% test is run independently per place against
+    the cell, not against each other's polygon. Points DESC, then the
+    same deterministic hash tiebreak app/places_api.py's viewport
+    queries use for an identical "need one stable order out of an
+    equally-ranked set" problem, picks one consistently rather than
+    letting sqlite's unspecified row order decide.
+    """
+    row = conn.execute(
+        "SELECT p.id, p.name, p.points FROM place_cell pc "
+        "  JOIN place p ON p.id = pc.place_id "
+        " WHERE pc.cell_id = ? AND p.ref_type = 'park' AND p.geom IS NOT NULL "
+        "   AND p.rotates = 0 AND p.active = 1 "
+        f" ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT 1",
+        (cell_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "name": row["name"], "points": row["points"]}
+
+
 def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
     """Detail for one cell in `protocol`'s active season: owner, capture
     time, per-team current scores, and a few recent capture-log entries
@@ -1125,6 +1167,9 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
             # ever the real rows ingest wrote for this cell, never a
             # distance-based guess.
             "repeaters": _repeater_observations(conn, protocol, cell_id),
+            # Additive -- see _containing_park()'s docstring. None when
+            # this cell isn't majority-inside any boundary-backed park.
+            "park": _containing_park(conn, cell_id),
         }
 
     return _safe_query(run)

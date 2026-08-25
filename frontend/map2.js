@@ -111,11 +111,13 @@ const LAYER_TOGGLES = [
   // cutoff any more -- they fade by icon-opacity instead (see
   // PLACE_ICON_OPACITY_ZOOM) -- so there is no zoom below which
   // checking this box would show literally nothing to grey it out for.
-  // park-boundaries-hit (the invisible click zone around a boundary's
-  // edge -- see setupPlacesLayer) rides along too: unchecking "Places"
-  // must take its click handler out of play along with the outline it
-  // answers for, the same reasoning as -fill/-line/-labels above.
-  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels', 'park-boundaries-fill', 'park-boundaries-line', 'park-boundaries-hit', 'park-boundaries-labels'], 0],
+  // park-boundaries-fill is itself the click target now (a park's
+  // whole box, not just a thin ring around its edge -- see
+  // setupPlacesLayer and setupCellClickPopup's precedence comment):
+  // unchecking "Places" must take that click handler out of play along
+  // with the outline it answers for, the same reasoning as
+  // -line/-labels above.
+  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels', 'park-boundaries-fill', 'park-boundaries-line', 'park-boundaries-labels'], 0],
 ];
 
 // Places Worth Going (docs/features/places.md). Three flat-colour
@@ -218,14 +220,6 @@ const MIN_BOUNDARY_ZOOM = 11;
 const PARK_BOUNDARY_FILL_OPACITY = { gold: 0.05, neon: 0.08 };
 const PARK_BOUNDARY_LINE_WIDTH = { gold: 1, neon: 1.5 };
 const PARK_BOUNDARY_LINE_OPACITY = { gold: 0.7, neon: 0.85 };
-
-// Screen-space hit width (px) for park-boundaries-hit, the invisible
-// line layer a park's outline click lands on -- see setupPlacesLayer.
-// Not per-theme like the values above: this layer never renders
-// (opacity 0), so there is nothing for a theme to affect, only a
-// generous, constant tap target around wherever the visible line
-// (PARK_BOUNDARY_LINE_WIDTH, 1-1.5px) actually sits.
-const PARK_BOUNDARY_HIT_WIDTH_PX = 24;
 
 // Marker screen size is also zoom-interpolated, on top of the
 // per-theme base pixel size above: with ~80,000 places now seeded
@@ -1399,6 +1393,15 @@ function setupPlacesLayer(map) {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] },
   });
+  // One Point feature per boundary-backed park, rebuilt in
+  // loadPlacesViewport (see buildParkLabelPoints) rather than read
+  // straight off the park-boundaries polygon source -- see
+  // park-boundaries-labels' addLayer call below for why a Point source
+  // exists at all here.
+  map.addSource('park-boundaries-label-points', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: [] },
+  });
   map.addLayer({
     id: 'park-boundaries-fill',
     type: 'fill',
@@ -1420,29 +1423,17 @@ function setupPlacesLayer(map) {
       'line-opacity': PARK_BOUNDARY_LINE_OPACITY.gold,
     },
   }, 'board-fill');
-  // The click target for a park's outline -- see the click-precedence
-  // comment above setupCellClickPopup for why this exists as its own
-  // layer instead of binding straight to park-boundaries-line or
-  // park-boundaries-fill. Same source and geometry as the visible
-  // line, drawn with 'line-opacity': 0 (never rendered, so the actual
-  // outline's look -- PARK_BOUNDARY_LINE_WIDTH/OPACITY -- is untouched)
-  // but a much wider PARK_BOUNDARY_HIT_WIDTH_PX, because MapLibre's
-  // queryRenderedFeatures hit-tests a line layer against its own
-  // rendered stroke width, and the visible 1-1.5px line would be
-  // exactly the "fiddly to hit" outline the user is asking to get away
-  // from. A ring around the edge, not the whole polygon: see the
-  // precedence comment for why the fill was rejected as the click
-  // target despite being the easier hit zone to reach for.
-  map.addLayer({
-    id: 'park-boundaries-hit',
-    type: 'line',
-    source: 'park-boundaries',
-    minzoom: MIN_BOUNDARY_ZOOM,
-    paint: {
-      'line-width': PARK_BOUNDARY_HIT_WIDTH_PX,
-      'line-opacity': 0,
-    },
-  }, 'board-fill');
+  // park-boundaries-fill IS the click target for a park's whole box now
+  // -- see the click-precedence comment above setupCellClickPopup. An
+  // earlier version added a separate invisible line layer as a wide hit
+  // ring around just the edge, so a click deep inside a large park
+  // (Craters of the Moon, e.g.) would fall through to the board
+  // untouched; that traded "can't click the name" for "can't click most
+  // of the park", which the user then asked to fix directly -- the
+  // board only actually has a square where someone painted one, so the
+  // fill can safely answer for every pixel of the park EXCEPT a painted
+  // square, which the board-fill handler below still claims. No ring
+  // layer needed once the fill itself carries the click.
 
   // One symbol layer per tier, not one shared layer, so each tier's
   // icon-image can point at its own glyph (PLACE_GLYPHS[type]) while
@@ -1500,22 +1491,40 @@ function setupPlacesLayer(map) {
   // A boundary-backed park's marker (and the label that hung off it) is
   // suppressed above -- see loadPlacesViewport's boundaryIds filter --
   // so without this the park has no name on the map at all once it's
-  // drawn as an outline. This is the same label, just sourced from
-  // park-boundaries instead of places, with symbol-placement 'point' so
-  // a polygon still gets exactly one label at its centroid rather than
-  // one per vertex. Text-only, on purpose -- no icon-image -- so an
-  // outlined park never regains the dot the user explicitly said must
-  // never coexist with the outline. Every layout/paint value below is
-  // copied from places-labels rather than re-derived, so the two kinds
-  // of label are indistinguishable in font, size, colour, and the zoom
-  // they appear at.
+  // drawn as an outline. This is the same label, text-only on purpose
+  // (no icon-image) so an outlined park never regains the dot the user
+  // explicitly said must never coexist with the outline; every other
+  // layout/paint value below is copied from places-labels rather than
+  // re-derived, so the two kinds of label are indistinguishable in
+  // font, size, colour, and the zoom they appear at.
+  //
+  // Sourced from park-boundaries-label-points, NOT park-boundaries --
+  // this used to point straight at the polygon source with
+  // 'symbol-placement': 'point', which reads as "one label per
+  // feature" but is not: MapLibre tiles a GeoJSON source client-side
+  // (geojson-vt) purely for rendering performance, and a polygon
+  // spanning several of those internal tiles gets its placement point
+  // recomputed once per tile it crosses, not once per feature. A park
+  // the size of Craters of the Moon crosses several, and printed its
+  // own name 3-4 times in one view as a result. park-boundaries-label-
+  // points carries exactly one Point feature per park (built in
+  // loadPlacesViewport's buildParkLabelPoints, from the same lat/lon
+  // app/places_api.py's `place` row already carries for this park,
+  // i.e. the same point the seed generator anchored the park's ~6km
+  // boundary clip to) -- a Point geometry cannot itself be split across
+  // an internal tile boundary the way a large polygon can, so this
+  // source can never reproduce the duplicate-label bug no matter how
+  // many tiles the underlying boundary polygon spans. Trade-off: if
+  // that anchor point ends up outside the current viewport while the
+  // park's edge is still on screen, no label draws there any more --
+  // see loadPlacesViewport's comment on buildParkLabelPoints for why
+  // that was accepted rather than worked around.
   map.addLayer({
     id: 'park-boundaries-labels',
     type: 'symbol',
-    source: 'park-boundaries',
+    source: 'park-boundaries-label-points',
     minzoom: PLACE_LABEL_MIN_ZOOM,
     layout: {
-      'symbol-placement': 'point',
       'text-field': ['get', 'name'],
       'text-font': ['Noto Sans Regular'],
       'text-size': 11,
@@ -1541,39 +1550,63 @@ function setupPlacesLayer(map) {
     map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
   }
 
-  // A park's outline answering its own click -- see the file-level
-  // comment above park-boundaries-hit's addLayer call for why this
-  // binds to that invisible ring rather than the fill or the visible
-  // line. Calls the exact same showPlacePopup() the marker click above
-  // does, on purpose: a boundary is the same place as its marker, at a
-  // different zoom, and the two must never be able to drift into
-  // showing different content for it. `f.properties` now includes
-  // `type` -- see app/places_api.py's _park_boundaries_in_viewport --
-  // precisely so this call needs no special-casing here.
+  // A park's NAME answering its own click -- the most obvious thing to
+  // aim at on an outlined park, and previously the one thing that did
+  // nothing (the edge ring answered, the label sitting right next to it
+  // did not). Calls the exact same showPlacePopup() the marker click
+  // above and the fill click below do, on purpose: a boundary is the
+  // same place as its marker, at a different zoom, and none of the
+  // three must be able to drift into showing different content for it.
+  // Anchors on the label's own point (f.geometry.coordinates, same as
+  // a marker click) rather than e.lngLat, since -- unlike the fill --
+  // this feature IS a single point.
   //
-  // Bails if a place marker was also hit at this point, same
-  // reasoning and same PLACE_LAYER_IDS check as setupCellClickPopup's
-  // board-fill handler below: a marker is the more specific thing a
-  // click can land on, so it must win over the park it happens to sit
-  // inside.
-  map.on('click', 'park-boundaries-hit', (e) => {
+  // Ranked immediately after a place marker, ahead of everything else:
+  // bails only if a marker was also hit at this exact point (same
+  // PLACE_LAYER_IDS check setupCellClickPopup's board-fill handler
+  // below uses) since a marker is a more specific, independently-
+  // placed reference than a label that just names the polygon under
+  // it. A label and a board/park-fill click essentially never coincide
+  // in practice (a label only draws where there is text to read, a
+  // few screen pixels), but the board-fill and park-boundaries-fill
+  // handlers below both bail on THIS layer regardless, so a label
+  // click can never be shadowed by either.
+  map.on('click', 'park-boundaries-labels', (e) => {
     if (map.queryRenderedFeatures(e.point, { layers: PLACE_LAYER_IDS }).length > 0) return;
+    const f = e.features[0];
+    if (!f) return;
+    showPlacePopup(map, popup, f.properties, f.geometry.coordinates);
+  });
+  map.on('mouseenter', 'park-boundaries-labels', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'park-boundaries-labels', () => { map.getCanvas().style.cursor = ''; });
+
+  // A park's whole box answering its own click, EXCEPT wherever a
+  // painted square already sits -- see setupCellClickPopup's
+  // precedence comment for the full order and why the board wins
+  // there instead. Same showPlacePopup() as the marker/label clicks
+  // above, anchored at the click point itself (e.lngLat) since a
+  // polygon has no single point of its own to anchor to the way a
+  // marker or label does.
+  map.on('click', 'park-boundaries-fill', (e) => {
+    if (map.queryRenderedFeatures(e.point, { layers: PLACE_LAYER_IDS }).length > 0) return;
+    if (map.queryRenderedFeatures(e.point, { layers: ['park-boundaries-labels'] }).length > 0) return;
+    if (map.queryRenderedFeatures(e.point, { layers: ['board-fill'] }).length > 0) return;
     const f = e.features[0];
     if (!f) return;
     showPlacePopup(map, popup, f.properties, e.lngLat);
   });
-  map.on('mouseenter', 'park-boundaries-hit', () => { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', 'park-boundaries-hit', () => { map.getCanvas().style.cursor = ''; });
+  map.on('mouseenter', 'park-boundaries-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'park-boundaries-fill', () => { map.getCanvas().style.cursor = ''; });
 }
 
-// Shared by setupPlacesLayer's two click handlers -- a place marker's
-// own click and a park boundary's click (park-boundaries-hit) -- so a
-// park never has two independent implementations of "what its popup
-// says" that could quietly drift apart. `lngLat` is where the popup
-// anchors: a marker click passes the marker's own coordinates
-// (f.geometry.coordinates, a Point), a boundary click passes the click
-// location itself (e.lngLat) since a polygon has no single point of
-// its own to anchor to.
+// Shared by setupPlacesLayer's three click handlers -- a place
+// marker's own click, a park's label click, and a park's boundary-fill
+// click -- so a park never has two (or three) independent
+// implementations of "what its popup says" that could quietly drift
+// apart. `lngLat` is where the popup anchors: a marker or label click
+// passes that feature's own point (f.geometry.coordinates), a fill
+// click passes the click location itself (e.lngLat) since a polygon
+// has no single point of its own to anchor to.
 function showPlacePopup(map, popup, properties, lngLat) {
   const { name, type: t, points } = properties;
   popup.setLngLat(lngLat).setHTML(
@@ -1647,6 +1680,21 @@ function buildCellPopupHtml(cellId, detail, c) {
     }).join('')
     : '<div class="mc-popup-capture-row mc-popup-empty">No capture history.</div>';
 
+  // Additive -- see app/mc_api.py's _containing_park(): the cell popup
+  // is now the only place a square's park membership shows once the
+  // park's own fill click yields to a painted square sitting on top of
+  // it (see setupCellClickPopup's precedence comment), so this is here
+  // to make sure that information is never simply lost. `detail.park`
+  // is the SAME >50%-of-cell relationship place_cell already encodes
+  // for scoring, not a client-side re-guess -- see that function's
+  // docstring for why (and for how it breaks a tie between two
+  // designations that both cover this cell, e.g. a state park and a
+  // coincident historic site). None, and no row, when this cell isn't
+  // majority-inside any boundary-backed park.
+  const parkRow = detail.park
+    ? `<div class="mc-popup-row">Inside: ${escapeHtml(detail.park.name)} (${escapeHtml(detail.park.points)} pts)</div>`
+    : '';
+
   return `
     <div class="mc-popup">
       <div class="mc-popup-header">
@@ -1655,6 +1703,7 @@ function buildCellPopupHtml(cellId, detail, c) {
       </div>
       <div class="mc-popup-row">Owner: ${escapeHtml(detail.owner_team || 'none')}</div>
       <div class="mc-popup-row">Captured: ${escapeHtml(formatTs(detail.captured_at))}</div>
+      ${parkRow}
       <div class="mc-popup-section-title">Scores</div>
       ${scoreRows}
       <div class="mc-popup-section-title">Recent captures</div>
@@ -1669,30 +1718,36 @@ function buildCellPopupHtml(cellId, detail, c) {
 // click handler needed when the board switches, cfg() is read fresh
 // per click.
 //
-// Three things can now answer the same click, in this precedence:
-//   1. a place marker (places-icons-*)         -- most specific
-//   2. a park's boundary (park-boundaries-hit)  -- see setupPlacesLayer
-//   3. bare board (this handler)                -- least specific
+// Four things can now answer the same click, in this precedence:
+//   1. a place marker (places-icons-*)            -- most specific
+//   2. a park's label (park-boundaries-labels)     -- see setupPlacesLayer
+//   3. a painted board square (this handler)        -- see below
+//   4. a park's fill (park-boundaries-fill)          -- least specific
 // MapLibre's per-layer click delegation queries each bound layer
 // independently by pixel, not by on-screen stacking order, so a click
-// landing on a marker OR a park edge sitting on top of a board square
-// would otherwise fire this handler too. This bails out (no cell
-// popup) whenever the same point also hits a places-icons-* feature or
-// park-boundaries-hit, letting that handler's own popup win
-// uncontested.
+// landing on a marker, a park label, OR a park's fill sitting under a
+// board square would otherwise fire more than one of these handlers at
+// once. This bails out (no cell popup) whenever the same point also
+// hits a places-icons-* or park-boundaries-labels feature, letting
+// that handler's own popup win uncontested.
 //
-// Deliberately NOT bailing on park-boundaries-fill: that layer
-// covers a park's entire interior, and a boundary-backed park can run
-// to many square miles (Craters of the Moon, e.g.) -- if the fill took
-// precedence over the board the way the marker and the edge do, a
-// player standing anywhere inside a large park could never click a
-// square again, trading one dead click target for a much bigger one.
-// park-boundaries-hit is a thin ring around the actual edge
-// (PARK_BOUNDARY_HIT_WIDTH_PX, screen-space px, not geo-space), so
-// only a click genuinely near the park's boundary line competes with
-// the board at all; deep inside, this handler runs exactly as before.
-// Verified by clicking well inside a large boundary-backed park during
-// deploy verification -- the cell popup still opens there.
+// Deliberately NOT bailing on park-boundaries-fill, and this is the
+// crux of the whole precedence order: the board only ever has a
+// feature where a square has actually been painted (mc_tile rows with
+// owner_team set -- see app/mc_api.py's board_for) -- most of the
+// ground inside a large boundary-backed park (Craters of the Moon,
+// e.g.) is unpainted, so a click there never reaches this handler at
+// all regardless of what it bails on. Letting the park's fill take
+// precedence over a PAINTED square would make every owned cell inside
+// a national park permanently unclickable, which is the regression
+// the fill click in setupPlacesLayer explicitly bails on (it checks
+// board-fill and yields to it) rather than risking here. The park a
+// painted square sits inside is never lost, just relocated: see
+// buildCellPopupHtml's `parkRow`, sourced from this fetch's own
+// `detail.park` (app/mc_api.py's _containing_park). Verified by
+// clicking well inside a large boundary-backed park, on both a painted
+// square (cell popup, park named) and unpainted ground (park popup) --
+// see the deploy verification notes for this change.
 function setupCellClickPopup(map) {
   const cellPopup = new maplibregl.Popup({
     closeButton: true,
@@ -1704,7 +1759,7 @@ function setupCellClickPopup(map) {
 
   map.on('click', 'board-fill', (e) => {
     if (map.queryRenderedFeatures(e.point, { layers: PLACE_LAYER_IDS }).length > 0) return;
-    if (map.queryRenderedFeatures(e.point, { layers: ['park-boundaries-hit'] }).length > 0) return;
+    if (map.queryRenderedFeatures(e.point, { layers: ['park-boundaries-labels'] }).length > 0) return;
 
     const f = e.features[0];
     if (!f) return;
@@ -1728,6 +1783,59 @@ function setupCellClickPopup(map) {
   });
   map.on('mouseenter', 'board-fill', () => { map.getCanvas().style.cursor = 'pointer'; });
   map.on('mouseleave', 'board-fill', () => { map.getCanvas().style.cursor = ''; });
+}
+
+// One Point feature per boundary-backed park in `boundaryFeatures`, for
+// the park-boundaries-label-points source (see setupPlacesLayer's
+// park-boundaries-labels comment for why this exists at all -- in
+// short, symbol-placement:'point' straight on the tiled polygon source
+// prints a park's name once per internal geojson-vt tile its boundary
+// crosses, not once per feature).
+//
+// The point used for each park is its OWN lat/lon from `places` --
+// the same row app/places_api.py's `place` table already carries for
+// this park's marker (suppressed on the map once its outline draws,
+// see loadPlacesViewport's boundaryIds filter, but still present in
+// the places array this function reads), which is also the exact
+// point app/places_seed.py anchored that park's ~6km boundary clip to.
+// Not a client-computed polygon centroid: that would need real
+// polygon math (area-weighted centroid or a pole-of-inaccessibility
+// pass, correctly handling multi-part geometry and holes) for a value
+// this seed point already gives for free, at the cost of one lookup.
+//
+// Trade-off this makes explicit: the seed point sits within a few km
+// of the park's own boundary by construction, but a huge park's edge
+// can still be on screen while that point is not (the same
+// off-screen-centroid case the old per-tile placement happened to
+// paper over by accident). When that happens here, the park simply
+// gets no label in that view -- accepted deliberately (see this
+// change's commit message) rather than reintroducing a second
+// placement path just to avoid it: one correct label beats a wrong
+// count, and the park is still fully clickable (fill and, once close
+// enough, its outline) with no label at all.
+function buildParkLabelPoints(boundaryFeatures, places) {
+  const byId = new Map(places.map((p) => [p.id, p]));
+  const features = [];
+  for (const f of boundaryFeatures) {
+    const place = byId.get(f.properties.id);
+    // This IS the off-screen-anchor case, not just a defensive
+    // fallback: app/places_api.py fetches park_boundaries against the
+    // viewport plus BOUNDARY_VIEWPORT_MARGIN_DEG of padding (a big
+    // polygon can poke into view from just outside it) but fetches
+    // `places` (markers) against the bare, unpadded viewport -- so a
+    // huge park's boundary can come back here while its own point sits
+    // just outside `places` and never arrives in this map at all. No
+    // label point is created for it in that view; see this function's
+    // header comment for why that is accepted rather than worked
+    // around.
+    if (!place) continue;
+    features.push({
+      type: 'Feature',
+      properties: f.properties,
+      geometry: { type: 'Point', coordinates: [place.lon, place.lat] },
+    });
+  }
+  return { type: 'FeatureCollection', features };
 }
 
 async function loadPlacesViewport(map) {
@@ -1754,6 +1862,12 @@ async function loadPlacesViewport(map) {
     // view) -- see app/places_api.py's places_in_viewport docstring --
     // so this can set it unconditionally rather than checking first.
     map.getSource('park-boundaries').setData(data.park_boundaries);
+    // See buildParkLabelPoints -- one label point per park, derived
+    // from data.places rather than left to the polygon source above,
+    // so park-boundaries-labels can never print the same name twice.
+    map.getSource('park-boundaries-label-points').setData(
+      buildParkLabelPoints(data.park_boundaries.features, data.places)
+    );
   } catch (err) {
     console.error('MeshWars map2: failed to load places', err);
   }
