@@ -13,13 +13,18 @@ Every square is currently worth the same; the map is graph paper with no feature
 
 ## Values and the cap
 
-| Reference type | Source | Points |
-|---|---|---|
-| Landmark | OpenStreetMap | 5 |
-| Park | POTA | 25 |
-| Summit | SOTA | 100 |
+**Scored by effort, not by category (changed 2026-08-25).** The original model paid a flat value by reference type — every park was worth 25, whether it sat across a parking lot or an hour up a dirt road. That said the walk and the trip were the same errand. The value now depends on whether the place is inside a town's own limits:
 
-A park is deliberately worth exactly one check-in — that is the anchor. Twenty landmarks, four parks, or one summit all reach the same weekly ceiling of 100 points, so the choice is how you would rather spend the week rather than which nets more.
+| | Landmark | Park | Summit |
+|---|---|---|---|
+| Inside city limits | 5 | 5 | 5 |
+| Outside city limits | 10 | 25 | 100 |
+
+"City limits" is computed at seed-build time, not guessed at runtime: `app/reference/places.csv` carries the Census place anchors this feature already uses for "how far is the nearest town" — each row is `lat,lon,effective_radius_m`, where the radius is `sqrt(ALAND/pi)`, a circle of the same land area as the place, standing in for its limits. A place is **inside** city limits if it falls within that radius of *any* anchor. `scripts/build_places_seed.py`'s `score_points()` (run once, in the `merge` stage) checks every place against every anchor and bakes the resulting value straight into the seed CSV's `points` column — the loader and the scoring path need no new logic, they already just read `points` off the row.
+
+A second CSV column, `points_reason` (`in_city` / `remote`), rides along purely so the reason is visible later — the `place` table carries it too, and the admin preview's `/api/admin/places/preview` sample rows include it — but nothing at runtime branches on it; `points` is still the only number that decides a credit.
+
+A remote park is still worth exactly one check-in — that is the anchor for anything genuinely away from town. Twenty remote landmarks, four remote parks, or one summit all reach the same weekly ceiling of 100 points; a town's own landmarks, parks, and even its in-bounds summits are worth a nickel apiece, so the choice for someone actually travelling is still how they would rather spend the week rather than which nets more.
 
 ## Rules
 
@@ -34,7 +39,9 @@ A park is deliberately worth exactly one check-in — that is the anchor. Twenty
 
 Sources ended up simpler than "a narrow OpenStreetMap tag list" alone implied: summits are SOTA's own list, parks are POTA's, and landmarks are OpenStreetMap filtered to the tag list below — all three pulled 2026-08-24 (`scripts/build_places_seed.py`, `app/reference/places_worth_going.csv`, 65,011 raw rows).
 
-**Landmark tags kept:** town hall, courthouse, library, museum, viewpoint, attraction, visitor centre, memorial, monument, historic marker, trailhead. Fire station and post office were cut before this landed — nobody drives to one.
+**Landmark tags kept:** town hall, courthouse, library, museum, viewpoint, attraction, visitor centre, memorial, monument, historic marker, plus a 2026-08-24 broadening for outdoor/natural destinations (hot spring, arch, cave entrance, waterfall, mine, ruins, fort, battlefield, wreck, lighthouse, alpine/wilderness hut, small nature reserve). Fire station and post office were cut before this landed — nobody drives to one.
+
+**Trailheads and fire lookouts were removed 2026-08-25** ("trailheads shouldn't be marked as landmarks"; "lookouts in the mountains — not a landmark"). A trailhead is where you start going somewhere, not a destination itself; a fire lookout on a peak is already scored as that peak's summit. In the western-US OSM extract this pipeline reads from, `highway=trailhead` matched 4,166 objects and `man_made=tower` WHERE `tower:type=observation` matched 312 — both removed from the extraction's tag list (`LANDMARK_TAGS` in `scripts/build_places_seed.py`), dropping the landmark count from 30,408 to 25,930. This had to happen at extraction time, not load time: the seed CSV carries only `ref_type=landmark`, never the source OSM tag, so the loader has nothing to filter on — a load-time patch was not possible, which is why the seed needed a full rebuild.
 
 **The seed is not pre-filtered to the US.** SOTA and POTA were both pulled over one bounding box (49.29N/25.8S/-125W/-93.5E) that, being a rectangle, also swept in northern Mexico and southern Canada. The loader (`app/places_seed.py`) excludes those at load time, not by re-pulling the CSV:
 
@@ -77,6 +84,20 @@ Re-measured on the real play area (49.29N/25.8S/-125W/-93.5E, 61,563 active rota
 Sweeping quota alone (spacing held at 3mi) moved the pass rate only 84.8%→84.9% before flattening completely at quota 25 — quota was not the real constraint. Sweeping spacing alone (quota held at 5) moved it 84.8%→93.3% at 0.5mi — spacing was. Of the candidate-slots the old 3-mile rule discarded, roughly 79% were in cells with 10 or fewer candidates to begin with: it was thinning already-thin rural clusters, not "crowded cities" as intended. `ROTATION_CELL_MILES` (18mi) was not changed — cell size was never the measured problem.
 
 **Repeats are a fallback, not a preference.** Last week's picks are sorted to the back of their cell's candidate list; a place only repeats if nothing else in its cell clears the spacing check against everything already chosen elsewhere.
+
+### Coverage re-measured after the effort-based rescore (2026-08-25)
+
+The 91.3%/98.9% figures above were measured under the old flat 5/25/100 model. Re-run against the same yardstick (40-mile radius, 100-point cap, the 12,136 in-play-area town anchors, quota 15 / spacing 1mi unchanged) after both Change 1 (effort-based scoring) and Change 2 (trailhead/lookout landmarks dropped, 30,408 → 25,930):
+
+| | old model (91.3% baseline) | effort-scored (current) |
+|---|---|---|
+| towns reaching 100 rotating-tier points within 40mi | 91.3% (11,080/12,136) | **82.47% (10,008/12,136)** |
+| … + boundary-backed big parks as fallback | +7.6% (927 more towns) → 98.9% | **+14.93% (1,812 more towns) → 97.40% (11,820/12,136)** |
+| still short even with the big-park fallback | 1.06% (129 towns) | **2.60% (316 towns)** |
+
+**This is a real regression, stated plainly, not papered over.** The rotating-tier-alone figure drops about 8.8 points (91.3% → 82.5%) — expected, and exactly what "city parks and landmarks dropping from 25/5 to a flat 5 will hurt town coverage" predicts: a small city park or town-hall landmark used to be able to single-handedly cover a chunk of the weekly cap for someone who never left town; now it takes 20 of them. The boundary-backed-park fallback (large, PAD-US-matched parks, mostly *not* inside any town's radius and so still worth their full 25) recovers most of the gap, landing at 97.40% — but that is still about 1.5 points under the old combined 98.9%, and 2.4x as many towns (316 vs 129) fall short of the cap even with every fallback counted. Both changes contributed: the effort model does the bulk of it (a town's own supply is worth far less now), and the landmark tag narrowing (Change 2, −4,478 landmarks nationwide) shrinks the rotating candidate pool on top of that.
+
+No rotation setting (quota, spacing, cell size) was touched to compensate — the brief was to report this number, not tune around it.
 
 **Preview without committing:** the admin panel's Places section (`app/admin_ops.py`'s `/api/admin/places/preview`, `frontend/admin.html`/`admin.js`) runs the same draw for any week — including the current one, or a hypothetical future one — without writing to `place_week`, so an operator can sanity-check density (candidates per cell, densest cells, a sample of the draw) before or long after a week actually happens.
 

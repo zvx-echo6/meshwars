@@ -297,7 +297,8 @@ async def admin_places_preview(request: Request, week_start: str | None = None):
         if chosen_ids:
             marks = ",".join("?" * min(len(chosen_ids), 20))
             sample_rows = conn.execute(
-                f"SELECT ref_type, name, points, lat, lon FROM place WHERE id IN ({marks})",
+                "SELECT ref_type, name, points, points_reason, lat, lon "
+                f"FROM place WHERE id IN ({marks})",
                 chosen_ids[:20],
             ).fetchall()
         by_type = {}

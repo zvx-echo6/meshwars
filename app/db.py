@@ -678,11 +678,30 @@ CREATE TABLE IF NOT EXISTS place (
     name        TEXT NOT NULL,
     lat         REAL NOT NULL,
     lon         REAL NOT NULL,
-    points      INTEGER NOT NULL,   -- flat by ref_type: landmark 5, park 25, summit 100
+    -- Effort-scored, not flat by ref_type (changed 2026-08-25 -- see
+    -- points_reason just below): 5 inside a Census place's limits for
+    -- any ref_type, else 10 (landmark) / 25 (park) / 100 (summit).
+    -- Computed once at seed-build time by scripts/build_places_seed.py's
+    -- score_points() against app/reference/places.csv's town anchors;
+    -- this column is still the only thing app/place_scoring.py and the
+    -- rotation draw read to award or rank a place.
+    points      INTEGER NOT NULL,
     source      TEXT NOT NULL,      -- 'SOTA' | 'POTA' | 'POTA/PAD-US' | 'OSM'
     area_m2     REAL,               -- park only, and only when PAD-US matched a boundary
     geom        TEXT,               -- park only: matched boundary as WKT, NULL otherwise
     rotates     INTEGER NOT NULL DEFAULT 0,  -- 1 = weekly rotation candidate, 0 = always active
+    -- WHY `points` got the value it did: 'in_city' (inside a Census
+    -- place's effective_radius_m, worth 5 regardless of ref_type) or
+    -- 'remote' (outside every anchor, worth the ref_type's full value).
+    -- Written by app/places_seed.py's loader from the seed CSV's own
+    -- points_reason column; nothing at runtime branches on it -- it
+    -- exists purely so the admin panel and any future re-tuning can see
+    -- WHY a place scores what it does without re-deriving it. Nullable
+    -- because a DB migrated from before this column existed has no
+    -- value to backfill for an already-loaded row; the next places_seed
+    -- reconcile pass (which re-upserts every row, not just new ones)
+    -- fills it in within one load.
+    points_reason TEXT,
     -- 1 = currently in the seed CSV, 0 = pruned from a later seed
     -- rebuild. Never deleted: place_activation (and, once resolved,
     -- place_week) FK/reference place.id, and a player who legitimately
@@ -904,6 +923,14 @@ MIGRATIONS = [
     # app/places_seed.py's load_places_seed() for the reconcile itself.
     "ALTER TABLE place ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
     "CREATE INDEX IF NOT EXISTS idx_place_active ON place(active)",
+    # `points_reason` added 2026-08-25 alongside the effort-based scoring
+    # model (see `place`'s own CREATE TABLE comment above) -- any DB that
+    # already ran this migration set needs the column added by hand.
+    # Nullable, backfilled to NULL for existing rows: the very next
+    # places_seed load re-upserts every row (including points_reason)
+    # from the CSV, so a stale NULL here never lasts more than one
+    # startup for a row still in the seed.
+    "ALTER TABLE place ADD COLUMN points_reason TEXT",
 ]
 
 PRAGMAS = [

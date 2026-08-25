@@ -95,20 +95,66 @@ and post_office were cut by Matt and must NOT be restored:
   tourism=museum, tourism=viewpoint, tourism=attraction
   tourism=information WHERE information=visitor_centre
   historic=memorial, historic=monument, historic=marker
-  highway=trailhead
   -- added 2026-08-24, "places worth going" rebalance:
   natural=hot_spring, natural=arch, natural=cave_entrance, natural=waterfall
   historic=mine, historic=ruins, historic=fort, historic=battlefield, historic=wreck
   man_made=lighthouse
-  man_made=tower WHERE tower:type=observation (fire lookouts)
   tourism=alpine_hut, tourism=wilderness_hut
   leisure=nature_reserve WHERE geometry is a node or a small way (skipped
     if it would duplicate the parks tier -- see _landmark_match's area gate)
 A landmark also needs a `name` tag -- an unnamed node matching one of
 these tags is not a "named destination" and is skipped.
 
-POINTS (flat, by ref_type -- not derived from SOTA's own points column
-or PAD-US acreage): landmark 5, park 25, summit 100.
+REMOVED 2026-08-25 ("trailheads shouldn't be marked as landmarks";
+"lookouts in the mountains -- not a landmark"): highway=trailhead
+(4,166 matches in the western-us extract) and man_made=tower WHERE
+tower:type=observation, i.e. fire lookouts (312 matches). A trailhead
+is where you start going somewhere, not a destination itself; a fire
+lookout sitting on a peak is already scored as that peak's summit (see
+_SUMMIT_COLOCATION_RADIUS_M in app/places_seed.py, which used to exist
+purely to de-dup exactly this pair -- the tower is gone now, but the
+colocation filter is left in place since a summit can still carry some
+OTHER landmark-tagged structure worth de-duping against). Neither tag
+is filtered at load time -- app/places_seed.py's loader has no OSM tag
+to filter on, only ref_type=landmark -- so this had to be an extraction-
+time change, which is why the seed needed a full rebuild rather than a
+loader patch.
+
+POINTS -- see "SCORING BY EFFORT, NOT CATEGORY" below. No longer flat
+by ref_type; computed per row at merge time from distance to the
+nearest Census place anchor in app/reference/places.csv.
+
+SCORING BY EFFORT, NOT CATEGORY (added 2026-08-25, "everything ...
+if they're easy to get to inside city limits should only be worth 5
+points. REAL parks and places that are actual trips should be 25 or
+100", then "remote landmark is 10"): the old model scored 5/25/100 by
+ref_type alone, which meant a city park across a parking lot and a
+wilderness park an hour up a dirt road both paid the same 25 -- the
+category said nothing about the trip. The new model scores effort
+instead:
+
+  inside city limits     any type      5
+  outside city limits    landmark     10
+                          park         25
+                          summit      100
+
+"City limits" is computed against app/reference/places.csv, the same
+Census place anchors app/places.py already uses for "how far is the
+nearest town" -- each row is (lat, lon, effective_radius_m), where the
+radius is sqrt(ALAND/pi), a circle of the same land area as the place,
+standing in for its limits (see that file's own header). A place is
+IN CITY LIMITS if it falls within that radius of ANY anchor. This is
+computed once, here, at seed-build time (merge()'s score_points()) and
+baked into the `points` column, so app/places_seed.py's loader and the
+scoring path need no new logic at all -- they already just read
+`points` off the row. A second column, `points_reason`
+("in_city"/"remote"), is written alongside it purely for visibility
+(the admin preview, and any future re-tuning) -- nothing reads it to
+make a scoring decision; `points` is still the only number that
+matters at runtime.
+
+The weekly per-person cap is unchanged at 100 -- see
+docs/features/places.md.
 
 SUMMIT THRESHOLD (added 2026-08-24, "places worth going" rebalance;
 LOWERED again 2026-08-24, "too few summits"):
@@ -146,6 +192,7 @@ import csv
 import datetime
 import io
 import math
+import os
 import sys
 import urllib.request
 
@@ -154,7 +201,19 @@ NORTH, SOUTH, WEST, EAST = 49.29, 25.8, -125.0, -93.5
 SOTA_URL = "https://storage.sota.org.uk/summitslist.csv"
 POTA_URL = "https://pota.app/all_parks_ext.csv"
 
-POINTS = {"summit": 100, "park": 25, "landmark": 5}
+# Provisional only -- each pipeline stage below writes a row with a
+# placeholder points value from this dict so the CSV shape is valid at
+# every intermediate stage, but the REAL points value (effort-scored,
+# not flat by type) is computed once, for every row regardless of which
+# stage produced it, by merge()'s score_points() -- see that function
+# and the module docstring's "SCORING BY EFFORT, NOT CATEGORY".
+POINTS = {"summit": 100, "park": 25, "landmark": 10}
+
+# Real scoring, computed at merge time (score_points()) --
+# IN_CITY_POINTS applies to every ref_type; REMOTE_POINTS is keyed by
+# ref_type for everything outside city limits. See module docstring.
+IN_CITY_POINTS = 5
+REMOTE_POINTS = {"summit": 100, "park": 25, "landmark": 10}
 
 # SOTA's own elevation-derived Points column (1-10, effectively
 # 1/2/4/6/8/10 -- see module docstring "SUMMIT THRESHOLD"). Only
@@ -173,6 +232,20 @@ SEED_FIELDS = [
     "ref_type", "ref_code", "name", "lat", "lon", "points", "source",
     "area_m2", "geom",
 ]
+
+# The merged, final seed adds one column beyond SEED_FIELDS:
+# points_reason ("in_city" / "remote") records WHY a row got the points
+# value it did -- not read by app/places_seed.py's loader (which only
+# ever reads `points` itself), but carried through to the `place` table
+# for the admin panel and future re-tuning to see. Only merge()'s
+# output (the actual app/reference/places_worth_going.csv) carries this
+# column; the intermediate per-stage CSVs (fetch-sota, fetch-pota,
+# extract-landmarks, match-parks, fetch-padus-parks) stay SEED_FIELDS-
+# shaped, since none of them can compute the real value on its own --
+# that needs the full merged row set plus app/reference/places.csv, and
+# is the reason score_points() has to live in merge(), not in each
+# individual stage.
+FINAL_SEED_FIELDS = SEED_FIELDS + ["points_reason"]
 
 
 def in_bbox(lat: float, lon: float) -> bool:
@@ -268,7 +341,10 @@ LANDMARK_TAGS = {
     ("amenity", "townhall"), ("amenity", "courthouse"), ("amenity", "library"),
     ("tourism", "museum"), ("tourism", "viewpoint"), ("tourism", "attraction"),
     ("historic", "memorial"), ("historic", "monument"), ("historic", "marker"),
-    ("highway", "trailhead"),
+    # REMOVED 2026-08-25, "trailheads shouldn't be marked as landmarks":
+    # ("highway", "trailhead") -- 4,166 matches in the western-us
+    # extract. A trailhead is where you start going somewhere, not a
+    # destination itself.
     # added 2026-08-24, "places worth going" rebalance -- outdoor/natural
     # destinations, to counter the civic-heavy original list:
     ("natural", "hot_spring"), ("natural", "arch"),
@@ -290,10 +366,12 @@ def _matched_tag(tags) -> str | None:
             return f"{k}={v}"
     if tags.get("tourism") == "information" and tags.get("information") == "visitor_centre":
         return "tourism=information+visitor_centre"
-    # Fire lookouts: man_made=tower is far too broad alone (cell towers,
-    # water towers), so it only counts with tower:type=observation.
-    if tags.get("man_made") == "tower" and tags.get("tower:type") == "observation":
-        return "man_made=tower+observation"
+    # Fire lookouts (man_made=tower WHERE tower:type=observation) were
+    # REMOVED 2026-08-25, "lookouts in the mountains -- not a landmark"
+    # -- 312 matches in the western-us extract. A lookout on a peak is
+    # the summit someone already climbed, not a separate destination;
+    # app/places_seed.py's summit/landmark colocation filter used to
+    # exist mostly to de-dup exactly this pair.
     # leisure=nature_reserve matches here on tags alone; the node-vs-way
     # "is it small" gate (skip if it would duplicate the parks tier) is
     # applied in the way() handler below, where the geometry is known.
@@ -324,9 +402,8 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
             amenity=townhall,courthouse,library \\
             tourism=museum,viewpoint,attraction,information,alpine_hut,wilderness_hut \\
             historic=memorial,monument,marker,mine,ruins,fort,battlefield,wreck \\
-            highway=trailhead \\
             natural=hot_spring,arch,cave_entrance,waterfall \\
-            man_made=lighthouse,tower \\
+            man_made=lighthouse \\
             leisure=nature_reserve
 
     then: python3 build_places_seed.py extract-landmarks filtered.pbf landmarks.csv
@@ -824,15 +901,101 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
 
 
 # --------------------------------------------------------------------
-# Stage 5: merge
+# Stage 5: merge -- also where the real, effort-based points value is
+# computed (score_points below), since that is the first point in the
+# pipeline where the full row set exists.
 # --------------------------------------------------------------------
-def merge(inputs: list, out_path: str) -> None:
+
+# Default location of the Census place anchors (lat, lon,
+# effective_radius_m) this scores city-limits containment against --
+# same file app/places.py already uses for "how far is the nearest
+# town". Resolved relative to this script's own location (not cwd), so
+# `merge` still finds it when run from some other directory, the same
+# way the rest of this pipeline is meant to run "anywhere".
+_DEFAULT_PLACES_CSV = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "app", "reference", "places.csv"
+)
+
+# Anchor bucket size for the coarse spatial index _load_city_anchors
+# builds below, in degrees. Must be bigger than the largest possible
+# search radius in EITHER direction so a 3x3-bucket neighbourhood around
+# a place's own bucket can never miss a real match. The largest anchor
+# radius in app/reference/places.csv is ~25.3km; converting that to
+# degrees of longitude (the more demanding direction, since a degree of
+# longitude covers fewer metres than a degree of latitude everywhere
+# except the equator) at this play area's northernmost latitude (49.29N,
+# cos ~0.652) gives ~0.35 degrees -- 1.0 degree buckets leave a wide,
+# deliberate margin over that, not a tight fit.
+_ANCHOR_BUCKET_DEG = 1.0
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Same formula as app/grid.py's distance_m, duplicated rather than
+    imported: this script is meant to run standalone ("anywhere", per
+    the module docstring, including on navi with no PYTHONPATH pointed
+    at the app package), so it carries no dependency on the app/ tree."""
+    r = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = (math.sin(dphi / 2.0) ** 2
+         + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2)
+    return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+
+
+def _load_city_anchors(path: str) -> dict[tuple[int, int], list[tuple[float, float, float]]]:
+    """Reads app/reference/places.csv (lat,lon,effective_radius_m,
+    comment lines starting with '#') and buckets each anchor into a
+    coarse (lat_bucket, lon_bucket) grid at _ANCHOR_BUCKET_DEG
+    resolution, so _in_city_limits below only has to haversine-check
+    anchors in a place's own 3x3-bucket neighbourhood instead of every
+    anchor in the country."""
+    buckets: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    with open(path, encoding="utf-8", newline="") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            lat_s, lon_s, radius_s = line.split(",")
+            lat, lon, radius_m = float(lat_s), float(lon_s), float(radius_s)
+            key = (math.floor(lat / _ANCHOR_BUCKET_DEG), math.floor(lon / _ANCHOR_BUCKET_DEG))
+            buckets.setdefault(key, []).append((lat, lon, radius_m))
+    return buckets
+
+
+def _in_city_limits(lat: float, lon: float, buckets: dict) -> bool:
+    """True if (lat, lon) falls within ANY anchor's effective_radius_m
+    -- see _load_city_anchors and the module docstring's "SCORING BY
+    EFFORT, NOT CATEGORY" for what this radius means."""
+    lat_b = math.floor(lat / _ANCHOR_BUCKET_DEG)
+    lon_b = math.floor(lon / _ANCHOR_BUCKET_DEG)
+    for d_lat in (-1, 0, 1):
+        for d_lon in (-1, 0, 1):
+            for a_lat, a_lon, radius_m in buckets.get((lat_b + d_lat, lon_b + d_lon), ()):
+                if _haversine_m(lat, lon, a_lat, a_lon) <= radius_m:
+                    return True
+    return False
+
+
+def score_points(row: dict, buckets: dict) -> tuple[int, str]:
+    """(points, points_reason) for one merged row -- the real,
+    effort-based value, replacing whatever placeholder points value the
+    row's originating stage wrote. See module docstring."""
+    lat, lon = float(row["lat"]), float(row["lon"])
+    if _in_city_limits(lat, lon, buckets):
+        return IN_CITY_POINTS, "in_city"
+    return REMOTE_POINTS[row["ref_type"]], "remote"
+
+
+def merge(inputs: list, out_path: str, places_csv: str = _DEFAULT_PLACES_CSV) -> None:
+    buckets = _load_city_anchors(places_csv)
     seen = set()
     total = 0
     counts = {}
+    dist = {}  # (ref_type, points, reason) -> count, for the distribution report
     with open(out_path, "w", newline="", encoding="utf-8") as out:
         w = csv.writer(out)
-        w.writerow(SEED_FIELDS)
+        w.writerow(FINAL_SEED_FIELDS)
         for path in inputs:
             with open(path, encoding="utf-8") as fh:
                 reader = csv.DictReader(fh)
@@ -841,12 +1004,20 @@ def merge(inputs: list, out_path: str) -> None:
                     if key in seen:
                         continue
                     seen.add(key)
-                    w.writerow([row[f] for f in SEED_FIELDS])
+                    points, reason = score_points(row, buckets)
+                    row["points"] = points
+                    out_row = [row[f] for f in SEED_FIELDS] + [reason]
+                    w.writerow(out_row)
                     total += 1
                     counts[row["ref_type"]] = counts.get(row["ref_type"], 0) + 1
+                    dist_key = (row["ref_type"], points, reason)
+                    dist[dist_key] = dist.get(dist_key, 0) + 1
     print(f"merge: {total} rows -> {out_path}", file=sys.stderr)
     for k, v in sorted(counts.items()):
         print(f"  {k}: {v}", file=sys.stderr)
+    print("merge: points distribution (ref_type, points, reason):", file=sys.stderr)
+    for (ref_type, points, reason), n in sorted(dist.items()):
+        print(f"  {ref_type} {points} ({reason}): {n}", file=sys.stderr)
 
 
 def main():
@@ -874,6 +1045,9 @@ def main():
     p = sub.add_parser("merge")
     p.add_argument("inputs", nargs="+")
     p.add_argument("--out", required=True)
+    p.add_argument("--places-csv", default=_DEFAULT_PLACES_CSV,
+                    help="Census place anchors (lat,lon,effective_radius_m) "
+                         "for city-limits scoring; default app/reference/places.csv")
 
     args = ap.parse_args()
     if args.cmd == "fetch-sota":
@@ -887,7 +1061,7 @@ def main():
     elif args.cmd == "fetch-padus-parks":
         fetch_padus_parks(args.pota_csv, args.out)
     elif args.cmd == "merge":
-        merge(args.inputs, args.out)
+        merge(args.inputs, args.out, args.places_csv)
 
 
 if __name__ == "__main__":
