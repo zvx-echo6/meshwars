@@ -111,7 +111,7 @@ const LAYER_TOGGLES = [
   // cutoff any more -- they fade by icon-opacity instead (see
   // PLACE_ICON_OPACITY_ZOOM) -- so there is no zoom below which
   // checking this box would show literally nothing to grey it out for.
-  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels', 'park-boundaries-fill', 'park-boundaries-line'], 0],
+  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels', 'park-boundaries-fill', 'park-boundaries-line', 'park-boundaries-labels'], 0],
 ];
 
 // Places Worth Going (docs/features/places.md). Three flat-colour
@@ -1440,6 +1440,38 @@ function setupPlacesLayer(map) {
   map.setPaintProperty('places-labels', 'text-color', textColor);
   map.setPaintProperty('places-labels', 'text-halo-color', currentTheme() === 'neon' ? '#0C0B0A' : '#ffffff');
   map.setPaintProperty('places-labels', 'text-halo-width', 1.2);
+
+  // A boundary-backed park's marker (and the label that hung off it) is
+  // suppressed above -- see loadPlacesViewport's boundaryIds filter --
+  // so without this the park has no name on the map at all once it's
+  // drawn as an outline. This is the same label, just sourced from
+  // park-boundaries instead of places, with symbol-placement 'point' so
+  // a polygon still gets exactly one label at its centroid rather than
+  // one per vertex. Text-only, on purpose -- no icon-image -- so an
+  // outlined park never regains the dot the user explicitly said must
+  // never coexist with the outline. Every layout/paint value below is
+  // copied from places-labels rather than re-derived, so the two kinds
+  // of label are indistinguishable in font, size, colour, and the zoom
+  // they appear at.
+  map.addLayer({
+    id: 'park-boundaries-labels',
+    type: 'symbol',
+    source: 'park-boundaries',
+    minzoom: PLACE_LABEL_MIN_ZOOM,
+    layout: {
+      'symbol-placement': 'point',
+      'text-field': ['get', 'name'],
+      'text-font': ['Noto Sans Regular'],
+      'text-size': 11,
+      'text-anchor': 'top',
+      'text-offset': [0, 0.9],
+      'text-optional': true,
+      'text-allow-overlap': false,
+    },
+  });
+  map.setPaintProperty('park-boundaries-labels', 'text-color', textColor);
+  map.setPaintProperty('park-boundaries-labels', 'text-halo-color', currentTheme() === 'neon' ? '#0C0B0A' : '#ffffff');
+  map.setPaintProperty('park-boundaries-labels', 'text-halo-width', 1.2);
 
   const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, offset: 12 });
   for (const type of PLACE_TYPES) {
