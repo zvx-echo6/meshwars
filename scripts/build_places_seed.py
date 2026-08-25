@@ -136,7 +136,7 @@ instead:
   inside city limits     any type      5
   outside city limits    landmark     10
                           park         25
-                          summit      100
+                          summit    50-100 (elevation-scaled, see below)
 
 "City limits" is computed against app/reference/places.csv, the same
 Census place anchors app/places.py already uses for "how far is the
@@ -182,8 +182,9 @@ Wyoming 571 (W7Y), Colorado 539 (W0C), Washington 687 (W7W), Oregon 104
 on SOTA's Points column, BEFORE the bbox/name checks -- not a separate
 stage, since it only needs the one column already being read. The
 `points` column written to the seed CSV is unrelated and unchanged by
-this: it is always the flat game value (100 for every surviving
-summit), never SOTA's own points value.
+this: it is always a placeholder (POINTS["summit"], overwritten by
+score_points() at merge time -- see ELEVATION SCALING above), never
+SOTA's own points value.
 """
 from __future__ import annotations
 
@@ -211,15 +212,74 @@ POINTS = {"summit": 100, "park": 25, "landmark": 10}
 
 # Real scoring, computed at merge time (score_points()) --
 # IN_CITY_POINTS applies to every ref_type; REMOTE_POINTS is keyed by
-# ref_type for everything outside city limits. See module docstring.
+# ref_type for everything outside city limits EXCEPT summit, which
+# scales by elevation instead of a flat value -- see ELEVATION SCALING
+# below and the module docstring.
 IN_CITY_POINTS = 5
-REMOTE_POINTS = {"summit": 100, "park": 25, "landmark": 10}
+REMOTE_POINTS = {"park": 25, "landmark": 10}
+
+# ELEVATION SCALING (added 2026-08-25, "lets make the points for peaks
+# scaling. 50 for low elevation peaks up to 100 for 9000ft +"): a remote
+# summit's value now scales linearly with elevation instead of paying
+# the same flat 100 a modest hill and a 12,000ft climb both used to.
+# The in-city rule still wins outright -- a summit inside a town's
+# limits is worth IN_CITY_POINTS (5) regardless of height, because you
+# can park at it; scaling only ever applies to a summit that failed the
+# in-city check. See score_points() and _summit_points() below for the
+# order that enforces that.
+#
+# Floor measured, not assumed, against the 7,987 currently-active
+# REMOTE summits in the seed at the time this was added (SOTA AltFt
+# joined onto app/reference/places_worth_going.csv by ref_code): min
+# 2,110ft, p10 6,761ft, p25 7,611ft, median 8,992ft, p75 10,569ft, p90
+# 12,540ft, max 14,494ft. The bottom of that range is not a smooth
+# taper -- a genuine gap sits between a small low-elevation cluster (80
+# summits, 2,110-3,999ft; these clear the SUMMIT_MIN_SOTA_POINTS
+# prominence bar despite low absolute elevation, e.g. relief above flat
+# surrounding terrain) and where the real body of the distribution
+# begins: only 16 summits fall in 4,000-5,999ft at all, then 1,099 land
+# in 6,000-6,999ft alone. p1 is 6,002ft, right at that seam. 6,000ft is
+# the floor for exactly that reason -- it is where "low elevation peak"
+# actually starts in this data, not a round number picked from nowhere,
+# and it costs only the 80 outlier summits below it (1.0% of remote
+# summits) a fixed 50 rather than a slightly-lower scaled value they
+# were never going to reach anyway.
+SUMMIT_ELEV_FLOOR_FT = 6000
+# 9,000ft is Matt's own ceiling ("up to 100 for 9000ft+"), not derived
+# -- it happens to land almost exactly on the measured median (8,992ft),
+# so very close to half of today's remote summits cap out at 100.
+SUMMIT_ELEV_CEIL_FT = 9000
+SUMMIT_MIN_REMOTE_POINTS = 50
+SUMMIT_MAX_REMOTE_POINTS = 100
+
+
+def _summit_points(elevation_ft: float | None) -> int:
+    """Linear 50->100 scale from SUMMIT_ELEV_FLOOR_FT to
+    SUMMIT_ELEV_CEIL_FT, clamped at both ends, rounded to a whole point
+    -- see ELEVATION SCALING above for where the floor and ceiling come
+    from. elevation_ft is None only if a row somehow reached here
+    without one (should not happen -- fetch_sota() skips any SOTA row
+    missing AltFt outright); treated as the floor rather than raising,
+    so one malformed upstream row degrades a single summit's score
+    instead of failing the whole merge."""
+    if elevation_ft is None:
+        return SUMMIT_MIN_REMOTE_POINTS
+    if elevation_ft <= SUMMIT_ELEV_FLOOR_FT:
+        return SUMMIT_MIN_REMOTE_POINTS
+    if elevation_ft >= SUMMIT_ELEV_CEIL_FT:
+        return SUMMIT_MAX_REMOTE_POINTS
+    frac = (elevation_ft - SUMMIT_ELEV_FLOOR_FT) / (SUMMIT_ELEV_CEIL_FT - SUMMIT_ELEV_FLOOR_FT)
+    return round(SUMMIT_MIN_REMOTE_POINTS + frac * (SUMMIT_MAX_REMOTE_POINTS - SUMMIT_MIN_REMOTE_POINTS))
+
 
 # SOTA's own elevation-derived Points column (1-10, effectively
 # 1/2/4/6/8/10 -- see module docstring "SUMMIT THRESHOLD"). Only
 # summits at or above this SOTA points value become a `place` row at
-# all; the ones that survive still carry the flat game value of 100,
-# not this number.
+# all; this is a PROMINENCE filter (relative relief within SOTA's own
+# region), distinct from the summit's own absolute elevation in feet
+# that ELEVATION SCALING above scores by -- a summit can clear this bar
+# with a low AltFt (see the 80-summit low cluster noted there) and
+# still only score the floor.
 #
 # LOWERED 2026-08-24, "too few summits": >=10 (1,865 nationwide / 141
 # Idaho at the time) was one stop too sparse in play. Dropped to the
@@ -230,21 +290,30 @@ SUMMIT_MIN_SOTA_POINTS = 8
 
 SEED_FIELDS = [
     "ref_type", "ref_code", "name", "lat", "lon", "points", "source",
-    "area_m2", "geom",
+    "area_m2", "geom", "elevation_ft",
 ]
 
+# elevation_ft (added 2026-08-25, "scaling summit points by elevation")
+# is only ever populated by fetch_sota(), from SOTA's own AltFt column
+# -- summit is the only ref_type score_points() scales by anything, so
+# it is the only ref_type that needs the number. Every other stage
+# (fetch_pota via match_parks/fetch_padus_parks, extract_landmarks)
+# writes "" for this field so the CSV stays SEED_FIELDS-shaped at every
+# stage; merge() carries it straight through from whichever row it
+# came from, same as area_m2/geom.
+#
 # The merged, final seed adds one column beyond SEED_FIELDS:
-# points_reason ("in_city" / "remote") records WHY a row got the points
-# value it did -- not read by app/places_seed.py's loader (which only
-# ever reads `points` itself), but carried through to the `place` table
-# for the admin panel and future re-tuning to see. Only merge()'s
-# output (the actual app/reference/places_worth_going.csv) carries this
-# column; the intermediate per-stage CSVs (fetch-sota, fetch-pota,
-# extract-landmarks, match-parks, fetch-padus-parks) stay SEED_FIELDS-
-# shaped, since none of them can compute the real value on its own --
-# that needs the full merged row set plus app/reference/places.csv, and
-# is the reason score_points() has to live in merge(), not in each
-# individual stage.
+# points_reason ("in_city" / "remote" / "remote_scaled") records WHY a
+# row got the points value it did -- not read by app/places_seed.py's
+# loader (which only ever reads `points` itself), but carried through
+# to the `place` table for the admin panel and future re-tuning to see.
+# Only merge()'s output (the actual app/reference/places_worth_going.csv)
+# carries this column; the intermediate per-stage CSVs (fetch-sota,
+# fetch-pota, extract-landmarks, match-parks, fetch-padus-parks) stay
+# SEED_FIELDS-shaped, since none of them can compute the real value on
+# its own -- that needs the full merged row set plus
+# app/reference/places.csv, and is the reason score_points() has to
+# live in merge(), not in each individual stage.
 FINAL_SEED_FIELDS = SEED_FIELDS + ["points_reason"]
 
 
@@ -270,6 +339,7 @@ def fetch_sota(out_path: str) -> None:
 
     kept = 0
     skipped_low_points = 0
+    skipped_no_altft = 0
     with open(out_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(SEED_FIELDS)
@@ -289,11 +359,27 @@ def fetch_sota(out_path: str) -> None:
             name = row["SummitName"].strip()
             if not code or not name:
                 continue
+            # AltFt is SOTA's own feet figure (AltM is the metres source
+            # it derives from) -- read directly rather than converting
+            # AltM ourselves, so this always agrees with what SOTA
+            # itself publishes. Feeds score_points()'s elevation
+            # scaling at merge time (see ELEVATION SCALING in this
+            # module's docstring); a row missing/unparseable AltFt is
+            # skipped outright rather than kept with a blank -- an
+            # unscored summit sitting in the seed with no elevation to
+            # scale from is worse than one fewer summit, and this has
+            # not happened against a real SOTA pull so far.
+            try:
+                elevation_ft = round(float(row["AltFt"]))
+            except (KeyError, ValueError):
+                skipped_no_altft += 1
+                continue
             w.writerow(["summit", code, name, f"{lat:.6f}", f"{lon:.6f}",
-                        POINTS["summit"], "SOTA", "", ""])
+                        POINTS["summit"], "SOTA", "", "", elevation_ft])
             kept += 1
     print(f"sota: wrote {kept} summits (SOTA Points >= {SUMMIT_MIN_SOTA_POINTS}; "
-          f"{skipped_low_points} below threshold worldwide) -> {out_path}", file=sys.stderr)
+          f"{skipped_low_points} below threshold worldwide, {skipped_no_altft} "
+          f"missing AltFt) -> {out_path}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------
@@ -493,7 +579,7 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
                 continue
             seen.add(code)
             w.writerow(["landmark", code, name, f"{lat:.6f}", f"{lon:.6f}",
-                        POINTS["landmark"], "OSM", "", ""])
+                        POINTS["landmark"], "OSM", "", "", ""])
             kept += 1
     print(f"landmarks: wrote {kept} named landmarks ({h.seen_names_skipped} "
           f"unnamed matches skipped, {h.large_reserves_skipped} large nature "
@@ -669,7 +755,7 @@ def match_parks(pota_csv: str, out_path: str) -> None:
                 geom_wkt = simplified.wkt
             w.writerow(["park", row["reference"], name, f"{lat:.6f}", f"{lon:.6f}",
                         POINTS["park"], "POTA/PAD-US" if best is not None else "POTA",
-                        f"{area_m2:.0f}" if area_m2 != "" else "", geom_wkt])
+                        f"{area_m2:.0f}" if area_m2 != "" else "", geom_wkt, ""])
         print(f"parks: {matched}/{total} matched a PAD-US boundary "
               f"({total - matched} unmatched, kept as points)", file=sys.stderr)
 
@@ -887,7 +973,7 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
             # the seed CSV is larger for it.
             simplified = geom.simplify(0.0008, preserve_topology=True)
             w.writerow(["park", f"PADUS-{fid}", name, f"{lat:.6f}", f"{lon:.6f}",
-                        POINTS["park"], "PAD-US", f"{area_m2:.0f}", simplified.wkt])
+                        POINTS["park"], "PAD-US", f"{area_m2:.0f}", simplified.wkt, ""])
             kept += 1
             if area_m2 >= SQUARE_AREA_M2:
                 larger += 1
@@ -980,10 +1066,21 @@ def _in_city_limits(lat: float, lon: float, buckets: dict) -> bool:
 def score_points(row: dict, buckets: dict) -> tuple[int, str]:
     """(points, points_reason) for one merged row -- the real,
     effort-based value, replacing whatever placeholder points value the
-    row's originating stage wrote. See module docstring."""
+    row's originating stage wrote. See module docstring.
+
+    In-city checked FIRST, for every ref_type including summit: a
+    summit inside a town's limits is worth IN_CITY_POINTS regardless of
+    elevation, because you can park at it -- see ELEVATION SCALING
+    above. Only a summit that fails that check goes on to
+    _summit_points() for its elevation-scaled value; park/landmark keep
+    the flat REMOTE_POINTS value they always had."""
     lat, lon = float(row["lat"]), float(row["lon"])
     if _in_city_limits(lat, lon, buckets):
         return IN_CITY_POINTS, "in_city"
+    if row["ref_type"] == "summit":
+        elev_s = row.get("elevation_ft")
+        elevation_ft = float(elev_s) if elev_s not in (None, "") else None
+        return _summit_points(elevation_ft), "remote_scaled"
     return REMOTE_POINTS[row["ref_type"]], "remote"
 
 

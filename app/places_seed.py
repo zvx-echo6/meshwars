@@ -342,7 +342,7 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
 
     Safe to call every startup: existing rows are updated in place by
     the UNIQUE(ref_type, ref_code) upsert (name/lat/lon/points/source/
-    area_m2/geom/rotates/points_reason/active refreshed, created_at and
+    area_m2/geom/rotates/points_reason/elevation_ft/active refreshed, created_at and
     id preserved), and place_cell for a place is fully replaced each time
     so a boundary that changed on re-seed cannot leave stale cells
     behind.
@@ -464,12 +464,19 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                 points = int(row["points"])
                 area_m2 = float(row["area_m2"]) if row.get("area_m2") else None
                 geom_wkt = row.get("geom") or None
-                # 'in_city' / 'remote' -- see app/db.py's `place` table
-                # comment and scripts/build_places_seed.py's
-                # score_points(). row.get(), not row[...]: a CSV written
-                # before this column existed (an old fixture, or a stale
+                # 'in_city' / 'remote' / 'remote_scaled' -- see
+                # app/db.py's `place` table comment and
+                # scripts/build_places_seed.py's score_points().
+                # row.get(), not row[...]: a CSV written before this
+                # column existed (an old fixture, or a stale
                 # cursor-fingerprinted file mid-upgrade) still loads.
                 points_reason = row.get("points_reason") or None
+                # summit only; "" for park/landmark (see build_places_
+                # seed.py's SEED_FIELDS comment) and for a CSV written
+                # before this column existed -- both read as NULL here,
+                # same row.get() fallback reasoning as points_reason
+                # just above.
+                elevation_ft = float(row["elevation_ft"]) if row.get("elevation_ft") else None
 
                 cells: set[str] = set()
                 if ref_type == "park":
@@ -508,13 +515,13 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
 
                 cur = conn.execute(
                     "INSERT INTO place(ref_type, ref_code, name, lat, lon, points, source, "
-                    "area_m2, geom, rotates, points_reason, active, created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?) "
+                    "area_m2, geom, rotates, points_reason, elevation_ft, active, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?) "
                     "ON CONFLICT(ref_type, ref_code) DO UPDATE SET "
                     "name=excluded.name, lat=excluded.lat, lon=excluded.lon, "
                     "points=excluded.points, source=excluded.source, "
                     "area_m2=excluded.area_m2, geom=excluded.geom, rotates=excluded.rotates, "
-                    "points_reason=excluded.points_reason, "
+                    "points_reason=excluded.points_reason, elevation_ft=excluded.elevation_ft, "
                     # Reactivate on the spot: a place that left the seed
                     # and later comes back (a re-pull picks it up again)
                     # is live again the moment this upsert touches it,
@@ -522,7 +529,7 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                     "active=1 "
                     "RETURNING id",
                     (ref_type, row["ref_code"], row["name"], lat, lon, points, row["source"],
-                     area_m2, geom_wkt, 1 if rotates else 0, points_reason, now),
+                     area_m2, geom_wkt, 1 if rotates else 0, points_reason, elevation_ft, now),
                 )
                 place_id = cur.fetchone()[0]
                 seen_ids.add(place_id)

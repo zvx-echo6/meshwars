@@ -680,19 +680,35 @@ CREATE TABLE IF NOT EXISTS place (
     lon         REAL NOT NULL,
     -- Effort-scored, not flat by ref_type (changed 2026-08-25 -- see
     -- points_reason just below): 5 inside a Census place's limits for
-    -- any ref_type, else 10 (landmark) / 25 (park) / 100 (summit).
-    -- Computed once at seed-build time by scripts/build_places_seed.py's
-    -- score_points() against app/reference/places.csv's town anchors;
-    -- this column is still the only thing app/place_scoring.py and the
-    -- rotation draw read to award or rank a place.
+    -- any ref_type, else 10 (landmark) / 25 (park) / 50-100 (summit,
+    -- scaled by elevation_ft below -- changed 2026-08-25, see that
+    -- column's own comment). Computed once at seed-build time by
+    -- scripts/build_places_seed.py's score_points() against
+    -- app/reference/places.csv's town anchors; this column is still
+    -- the only thing app/place_scoring.py and the rotation draw read
+    -- to award or rank a place.
     points      INTEGER NOT NULL,
     source      TEXT NOT NULL,      -- 'SOTA' | 'POTA' | 'POTA/PAD-US' | 'OSM'
     area_m2     REAL,               -- park only, and only when PAD-US matched a boundary
     geom        TEXT,               -- park only: matched boundary as WKT, NULL otherwise
+    -- summit only, NULL for park/landmark. SOTA's own AltFt, carried
+    -- through the seed CSV (scripts/build_places_seed.py's fetch_sota())
+    -- purely so a remote summit's score can be derived from it
+    -- (score_points()'s elevation scaling, 50 at
+    -- SUMMIT_ELEV_FLOOR_FT up to 100 at SUMMIT_ELEV_CEIL_FT) and so an
+    -- operator can see WHY a summit scored what it did without
+    -- re-deriving it -- same purpose points_reason already serves,
+    -- just numeric rather than a category. Added 2026-08-25 alongside
+    -- that scaling; `place` had no elevation before this, since the
+    -- old flat-100 model never needed one.
+    elevation_ft REAL,
     rotates     INTEGER NOT NULL DEFAULT 0,  -- 1 = weekly rotation candidate, 0 = always active
     -- WHY `points` got the value it did: 'in_city' (inside a Census
-    -- place's effective_radius_m, worth 5 regardless of ref_type) or
-    -- 'remote' (outside every anchor, worth the ref_type's full value).
+    -- place's effective_radius_m, worth 5 regardless of ref_type),
+    -- 'remote' (park/landmark outside every anchor, worth the
+    -- ref_type's flat value), or 'remote_scaled' (summit outside every
+    -- anchor, worth its elevation_ft-scaled value -- see that column's
+    -- comment above).
     -- Written by app/places_seed.py's loader from the seed CSV's own
     -- points_reason column; nothing at runtime branches on it -- it
     -- exists purely so the admin panel and any future re-tuning can see
@@ -958,6 +974,15 @@ MIGRATIONS = [
     # from the CSV, so a stale NULL here never lasts more than one
     # startup for a row still in the seed.
     "ALTER TABLE place ADD COLUMN points_reason TEXT",
+    # `elevation_ft` added 2026-08-25 alongside summit elevation scaling
+    # (see `place`'s own CREATE TABLE comment above) -- same situation
+    # as points_reason just above: any DB that already ran this
+    # migration set needs the column added by hand. Nullable, backfilled
+    # to NULL for existing rows (correct for every non-summit row
+    # permanently, and for a summit row until the next reconcile fills
+    # it in from the CSV, same one-startup window points_reason's own
+    # migration note describes).
+    "ALTER TABLE place ADD COLUMN elevation_ft REAL",
 ]
 
 PRAGMAS = [
