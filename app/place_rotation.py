@@ -27,33 +27,62 @@ stated plainly:
   app/places.py documents its own bucket sizing depends on where degrees
   are being measured -- see _region_cell_degrees().
 
-QUOTA (ROTATION_QUOTA_PER_CELL, RAISED 2026-08-24 from 1 to 5, "a town
-should have more than one place"): at quota 1, an 18-mile cell -- big
-enough to span a town and its nearby neighbors -- contributes exactly
-one live place regardless of how many candidates it holds, so Twin
-Falls (population center of its own cell, sharing that cell with Buhl
-and Filer) drew exactly the county courthouse and nothing else most
-weeks: "twin falls has 1 landmark". Measured directly against the real
-seed (including the PAD-US local-park addition -- see
-scripts/build_places_seed.py) before picking, not assumed: chosen
-places in Twin Falls' own region cell at quota 1/3/5/8 were 1/3/4/4,
-and nationwide live rotating count (all cells, this same seed) was
-3,266/6,617/8,307/9,476. 5 and 8 land on the same in-cell answer (4) --
-MIN_SPACING_MILES's 3-mile floor is what actually caps a compact town's
-count once the quota stops being the binding constraint, exactly as
-intended (see MIN_SPACING_MILES below) -- so 5 is the smallest quota
-that reaches that natural ceiling for a town like Twin Falls, without
-paying 8's extra ~1,169 nationwide rotating places for no further gain
-there. A cell with only one real candidate still contributes only one
-live place (there is nothing else to fill the other slots with); a
-dense cell like Boise's fills more of its quota, which is the "genuine
-handful to choose from" the brief asked for, not the flat levelling
-quota 1 produced.
+QUOTA and SPACING (RAISED/LOWERED 2026-08-25, replacing the 2026-08-24
+tuning below) -- that earlier pass was measured against a MISCONFIGURED
+preview whose play area was roughly Idaho and northern Utah, about a
+tenth of the real board (49.29N/25.80S/-125W/-93.5E), and against the
+wrong yardstick ("does Twin Falls get more than one place") rather than
+the one that actually matches how a player experiences this: "starting
+from any populated place, do the live places within a realistic
+one-drive radius add up to a full week's cap on their own." Re-measured
+against the real seed on the real play area (61,563 active rotating
+candidates: 30,408 landmarks, ~31,155 small parks) with that yardstick
+-- 40 miles (Twin Falls to Burley, a real answer to "how far would you
+actually drive"), 100 points (one week's per-person cap), rotating tier
+ONLY (landmarks + small parks; summits and boundary-backed parks do not
+count here, because "I can't find landmarks and local parks" was the
+complaint being measured, and letting a distant summit paper over a
+locally-empty rotation would hide that):
 
-MIN_SPACING_MILES = 3: no two live rotating places within 3 miles of
+  At the old quota 5 / spacing 3mi, 84.5% of the play area's 12,136 real
+  town anchors (app/reference/places.csv, filtered to the actual play
+  area -- the file's own 1-degree margin strip has no seed data and
+  reads as false zero-supply) already reached 100 points from the
+  rotating tier alone within 40 miles. Sweeping ROTATION_QUOTA_PER_CELL
+  up on its own (5/8/10/15/20/25/30/40, spacing held at 3mi) moved that
+  number from 84.8% to just 84.9% and topped out completely at quota 25
+  (10,450 live nationwide) -- quota was NOT the binding constraint past
+  a small increase. Sweeping MIN_SPACING_MILES down instead (3/2/1.5/1/
+  0.5mi, quota held at 5) moved it from 84.8% to 93.3% -- spacing was
+  the real ceiling. The two together (spacing 1mi, quota 15 -- quota
+  swept separately at 1mi spacing and found to fully saturate by 15,
+  same flat pattern as at 3mi) reach 91.3% (11,080/12,136 towns) at
+  16,267 live rotating places nationwide (2026-08-19 seed), leaving the
+  admin preview's boundary-backed-park fallback (docs/features/
+  places.md's Stage 2) to cover most of the remainder and only 129
+  towns (1.06%) genuinely short even with that fallback -- real empty
+  country (Big Bend, the Dakota/Montana high plains, the Nebraska
+  Sandhills), not a rotation setting away from fixed. See
+  docs/features/places.md for the full before/after table.
+
+  ROTATION_CELL_MILES stays 18 -- cell size was never the measured
+  problem, only quota and spacing were.
+
+  A cell with only one real candidate still contributes only one live
+  place; there is nothing else to fill the remaining slots with. A
+  dense cell (the seed's densest single cell holds 829 candidates)
+  fills much more of its quota, which is the "genuine handful to choose
+  from" the brief asks for.
+
+MIN_SPACING_MILES = 1: no two live rotating places within 1 mile of
 each other, enforced globally (not just within one region cell -- two
-candidates a mile apart but in adjacent cells would otherwise both
-slip through).
+candidates a short walk apart but in adjacent cells would otherwise
+both slip through). Still far enough to keep two live picks from being
+the same walk, while no longer discarding candidates that a flat 3-mile
+floor was rejecting mostly in already-thin rural cells (measured: of
+the candidate-slots the old 3-mile rule cost, ~79% were in cells with
+10 or fewer candidates to begin with, not in the dense cells "thinning
+crowded cities" was meant to target).
 """
 from __future__ import annotations
 
@@ -70,8 +99,8 @@ from .grid import distance_m
 MILE_M = 1609.344
 
 ROTATION_CELL_MILES = 18.0
-ROTATION_QUOTA_PER_CELL = 5
-MIN_SPACING_MILES = 3.0
+ROTATION_QUOTA_PER_CELL = 15
+MIN_SPACING_MILES = 1.0
 
 _METERS_PER_DEG_LAT = 111_320.0
 

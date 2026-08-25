@@ -52,7 +52,7 @@ Kept after the country filter: **26,600 summits, 5,293 parks, 24,771 landmarks.*
 - **Park at or above one grid cell, boundary matched:** any square more than 50% inside the boundary.
 - **Park below one grid cell (matched or not), or boundary unmatched:** the square containing its point, same as a landmark.
 
-## Weekly rotation (decided 2026-08-24)
+## Weekly rotation (decided 2026-08-24, retuned 2026-08-25)
 
 Summits and boundary-backed parks — anything that does not rotate above — are **always active**. Landmarks and small parks **rotate weekly**, flipping on the same Wednesday reset as everything else, so a town's handful of live places changes from week to week rather than every landmark within reach being live all the time.
 
@@ -60,10 +60,21 @@ Summits and boundary-backed parks — anything that does not rotate above — ar
 
 **Two constraints on the draw:**
 
-- **3-mile minimum spacing.** No two live rotating places within 3 miles of each other, checked globally (not just within one region cell — two candidates a short walk apart but on opposite sides of a cell boundary must not both get picked).
-- **Per-region quota.** The play area is divided into region cells sized **18 miles** on a side (`ROTATION_CELL_MILES`), each allowed **one live rotating place** (`ROTATION_QUOTA_PER_CELL = 1`). A cell with one candidate gets it automatically; a cell with many (Boise, say) does not get proportionally more live places for having more candidates — that levelling is the point, not a bug in it. An 18-mile cell filled edge-to-edge puts one live place roughly 18 miles — about a 20-minute drive — from the next, landing inside the target band of one live rotating place per 15-20 miles.
+- **1-mile minimum spacing** (`MIN_SPACING_MILES`). No two live rotating places within 1 mile of each other, checked globally (not just within one region cell — two candidates a short walk apart but on opposite sides of a cell boundary must not both get picked).
+- **Per-region quota.** The play area is divided into region cells sized **18 miles** on a side (`ROTATION_CELL_MILES`), each allowed up to **15 live rotating places** (`ROTATION_QUOTA_PER_CELL = 15`). A cell with fewer candidates than the quota gets all of them; a cell with many (a city downtown) fills more of its quota, up to what the 1-mile spacing floor still allows once that many are competing for room.
 
-For the week of 2026-08-19, on the real play area (49.29N/25.8S/-125W/-93.5E — the box `meshwars-staging`'s `.env` and production both configure, wider than `app/config.py`'s own narrower Idaho-only defaults), this yields **2,269 live rotating places**, drawn from 2,289 region cells that hold at least one candidate (20 cells lost their only candidate to the 3-mile spacing rule against a neighbour). Together with the 31,612 always-active places (summits + larger/unmatched parks), **33,881 places are live** that week. (Region cell size is computed from the configured play area's own latitude band — see `_region_cell_degrees()` — so this count moves if `PLAY_AREA_*` is ever narrowed; it does not move on a re-seed of the same data.)
+**Retuned 2026-08-25 against a real complaint** ("I shouldn't have to travel more than 10 minutes between spaces… entire towns have 4 available with the next closest 45 minutes away", and separately "even in larger cities I can't find the places" / "very very few landmarks and local parks"). The 2026-08-24 tuning (quota 1→5) had been measured against a preview whose play area was misconfigured to roughly Idaho and northern Utah — about a tenth of the real board — and against "does Twin Falls get more than one place" rather than against how a player actually experiences density.
+
+Re-measured on the real play area (49.29N/25.8S/-125W/-93.5E, 61,563 active rotating candidates: 30,408 landmarks + ~31,155 small parks) against the yardstick that matches the complaint: **from any populated place, do the live ROTATING places (landmarks + small parks only — summits and boundary-backed parks don't count here) within a 40-mile radius (Twin Falls to Burley, a real answer to "how far would I actually drive") add up to at least 100 points (one week's per-person cap)?** Measured against the 12,136 real town anchors inside the play area in `app/reference/places.csv` (the file also carries a 1-degree margin strip with no seed data in it — those margin rows read as false zero-supply and are excluded from this measurement).
+
+| | quota 5 / spacing 3mi (old) | quota 15 / spacing 1mi (current) |
+|---|---|---|
+| live rotating places nationwide | 8,303–8,457 | 16,267 |
+| towns reaching 100 rotating-tier points within 40mi | 84.5% (10,250/12,136) | 91.3% (11,080/12,136) |
+| … + boundary-backed big parks as fallback for the rest | — | +7.6% (927 more towns) |
+| still short even with the big-park fallback | — | 1.06% (129 towns) — real empty country: Big Bend, the Dakota/Montana high plains, the Nebraska Sandhills |
+
+Sweeping quota alone (spacing held at 3mi) moved the pass rate only 84.8%→84.9% before flattening completely at quota 25 — quota was not the real constraint. Sweeping spacing alone (quota held at 5) moved it 84.8%→93.3% at 0.5mi — spacing was. Of the candidate-slots the old 3-mile rule discarded, roughly 79% were in cells with 10 or fewer candidates to begin with: it was thinning already-thin rural clusters, not "crowded cities" as intended. `ROTATION_CELL_MILES` (18mi) was not changed — cell size was never the measured problem.
 
 **Repeats are a fallback, not a preference.** Last week's picks are sorted to the back of their cell's candidate list; a place only repeats if nothing else in its cell clears the spacing check against everything already chosen elsewhere.
 

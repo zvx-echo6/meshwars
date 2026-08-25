@@ -1,6 +1,6 @@
 """Tests for app/place_rotation.py: the weekly rotation draw is
-deterministic from week_start alone, and respects the 3-mile minimum
-spacing between chosen places (docs/features/places.md).
+deterministic from week_start alone, and respects MIN_SPACING_MILES's
+minimum spacing between chosen places (docs/features/places.md).
 """
 from __future__ import annotations
 
@@ -129,16 +129,21 @@ def test_resolve_week_inside_an_open_transaction(conn):
         raise
 
 
-def test_three_mile_spacing_enforced(conn):
-    """Two candidates 1 mile apart (well under MIN_SPACING_MILES) in the
-    same region cell must never both be chosen -- and a set of many
+def test_min_spacing_enforced(conn):
+    """Two candidates well under MIN_SPACING_MILES apart in the same
+    region cell must never both be chosen -- and a set of many
     tightly-clustered candidates should never yield two live picks
     closer than the minimum spacing to each other, checked pairwise
     over the actual result rather than assumed from the algorithm.
+    Offsets are computed from MIN_SPACING_MILES itself (not a hardcoded
+    distance) so this stays meaningful regardless of what the constant
+    is tuned to later.
     """
-    # ~1 mile apart in latitude (1 degree lat ~= 69 miles).
+    # A third of MIN_SPACING_MILES apart in latitude (1 degree lat ~= 69
+    # miles) -- comfortably under the limit whatever it is currently set to.
+    close_lat_offset = (MIN_SPACING_MILES / 3.0) / 69.0
     _insert_place(conn, 1, "landmark", 43.000, -116.000)
-    _insert_place(conn, 2, "landmark", 43.0145, -116.000)
+    _insert_place(conn, 2, "landmark", 43.000 + close_lat_offset, -116.000)
 
     chosen, _ = _compute_week(conn, WEEK)
     assert len(chosen) == 1  # only one of the two can survive spacing
