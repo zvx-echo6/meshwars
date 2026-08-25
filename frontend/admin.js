@@ -578,6 +578,54 @@ async function previewPlaces(b) {
   b.disabled = false;
 }
 
+// ---- notice -------------------------------------------------------------
+
+function renderNoticeCurrent(n) {
+  const line = document.getElementById('nt-current');
+  if (!n.active || !n.title) {
+    line.textContent = 'Nothing is currently shown to players.';
+    return;
+  }
+  line.textContent = 'Currently shown to players: "' + n.title + '" (version ' + n.version_key + ').';
+}
+
+async function loadNotice() {
+  try {
+    const n = await api('/api/admin/notice');
+    document.getElementById('nt-version').value = n.version_key || '';
+    document.getElementById('nt-title').value = n.title || '';
+    document.getElementById('nt-body').value = n.body || '';
+    document.getElementById('nt-active').checked = !!n.active;
+    renderNoticeCurrent(n);
+  } catch (e) {
+    document.getElementById('nt-current').textContent = 'Could not load: ' + e.message;
+  }
+}
+
+async function saveNotice(b, overrideActive) {
+  const out = document.getElementById('nt-result');
+  out.replaceChildren();
+  const version = document.getElementById('nt-version').value.trim();
+  const title = document.getElementById('nt-title').value.trim();
+  const bodyText = document.getElementById('nt-body').value.trim();
+  const active = overrideActive !== undefined ? overrideActive : document.getElementById('nt-active').checked;
+  if (!version || !title || !bodyText) {
+    out.textContent = 'Version key, title and body are all required.';
+    return;
+  }
+  b.disabled = true;
+  try {
+    const n = await post('/api/admin/notice',
+      { version_key: version, title: title, body: bodyText, active: active });
+    document.getElementById('nt-active').checked = n.active;
+    renderNoticeCurrent(n);
+    out.textContent = 'Saved.';
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 // ---- read-API keys ----------------------------------------------------
 
 async function loadApiClients() {
@@ -661,7 +709,7 @@ function badge(id, value, bad) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadPlayers(), loadOverview(), loadApiClients()]);
+  await Promise.all([loadPlayers(), loadOverview(), loadApiClients(), loadNotice()]);
   badge('nav-players', allPlayers.length, false);
 }
 
@@ -723,3 +771,9 @@ document.getElementById('ci-award').addEventListener('click', function () { awar
 document.getElementById('mo-freeze').addEventListener('click', function () { freezeMonth(this); });
 document.getElementById('pl-preview').addEventListener('click', function () { previewPlaces(this); });
 document.getElementById('apikey-create').addEventListener('click', function () { createApiClient(this); });
+document.getElementById('nt-save').addEventListener('click', function () { saveNotice(this); });
+// Resends whatever is currently in the form with active forced off --
+// the "make it easy to clear" path: retiring a notice never requires
+// first retyping title/body/version just to satisfy the required-field
+// check saveNotice() otherwise runs.
+document.getElementById('nt-clear').addEventListener('click', function () { saveNotice(this, false); });

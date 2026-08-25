@@ -497,6 +497,109 @@ async def admin_checkin_binding(request: Request):
     return JSONResponse({"player_id": player_id, "sender_name": normalized})
 
 
+@router.get("/api/admin/notice")
+async def admin_notice(request: Request):
+    """The one-time update notice's current saved state, for the admin
+    panel's Notice section to load into its form. Singleton row (see
+    app/db.py's `notice` table) -- there is only ever one to fetch, and
+    a DB that has never had one saved gets all-empty/inactive defaults
+    rather than a 404, so the form just opens blank.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT version_key, title, body, active, updated_at FROM notice WHERE id = 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return JSONResponse({
+            "version_key": "", "title": "", "body": "", "active": False, "updated_at": None,
+        })
+    return JSONResponse({
+        "version_key": row["version_key"],
+        "title": row["title"],
+        "body": row["body"],
+        "active": bool(row["active"]),
+        "updated_at": row["updated_at"],
+    })
+
+
+@router.post("/api/admin/notice")
+async def admin_notice_save(request: Request):
+    """Save the one-time update notice.
+
+    Singleton row, upserted by the fixed id -- re-saving the same
+    version_key updates what is already published (fixing a typo, say)
+    without re-showing it to anyone who already dismissed it; only a
+    NEW version_key does that, because the version_key IS the
+    localStorage dismissal key the player-facing map checks (see
+    app/notice_api.py's GET /api/notice and frontend/map2.js).
+
+    All three text fields are required even to save a draft -- there is
+    one form, not a partial/full distinction, and `active` is what
+    actually controls whether it's live. Setting active=false is the
+    "make it easy to clear" path the admin UI's quick button uses: it
+    resends whatever is already saved with active flipped off, so
+    retiring a notice never requires retyping it.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    version_key = (body.get("version_key") or "").strip()
+    title = (body.get("title") or "").strip()
+    notice_body = (body.get("body") or "").strip()
+    active = bool(body.get("active"))
+
+    if not version_key or len(version_key) > 40:
+        return JSONResponse(
+            {"error": "version_key is required, 40 characters max"}, status_code=400)
+    if not title or len(title) > 200:
+        return JSONResponse({"error": "title is required, 200 characters max"}, status_code=400)
+    if not notice_body or len(notice_body) > 4000:
+        return JSONResponse({"error": "body is required, 4000 characters max"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO notice(id, version_key, title, body, active, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  version_key = excluded.version_key, "
+            "  title = excluded.title, "
+            "  body = excluded.body, "
+            "  active = excluded.active, "
+            "  updated_at = excluded.updated_at",
+            (version_key, title, notice_body, int(active), now),
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    log.info("admin: notice saved (version_key=%r, active=%s)", version_key, active)
+    return JSONResponse({
+        "version_key": version_key,
+        "title": title,
+        "body": notice_body,
+        "active": active,
+        "updated_at": now,
+    })
+
+
 @router.post("/api/admin/month/freeze")
 async def admin_month_freeze(request: Request):
     """Freeze or re-freeze one month's result.

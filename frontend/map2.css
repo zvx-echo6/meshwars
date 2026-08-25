@@ -204,3 +204,68 @@
   font-size: 12px;
   color: var(--mw-text-6);
 }
+
+/* ===== Update notice (operator-authored, admin panel) =====
+   Same dimmed-backdrop/dark-card shape as mc.css's .mc-modal (see
+   map2.js's ensureModal), kept as its own small block rather than
+   reusing that modal: this one is built and torn down by map2.js's
+   loadNotice() on its own timer (once, at boot, only if unread), not
+   opened by a nav button, and .mc-modal's own display:none/flex toggle
+   would fight a second consumer appending into the same element. Only
+   theme tokens below -- no literal colors -- so it reads correctly on
+   both the gold and neon skins without any theme-specific rule here. */
+.mw-notice-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2100; /* above .mc-modal's 2000 -- a release notice outranks a stats popup */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 16px;
+}
+
+.mw-notice-modal-inner {
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 8px;
+  width: min(520px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+}
+
+.mw-notice-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--mw-line);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--mw-accent);
+}
+
+.mw-notice-modal-close {
+  flex: none;
+  cursor: pointer;
+  color: var(--mw-text-4);
+  font-size: 22px;
+  line-height: 1;
+  background: none;
+  border: none;
+  padding: 0;
+}
+.mw-notice-modal-close:hover { color: var(--mw-text-1); }
+
+.mw-notice-modal-body {
+  padding: 16px 18px 20px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--mw-text-2);
+  /* Plain text is written in with .textContent (map2.js) -- this is
+     what turns the operator's line breaks back into visible ones
+     without ever parsing the body as markup. */
+  white-space: pre-wrap;
+}

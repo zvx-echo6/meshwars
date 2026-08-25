@@ -1771,6 +1771,133 @@ async function loadBoardData(map) {
   }
 }
 
+// ===== Update notice (operator-authored, admin panel) =====
+//
+// One-time release notice, authored and toggled from the admin panel's
+// Notice section (app/admin_ops.py's admin_notice_save) and read here
+// from the tiny, unauthenticated GET /api/notice (app/notice_api.py).
+// A player sees it once per version_key: dismissal is remembered in
+// this browser's localStorage, never on the server, so bumping the
+// version key server-side is what re-shows it to everyone, including
+// anyone who already dismissed the previous one.
+//
+// SECURITY: title/body are operator-authored, not player-authored, but
+// still written to the DOM with .textContent only, never innerHTML --
+// see .mw-notice-modal-body's white-space: pre-wrap in map2.css, which
+// is what turns the operator's plain line breaks back into visible
+// ones without this ever parsing the body as markup.
+const NOTICE_DISMISSED_KEY = 'mwNoticeDismissed';
+
+function noticeAlreadyDismissed(versionKey) {
+  try {
+    return localStorage.getItem(NOTICE_DISMISSED_KEY) === versionKey;
+  } catch {
+    return false;
+  }
+}
+
+function rememberNoticeDismissed(versionKey) {
+  try {
+    localStorage.setItem(NOTICE_DISMISSED_KEY, versionKey);
+  } catch {
+    // Storage unavailable (private browsing, quota) -- the notice just
+    // shows again next load, which is the safe direction to fail in.
+  }
+}
+
+let noticeModalEl = null;
+let noticeReturnFocusEl = null;
+
+function onNoticeKeydown(e) {
+  if (e.key === 'Escape' && noticeModalEl) {
+    closeNoticeModal(noticeModalEl.dataset.versionKey);
+  }
+}
+
+// Always reachable: a close button, Escape, and a click on the dimmed
+// backdrop all call this. Nothing about this modal can leave the map
+// permanently covered -- there is no state where none of the three work.
+function closeNoticeModal(versionKey) {
+  if (versionKey) rememberNoticeDismissed(versionKey);
+  if (noticeModalEl) {
+    noticeModalEl.remove();
+    noticeModalEl = null;
+  }
+  document.removeEventListener('keydown', onNoticeKeydown);
+  // Returns focus to whatever had it before the modal opened (the body,
+  // in practice, since this only ever opens once on boot) -- no focus
+  // trap is installed in the first place, so Tab already never got
+  // stuck; this just avoids dropping focus onto <body> instead of
+  // wherever it reasonably belongs.
+  if (noticeReturnFocusEl && typeof noticeReturnFocusEl.focus === 'function') {
+    noticeReturnFocusEl.focus();
+  }
+  noticeReturnFocusEl = null;
+}
+
+function showNoticeModal(notice) {
+  noticeReturnFocusEl = document.activeElement;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'mw-notice-modal';
+  wrap.dataset.versionKey = notice.version_key;
+
+  const inner = document.createElement('div');
+  inner.className = 'mw-notice-modal-inner';
+  inner.setAttribute('role', 'dialog');
+  inner.setAttribute('aria-modal', 'true');
+  inner.setAttribute('aria-labelledby', 'mw-notice-title');
+
+  const header = document.createElement('div');
+  header.className = 'mw-notice-modal-header';
+  const titleEl = document.createElement('span');
+  titleEl.id = 'mw-notice-title';
+  titleEl.textContent = notice.title;
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'mw-notice-modal-close';
+  closeBtn.setAttribute('aria-label', 'Close');
+  closeBtn.textContent = '×';
+  header.appendChild(titleEl);
+  header.appendChild(closeBtn);
+
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'mw-notice-modal-body';
+  bodyEl.textContent = notice.body;
+
+  inner.appendChild(header);
+  inner.appendChild(bodyEl);
+  wrap.appendChild(inner);
+  document.body.appendChild(wrap);
+  noticeModalEl = wrap;
+
+  closeBtn.addEventListener('click', () => closeNoticeModal(notice.version_key));
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap) closeNoticeModal(notice.version_key);
+  });
+  document.addEventListener('keydown', onNoticeKeydown);
+
+  closeBtn.focus();
+}
+
+// Fired off from main() without being awaited -- see that call site's
+// own comment. Failure of any kind (network, bad JSON, no notice
+// published) just means nothing renders; it never blocks or delays the
+// map itself.
+async function loadNotice() {
+  try {
+    const res = await fetch('/api/notice');
+    if (!res.ok) return;
+    const data = await res.json();
+    const notice = data && data.notice;
+    if (!notice || !notice.version_key || !notice.title || !notice.body) return;
+    if (noticeAlreadyDismissed(notice.version_key)) return;
+    showNoticeModal(notice);
+  } catch (err) {
+    console.error('MeshWars map2: failed to load notice', err);
+  }
+}
+
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
 // Read from /config rather than written down here, same reasoning as
@@ -1806,6 +1933,12 @@ async function fetchBootConfig() {
 }
 
 async function main() {
+  // Not awaited: a single small GET against a one-row table, kicked off
+  // in parallel with the map's own boot rather than gating first paint
+  // on it -- see loadNotice()'s own comment for why a failure here is
+  // silent.
+  loadNotice();
+
   const bootTheme = currentTheme();
   const { playAreaBounds, defaultMode } = await fetchBootConfig();
   mode = defaultMode;

@@ -47,6 +47,7 @@ from .mc_ingest import hash_secret, log_raw_batch
 from .mc_scoring import team_checkin_points, team_tile_counts
 from .node_ref import normalize_node_ref
 from .nodes_api import router as nodes_router
+from .notice_api import router as notice_router
 from .places_api import router as places_router
 from .public_api import router as public_router
 
@@ -886,6 +887,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(checkin_router)
     app.include_router(public_router)
     app.include_router(places_router)
+    app.include_router(notice_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"

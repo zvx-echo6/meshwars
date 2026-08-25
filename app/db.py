@@ -780,6 +780,33 @@ CREATE TABLE IF NOT EXISTS place_week (
     place_id    INTEGER NOT NULL,
     PRIMARY KEY (week_start, place_id)
 );
+
+-- ---------------------------------------------------------------------
+-- The one-time update notice: operator-authored, shown to players once
+-- per version_key, edited from the admin panel's Notice section (see
+-- app/admin_ops.py's admin_notice/admin_notice_save and
+-- frontend/admin.js). A player sees it on first map load and never
+-- again once dismissed, UNLESS version_key changes -- the dismissal
+-- itself lives in the player's own browser (localStorage, keyed on
+-- version_key -- see frontend/map2.js), never in this table, so this
+-- row only has to say what the CURRENT notice is, not who has seen it.
+--
+-- Singleton row (id fixed to 1 by the CHECK), upserted the same way
+-- app/db.py's own set_cursor() upserts the `cursor` table -- there is
+-- only ever one current notice, not a history of past ones. The repo's
+-- CHANGELOG.md is where release history actually lives; re-publishing
+-- here overwrites what was here before on purpose. Toggling `active`
+-- off retires the notice (nothing renders for players) without losing
+-- the drafted title/body/version_key, so turning it back on later does
+-- not mean retyping it.
+CREATE TABLE IF NOT EXISTS notice (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    version_key TEXT NOT NULL DEFAULT '',
+    title       TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    active      INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL DEFAULT 0
+);
 """
 
 

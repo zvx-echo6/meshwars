@@ -10,7 +10,7 @@
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/static/theme.css?v=20260823-16" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260824-1" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260825-1" />
 </head>
 <body>
 
@@ -54,6 +54,7 @@
         <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
         <button type="button" class="adm-nav-item" data-section="months">Months</button>
         <button type="button" class="adm-nav-item" data-section="places">Places</button>
+        <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
         <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
       </nav>
 
@@ -119,6 +120,25 @@
           <div id="pl-result" class="adm-result"></div>
         </section>
 
+        <section class="adm-section" data-section="notice" hidden>
+          <h2 class="adm-h2">Notice</h2>
+          <p class="adm-hint">A one-time message shown to players on their first map load. Plain text only &mdash; line breaks are kept, nothing else is. A player who dismisses it never sees it again unless the version key below changes; bumping the key re-shows it to everyone, including anyone who already dismissed the last one. History lives in the repo's CHANGELOG, not here &mdash; saving replaces whatever notice was here before.</p>
+          <p class="adm-result" id="nt-current">Loading&hellip;</p>
+          <div class="adm-form">
+            <input type="text" id="nt-version" autocomplete="off" maxlength="40" placeholder="version key, e.g. 2026-08-25" />
+          </div>
+          <div class="adm-form">
+            <input type="text" id="nt-title" autocomplete="off" maxlength="200" placeholder="title" />
+          </div>
+          <textarea id="nt-body" class="adm-textarea" maxlength="4000" rows="6" placeholder="body -- plain text, line breaks are kept as-is"></textarea>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="nt-active" class="adm-check" /> Active &mdash; shown to players</label>
+            <button type="button" id="nt-save" class="adm-btn">Save</button>
+            <button type="button" id="nt-clear" class="adm-btn adm-btn-quiet">Stop showing to players</button>
+          </div>
+          <div id="nt-result" class="adm-result"></div>
+        </section>
+
         <section class="adm-section" data-section="keys" hidden>
           <h2 class="adm-h2">API keys</h2>
           <p class="adm-hint">Keys for the public read API at <code>/api/v1</code> &mdash; one per integration, so a misbehaving bot can be revoked on its own. Read-only: these cannot post wardriving data.</p>
@@ -135,6 +155,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260824-1"></script>
+  <script src="/static/admin.js?v=20260825-1"></script>
 </body>
 </html>
