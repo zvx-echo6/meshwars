@@ -49,6 +49,35 @@ MAX_VIEWPORT_RESULTS = 2000
 MAX_NEAR_RESULTS = 100
 DEFAULT_NEAR_RESULTS = 20
 
+# Tiebreak for the two capped, points-ordered queries below (viewport
+# markers and park boundaries). `points DESC` alone is not a total
+# order -- every SOTA summit is worth the same 100 points (docs/features/
+# places.md), so SQLite falls back to breaking the tie by insertion
+# order, which follows app/reference/places_worth_going.csv, which is
+# sorted by SOTA association code (W0C Colorado ... W7Y Wyoming -- see
+# app/places_seed.py's US_SOTA_ASSOCIATIONS). A zoomed-out viewport
+# capped at MAX_VIEWPORT_RESULTS then silently kept everything up to
+# about Oregon and dropped the alphabetic tail -- Utah, Washington,
+# Wyoming, most of Nevada -- not because they are less deserving, but
+# because of where their state code falls in the alphabet.
+#
+# The fix: break the tie with a deterministic scramble of `id` instead
+# of `id` itself. Multiplicative hashing (Knuth's constant, the odd
+# 32-bit-ish multiplier below, reduced mod a large prime) decorrelates
+# the tiebreak order from insertion order -- and insertion order is
+# exactly what carries the state-code clustering -- without needing a
+# registered SQLite UDF or a second query pass: it's one arithmetic
+# expression SQLite can evaluate inline while sorting the (already
+# viewport-filtered, so already small) row set. Same `id` always hashes
+# to the same value, so the same viewport always returns the same
+# subset (no flicker while panning) and the same order (stable paging),
+# while a capped, zoomed-out view now thins evenly across whatever
+# states/regions are actually in it instead of amputating whichever one
+# sorts last.
+def _stable_tiebreak(id_column: str) -> str:
+    return f"(({id_column} * 2654435761) % 1000000007)"
+
+
 # Park boundaries (docs/features/places.md's "boundary-backed" parks --
 # a matched PAD-US polygon at or above one grid cell, app/places_seed.py's
 # geom + rotates=0 combination). These are the only places carrying a
@@ -122,7 +151,7 @@ def _park_boundaries_in_viewport(
         "SELECT id, name, points, geom FROM place "
         " WHERE ref_type = 'park' AND geom IS NOT NULL AND rotates = 0 AND active = 1 "
         "   AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? "
-        " ORDER BY points DESC, id LIMIT ?",
+        f" ORDER BY points DESC, {_stable_tiebreak('id')} LIMIT ?",
         (
             south - BOUNDARY_VIEWPORT_MARGIN_DEG, north + BOUNDARY_VIEWPORT_MARGIN_DEG,
             west - BOUNDARY_VIEWPORT_MARGIN_DEG, east + BOUNDARY_VIEWPORT_MARGIN_DEG,
@@ -157,9 +186,11 @@ async def places_in_viewport(
     zoom: float | None = None,
 ) -> JSONResponse:
     """Live places inside a map viewport -- always-active plus this
-    week's live rotating set, capped at MAX_VIEWPORT_RESULTS and
-    ordered by points (highest first) so a capped view drops the least
-    valuable markers, not an arbitrary tail.
+    week's live rotating set, capped at MAX_VIEWPORT_RESULTS and ordered
+    by points (highest first, so a capped view drops the least valuable
+    markers first) then by _stable_tiebreak (see that function) so a
+    capped, zoomed-out view thins evenly across the viewport instead of
+    keeping whichever places happen to sort first within a points tier.
 
     `zoom` only ever gates one thing server-side: whether the response
     also carries `park_boundaries`, the GeoJSON outlines for
@@ -185,7 +216,7 @@ async def places_in_viewport(
             "  FROM place p "
             " WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
             f"  AND {_live_where(week_start)} "
-            " ORDER BY p.points DESC LIMIT ?",
+            f" ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT ?",
             (south, north, west, east, week_start, MAX_VIEWPORT_RESULTS),
         ).fetchall()
         boundary_features = (
