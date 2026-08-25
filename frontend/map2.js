@@ -100,75 +100,102 @@ const LAYER_TOGGLES = [
   ['mw-layer-public-lands', ['public-lands-fill', 'public-lands-line'], 4],
   ['mw-layer-usfs-roads', ['usfs-roads-line'], 6],
   ['mw-layer-usfs-trails', ['usfs-trails-line'], 6],
-  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels'], 0],
+  // park-boundaries-fill/line are included here too -- see
+  // setupPlacesLayer -- so unchecking "Places" hides a park's outline
+  // along with its glyph instead of leaving the outline drawn with no
+  // marker to explain it. One toggle, both layers it actually governs.
+  // minZoom 0 (always available): place markers have no hard zoom
+  // cutoff any more -- they fade by icon-opacity instead (see
+  // PLACE_ICON_OPACITY_ZOOM) -- so there is no zoom below which
+  // checking this box would show literally nothing to grey it out for.
+  ['mw-layer-places', ['places-icons-summit', 'places-icons-park', 'places-icons-landmark', 'places-labels', 'park-boundaries-fill', 'park-boundaries-line'], 0],
 ];
 
-// Places Worth Going (docs/features/places.md). Colours are
-// deliberately NOT team colours (TEAM_COLORS above) -- a place is a
-// separate scoring layer from square ownership, and reusing red/green/
-// blue/etc. here would read as if a place belonged to a team. Shape is
-// the primary signal per tier (summit=triangle, park=circle,
-// landmark=diamond); colour is secondary and mostly there so the three
-// still read apart from each other at a glance against the basemap.
-// Landmark is deliberately NOT a square: the board's territory tiles
-// are axis-aligned squares, and an axis-aligned square marker sitting
-// among a run of captured tiles (e.g. along a highway) is
-// indistinguishable from one at a glance. A diamond is a square
-// rotated 45 degrees -- it keeps the tier's "squared-off" family
-// relation but a rotated shape never reads as a grid tile, since the
-// board itself is never drawn rotated.
+// Places Worth Going (docs/features/places.md). Three flat-colour
+// shapes (summit=triangle, park=circle, landmark=diamond) was the
+// original design; live feedback was that landmarks were grey and
+// nearly invisible while parks, at their old size, dominated the map,
+// and that a legend of three shapes in three greys asked a reader to
+// learn a code. A circular pin with a glyph inside it was the next
+// attempt; the user watching it live on the actual map rejected the
+// circle itself -- "i want just the icon instead" -- so this is now a
+// bare glyph silhouette (mountain/tree/star -- see PLACE_GLYPHS) with
+// no enclosing shape at all, drawn straight onto the basemap and given
+// its own outline/halo (PLACE_ICON_OUTLINE) for contrast in place of
+// the pin fill that used to provide it. The glyph is now the ONLY
+// thing separating the three tiers -- both colour and reveal zoom are
+// now shared across all three (see below) precisely so nothing but the
+// silhouette itself is left to tell them apart. Colour deliberately
+// follows each theme's own accent family (gold on classic, cyan on
+// neon) rather than staying constant across themes the way team
+// colours do -- a place is a separate scoring layer from square
+// ownership (TEAM_COLORS above), so reusing red/green/blue here would
+// read as if a place belonged to a team, but there is no reason for it
+// to fight the theme the way a team colour would. All three tiers
+// share the SAME shade -- the lightest, most saturated end of the
+// family (theme.css's --mw-gold-light / neon's cyan-light token) --
+// chosen purely for visibility against busy terrain at a tiny size;
+// there is no dimmer shade held back for a "less important" tier,
+// because the previous attempt at that (a shade ladder across tiers)
+// is exactly what made landmarks hard to see in the first place.
 const PLACE_COLORS = {
-  summit: '#e8b84b',    // warm gold -- matches --mw-gold, the site's own "this matters most" accent
-  park: '#2ec4b6',       // teal
-  landmark: '#8892a0',   // slate
+  gold: '#EDD39F',   // theme.css --mw-gold-light (classic)
+  neon: '#9DFDF6',   // theme.css --mw-gold-light (neon's cyan-light token)
 };
 
-// Base pixel sizes (not degrees -- these must stay a constant SCREEN
+// Base pixel size (not degrees -- this must stay a constant SCREEN
 // size across zoom, like any map marker, unlike the board squares
-// which are drawn to true ground scale). Summits are sized to
-// dominate, per the brief: a mountain worth 100 points should read as
-// the biggest thing on the map, a park (25) in between, a landmark (5)
-// smallest. Neon gets a larger baseline than gold -- a marker sized to
-// read against gold's light basemap washes out against neon's dark
-// hillshade and the orange territory squares underneath. Gold is left
-// as it was; same reasoning as BOARD_FILL_OPACITY/BOARD_LINE_WIDTH
-// below, it already reads fine. Zoom-interpolated on top of this via
+// which are drawn to true ground scale). ONE size, not one per tier --
+// an earlier version sized summit largest/park mid/landmark smallest as
+// a secondary hierarchy cue, explicitly dropped watching it live: with
+// colour already shared (see PLACE_COLORS above) and the glyph the only
+// intended differentiator, a size difference on top just made summit
+// read as "more important" again through the back door. Equal NOMINAL
+// size does not by itself mean equal APPARENT size -- see PLACE_GLYPHS'
+// own per-shape normalization below, which is doing the real work of
+// making the three look like siblings; this constant is just the
+// shared budget they each normalize into. Neon gets a larger baseline
+// than gold -- a marker sized to read against gold's light basemap
+// washes out against neon's dark hillshade and the orange territory
+// squares underneath; same per-theme pattern as BOARD_FILL_OPACITY/
+// BOARD_LINE_WIDTH below. Zoom-interpolated on top of this via
 // PLACE_ICON_SIZE_ZOOM -- see there for why.
-const PLACE_ICON_PX = {
-  gold: { summit: 22, park: 15, landmark: 9 },
-  neon: { summit: 30, park: 20, landmark: 13 },
-};
+const PLACE_ICON_PX = { gold: 22, neon: 30 };
 
-// Outline drawn around each marker's fill in drawPlaceIcon. This, not
-// raw size, is what actually separates a filled shape from a dark
-// hillshade and the orange territory squares underneath -- gold's
-// existing soft dark outline is left untouched (it already reads fine
-// against gold's light basemap), neon needs the opposite: a light
-// halo, same problem BOARD_FILL_OPACITY/BOARD_LINE_WIDTH solved for
-// the board layer, same per-theme pattern.
+// Outline/halo stroked around each glyph's own edge in drawPlaceIcon.
+// With the enclosing pin gone, this is now the ONLY thing separating a
+// bare gold or cyan glyph from a dark hillshade and the orange
+// territory squares underneath -- it used to just edge a solid pin
+// fill, a lighter job. Both values were strengthened over the pin-era
+// numbers (was width 1/1.5, opacity .55/.95) to do that heavier job:
+// gold gets a stronger dark outline (still soft, but no longer barely
+// there) against its light basemap; neon keeps its light halo, opaque
+// now rather than near-opaque, same problem BOARD_FILL_OPACITY/
+// BOARD_LINE_WIDTH solved for the board layer, same per-theme pattern.
 const PLACE_ICON_OUTLINE = {
-  gold: { color: 'rgba(0,0,0,0.55)', width: 1 },
-  neon: { color: 'rgba(244,241,232,0.95)', width: 1.5 },
+  gold: { color: 'rgba(0,0,0,0.65)', width: 1.5 },
+  neon: { color: 'rgba(244,241,232,1)', width: 2 },
 };
 
 // Park boundaries (app/places_api.py's `park_boundaries` -- a matched
 // PAD-US polygon at or above one grid cell, docs/features/places.md).
-// A big park still keeps its circle marker at every zoom (see
-// setupPlacesLayer/PLACE_TYPE_MIN_ZOOM below) -- the outline is drawn
-// ON TOP of that, only once zoomed in enough for the shape to mean
-// anything, so the park is still findable by its marker at a whole-
-// region zoom even though the outline itself has not appeared yet.
-// MIN_BOUNDARY_ZOOM must match app/places_api.py's own constant of the
-// same name -- it is both the client's own layer minzoom AND the zoom
-// this page starts asking the server for boundary geometry at all
-// (fetchPlacesInViewport passes map.getZoom() in the `zoom` param), so
-// a mismatch here would either fetch boundary data that never draws or
-// draw a layer that never has data.
+// A big park still keeps its own glyph, fading in by
+// PLACE_ICON_OPACITY_ZOOM the same as every other place (see
+// setupPlacesLayer) -- the outline is drawn ON TOP of that, only once
+// zoomed in enough for the shape to mean anything, so the park is
+// still findable by its glyph before the outline itself has appeared.
+// MIN_BOUNDARY_ZOOM must match app/places_api.py's own
+// constant of the same name -- it is both the client's own layer
+// minzoom AND the zoom this page starts asking the server for boundary
+// geometry at all (fetchPlacesInViewport passes map.getZoom() in the
+// `zoom` param), so a mismatch here would either fetch boundary data
+// that never draws or draw a layer that never has data.
 const MIN_BOUNDARY_ZOOM = 11;
 
-// Colour reuses PLACE_COLORS.park (the same teal the circle marker
-// already draws in) rather than inventing a new one -- this is the
-// same park, just drawn two ways at once. Fill stays close to nothing
+// Colour reuses PLACE_COLORS[theme] (the same shade every glyph now
+// draws in, park included -- see PLACE_COLORS above) rather than
+// inventing a new one -- this is the same park, just drawn two ways at
+// once. Fill stays close to nothing
 // on purpose: a boundary is a quiet outline, not a second filled area
 // competing with the team squares (BOARD_FILL_OPACITY, 0.45/0.65) or
 // reading like the public-lands overlay (a flat, unrelated green wash,
@@ -181,41 +208,66 @@ const PARK_BOUNDARY_LINE_WIDTH = { gold: 1, neon: 1.5 };
 const PARK_BOUNDARY_LINE_OPACITY = { gold: 0.7, neon: 0.85 };
 
 // Marker screen size is also zoom-interpolated, on top of the
-// per-theme base pixel sizes above: with ~80,000 places now seeded
+// per-theme base pixel size above: with ~80,000 places now seeded
 // (43,639 parks + 30,408 landmarks + 6,487 summits, plus rotating live
 // ones), a size tuned to read at zoom 13 close-in tiles into a solid
-// mass at zoom 9's region view if left constant. Same curve for both
-// themes -- the per-theme PX values above already carry the theme
-// difference. Summits alone carry PLACE_TYPE_MIN_ZOOM 0, so they are
-// the only tier drawn below zoom 10 -- interpolate clamps to the
-// lowest stop's value for any zoom below it, so the original curve
-// (first stop at 9) rendered every summit at that same size all the
-// way out to a whole-state view, where they read as chunky triangles
-// blanketing the terrain. Stops now reach down to zoom 3 (global/
-// regional) at a small fraction of the zoom-13 size -- just enough to
-// say "a peak is here" -- and grow through the mid zooms up to the
-// same zoom-11/13 values as before, so close-in legibility is
-// unchanged. Since icon-size scales the whole rasterized icon
-// (drawPlaceIcon bakes the outline into the same raster at
-// PLACE_ICON_OUTLINE's width), the outline thins proportionally with
-// the fill at low zoom for free -- no separate outline curve needed.
-const PLACE_ICON_SIZE_ZOOM = ['interpolate', ['linear'], ['zoom'], 3, 0.1, 6, 0.2, 8, 0.32, 9, 0.6, 11, 0.85, 13, 1.1];
+// mass at a whole-region view if left constant. Same curve for both
+// themes -- the per-theme PX value above already carries the theme
+// difference.
+//
+// CAPPED AT 1.0, deliberately never higher -- this is the fix for a
+// real blur bug, not a style choice. registerPlaceIcons rasterizes
+// each glyph once, at PLACE_ICON_PX * the screen's own devicePixelRatio
+// (see there), and icon-size then scales THAT raster for display: at
+// icon-size 1.0 the raster is shown at its own native resolution
+// (crisp on any dpr, since it was authored at that dpr already), but
+// any icon-size ABOVE 1.0 stretches it past native resolution and
+// blurs, exactly like blowing up a small image -- an earlier version
+// of this curve peaked at 1.15 (a 15% upscale at zoom 13 and, since
+// interpolate clamps past its last stop, at every zoom above that too,
+// including the map's own 17 maximum), which is precisely why the
+// glyphs read as blurry zoomed in. Peaking at 1.0 here means the
+// rasterized size (PLACE_ICON_PX) IS the size needed at the closest
+// zoom the map allows -- every zoom below that only ever shrinks the
+// same raster down, never up, so there is no zoom level, including 15
+// and 17, where this can go soft.
+const PLACE_ICON_SIZE_ZOOM = ['interpolate', ['linear'], ['zoom'], 3, 0.15, 6, 0.35, 8, 0.55, 9, 0.75, 10, 0.9, 11, 0.95, 13, 1.0];
 
 const PLACE_TYPES = ['summit', 'park', 'landmark'];
 
-// Per-tier reveal zoom (see setupPlacesLayer's three-layer split).
-// City parks alone run ~43,600 -- at a whole-region zoom (e.g. zoom 9
-// over Boise) that many 25-point circles visually bury both the rare
-// 100-point summits and the 5-point landmarks, backwards from what
-// matters. Gating by value instead of shrinking further (shrinking
-// undoes the whole point of this fix) makes the reveal match what is
-// worth going to at that scale: summits from the map's own minzoom
-// (rare and the highest tier -- the thing to see scanning a whole
-// region), parks from zoom 10 (a sub-region has narrowed into view),
-// landmarks from zoom 11 (already looking at one town, same zoom as
-// the Twin Falls reference case). Chosen by screenshot at zoom 7/9/11/
-// 13 -- see the deploy notes for what else was tried.
-const PLACE_TYPE_MIN_ZOOM = { summit: 0, park: 10, landmark: 11 };
+// All three tiers reveal at the SAME zoom, and there is no hard cutoff
+// at all any more: the layer's own minzoom is left at the map's own
+// floor (see main()'s `minZoom: 4`), and decluttering a whole-region
+// view of ~80,000 places is instead handled entirely by icon-opacity
+// (PLACE_ICON_OPACITY_ZOOM below) -- fading out, not disappearing at a
+// boundary. Two earlier attempts at the regional-declutter problem both
+// got explicitly overridden watching this live: a staggered per-tier
+// reveal zoom (summit from 0, park from 10, landmark from 8/11) read as
+// three different tiers with three different rules; a single shared
+// reveal zoom plus a dot-below/glyph-above size threshold fixed the
+// "three different rules" complaint but replaced it with a new one --
+// "trees turn to circles when zooming out" -- because a `step`
+// expression is a discontinuous jump: one frame is a glyph, the next is
+// a completely different shape. icon-opacity is a paint property
+// MapLibre interpolates smoothly every frame at zero extra cost (no
+// separate image per opacity step the way the dot/glyph swap needed
+// one), so nothing ever changes SHAPE, only how visible it is -- there
+// is no discontinuity for a "pop" or a "the trees broke" read to happen
+// at all.
+//
+// Stops (0 at the map's own zoom 4 floor, ramped up to full by 10, held
+// at 1 above that -- interpolate clamps past the last stop):
+//   4 -> 0     (map's own minimum: fully invisible, nothing to declutter)
+//   6 -> 0.05  (whole-region view: barely perceptible, reads as empty)
+//   8 -> 0.35  (a sub-region has narrowed into view: starting to show)
+//   9 -> 0.7
+//   10 -> 1    (full strength from here up -- "somewhere you'd go")
+// Chosen by looking at the zoom-6/10/13 reference screenshots: zoom 6
+// needed to still read as an honest empty regional view (same result
+// the old hard zoom-8 cutoff gave), while zoom 10 and 13 both needed to
+// be at full strength, matching every earlier round's legibility work
+// -- so the curve had to reach 1.0 by 10, not somewhere past it.
+const PLACE_ICON_OPACITY_ZOOM = ['interpolate', ['linear'], ['zoom'], 4, 0, 6, 0.05, 8, 0.35, 9, 0.7, 10, 1];
 
 // Below this zoom the map is showing a whole region and place NAMES
 // would overlap into noise; icons still draw at every zoom (subject to
@@ -1062,6 +1114,100 @@ async function fetchPlacesNear(lat, lon) {
   return res.json();
 }
 
+// One canvas path per tier, drawn centered on (cx, cy) and scaled to
+// fit within radius g (the glyph budget -- see drawPlaceIcon). Bold,
+// simple, single-fill-pass silhouettes on
+// purpose: these render as small as ~22-30 CSS px (see PLACE_ICON_PX)
+// at low zoom, so any silhouette with fine detail (a snow-capped peak,
+// individual pine needles, a five-point star with thin arms) turns to
+// mud at that size. Each is picked to be unmistakable from the
+// other two even as a blurry thumbnail: the mountain is wide and low
+// (twin overlapping peaks), the tree is tall and narrow with a trunk
+// stub, the star is the only one with concave points -- three
+// different silhouette OUTLINES, not just three different fills of the
+// same rough blob, so they stay apart at every zoom the fade
+// (PLACE_ICON_OPACITY_ZOOM) leaves them at all visible.
+const PLACE_GLYPHS = {
+  // Twin overlapping peaks -- wide and flat, both peaks sharing roughly
+  // the same baseline. Reads as "range" rather than "single point" even
+  // tiny, and its wide/short silhouette is the opposite of the tree's
+  // tall/narrow one below.
+  summit(ctx, cx, cy, g) {
+    const baseY = cy + g * 0.6;
+    ctx.moveTo(cx - g, baseY);
+    ctx.lineTo(cx - g * 0.32, cy - g * 0.4);
+    ctx.lineTo(cx + g * 0.08, baseY);
+    ctx.closePath();
+    ctx.moveTo(cx - g * 0.22, baseY);
+    ctx.lineTo(cx + g * 0.32, cy - g * 0.85);
+    ctx.lineTo(cx + g, baseY);
+    ctx.closePath();
+  },
+  // A stacked, three-tier conifer over a short trunk block -- two
+  // earlier attempts both failed watching this live: a single wide
+  // triangle plus a trunk line read as an up-arrow (a triangle-over-a-
+  // stem is exactly that common icon's shape, regardless of the
+  // triangle's own proportions), and a rounded 3-circle "bush" canopy
+  // read as a face/skull (the gaps between the circles' outlines
+  // become eye-shaped holes once stroked). Three flat-bottomed
+  // triangles, each apex overlapping down into the tier above so the
+  // wider shoulders of every lower tier show as a visible STEP, is the
+  // classic layered-Christmas-tree silhouette -- multiple distinct
+  // tiers read as "tree" precisely because neither an arrow nor a
+  // mountain (two peaks, not three stacked/shrinking ones) has that
+  // shape, and there is no smooth rounded outline for it to be
+  // mistaken for a face.
+  park(ctx, cx, cy, g) {
+    const trunkW = g * 0.2, trunkTop = cy + g * 0.55, trunkBottom = cy + g * 0.85;
+    ctx.moveTo(cx - trunkW, trunkBottom);
+    ctx.lineTo(cx + trunkW, trunkBottom);
+    ctx.lineTo(cx + trunkW, trunkTop);
+    ctx.lineTo(cx - trunkW, trunkTop);
+    ctx.closePath();
+    ctx.moveTo(cx, cy - g);
+    ctx.lineTo(cx + g * 0.45, cy - g * 0.25);
+    ctx.lineTo(cx - g * 0.45, cy - g * 0.25);
+    ctx.closePath();
+    ctx.moveTo(cx, cy - g * 0.5);
+    ctx.lineTo(cx + g * 0.68, cy + g * 0.15);
+    ctx.lineTo(cx - g * 0.68, cy + g * 0.15);
+    ctx.closePath();
+    ctx.moveTo(cx, cy - g * 0.12);
+    ctx.lineTo(cx + g * 0.9, trunkTop);
+    ctx.lineTo(cx - g * 0.9, trunkTop);
+    ctx.closePath();
+  },
+  // Standard five-point star -- the only glyph with concave points, so
+  // it never reads as a rounded blob the way a shrunk mountain or tree
+  // can. Normalized against the other two by actual pixel-area, not by
+  // eye: measured via an offscreen canvas at a shared reference budget
+  // (fill each glyph, count non-transparent pixels), summit and park
+  // land within 2% of each other already (their different silhouette
+  // shapes happen to use their own bounding box about equally
+  // efficiently) -- landmark at outerR=g came in far under both, and at
+  // an earlier 0.8g (tuned back when PLACE_ICON_PX still gave landmark
+  // its own, larger, per-tier size) came in at little more than half
+  // their filled area. 0.95 is the measured match: close to full
+  // radius, because a star's concave notches always cost real filled
+  // area a solid triangle does not pay for the same reach -- matching
+  // envelope size, not raw fill density, is what actually reads as
+  // "the same size" for a spiky shape next to a solid one. Confirmed by
+  // eye afterward, side by side at equal size, not just by the numbers.
+  landmark(ctx, cx, cy, g) {
+    const outerR = g * 0.95, innerR = g * 0.95 * 0.42, spikes = 5;
+    let rot = -Math.PI / 2;
+    const step = Math.PI / spikes;
+    ctx.moveTo(cx + Math.cos(rot) * outerR, cy + Math.sin(rot) * outerR);
+    for (let i = 0; i < spikes; i++) {
+      rot += step;
+      ctx.lineTo(cx + Math.cos(rot) * innerR, cy + Math.sin(rot) * innerR);
+      rot += step;
+      ctx.lineTo(cx + Math.cos(rot) * outerR, cy + Math.sin(rot) * outerR);
+    }
+    ctx.closePath();
+  },
+};
+
 // Draws a tiny raster icon for one place tier on an offscreen canvas
 // and hands it to MapLibre via map.addImage -- no sprite sheet or
 // external asset file, generated at runtime instead, same
@@ -1069,57 +1215,81 @@ async function fetchPlacesNear(lat, lon) {
 // symbol layer (not a fill layer of ground polygons the way the board
 // squares are drawn) is what keeps these a constant PIXEL size across
 // zoom: a place marker is a marker, not a to-scale shape on the ground.
-// outline is a {color, width} pair (PLACE_ICON_OUTLINE) -- width is in
-// CSS px, doubled below for the same 2x-canvas reason dim is.
-function drawPlaceIcon(shape, color, sizePx, outline) {
+//
+// No enclosing pin or circle any more -- the glyph itself (from
+// PLACE_GLYPHS, filled with `color`) IS the whole icon, with `outline`
+// (a {color, width} pair, PLACE_ICON_OUTLINE) stroked around its own
+// edge as a halo for contrast against the basemap, the same job a
+// solid pin fill used to do for free. No dot fallback any more either
+// (see PLACE_ICON_OPACITY_ZOOM) -- the glyph is the ONLY thing this
+// function ever draws now.
+//
+// dpr is the screen's own window.devicePixelRatio, passed in by
+// registerPlaceIcons rather than hardcoded -- THE FIX for a real blur
+// bug, not a style choice. This used to hardcode "2" for both the
+// canvas resolution (dim = sizePx*2) and the pixelRatio handed to
+// map.addImage, regardless of the actual screen: on any display
+// reporting a higher devicePixelRatio (most phones report 3, many
+// laptops report 2.5+), MapLibre renders its own tiles at that
+// screen's real pixel density but this raster was never authored at
+// more than 2x, so a real hidpi screen was upscaling a raster that was
+// already lower-resolution than the screen needed -- exactly the
+// "blurry when zoomed in" symptom, and the worse the screen, the worse
+// the blur. Rasterizing at the screen's OWN dpr (floored at 2 so a
+// standard 1x display still gets a generously large source image, per
+// PLACE_ICON_SIZE_ZOOM's own no-upscale-past-1.0 fix alongside this
+// one) means the source image always has at least as many physical
+// pixels as the screen can show, so icon-size <= 1.0 never has to
+// stretch past native resolution on ANY screen.
+function drawPlaceIcon(type, color, sizePx, outline, dpr) {
   const canvas = document.createElement('canvas');
-  // 2x for a crisp icon on high-DPI screens; MapLibre reads pixelRatio
-  // separately from the addImage options below.
-  const dim = sizePx * 2;
+  const dim = sizePx * dpr;
   canvas.width = dim;
   canvas.height = dim;
   const ctx = canvas.getContext('2d');
-  const cx = dim / 2, cy = dim / 2, r = dim / 2 - 2;
+  const cx = dim / 2, cy = dim / 2;
+  // Glyph budget leaves just enough margin for the outline stroke
+  // itself not to clip against the canvas edge -- there is no pin fill
+  // eating into this any more, so the glyph gets almost the whole
+  // canvas footprint. Outline width is scaled by dpr the same way the
+  // glyph itself is (CSS px -> device px), not by the old fixed *2.
+  const g = dim / 2 - outline.width * dpr - 1;
 
   ctx.fillStyle = color;
   ctx.strokeStyle = outline.color;
-  ctx.lineWidth = outline.width * 2;
-
-  if (shape === 'triangle') {
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - r);
-    ctx.lineTo(cx + r * 0.92, cy + r * 0.8);
-    ctx.lineTo(cx - r * 0.92, cy + r * 0.8);
-    ctx.closePath();
-  } else if (shape === 'diamond') {
-    const d = r * 0.95;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - d);
-    ctx.lineTo(cx + d, cy);
-    ctx.lineTo(cx, cy + d);
-    ctx.lineTo(cx - d, cy);
-    ctx.closePath();
-  } else {
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  }
+  ctx.lineWidth = outline.width * dpr;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  PLACE_GLYPHS[type](ctx, cx, cy, g);
   ctx.fill();
   ctx.stroke();
 
   return { data: ctx.getImageData(0, 0, dim, dim).data, width: dim, height: dim };
 }
 
-// Registers both themes' icon images up front (place-icon-<type>-gold
-// and place-icon-<type>-neon) so applyBasemapTheme can flip which set
-// each places-icons-<type> layer points at with a plain
-// setLayoutProperty, the same visibility-swap-not-rebuild pattern the
-// gold/neon basemap rasters use -- see applyBasemapTheme.
+// Registers both themes' icon images up front (place-icon-<type>-gold/
+// -neon) so applyBasemapTheme can flip which set each places-icons-
+// <type> layer points at with a plain setLayoutProperty, the same
+// visibility-swap-not-rebuild pattern the gold/neon basemap rasters
+// use -- see applyBasemapTheme. dpr is read ONCE here (not inside
+// drawPlaceIcon per call) and handed to both the canvas resolution and
+// map.addImage's own pixelRatio option -- these two MUST agree, since
+// pixelRatio is what tells MapLibre how many raster pixels correspond
+// to one CSS pixel; passing a mismatched pair would reintroduce the
+// same blur this whole function exists to fix, just via a different
+// mismatch. Floored at 2 rather than passed through raw: a floor of 1
+// would make a completely ordinary 1x monitor the WORST-resolution
+// source of all three, when it is by far the most common screen this
+// page will actually render on.
 function registerPlaceIcons(map) {
-  const shapes = { summit: 'triangle', park: 'circle', landmark: 'diamond' };
+  const dpr = Math.max(2, window.devicePixelRatio || 1);
   for (const theme of Object.keys(PLACE_ICON_PX)) {
-    for (const type of Object.keys(shapes)) {
-      const icon = drawPlaceIcon(shapes[type], PLACE_COLORS[type], PLACE_ICON_PX[theme][type], PLACE_ICON_OUTLINE[theme]);
-      map.addImage(`place-icon-${type}-${theme}`, icon, { pixelRatio: 2 });
+    const color = PLACE_COLORS[theme];
+    const sizePx = PLACE_ICON_PX[theme];
+    const outline = PLACE_ICON_OUTLINE[theme];
+    for (const type of PLACE_TYPES) {
+      const icon = drawPlaceIcon(type, color, sizePx, outline, dpr);
+      map.addImage(`place-icon-${type}-${theme}`, icon, { pixelRatio: dpr });
     }
   }
 }
@@ -1148,7 +1318,7 @@ function setupPlacesLayer(map) {
     source: 'park-boundaries',
     minzoom: MIN_BOUNDARY_ZOOM,
     paint: {
-      'fill-color': PLACE_COLORS.park,
+      'fill-color': PLACE_COLORS[currentTheme()],
       'fill-opacity': PARK_BOUNDARY_FILL_OPACITY.gold,
     },
   }, 'board-fill');
@@ -1158,37 +1328,37 @@ function setupPlacesLayer(map) {
     source: 'park-boundaries',
     minzoom: MIN_BOUNDARY_ZOOM,
     paint: {
-      'line-color': PLACE_COLORS.park,
+      'line-color': PLACE_COLORS[currentTheme()],
       'line-width': PARK_BOUNDARY_LINE_WIDTH.gold,
       'line-opacity': PARK_BOUNDARY_LINE_OPACITY.gold,
     },
   }, 'board-fill');
 
-  // One symbol layer per tier, not one shared layer, so each tier can
-  // carry its own minzoom (PLACE_TYPE_MIN_ZOOM) -- a single "Places"
-  // toggle still controls all three together (see LAYER_TOGGLES), this
-  // split is purely about *when* each tier reveals, not a switcher
-  // control of its own. Reveals progressively by value: summits (100
-  // pts, rare) are visible from the map's own minzoom upward; parks
-  // (25 pts, common) fade in at a mid zoom once the region has
-  // narrowed to a town-sized area; landmarks (5 pts, most common)
-  // reveal last, only once zoomed in on a town, so the most valuable
-  // tier is what a reader sees first rather than being swamped by the
-  // most numerous one -- see PLACE_TYPE_MIN_ZOOM's own comment.
+  // One symbol layer per tier, not one shared layer, so each tier's
+  // icon-image can point at its own glyph (PLACE_GLYPHS[type]) while
+  // still filtering the same shared `places` source -- a single
+  // "Places" toggle still controls all three together (see
+  // LAYER_TOGGLES). No minzoom set (defaults to the map's own floor,
+  // see main()'s `minZoom: 4`) -- there is no hard cutoff any more,
+  // regional decluttering is entirely icon-opacity's job now (see
+  // PLACE_ICON_OPACITY_ZOOM), which fades smoothly rather than
+  // switching anything on or off at a boundary.
   for (const type of PLACE_TYPES) {
     map.addLayer({
       id: `places-icons-${type}`,
       type: 'symbol',
       source: 'places',
       filter: ['==', ['get', 'type'], type],
-      minzoom: PLACE_TYPE_MIN_ZOOM[type],
       layout: {
-        // Theme suffix is filled in properly by applyBasemapTheme right
-        // after this layer is added (see boot sequence); this initial
-        // value is just a safe default before that first call.
-        'icon-image': ['concat', 'place-icon-', ['get', 'type'], '-', currentTheme()],
+        // Theme is filled in properly by applyBasemapTheme right after
+        // this layer is added (see boot sequence); this initial value
+        // is just a safe default before that first call.
+        'icon-image': `place-icon-${type}-${currentTheme()}`,
         'icon-allow-overlap': true,
         'icon-size': PLACE_ICON_SIZE_ZOOM,
+      },
+      paint: {
+        'icon-opacity': PLACE_ICON_OPACITY_ZOOM,
       },
     });
   }
@@ -1286,7 +1456,7 @@ function renderPlacesPanel(data) {
     const li = document.createElement('li');
     const miles = (p.distance_m / 1609.344).toFixed(1);
     li.innerHTML =
-      `<span class="mw-place-icon" style="background:${PLACE_COLORS[p.type] || '#999'}"></span>`
+      `<span class="mw-place-icon" style="background:${PLACE_COLORS[currentTheme()]}"></span>`
       + `<span class="mw-place-name">${escapeHtml(p.name)}</span>`
       + `<span class="mw-place-meta">${p.points}pt &middot; ${miles}mi</span>`;
     li.addEventListener('click', () => {
@@ -1343,10 +1513,12 @@ function applyBasemapTheme(map) {
   map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
   map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
   map.setPaintProperty('park-boundaries-fill', 'fill-opacity', PARK_BOUNDARY_FILL_OPACITY[theme]);
+  map.setPaintProperty('park-boundaries-fill', 'fill-color', PLACE_COLORS[theme]);
   map.setPaintProperty('park-boundaries-line', 'line-width', PARK_BOUNDARY_LINE_WIDTH[theme]);
   map.setPaintProperty('park-boundaries-line', 'line-opacity', PARK_BOUNDARY_LINE_OPACITY[theme]);
+  map.setPaintProperty('park-boundaries-line', 'line-color', PLACE_COLORS[theme]);
   for (const type of PLACE_TYPES) {
-    map.setLayoutProperty(`places-icons-${type}`, 'icon-image', ['concat', 'place-icon-', ['get', 'type'], '-', theme]);
+    map.setLayoutProperty(`places-icons-${type}`, 'icon-image', `place-icon-${type}-${theme}`);
   }
 }
 

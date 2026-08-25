@@ -78,7 +78,7 @@ import time
 from shapely import wkt as shapely_wkt
 from shapely.geometry import MultiPolygon, Polygon, box as shapely_box
 
-from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id
+from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
 
 log = logging.getLogger("places_seed")
 
@@ -105,6 +105,71 @@ US_SOTA_ASSOCIATIONS = frozenset({
 })
 
 _MIN_OVERLAP_FRACTION = 0.5  # ">50% inside the boundary"
+
+# SUMMIT/LANDMARK DOUBLE-DIP FILTER (added 2026-08-25) -- some SOTA
+# summits carry a fire lookout, and OSM separately maps that lookout as
+# its own landmark (man_made=tower / tower:type=observation, or similar
+# -- extract_landmarks() in scripts/build_places_seed.py does not
+# distinguish landmark subtypes, so these come through like any other
+# landmark). Both rows then sit at essentially the same coordinates: the
+# 100-point summit and a 5-point landmark for the SAME physical peak,
+# meaning one visit could score twice. The summit is the higher tier and
+# the real destination, so the landmark loses -- dropped here rather
+# than kept and left to double-score.
+#
+# 100m, not miles: a lookout tower sits ON the summit it serves, so the
+# two points are essentially coincident modulo GPS/OSM-mapping noise,
+# not "nearby". 100m is generous enough to absorb that noise (SOTA's
+# summit point and OSM's tower point are rarely surveyed to the same
+# few meters) while still being far too tight to catch a genuinely
+# separate landmark (a trailhead sign, a monument) that merely happens
+# to sit on the same mountain a summit does -- those are real, distinct
+# destinations and must survive.
+_SUMMIT_COLOCATION_RADIUS_M = 100.0
+
+
+def _kept_summit_buckets(path: str) -> dict[str, list[tuple[float, float]]]:
+    """First pass over the CSV: (lat, lon) of every summit that will
+    actually be KEPT (passes the same US/named-summit test
+    _classify_row applies in the real load), bucketed by grid cell id
+    for a cheap proximity lookup in the main load loop below. A summit
+    that _classify_row would exclude (non-US, or an unnamed placeholder
+    peak) never got the game's 100 points in the first place, so a
+    landmark near IT must not be excluded either -- there would be
+    nothing left at that spot to double-dip against.
+    """
+    buckets: dict[str, list[tuple[float, float]]] = {}
+    with open(path, encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            if row["ref_type"] != "summit":
+                continue
+            keep, _ = _classify_row(row)
+            if not keep:
+                continue
+            lat, lon = float(row["lat"]), float(row["lon"])
+            buckets.setdefault(cell_id(lat, lon), []).append((lat, lon))
+    return buckets
+
+
+def _near_kept_summit(lat: float, lon: float, buckets: dict[str, list[tuple[float, float]]]) -> bool:
+    """True if (lat, lon) is within _SUMMIT_COLOCATION_RADIUS_M of any
+    bucketed summit. Checks the containing cell PLUS its 8 neighbours
+    (grid cells are ~300x420m -- see CELL_LAT_DEG/CELL_LON_DEG -- well
+    over 3x the 100m radius, so a summit just across a cell boundary
+    from the landmark being tested is still caught) rather than trusting
+    a single cell lookup, same reasoning _park_cells already applies to
+    boundary-cell membership above.
+    """
+    lat_idx = math.floor(lat / CELL_LAT_DEG)
+    lon_idx = math.floor(lon / CELL_LON_DEG)
+    for d_lat in (-1, 0, 1):
+        for d_lon in (-1, 0, 1):
+            cid = f"{lat_idx + d_lat}_{lon_idx + d_lon}"
+            for s_lat, s_lon in buckets.get(cid, ()):
+                if distance_m(lat, lon, s_lat, s_lon) <= _SUMMIT_COLOCATION_RADIUS_M:
+                    return True
+    return False
 
 # NAMED-SUMMITS-ONLY FILTER (added 2026-08-24) -- SOTA does not require
 # a summit to have a real name. Where one is missing, SOTA's own
@@ -313,6 +378,13 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         # because they were not present in this load at all (never
         # deleted -- see the reconcile note above).
         "deactivated": 0,
+        # Landmarks dropped by the summit/landmark double-dip filter
+        # (see _SUMMIT_COLOCATION_RADIUS_M) -- a distinct counter from
+        # excluded.landmark (the non-US filter) so this specific,
+        # data-quality-sensitive exclusion is visible on its own rather
+        # than folded into a bucket that would hide a wrong radius
+        # behind a normal-looking total.
+        "landmark_colocated_with_summit": 0,
     }
 
     if not os.path.exists(_DATA_PATH):
@@ -344,7 +416,13 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # DB fingerprinted before this filter landed needs the version bump
     # to actually deactivate the newly-excluded summits rather than
     # trusting a fingerprint recorded under the old, looser rule.
-    _RECONCILE_VERSION = 2
+    #
+    # v3 (2026-08-25): the summit/landmark double-dip filter
+    # (_SUMMIT_COLOCATION_RADIUS_M) is new -- same "CSV bytes unchanged,
+    # which rows get kept changed" situation, so a DB fingerprinted
+    # under v2 needs this bump to actually deactivate the newly-excluded
+    # co-located landmarks.
+    _RECONCILE_VERSION = 3
     st = os.stat(_DATA_PATH)
     fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}"
     row = conn.execute("SELECT v FROM cursor WHERE k = 'places_seed_csv_fingerprint'").fetchone()
@@ -358,6 +436,13 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
 
     now = int(time.time())
     t0 = time.monotonic()
+    # Built up front, once, from its own pass over the file -- see
+    # _kept_summit_buckets's docstring for why this has to be a
+    # separate pass rather than accumulated inline as the main loop
+    # below reads landmark rows (a landmark can appear before the
+    # summit it double-dips with in file order; SOTA/PADUS/OSM rows are
+    # not sorted by proximity to each other).
+    summit_buckets = _kept_summit_buckets(_DATA_PATH)
     seen_ids: set[int] = set()
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -372,6 +457,10 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
 
                 lat = float(row["lat"])
                 lon = float(row["lon"])
+
+                if ref_type == "landmark" and _near_kept_summit(lat, lon, summit_buckets):
+                    stats["landmark_colocated_with_summit"] += 1
+                    continue
                 points = int(row["points"])
                 area_m2 = float(row["area_m2"]) if row.get("area_m2") else None
                 geom_wkt = row.get("geom") or None
@@ -469,11 +558,13 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     log.info(
         "places_seed: loaded summit=%d park=%d landmark=%d (excluded non-US: summit=%d park=%d landmark=%d) "
         "park boundary matched=%d unmatched=%d (of matched: larger-than-cell=%d smaller-than-cell=%d) "
+        "landmark colocated with summit=%d (dropped, within %.0fm) "
         "deactivated=%d (left the seed, kept as history) in %.1fs",
         stats["kept"]["summit"], stats["kept"]["park"], stats["kept"]["landmark"],
         stats["excluded"]["summit"], stats["excluded"]["park"], stats["excluded"]["landmark"],
         stats["park_matched"], stats["park_unmatched"],
         stats["park_matched_larger"], stats["park_matched_smaller"],
+        stats["landmark_colocated_with_summit"], _SUMMIT_COLOCATION_RADIUS_M,
         stats["deactivated"], elapsed,
     )
     return stats
