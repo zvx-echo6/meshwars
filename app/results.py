@@ -47,7 +47,9 @@ PLAYER_AWARDS = [
     ("top_attacker", "Top Attacker"),
     ("top_defender", "Top Defender"),
     ("quick_fingers", "Quick Fingers"),
-    ("explorer", "Explorer"),
+    ("tourist", "Tourist"),
+    ("park_hopper", "Park Hopper"),
+    ("peak_tagger", "Peak Tagger"),
     ("frontier", "Frontier"),
 ]
 PER_TEAM_AWARDS = [
@@ -76,6 +78,18 @@ AWARD_LABELS["most_consistent"] = "Most Consistent"
 # record of seniority rather than a contest -- players still earn streak
 # points, only the award for topping them is gone.
 AWARD_LABELS["top_netop"] = "Top NetOp"
+
+# explorer (most place_activation points earned this month) came down
+# 2026-08-25: points are capped at 100 per person per week, so everyone
+# who plays seriously ends a month within the same narrow band and the
+# award separates nobody -- the same ceiling that retired Most
+# Consistent. Replaced by three awards that count VISITS instead of
+# points -- Tourist, Park Hopper, Peak Tagger, one per place type --
+# because the weekly cap makes them mutually exclusive in practice (a
+# remote summit alone spends the whole week) and so each one now
+# describes a real, distinct playstyle instead of three views of the
+# same points grind.
+AWARD_LABELS["explorer"] = "Explorer"
 
 # Display order. compute_month() emits awards in this order naturally,
 # but a frozen month is read back out of a table with no inherent order,
@@ -311,27 +325,39 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     add(_award("top_defender", *(_top(retakes) or (None, 0)), names=names,
                detail="squares taken back"))
 
-    # ---- explorer: most Explorer Score points earned this month -------
-    # Places Worth Going (docs/features/places.md) points, from
-    # place_activation.points, scoped by awarded_at falling inside the
-    # month -- the same time-only scoping mc_scoring.team_place_points()
-    # and the /api/v1/players Explorer Score already use. place_activation
-    # has no protocol column (a scoring ping credits places the same way
-    # regardless of which board sent it -- see app/place_scoring.py), so
-    # this does not filter by protocol either, matching that existing
-    # convention rather than inventing a new one.
+    # ---- tourist / park hopper / peak tagger: most VISITS this month ---
+    # One award per place type (docs/features/places.md), counting rows
+    # in place_activation joined to place.ref_type, scoped by awarded_at
+    # falling inside the month -- the same time-only scoping every other
+    # award here uses. place_activation has no protocol column (a
+    # scoring ping credits places the same way regardless of which
+    # board sent it -- see app/place_scoring.py), so this does not
+    # filter by protocol either, matching that existing convention.
     #
-    # Used to be "most squares nobody had ever claimed" -- a proxy for
-    # exploring, back when there was nothing else to measure it with. Now
-    # that Places Worth Going exists, points earned from actual named
-    # destinations are the real thing that proxy was standing in for.
-    explorer_pts: dict[int, float] = dict(conn.execute(
-        "SELECT player_id, SUM(points) FROM place_activation "
-        " WHERE awarded_at >= ? AND awarded_at < ? GROUP BY player_id",
-        (start, end),
-    ).fetchall())
-    add(_award("explorer", *(_top(explorer_pts) or (None, 0)), names=names,
-               detail="points earned from places"))
+    # A VISIT, not a point total: place.points is never read here.
+    # Replaced "explorer" (most place points earned that month) because
+    # the 100-point weekly cap meant everyone who played seriously ended
+    # the month within the same narrow band -- the award separated
+    # nobody, the same flaw that retired Most Consistent. Counting raw
+    # visits instead, split by type, works because the same weekly cap
+    # makes the three mutually exclusive in practice: one remote summit
+    # is worth the whole week on its own, so a summit-chaser gets about
+    # one a week, while a landmark-hunter needs twenty. Each award now
+    # describes a real, distinct playstyle instead of three views of the
+    # same points grind.
+    for award, ref_type, label_detail in (
+        ("tourist", "landmark", "landmarks visited"),
+        ("park_hopper", "park", "parks visited"),
+        ("peak_tagger", "summit", "summits visited"),
+    ):
+        visits: dict[int, int] = dict(conn.execute(
+            "SELECT a.player_id, COUNT(*) FROM place_activation a "
+            "  JOIN place p ON p.id = a.place_id "
+            " WHERE p.ref_type = ? AND a.awarded_at >= ? AND a.awarded_at < ? "
+            " GROUP BY a.player_id",
+            (ref_type, start, end),
+        ).fetchall())
+        add(_award(award, *(_top(visits) or (None, 0)), names=names, detail=label_detail))
 
     for team in settings.teams_list:
         add(_award("team_attacker", *(_top(per_team_attacks.get(team, {})) or (None, 0)),
@@ -345,12 +371,13 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     #
     # No virgin-ground restriction: that only ever existed to keep
     # Frontier a strict subset of the old squares-nobody-had-claimed
-    # Explorer. Now that Explorer counts place points instead, the two
-    # measure different things -- Frontier counts ground out past the
-    # towns, Explorer counts destinations reached -- so every out-of-town
-    # capture counts here, attack or retake or virgin claim alike.
-    # Aircraft are still excluded, same as everywhere else that measures
-    # reach and effort.
+    # Explorer. Explorer has since been retired outright (2026-08-25,
+    # replaced by Tourist/Park Hopper/Peak Tagger above) and never
+    # measured squares in the first place, but Frontier's own rule --
+    # every out-of-town capture counts here, attack or retake or virgin
+    # claim alike -- was unaffected by either change and stays as it
+    # is. Aircraft are still excluded, same as everywhere else that
+    # measures reach and effort.
     #
     # Still expect empty months: twenty miles past a town is where mesh
     # coverage runs out, and a square out there has to hear a repeater

@@ -1,12 +1,18 @@
-"""Tests for the Explorer/Frontier redefinition in app/results.py
-(docs/features/places.md, "What it changes about the honors").
+"""Tests for the Tourist/Park Hopper/Peak Tagger awards in
+app/results.py (docs/features/places.md, "What it changes about the
+honors").
 
-Explorer used to mean "most squares nobody had ever claimed" -- a proxy
-for exploring, back when Places Worth Going did not exist to measure it
-directly. It now means "most Explorer Score points earned this month"
-(points from place_activation). Frontier keeps counting squares beyond
-city limits but drops the virgin-ground restriction that used to make
-it a strict subset of the old Explorer.
+Explorer used to mean "most Explorer Score points earned this month"
+(points from place_activation), which came down 2026-08-25: points are
+capped at 100 per person per week, so everyone who played seriously
+finished a month within the same narrow band and the award separated
+nobody. It was replaced by three awards that count VISITS instead --
+Tourist (landmarks), Park Hopper (parks), Peak Tagger (summits) -- each
+scoped to the month and blind to place.points entirely. A month frozen
+while Explorer still existed keeps its stored "explorer" award and
+label forever (frozen months are never rewritten). Frontier is
+unaffected by any of this and keeps counting squares beyond city
+limits, virgin-ground restriction already dropped.
 """
 from __future__ import annotations
 
@@ -48,7 +54,9 @@ def _capture(conn, season_id, cell, ts, player_id, team, from_team=None, by_air=
 def _place_activation(conn, place_id, player_id, points, awarded_at, week_start="2026-01-07"):
     # place_activation has no foreign-key enforcement in the test schema's
     # in-memory connection (see conftest.py), so a bare place_id is fine --
-    # nothing here reads app/place.
+    # nothing here reads app/place. Tests that need ref_type (tourist /
+    # park_hopper / peak_tagger are joined against place.ref_type) go
+    # through _place() below instead, for a real place row to join to.
     conn.execute(
         "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
         "VALUES (?,?,?,?,?)",
@@ -56,45 +64,112 @@ def _place_activation(conn, place_id, player_id, points, awarded_at, week_start=
     )
 
 
+def _place(conn, place_id, ref_type, points=5):
+    conn.execute(
+        "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+        "created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (place_id, ref_type, f"ref-{place_id}", f"place-{place_id}", 43.0, -116.0,
+         points, "TEST", NOW),
+    )
+
+
 def _award(awards, key):
     return next((a for a in awards if a["award"] == key), None)
 
 
-def test_explorer_ranks_by_place_points(conn):
-    """Explorer goes to the player with the most place_activation points
-    THIS MONTH, not the most captures -- and a player with more captures
-    but fewer place points must not win it.
+def test_tourist_counts_landmark_visits_not_points(conn):
+    """Tourist goes to the most landmark VISITS this month -- a row in
+    place_activation joined to a landmark place -- ignoring points
+    entirely. A player with fewer, higher-value visits must not beat one
+    with more, cheaper ones.
     """
     _player(conn, 1, "RED")
     _player(conn, 2, "BLUE")
-    season_id = _season(conn, "mt")
+    _season(conn, "mt")
 
-    # Player 1: fewer place points, but more virgin captures (would have
-    # won the OLD Explorer).
-    _capture(conn, season_id, cell_id(43.0, -116.0), START + 10, 1, "RED", from_team=None)
-    _capture(conn, season_id, cell_id(43.1, -116.1), START + 20, 1, "RED", from_team=None)
-    _place_activation(conn, 1, player_id=1, points=5, awarded_at=START + 30)
+    # Player 1: two landmark visits, 5 points each (10 total).
+    _place(conn, 1, "landmark", points=5)
+    _place(conn, 2, "landmark", points=5)
+    _place_activation(conn, 1, player_id=1, points=5, awarded_at=START + 10)
+    _place_activation(conn, 2, player_id=1, points=5, awarded_at=START + 20)
 
-    # Player 2: no captures at all, but more place points.
-    _place_activation(conn, 2, player_id=2, points=25, awarded_at=START + 40)
-    _place_activation(conn, 3, player_id=2, points=100, awarded_at=START + 50)
+    # Player 2: one landmark visit worth far more points (10) -- must
+    # still lose on VISIT count, proving points are ignored.
+    _place(conn, 3, "landmark", points=10)
+    _place_activation(conn, 3, player_id=2, points=10, awarded_at=START + 30)
 
     result = results.compute_month(conn, "mt", MONTH)
-    explorer = _award(result["awards"], "explorer")
-    assert explorer is not None
-    assert explorer["player_id"] == 2
-    assert explorer["value"] == 125
-    assert explorer["detail"] == "points earned from places"
+    tourist = _award(result["awards"], "tourist")
+    assert tourist is not None
+    assert tourist["player_id"] == 1
+    assert tourist["value"] == 2
+    assert tourist["detail"] == "landmarks visited"
+    # Ignored entirely: park_hopper/peak_tagger must not fire on landmark data.
+    assert _award(result["awards"], "park_hopper") is None
+    assert _award(result["awards"], "peak_tagger") is None
+    assert _award(result["awards"], "explorer") is None
 
 
-def test_explorer_ignores_place_points_outside_the_month(conn):
+def test_park_hopper_counts_park_visits_only(conn):
     _player(conn, 1, "RED")
     _season(conn, "mt")
-    _place_activation(conn, 1, player_id=1, points=100, awarded_at=START - 1)  # before the month
-    _place_activation(conn, 2, player_id=1, points=100, awarded_at=END)  # on/after the month ends
+    _place(conn, 1, "park", points=25)
+    _place(conn, 2, "landmark", points=5)  # different type -- must not count here
+    _place_activation(conn, 1, player_id=1, points=25, awarded_at=START + 10)
+    _place_activation(conn, 2, player_id=1, points=5, awarded_at=START + 20)
 
     result = results.compute_month(conn, "mt", MONTH)
-    assert _award(result["awards"], "explorer") is None
+    park_hopper = _award(result["awards"], "park_hopper")
+    assert park_hopper is not None
+    assert park_hopper["player_id"] == 1
+    assert park_hopper["value"] == 1
+    assert park_hopper["detail"] == "parks visited"
+
+
+def test_peak_tagger_counts_summit_visits_only(conn):
+    _player(conn, 1, "RED")
+    _season(conn, "mt")
+    _place(conn, 1, "summit", points=100)
+    _place_activation(conn, 1, player_id=1, points=100, awarded_at=START + 10)
+
+    result = results.compute_month(conn, "mt", MONTH)
+    peak_tagger = _award(result["awards"], "peak_tagger")
+    assert peak_tagger is not None
+    assert peak_tagger["player_id"] == 1
+    assert peak_tagger["value"] == 1
+    assert peak_tagger["detail"] == "summits visited"
+
+
+def test_place_visit_awards_ignore_activity_outside_the_month(conn):
+    _player(conn, 1, "RED")
+    _season(conn, "mt")
+    _place(conn, 1, "landmark")
+    _place(conn, 2, "park")
+    _place(conn, 3, "summit")
+    _place_activation(conn, 1, player_id=1, points=5, awarded_at=START - 1)   # before the month
+    _place_activation(conn, 2, player_id=1, points=25, awarded_at=END)        # on/after month end
+    _place_activation(conn, 3, player_id=1, points=100, awarded_at=END + 1)   # after the month
+
+    result = results.compute_month(conn, "mt", MONTH)
+    assert _award(result["awards"], "tourist") is None
+    assert _award(result["awards"], "park_hopper") is None
+    assert _award(result["awards"], "peak_tagger") is None
+
+
+def test_place_visit_awards_tie_refuses_a_winner(conn):
+    """Matches _top()'s existing rule (shared by top_attacker, frontier,
+    etc.): a shared lead is not a winner, an award nobody won is fine.
+    """
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    _season(conn, "mt")
+    _place(conn, 1, "landmark")
+    _place(conn, 2, "landmark")
+    _place_activation(conn, 1, player_id=1, points=5, awarded_at=START + 10)
+    _place_activation(conn, 2, player_id=2, points=5, awarded_at=START + 20)
+
+    result = results.compute_month(conn, "mt", MONTH)
+    assert _award(result["awards"], "tourist") is None
 
 
 def test_frontier_counts_out_of_town_captures_without_virgin_restriction(conn, monkeypatch):
@@ -133,17 +208,19 @@ def test_frozen_month_is_not_recomputed(conn):
     """
     _player(conn, 1, "RED")
     season_id = _season(conn, "mt")
+    _place(conn, 1, "landmark")
     _place_activation(conn, 1, player_id=1, points=5, awarded_at=START + 10)
 
     results.freeze_month(conn, "mt", MONTH, NOW)
     frozen = results.month_results_for(conn, "mt", now=results.month_bounds(MONTH)[1] + 1)
     # Sanity: our frozen month is actually the one returned.
     stored = next(m for m in frozen["months"] if m["month"] == MONTH)
-    before = _award(stored["awards"], "explorer")
-    assert before is not None and before["value"] == 5
+    before = _award(stored["awards"], "tourist")
+    assert before is not None and before["value"] == 1
 
     # New activity lands in the same, already-frozen month.
-    _place_activation(conn, 2, player_id=1, points=100, awarded_at=START + 20)
+    _place(conn, 2, "landmark")
+    _place_activation(conn, 2, player_id=1, points=5, awarded_at=START + 20)
     _player(conn, 2, "BLUE")
     _capture(conn, season_id, cell_id(43.0, -116.0), START + 30, 2, "BLUE", from_team=None)
 
@@ -153,5 +230,36 @@ def test_frozen_month_is_not_recomputed(conn):
 
     after = results.month_results_for(conn, "mt", now=results.month_bounds(MONTH)[1] + 1)
     stored_after = next(m for m in after["months"] if m["month"] == MONTH)
-    still = _award(stored_after["awards"], "explorer")
-    assert still is not None and still["value"] == 5  # unchanged -- history is history
+    still = _award(stored_after["awards"], "tourist")
+    assert still is not None and still["value"] == 1  # unchanged -- history is history
+
+
+def test_frozen_month_keeps_a_stored_explorer_award_with_its_label(conn):
+    """Explorer is retired -- compute_month() never emits it for a month
+    computed fresh -- but a month frozen while it still existed keeps
+    its month_award row forever (frozen months are never rewritten), and
+    AWARD_LABELS still carries a real name for it rather than falling
+    back to the raw key. Writes the month_award row directly, the way a
+    month frozen before 2026-08-25 would already have it on disk --
+    freeze_month() itself is not involved, since a fresh freeze today
+    would never produce this row.
+    """
+    _player(conn, 1, "RED")
+    past_month = results.previous_month(results.previous_month(MONTH))
+    conn.execute(
+        "INSERT INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
+        (past_month, "mt", NOW),
+    )
+    conn.execute(
+        "INSERT INTO month_award(month, protocol, award, scope, player_id, team, value, detail) "
+        "VALUES (?, 'mt', 'explorer', '', 1, 'RED', 125, 'points earned from places')",
+        (past_month,),
+    )
+
+    out = results.month_results_for(conn, "mt", now=NOW)
+    stored = next(m for m in out["months"] if m["month"] == past_month)
+    explorer = _award(stored["awards"], "explorer")
+    assert explorer is not None
+    assert explorer["label"] == "Explorer"
+    assert explorer["value"] == 125
+    assert explorer["player"] == "player-1"
