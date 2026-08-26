@@ -36,7 +36,7 @@ services:
       CHECKIN_NET_START_DATE: "${CHECKIN_NET_START_DATE:-}"
       MC_CHECKIN_BASE_URL: "${MC_CHECKIN_BASE_URL:-}"
     volumes:
-      - meshwars-data:/data
+      - ./data/data:/data
       # Terrain/overlay PMTiles archives (USFS roads+trails, public
       # lands) -- a bind mount to a directory that sits next to this
       # repo checkout on the host, not the meshwars-data volume above.
@@ -47,7 +47,7 @@ services:
       # the container's side -- the app only ever serves these, never
       # writes them. Absent on a checkout that hasn't set this directory
       # up yet; app/api.py's /tiles mount just doesn't appear then.
-      - /home/zvx/meshwars-tiles:/tiles-data:ro
+      - ./data/tiles:/tiles-data:ro
 
 volumes:
   meshwars-data:
