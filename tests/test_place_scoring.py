@@ -139,3 +139,138 @@ def test_inactive_place_cannot_be_scored(conn):
         "SELECT COUNT(*) FROM place_activation WHERE place_id = ?", (1,)
     ).fetchone()[0]
     assert count == 0
+
+
+# ---------------------------------------------------------------------
+# Non-stacking (2026-08-27): a cell that maps to several live places
+# credits ONLY the highest-value one. The lesser places are dropped
+# outright -- not paid alongside it, and not a fallback when the winner
+# cannot be paid. See app/place_scoring.py's module docstring.
+# ---------------------------------------------------------------------
+
+def _place_on(conn, place_id, ref_type, cid_lat, cid_lon, points, rotates=0, active=1):
+    """Same as _place(), but the caller supplies coordinates directly so
+    two places can be planted on the SAME grid cell (identical lat/lon
+    is the simplest way to guarantee that)."""
+    return _place(conn, place_id, ref_type, cid_lat, cid_lon, points,
+                  rotates=rotates, active=active)
+
+
+def test_overlapping_places_credit_only_the_highest(conn):
+    """A landmark standing inside a big park: one ping, one credit, the
+    park's. Under the old stacking behaviour this returned BOTH."""
+    cid = _place_on(conn, 1, "park", 43.0, -116.0, points=25)
+    cid2 = _place_on(conn, 2, "landmark", 43.0, -116.0, points=10)
+    assert cid == cid2, "both places must land on the same cell for this test"
+
+    credited = credit_places(conn, player_id=20, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    assert credited == [(1, 25)]
+
+    rows = conn.execute(
+        "SELECT place_id, points FROM place_activation WHERE player_id = ?", (20,)
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [(1, 25)]
+
+
+def test_equal_points_tiebreak_is_stable_and_not_insertion_order(conn):
+    """Two places of EQUAL value on one cell: exactly one credits, and
+    which one is decided by _stable_tiebreak's hash of the id -- not by
+    the id itself and not by insertion order.
+
+    The ids are chosen so those three answers disagree: place 1 is
+    inserted first and has the lower id, but hashes HIGHER
+    ((1*2654435761) % 1000000007 = 654435747 vs 308871487 for id 2), so
+    the hash orders them 2-then-1. A pass here means the tiebreak really
+    is the hash.
+    """
+    assert (1 * 2654435761) % 1000000007 > (2 * 2654435761) % 1000000007
+
+    cid = _place_on(conn, 1, "landmark", 43.5, -116.5, points=10)
+    cid2 = _place_on(conn, 2, "landmark", 43.5, -116.5, points=10)
+    assert cid == cid2
+
+    credited = credit_places(conn, player_id=21, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    assert credited == [(2, 10)]
+
+    # Deterministic across runs: a fresh player on the same cell, and a
+    # repeat call, must resolve to the same winner every time.
+    for pid in (22, 23, 24):
+        assert credit_places(conn, player_id=pid, cell_id=cid, ts=NOW,
+                             repeater_ids=["r1"]) == [(2, 10)]
+
+
+def test_lesser_place_is_not_a_fallback_when_the_winner_is_over_budget(conn):
+    """95 points already spent this week. The cell's winner is a
+    100-point summit, which does not fit -- and the 5-point landmark
+    sharing the cell must NOT pay in its place. The cell pays nothing.
+
+    This is the deliberate reading of "drop the lesser value option":
+    the lesser place is not on the table at all, so it cannot inherit
+    the budget the dearer one could not use.
+    """
+    for i in range(1, 20):
+        cid = _place(conn, i, "landmark", 43.0 + i * 0.01, -116.0, points=5)
+        credit_places(conn, player_id=25, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    assert conn.execute(
+        "SELECT SUM(points) FROM place_activation WHERE player_id = ? AND week_start = ?",
+        (25, WEEK)).fetchone()[0] == 95
+
+    shared = _place_on(conn, 100, "summit", 45.0, -114.0, points=100)
+    _place_on(conn, 101, "landmark", 45.0, -114.0, points=5)
+
+    assert credit_places(conn, player_id=25, cell_id=shared, ts=NOW,
+                         repeater_ids=["r1"]) == []
+    # Neither of them credited, and the weekly total is unchanged.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM place_activation WHERE player_id = ? AND place_id IN (100, 101)",
+        (25,)).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT SUM(points) FROM place_activation WHERE player_id = ? AND week_start = ?",
+        (25, WEEK)).fetchone()[0] == 95
+
+
+def test_revisiting_a_cell_does_not_fall_through_to_the_lesser_place(conn):
+    """The winner was already credited this week, so the cell is spent
+    for the week -- the cheaper place on it does not step in for a
+    second payout."""
+    cid = _place_on(conn, 1, "park", 44.0, -115.0, points=25)
+    _place_on(conn, 2, "landmark", 44.0, -115.0, points=10)
+
+    first = credit_places(conn, player_id=26, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    second = credit_places(conn, player_id=26, cell_id=cid, ts=NOW + 3600, repeater_ids=["r1"])
+    assert first == [(1, 25)]
+    assert second == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM place_activation WHERE player_id = ?", (26,)
+    ).fetchone()[0] == 1
+
+
+def test_existing_stacked_history_is_never_rewritten(conn):
+    """Rows written under the old stacking behaviour -- both places on
+    one cell credited in the same past week -- stay exactly as they are.
+    This change is forward-only: credit_places never updates or deletes
+    a place_activation row, so past scores and frozen months cannot
+    move under a player.
+    """
+    cid = _place_on(conn, 1, "park", 44.5, -115.5, points=25)
+    _place_on(conn, 2, "landmark", 44.5, -115.5, points=10)
+
+    old_ts = NOW - 7 * 86400
+    old_week = week_start_for_ts(old_ts)
+    assert old_week != WEEK
+    for place_id, points in ((1, 25), (2, 10)):
+        conn.execute(
+            "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
+            "VALUES (?, ?, ?, ?, ?)", (place_id, 27, old_week, points, old_ts))
+    before = [tuple(r) for r in conn.execute(
+        "SELECT place_id, player_id, week_start, points, awarded_at FROM place_activation "
+        " WHERE week_start = ? ORDER BY place_id", (old_week,)).fetchall()]
+    assert before == [(1, 27, old_week, 25, old_ts), (2, 27, old_week, 10, old_ts)]
+
+    # A fresh visit under the new rule, this week.
+    assert credit_places(conn, player_id=27, cell_id=cid, ts=NOW, repeater_ids=["r1"]) == [(1, 25)]
+
+    after = [tuple(r) for r in conn.execute(
+        "SELECT place_id, player_id, week_start, points, awarded_at FROM place_activation "
+        " WHERE week_start = ? ORDER BY place_id", (old_week,)).fetchall()]
+    assert after == before, "historic activation rows must not change"

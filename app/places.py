@@ -1,7 +1,12 @@
 """How far a square is from the nearest town.
 
-Used only by the exploration awards (Explorer and Frontier, see
-app/results.py). Nothing on the scoring or ingest path reads this --
+Used only by the Frontier award (app/results.py) and, through the same
+Census anchors, by the seed's effort scoring (scripts/build_places_seed.py's
+"city limits" test). NOT by Explorer: Explorer is not an award at all --
+it is the season-long Places Worth Going points ranking that feeds a
+player's total score (app/public_api._player_rows, app/mc_api's
+top_explorer_for), the same shape NetOps has, and it never reads this
+module. Nothing on the scoring or ingest path reads this --
 territory does not care where it is, only whether the radio reached a
 repeater.
 

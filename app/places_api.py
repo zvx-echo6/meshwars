@@ -35,6 +35,7 @@ from shapely.geometry import mapping as shapely_mapping
 from .db import connect
 from .grid import distance_m
 from .place_rotation import current_week_start, resolve_week
+from .place_scoring import _stable_tiebreak
 
 router = APIRouter()
 
@@ -74,8 +75,13 @@ DEFAULT_NEAR_RESULTS = 20
 # while a capped, zoomed-out view now thins evenly across whatever
 # states/regions are actually in it instead of amputating whichever one
 # sorts last.
-def _stable_tiebreak(id_column: str) -> str:
-    return f"(({id_column} * 2654435761) % 1000000007)"
+#
+# The expression itself now lives in app/place_scoring.py, which needs
+# the same property for a job where it decides real points rather than
+# which markers a crowded viewport shows: two places on one cell with
+# equal point values, only one of which may credit. One definition, so
+# the two can never drift apart. (place_scoring imports nothing beyond
+# the stdlib, so importing it here costs nothing and creates no cycle.)
 
 
 # Park boundaries (docs/features/places.md's "boundary-backed" parks --
