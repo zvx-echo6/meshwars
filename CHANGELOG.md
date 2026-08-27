@@ -2,6 +2,19 @@
 
 Notable, player-facing changes. Plain language, newest first.
 
+## 2026-08-27 — The Layers box gets out of the way
+
+**You can put the Layers panel away.** The layer switcher in the bottom
+left corner of the map now has a tab on its right-hand edge. Press it
+and the panel slides off the left side of the screen, leaving just the
+tab behind; press the tab again and it slides back. Worth the most on a
+phone, where the panel was covering a real share of the map and could
+not be dismissed at all.
+
+Your choice is remembered on that device, so a collapsed panel stays
+collapsed the next time you open the map rather than making you put it
+away again on every visit.
+
 ## 2026-08-27 — Places no longer stack
 
 **One square, one place, one credit.** A square that carries more than

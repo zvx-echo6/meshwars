@@ -143,7 +143,7 @@
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/coverage.css?v=20260824-2" />
   <link rel="stylesheet" href="/static/mc.css?v=20260825-1" />
-  <link rel="stylesheet" href="/static/map2.css?v=20" />
+  <link rel="stylesheet" href="/static/map2.css?v=21" />
 </head>
 <body>
 
@@ -207,25 +207,40 @@
     </div>
   </div>
 
+  <!-- The switcher is the panel; the tab beside it is the only control
+       that collapses or restores it (map2.js's setupLayersCollapse,
+       .mw-layers styling in map2.css). One control rather than a
+       separate close button and reopen handle, deliberately: the tab
+       travels with the panel, so there is no state in which the way
+       back is off screen. Its label and aria-expanded are rewritten on
+       every toggle, and the caret is decorative -- the accessible name
+       says what pressing it does, not which way an arrow points. -->
   <div id="mw-layers" class="mw-layers">
-    <div class="mw-layers-title">Layers</div>
-    <ul class="mw-layers-list">
-      <li>
-        <label><input type="checkbox" id="mw-layer-hillshade" checked> Hillshade</label>
-      </li>
-      <li>
-        <label><input type="checkbox" id="mw-layer-public-lands"> Public lands</label>
-      </li>
-      <li>
-        <label><input type="checkbox" id="mw-layer-usfs-roads"> USFS roads</label>
-      </li>
-      <li>
-        <label><input type="checkbox" id="mw-layer-usfs-trails"> USFS trails</label>
-      </li>
-      <li>
-        <label><input type="checkbox" id="mw-layer-places" checked> Places</label>
-      </li>
-    </ul>
+    <div class="mw-layers-panel" id="mw-layers-panel">
+      <div class="mw-layers-title">Layers</div>
+      <ul class="mw-layers-list">
+        <li>
+          <label><input type="checkbox" id="mw-layer-hillshade" checked> Hillshade</label>
+        </li>
+        <li>
+          <label><input type="checkbox" id="mw-layer-public-lands"> Public lands</label>
+        </li>
+        <li>
+          <label><input type="checkbox" id="mw-layer-usfs-roads"> USFS roads</label>
+        </li>
+        <li>
+          <label><input type="checkbox" id="mw-layer-usfs-trails"> USFS trails</label>
+        </li>
+        <li>
+          <label><input type="checkbox" id="mw-layer-places" checked> Places</label>
+        </li>
+      </ul>
+    </div>
+    <button type="button" id="mw-layers-toggle" class="mw-layers-toggle"
+            aria-controls="mw-layers-panel" aria-expanded="true"
+            aria-label="Hide the layers panel" title="Hide the layers panel">
+      <span class="mw-layers-toggle-caret" aria-hidden="true">&#9666;</span>
+    </button>
   </div>
 
   <!-- Places Worth Going (docs/features/places.md) has no static markup
@@ -243,7 +258,7 @@
   <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
           crossorigin="anonymous"></script>
 
-  <script src="/static/map2.js?v=40" type="module"></script>
+  <script src="/static/map2.js?v=41" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
 </body>
 </html>
