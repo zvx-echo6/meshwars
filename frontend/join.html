@@ -70,8 +70,8 @@
        fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
-  <link rel="stylesheet" href="/static/theme.css?v=20260824-2" />
-  <link rel="stylesheet" href="/static/join.css?v=20260824-1" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/join.css?v=20260827-1" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -431,11 +431,18 @@
 
         <div id="radios-error" class="join-error" role="alert" hidden></div>
 
+        <!-- Protocol first, then the picker: which list you search is
+             decided by which protocol you picked, so asking for the
+             node before the protocol had it backwards. Two picker
+             blocks rather than one -- the markup below is the same
+             markup the join-flow pickers use (join.js's
+             createNodePicker(), here with the 'add-mc'/'add-mt' id
+             prefixes so two instances of a protocol can coexist on one
+             page), and only the one matching the selected protocol is
+             ever shown. Manual entry is still right there behind
+             "Enter its ID by hand instead", which is what this form
+             used to be. -->
         <form id="add-radio-form" class="add-radio-form" novalidate autocomplete="off">
-          <label class="join-field">
-            <span>Node ID</span>
-            <input type="text" id="f-add-node-ref" placeholder="!a1b2c3d4" autocomplete="off" required />
-          </label>
           <label class="join-field">
             <span>Protocol</span>
             <select id="f-add-protocol">
@@ -443,6 +450,59 @@
               <option value="mc">MeshCore</option>
             </select>
           </label>
+
+          <div class="node-picker" id="add-mt-node-picker" data-protocol="mt">
+            <div class="node-picker-search" id="add-mt-node-picker-search">
+              <label class="join-field">
+                <span>Find your node</span>
+                <input type="text" id="f-add-mt-node-search" placeholder="Type a name to search" autocomplete="off" />
+              </label>
+              <p class="hint">Don't see your node? <button type="button" class="link-btn" id="add-mt-node-manual-link">Enter its ID by hand instead.</button></p>
+              <ul class="node-picker-results" id="add-mt-node-picker-results" hidden></ul>
+              <p class="hint node-picker-status" id="add-mt-node-picker-status" hidden></p>
+            </div>
+            <div class="node-picker-selected" id="add-mt-node-picker-selected" hidden>
+              <div class="node-picker-selected-text">
+                <span class="node-picker-selected-name" id="add-mt-node-picker-selected-name"></span>
+                <span class="node-picker-selected-ref" id="add-mt-node-picker-selected-ref"></span>
+              </div>
+              <button type="button" class="node-picker-change-btn" id="add-mt-node-picker-change">Change</button>
+            </div>
+            <div class="node-picker-manual" id="add-mt-node-picker-manual" hidden>
+              <label class="join-field">
+                <span>Node ID</span>
+                <input type="text" id="f-add-mt-node-ref" placeholder="!a1b2c3d4" autocomplete="off" />
+              </label>
+              <p class="hint">Looks like <code>!a1b2c3d4</code> &mdash; find it in the Meshtastic app. <button type="button" class="link-btn" id="add-mt-node-search-link">Search instead.</button></p>
+            </div>
+          </div>
+
+          <div class="node-picker" id="add-mc-node-picker" data-protocol="mc" hidden>
+            <div class="node-picker-search" id="add-mc-node-picker-search">
+              <label class="join-field">
+                <span>Find your node</span>
+                <input type="text" id="f-add-mc-node-search" placeholder="Type a name to search" autocomplete="off" />
+              </label>
+              <p class="hint">Matched against the <a href="https://mwmesh.com/" target="_blank" rel="noopener noreferrer">mwmesh.com</a> directory this board already uses to resolve check-ins. Don't see your node? <button type="button" class="link-btn" id="add-mc-node-manual-link">Enter its ID by hand instead.</button></p>
+              <ul class="node-picker-results" id="add-mc-node-picker-results" hidden></ul>
+              <p class="hint node-picker-status" id="add-mc-node-picker-status" hidden></p>
+            </div>
+            <div class="node-picker-selected" id="add-mc-node-picker-selected" hidden>
+              <div class="node-picker-selected-text">
+                <span class="node-picker-selected-name" id="add-mc-node-picker-selected-name"></span>
+                <span class="node-picker-selected-ref" id="add-mc-node-picker-selected-ref"></span>
+              </div>
+              <button type="button" class="node-picker-change-btn" id="add-mc-node-picker-change">Change</button>
+            </div>
+            <div class="node-picker-manual" id="add-mc-node-picker-manual" hidden>
+              <label class="join-field">
+                <span>Node ID</span>
+                <input type="text" id="f-add-mc-node-ref" placeholder="cddb2304" autocomplete="off" />
+              </label>
+              <p class="hint">Looks like <code>cddb2304</code>. <button type="button" class="link-btn" id="add-mc-node-search-link">Search instead.</button></p>
+            </div>
+          </div>
+
           <button type="submit" id="add-radio-submit">Add radio</button>
         </form>
 
@@ -494,7 +554,7 @@
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
   <script src="/static/play-area-map.js?v=20260824-1"></script>
-  <script src="/static/join.js?v=20260824-1" type="module"></script>
+  <script src="/static/join.js?v=20260827-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
 </body>
 </html>

@@ -37,7 +37,21 @@ services:
       MC_CHECKIN_BASE_URL: "${MC_CHECKIN_BASE_URL:-}"
       CARTO_API_KEY: "${CARTO_API_KEY:-}"
     volumes:
-      - meshwars-data:/data
+      # Where the game database lives. The default is the named volume
+      # declared at the bottom of this file -- unchanged behaviour for
+      # every existing deployment, which is why it must stay a bare
+      # volume NAME here, not a path. Docker Compose reads whatever this
+      # resolves to the same way it reads a literal: a value with no
+      # leading "/" or "./" and matching a name under `volumes:` is a
+      # named volume; anything path-shaped is a bind mount. So a
+      # deployment that would rather keep the database in a directory it
+      # can see and back up itself sets MESHWARS_DATA to an absolute or
+      # ./-relative path in .env and gets a bind mount instead, with no
+      # edit to this file. Do NOT change the default: pointing an
+      # existing install at an empty directory brings the site up
+      # looking wiped, because the live database is still sitting in the
+      # named volume nothing reads any more.
+      - ${MESHWARS_DATA:-meshwars-data}:/data
       # Terrain/overlay PMTiles archives (USFS roads+trails, public
       # lands) -- a bind mount to a directory that sits next to this
       # repo checkout on the host, not the meshwars-data volume above.
@@ -48,7 +62,13 @@ services:
       # the container's side -- the app only ever serves these, never
       # writes them. Absent on a checkout that hasn't set this directory
       # up yet; app/api.py's /tiles mount just doesn't appear then.
-      - /home/zvx/meshwars-tiles:/tiles-data:ro
+      # The default is this deployment's own directory, kept as the
+      # default so nothing here changes; MESHWARS_TILES_DIR in .env
+      # points it somewhere else. A clone that has no such directory
+      # should set it to a path that exists (an empty one is fine)
+      # rather than leave the default pointing at a home directory
+      # that isn't theirs -- docker will otherwise create one.
+      - ${MESHWARS_TILES_DIR:-/home/zvx/meshwars-tiles}:/tiles-data:ro
 
 volumes:
   meshwars-data:
