@@ -12,12 +12,24 @@ Rules encoded here, from docs/features/places.md:
     up by an existence check here so the weekly cap (below) is counted
     correctly rather than discovered via a failed insert.
   - 100 points per person per week, whatever the mix -- WEEKLY_CAP_POINTS.
-    A place only credits if its FULL point value fits in what is left
-    of the cap this week; there is no partial credit. Because only ONE
-    place per cell is ever eligible (see NON-STACKING below), a cell
-    whose place does not fit pays nothing that week -- there is no
-    cheaper runner-up on the cell to fall back to. The place itself is
-    untouched and is still there next week.
+    The cap CLAMPS rather than refuses (changed 2026-08-27, "no just
+    drop the lower value. if you are at 50 points and snag a 100 point
+    peak, just cap it out."): a place credits for whatever is left of
+    the cap, min(place.points, remaining), not its full value. A player
+    at 50 of 100 who activates a 100-point peak is credited 50, finishes
+    the week at the cap, and that place_activation row records 50 --
+    not the peak's real 100 -- because the row is the source every SUM
+    (Explorer Score, team totals) reads, and that sum must equal what
+    the player actually received. Only when remaining is already zero
+    does the place credit nothing and get no row at all -- it is not
+    consumed for a zero-point activation, and it is not partially
+    creditable either way: whatever fraction it did pay counts as its
+    one credit for the week (place_activation is still unique per
+    place/player/week), so a place capped down to a partial payout does
+    NOT reappear later in the same week to pay out its remainder.
+    (Until 2026-08-27 a place whose full value didn't fit the remaining
+    budget was skipped entirely, paying zero rather than the partial
+    amount; that was the rule Matt corrected.)
   - Point values are NOT flat by ref_type. They are scored by effort at
     seed-build time (scripts/build_places_seed.py's score_points(),
     baked into place.points): anything inside a Census place's own
@@ -32,9 +44,11 @@ Rules encoded here, from docs/features/places.md:
     park is the ordinary case -- and only the HIGHEST-VALUE eligible
     one pays out. The lesser ones are not on the table at all: they do
     not credit alongside the winner, and they are not a fallback when
-    the winner is over this week's remaining budget or was already
-    credited this week. Equal point values are broken by
-    _stable_tiebreak() below, never by insertion order.
+    the winner's full value exceeds this week's remaining budget (the
+    winner itself is simply capped there, not swapped out -- see the
+    weekly-cap rule above) or the winner was already credited this
+    week. Equal point values are broken by _stable_tiebreak() below,
+    never by insertion order.
     (Until 2026-08-27 every eligible place on the cell credited, points
     DESC, until the cap stopped it. That stacking was never intended --
     it paid twice out of one ping for one errand.)
@@ -177,21 +191,6 @@ def credit_places(
         )
         return []
 
-    if points > remaining:
-        # Doesn't fit this week's remaining budget -- no partial credit,
-        # and (non-stacking) no falling through to a cheaper place on
-        # the same cell: the lesser place was never on the table, so
-        # this cell simply pays nothing this week. The place is not
-        # consumed by the attempt -- it is still worth its full value
-        # next week.
-        log.debug(
-            "place_scoring: place %d (%d pts) doesn't fit player %d's "
-            "remaining %d-point budget this week (%s) -- cell %s credits "
-            "nothing",
-            place_id, points, player_id, remaining, week_start, cell_id,
-        )
-        return []
-
     exists = conn.execute(
         "SELECT 1 FROM place_activation WHERE place_id = ? AND player_id = ? AND week_start = ?",
         (place_id, player_id, week_start),
@@ -207,14 +206,32 @@ def credit_places(
         )
         return []
 
+    # Clamp, don't refuse (changed 2026-08-27): a place worth more than
+    # what's left of the week still credits, just for the remainder --
+    # the row records `awarded`, the amount actually paid, not
+    # `points`, the place's full value, so every reader that SUMs this
+    # table (Explorer Score, team totals) agrees with what the player
+    # received. A place capped down this way still fully consumes its
+    # one credit for the week (the UNIQUE constraint above), so it does
+    # NOT come back later in the same week to pay out the difference --
+    # see the module docstring.
+    awarded = min(points, remaining)
     conn.execute(
         "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
         "VALUES (?, ?, ?, ?, ?)",
-        (place_id, player_id, week_start, points, ts),
+        (place_id, player_id, week_start, awarded, ts),
     )
-    credited = [(place_id, points)]
-    log.info(
-        "place_scoring: player %d credited %s at cell %s (week %s)",
-        player_id, credited, cell_id, week_start,
-    )
+    credited = [(place_id, awarded)]
+    if awarded < points:
+        log.info(
+            "place_scoring: player %d credited %s at cell %s (week %s) "
+            "-- capped from the place's full %d points by the remaining "
+            "%d-point budget",
+            player_id, credited, cell_id, week_start, points, remaining,
+        )
+    else:
+        log.info(
+            "place_scoring: player %d credited %s at cell %s (week %s)",
+            player_id, credited, cell_id, week_start,
+        )
     return credited

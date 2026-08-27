@@ -40,9 +40,9 @@ def test_credits_a_summit_and_caps_at_100(conn):
 
 def test_landmarks_do_not_exceed_weekly_cap(conn):
     """20 landmarks at 5 points each sums exactly to the cap; a 21st
-    must not credit anything -- the cap must never be exceeded, and a
-    place whose full value does not fit the remainder is skipped
-    entirely rather than partially credited.
+    must not credit anything and must not create a row -- landing
+    exactly on zero remaining budget is the one case with nothing left
+    to clamp down to.
     """
     cell_ids = [_place(conn, i, "landmark", 43.0 + i * 0.01, -116.0 + i * 0.01, points=5)
                 for i in range(1, 22)]
@@ -58,6 +58,11 @@ def test_landmarks_do_not_exceed_weekly_cap(conn):
         (2, WEEK),
     ).fetchone()[0]
     assert total == WEEKLY_CAP_POINTS
+    count = conn.execute(
+        "SELECT COUNT(*) FROM place_activation WHERE player_id = ? AND week_start = ?",
+        (2, WEEK),
+    ).fetchone()[0]
+    assert count == 20  # the 21st place created no row for its zero-point non-credit
 
 
 def test_one_credit_per_reference_per_week(conn):
@@ -104,11 +109,15 @@ def test_rotating_place_only_credits_when_live(conn):
     assert credited == []
 
 
-def test_place_worth_more_than_remaining_cap_is_skipped_not_partial(conn):
+def test_place_worth_more_than_remaining_cap_is_clamped_to_the_remainder(conn):
     """95 points already earned this week; a 100-point summit does not
-    fit (would exceed the cap) and must be skipped entirely -- no
-    partial credit -- while a 5-point landmark that DOES fit still
-    credits."""
+    fit whole, so it is credited for the 5 points still left rather
+    than refused -- "if you are at 50 points and snag a 100 point peak,
+    just cap it out." The activation row itself must record the 5
+    actually awarded, not the summit's full 100, so the weekly SUM
+    matches what the player received. A further place afterward, with
+    the budget now exactly spent, credits nothing and creates no row.
+    """
     landmark_cells = [_place(conn, i, "landmark", 43.0 + i * 0.01, -116.0, points=5) for i in range(1, 20)]
     for cid in landmark_cells:
         credit_places(conn, player_id=7, cell_id=cid, ts=NOW, repeater_ids=["r1"])
@@ -119,11 +128,73 @@ def test_place_worth_more_than_remaining_cap_is_skipped_not_partial(conn):
 
     summit_cell = _place(conn, 100, "summit", 50.0, -120.0, points=100)
     credited = credit_places(conn, player_id=7, cell_id=summit_cell, ts=NOW, repeater_ids=["r1"])
-    assert credited == []  # 100 does not fit in the remaining 5
+    assert credited == [(100, 5)]  # clamped to the remaining 5, not the full 100
 
-    fits_cell = _place(conn, 101, "landmark", 51.0, -121.0, points=5)
-    credited2 = credit_places(conn, player_id=7, cell_id=fits_cell, ts=NOW, repeater_ids=["r1"])
-    assert credited2 == [(101, 5)]
+    row_points = conn.execute(
+        "SELECT points FROM place_activation WHERE player_id = ? AND place_id = ?", (7, 100)
+    ).fetchone()[0]
+    assert row_points == 5  # the row records what was awarded, not the place's full value
+
+    total_after = conn.execute(
+        "SELECT SUM(points) FROM place_activation WHERE player_id = ? AND week_start = ?", (7, WEEK)
+    ).fetchone()[0]
+    assert total_after == WEEKLY_CAP_POINTS
+
+    # Budget is now exactly spent -- a further place credits nothing
+    # and creates no row (it is not consumed for a zero-point activation).
+    another_cell = _place(conn, 101, "landmark", 51.0, -121.0, points=5)
+    credited2 = credit_places(conn, player_id=7, cell_id=another_cell, ts=NOW, repeater_ids=["r1"])
+    assert credited2 == []
+    count = conn.execute(
+        "SELECT COUNT(*) FROM place_activation WHERE player_id = ? AND place_id = ?", (7, 101)
+    ).fetchone()[0]
+    assert count == 0
+
+
+def test_place_larger_than_the_whole_cap_is_clamped_to_100(conn):
+    """A single place worth more than the entire weekly cap (a
+    synthetic 150-point value -- nothing in the real seed scores that
+    high, but credit_places() must not assume points <= 100), hit by a
+    player with the full budget still open, is clamped to exactly
+    WEEKLY_CAP_POINTS in one activation."""
+    cid = _place(conn, 1, "summit", 43.0, -116.0, points=150)
+    credited = credit_places(conn, player_id=30, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    assert credited == [(1, WEEKLY_CAP_POINTS)]
+
+    row_points = conn.execute(
+        "SELECT points FROM place_activation WHERE player_id = ? AND place_id = ?", (30, 1)
+    ).fetchone()[0]
+    assert row_points == WEEKLY_CAP_POINTS
+
+
+def test_partially_credited_place_does_not_pay_again_same_week(conn):
+    """A place clamped down this week (only part of its value paid) is
+    still fully spent for the week -- the place_activation UNIQUE
+    constraint gates on (place_id, player_id, week_start), not on
+    whether a prior credit was full or partial, so revisiting it again
+    the same week earns nothing more. (Whether it should be reclaimable
+    for the remainder in a LATER week is Matt's call, not decided by
+    this test -- see docs/features/places.md and the module docstring;
+    this test only pins down same-week behaviour, which the simpler
+    reading already makes unambiguous.)
+    """
+    landmark_cells = [_place(conn, i, "landmark", 43.0 + i * 0.01, -116.0, points=5) for i in range(1, 20)]
+    for cid in landmark_cells:
+        credit_places(conn, player_id=31, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    assert conn.execute(
+        "SELECT SUM(points) FROM place_activation WHERE player_id = ? AND week_start = ?",
+        (31, WEEK)).fetchone()[0] == 95
+
+    summit_cell = _place(conn, 100, "summit", 50.0, -120.0, points=100)
+    first = credit_places(conn, player_id=31, cell_id=summit_cell, ts=NOW, repeater_ids=["r1"])
+    assert first == [(100, 5)]
+
+    second = credit_places(conn, player_id=31, cell_id=summit_cell, ts=NOW + 3600, repeater_ids=["r1"])
+    assert second == []
+    count = conn.execute(
+        "SELECT COUNT(*) FROM place_activation WHERE player_id = ? AND place_id = ?", (31, 100)
+    ).fetchone()[0]
+    assert count == 1
 
 
 def test_inactive_place_cannot_be_scored(conn):
@@ -199,14 +270,13 @@ def test_equal_points_tiebreak_is_stable_and_not_insertion_order(conn):
                              repeater_ids=["r1"]) == [(2, 10)]
 
 
-def test_lesser_place_is_not_a_fallback_when_the_winner_is_over_budget(conn):
+def test_lesser_place_is_not_a_fallback_when_the_winner_is_clamped(conn):
     """95 points already spent this week. The cell's winner is a
-    100-point summit, which does not fit -- and the 5-point landmark
-    sharing the cell must NOT pay in its place. The cell pays nothing.
-
-    This is the deliberate reading of "drop the lesser value option":
-    the lesser place is not on the table at all, so it cannot inherit
-    the budget the dearer one could not use.
+    100-point summit, which is clamped to the remaining 5 -- and the
+    5-point landmark sharing the cell must NOT ALSO credit its own 5
+    on top of that. The winner alone is on the table; the lesser place
+    is never queried once non-stacking has picked a winner, clamped or
+    not.
     """
     for i in range(1, 20):
         cid = _place(conn, i, "landmark", 43.0 + i * 0.01, -116.0, points=5)
@@ -219,14 +289,15 @@ def test_lesser_place_is_not_a_fallback_when_the_winner_is_over_budget(conn):
     _place_on(conn, 101, "landmark", 45.0, -114.0, points=5)
 
     assert credit_places(conn, player_id=25, cell_id=shared, ts=NOW,
-                         repeater_ids=["r1"]) == []
-    # Neither of them credited, and the weekly total is unchanged.
-    assert conn.execute(
-        "SELECT COUNT(*) FROM place_activation WHERE player_id = ? AND place_id IN (100, 101)",
-        (25,)).fetchone()[0] == 0
+                         repeater_ids=["r1"]) == [(100, 5)]
+    # Only the winner (100) credited, clamped to 5 -- the lesser place
+    # (101) never gets a row of its own.
+    assert [tuple(r) for r in conn.execute(
+        "SELECT place_id, points FROM place_activation WHERE player_id = ? AND place_id IN (100, 101)",
+        (25,)).fetchall()] == [(100, 5)]
     assert conn.execute(
         "SELECT SUM(points) FROM place_activation WHERE player_id = ? AND week_start = ?",
-        (25, WEEK)).fetchone()[0] == 95
+        (25, WEEK)).fetchone()[0] == WEEKLY_CAP_POINTS
 
 
 def test_revisiting_a_cell_does_not_fall_through_to_the_lesser_place(conn):
