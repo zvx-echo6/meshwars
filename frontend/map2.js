@@ -2401,6 +2401,112 @@ async function fetchBootConfig() {
   }
 }
 
+// ---------------------------------------------------------------------
+// Failure reporting.
+//
+// The map has been seen never rendering at all on real mobile hardware
+// (GrapheneOS Vanadium and Brave, stock Android Chrome) -- #loading-
+// overlay stays up forever, with nothing in the console to say why. It
+// works on desktop and in headless Chromium emulating a mobile
+// viewport, so whatever fails only shows up on real devices, and until
+// the trigger is caught, the map had NO error handling at all: no
+// try/catch around `new maplibregl.Map(...)`, no map.on('error'), no
+// load timeout, no webglcontextlost handler, and main() was called bare
+// with no .catch. Every one of those had exactly one way out --
+// map.on('load') removing #loading-overlay -- so every failure mode
+// collapsed into the same silent hang.
+//
+// This section makes each of those paths visible instead: a shared
+// banner (showMapErrorBanner, #map-error-banner in map2.html/map2.css)
+// that replaces the loading overlay the first time any of them fires,
+// and a best-effort report to POST /api/clientlog (app/clientlog_api.py)
+// so a future occurrence leaves a server-side trail instead of only a
+// phone screen nobody can inspect. This does NOT identify the actual
+// trigger -- that is still unknown -- it only stops it from being
+// silent.
+
+// 12s: comfortably longer than a slow cold TLS+tile fetch on a poor
+// mobile connection takes to reach MapLibre's 'load' event (which fires
+// once the initial style/sources are ready, well before every tile is
+// in), short enough that a visitor whose map really has hung isn't left
+// staring at the spinner for anywhere near the 30s periodic-refresh
+// cadence before being told it isn't coming.
+const MAP_LOAD_TIMEOUT_MS = 12000;
+
+let mapFailureShown = false;
+
+// Swaps #loading-overlay for #map-error-banner. Idempotent: only the
+// first failure does anything, since several of these paths (e.g. a
+// map.on('error') followed by the load timeout it caused) can fire for
+// the same underlying problem, and the banner should not flash or
+// re-render on the second one.
+function showMapErrorBanner() {
+  if (mapFailureShown) return;
+  mapFailureShown = true;
+  const overlay = document.getElementById('loading-overlay');
+  if (overlay) overlay.remove();
+  const banner = document.getElementById('map-error-banner');
+  if (banner) banner.hidden = false;
+}
+
+// Best-effort report to the server. Deliberately paranoid about never
+// throwing itself -- a reporter that can fail loudly would turn "the
+// map broke" into "the map broke AND so did reporting it" -- so
+// everything from building the body to the fetch itself is swallowed.
+// Fields are pre-truncated here too (the server enforces its own caps
+// independently; this just avoids sending bytes that would only be
+// discarded).
+// Caps how many reports a single page load will ever send. A flaky
+// connection can throw many tile errors in quick succession (see the
+// map.on('error') gating below); without a cap that becomes a burst of
+// requests the server's own 20/min limiter (app/clientlog_api.py) was
+// only ever going to reject anyway. 8 is enough to see a pattern across
+// the failure paths above without turning a bad connection into a
+// request spray.
+const CLIENT_LOG_MAX_PER_LOAD = 8;
+let clientLogSentCount = 0;
+
+function sendClientLog(kind, message) {
+  if (clientLogSentCount >= CLIENT_LOG_MAX_PER_LOAD) return;
+  clientLogSentCount += 1;
+  try {
+    const body = JSON.stringify({
+      kind: String(kind == null ? 'unknown' : kind).slice(0, 64),
+      message: String(message == null ? '' : message).slice(0, 500),
+      href: String((location && location.pathname) || '').slice(0, 200),
+    });
+    fetch('/api/clientlog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // Never let a reporting failure become a second error.
+  }
+}
+
+// Page-wide safety net, not map-specific -- addEventListener rather
+// than assigning window.onerror/onunhandledrejection so this can never
+// clobber (or be clobbered by) some other handler. Reports only; it
+// does not show the map error banner itself, since an error anywhere
+// else on the page (theme-toggle.js, a browser extension, ...) is not
+// evidence the map itself failed -- the map's own paths below call
+// showMapErrorBanner() directly when they know that's what happened.
+window.addEventListener('error', (e) => {
+  sendClientLog('window_onerror', e && e.message);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e && e.reason;
+  const msg = reason && reason.message ? reason.message : String(reason);
+  sendClientLog('unhandled_rejection', msg);
+});
+
+const mapErrorReloadBtn = document.getElementById('mw-map-error-reload');
+if (mapErrorReloadBtn) {
+  mapErrorReloadBtn.addEventListener('click', () => location.reload());
+}
+
 async function main() {
   // Not awaited: a single small GET against a one-row table, kicked off
   // in parallel with the map's own boot rather than gating first paint
@@ -2414,84 +2520,137 @@ async function main() {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
   }
 
-  const map = new maplibregl.Map({
-    container: 'map',
-    center: [-116.10, 43.76],
-    zoom: 10,
-    minZoom: 4,   // roughly the whole play area in view
-    maxZoom: 17,  // well past the 300 m grid; squares stay legible
-    ...(playAreaBounds ? { maxBounds: playAreaBounds } : {}),
-    // Pitching made the hillshade render with holes -- the DEM tiles are
-    // not all there once the camera tilts, with nothing erroring to say
-    // so -- and it took bandwidth from 8 MB to 32 MB for a worse picture.
-    // This is a top-down territory game, so the camera is locked flat
-    // rather than the rendering chased.
-    maxPitch: 0,
-    style: {
-      version: 8,
-      // Only needed once Places Worth Going's name labels
-      // (places-labels, setupPlacesLayer) added the first `text-field`
-      // layer this style has ever had -- MapLibre refuses to add ANY
-      // symbol layer using text-field without a glyphs template in the
-      // style, even one that never renders (board/overlay layers below
-      // are all fill/line/hillshade, no text). Served from our own
-      // /static mount (frontend/fonts/, see its README.md) rather than
-      // MapLibre's public demo glyph server -- the OSM/CARTO basemap
-      // tiles below are still fetched from their own public hosts, but
-      // the place labels the game itself put on the map should not
-      // depend on someone else's demo infrastructure staying up.
-      glyphs: '/static/fonts/{fontstack}/{range}.pbf',
-      sources: {
-        [BASEMAP_ID]: {
-          type: 'raster',
-          tiles: [
-            'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-            'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-            'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-          ],
-          tileSize: 256,
-          attribution: '© OpenStreetMap contributors © CARTO',
-          maxzoom: 20,
+  let map;
+  try {
+    map = new maplibregl.Map({
+      container: 'map',
+      center: [-116.10, 43.76],
+      zoom: 10,
+      minZoom: 4,   // roughly the whole play area in view
+      maxZoom: 17,  // well past the 300 m grid; squares stay legible
+      ...(playAreaBounds ? { maxBounds: playAreaBounds } : {}),
+      // Pitching made the hillshade render with holes -- the DEM tiles are
+      // not all there once the camera tilts, with nothing erroring to say
+      // so -- and it took bandwidth from 8 MB to 32 MB for a worse picture.
+      // This is a top-down territory game, so the camera is locked flat
+      // rather than the rendering chased.
+      maxPitch: 0,
+      style: {
+        version: 8,
+        // Only needed once Places Worth Going's name labels
+        // (places-labels, setupPlacesLayer) added the first `text-field`
+        // layer this style has ever had -- MapLibre refuses to add ANY
+        // symbol layer using text-field without a glyphs template in the
+        // style, even one that never renders (board/overlay layers below
+        // are all fill/line/hillshade, no text). Served from our own
+        // /static mount (frontend/fonts/, see its README.md) rather than
+        // MapLibre's public demo glyph server -- the OSM/CARTO basemap
+        // tiles below are still fetched from their own public hosts, but
+        // the place labels the game itself put on the map should not
+        // depend on someone else's demo infrastructure staying up.
+        glyphs: '/static/fonts/{fontstack}/{range}.pbf',
+        sources: {
+          [BASEMAP_ID]: {
+            type: 'raster',
+            tiles: [
+              'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+              'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+              'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+            ],
+            tileSize: 256,
+            attribution: '© OpenStreetMap contributors © CARTO',
+            maxzoom: 20,
+          },
+          // meshwars-hillshade-alpha.pmtiles is finished imagery (WEBP
+          // tiles, z0-12, RGBA), not elevation data -- there is nothing
+          // left for the browser to shade, so this is a plain raster
+          // source, not raster-dem, and carries no `encoding`. maxzoom
+          // marks the archive's real ceiling; MapLibre reuses and
+          // stretches that z12 tile above it (see the HILLSHADE_ID layer
+          // below and the overzoom comment near ROUTE_LINE_WIDTH).
+          'hillshade-source': {
+            type: 'raster',
+            url: `pmtiles://${DEM_URL}`,
+            tileSize: 256,
+            maxzoom: 12,
+          },
         },
-        // meshwars-hillshade-alpha.pmtiles is finished imagery (WEBP
-        // tiles, z0-12, RGBA), not elevation data -- there is nothing
-        // left for the browser to shade, so this is a plain raster
-        // source, not raster-dem, and carries no `encoding`. maxzoom
-        // marks the archive's real ceiling; MapLibre reuses and
-        // stretches that z12 tile above it (see the HILLSHADE_ID layer
-        // below and the overzoom comment near ROUTE_LINE_WIDTH).
-        'hillshade-source': {
-          type: 'raster',
-          url: `pmtiles://${DEM_URL}`,
-          tileSize: 256,
-          maxzoom: 12,
-        },
+        layers: [
+          {
+            id: BASEMAP_ID,
+            type: 'raster',
+            source: BASEMAP_ID,
+          },
+          {
+            id: HILLSHADE_ID,
+            type: 'raster',
+            source: 'hillshade-source',
+            // No `maxzoom` here (see the overzoom comment near
+            // ROUTE_LINE_WIDTH) -- the map's own maxZoom is 17, and a
+            // plain raster layer just keeps reusing the source's last
+            // real z12 tile above that rather than vanishing. No
+            // `raster-dem` exaggeration to set either: this archive's
+            // exaggeration (0.85, the dark theme's former value) is baked
+            // into the pixels at build time. raster-opacity is set by
+            // applyBasemapTheme (HILLSHADE_OPACITY) instead, right after
+            // the map loads, so the basemap underneath -- roads, water,
+            // place labels -- still shows through everywhere the imagery's
+            // own alpha channel already leaves transparent.
+          },
+        ],
       },
-      layers: [
-        {
-          id: BASEMAP_ID,
-          type: 'raster',
-          source: BASEMAP_ID,
-        },
-        {
-          id: HILLSHADE_ID,
-          type: 'raster',
-          source: 'hillshade-source',
-          // No `maxzoom` here (see the overzoom comment near
-          // ROUTE_LINE_WIDTH) -- the map's own maxZoom is 17, and a
-          // plain raster layer just keeps reusing the source's last
-          // real z12 tile above that rather than vanishing. No
-          // `raster-dem` exaggeration to set either: this archive's
-          // exaggeration (0.85, the dark theme's former value) is baked
-          // into the pixels at build time. raster-opacity is set by
-          // applyBasemapTheme (HILLSHADE_OPACITY) instead, right after
-          // the map loads, so the basemap underneath -- roads, water,
-          // place labels -- still shows through everywhere the imagery's
-          // own alpha channel already leaves transparent.
-        },
-      ],
-    },
+    });
+  } catch (err) {
+    console.error('MeshWars map2: map construction failed', err);
+    sendClientLog('map_construct_failed', err && err.message);
+    showMapErrorBanner();
+    return;
+  }
+
+  // Failure paths for everything a successful constructor above can
+  // still go wrong on later: a runtime error MapLibre reports through
+  // the map itself (map.on('error') -- a failed tile/style/glyph
+  // fetch, a WebGL init problem it catches internally, ...), a 'load'
+  // that never arrives at all, and a WebGL context the browser or GPU
+  // driver drops out from under an already-running map. Wired here,
+  // immediately after construction succeeds, rather than inside the
+  // map.on('load') block below -- that block is exactly what a hang
+  // looks like, so its own contents can't be where a hang gets caught.
+  let mapLoaded = false;
+  map.on('error', (e) => {
+    const inner = e && e.error;
+    const msg = inner && inner.message ? inner.message : String(inner || (e && e.type) || 'map error');
+    console.error('MeshWars map2: map.on(error)', e);
+    sendClientLog('map_error_event', msg);
+    // MapLibre also fires 'error' for routine, non-fatal problems --
+    // most commonly a single tile 404 or an aborted fetch -- which are
+    // common and expected on a flaky mobile connection. Once the map
+    // has already loaded, that's a hiccup on an otherwise-working map,
+    // not the silent-hang failure this section exists to catch: only
+    // show the banner (and cover a working map) if 'load' hasn't fired
+    // yet. The report above still goes out either way.
+    if (mapLoaded) return;
+    showMapErrorBanner();
   });
+  setTimeout(() => {
+    if (mapLoaded) return;
+    console.error(`MeshWars map2: map did not fire 'load' within ${MAP_LOAD_TIMEOUT_MS}ms`);
+    sendClientLog('map_load_timeout', `no load event after ${MAP_LOAD_TIMEOUT_MS}ms`);
+    showMapErrorBanner();
+  }, MAP_LOAD_TIMEOUT_MS);
+  const canvas = map.getCanvas && map.getCanvas();
+  if (canvas) {
+    canvas.addEventListener('webglcontextlost', (e) => {
+      // Per spec this is cancelable and preventing default is what
+      // requests a restore -- done here regardless of whether MapLibre
+      // itself will ever act on it, since it costs nothing and is the
+      // documented way to even ask for one.
+      if (e && e.preventDefault) e.preventDefault();
+      console.error('MeshWars map2: webglcontextlost', e);
+      sendClientLog('webgl_context_lost', 'webglcontextlost');
+      showMapErrorBanner();
+    });
+  }
 
   // Referenced by the places panel's click-to-fly-to handler
   // (renderPlacesPanel) and by the territory panel's player-lookup
@@ -2530,6 +2689,16 @@ async function main() {
   }
 
   map.on('load', () => {
+    mapLoaded = true; // read by the load-timeout setTimeout above
+    // A 'load' arriving late, after the timeout above already swapped
+    // in the error banner, means the map did in fact come up -- pull
+    // the banner back down rather than leaving a stale "failed" message
+    // over a map that is now working.
+    if (mapFailureShown) {
+      const banner = document.getElementById('map-error-banner');
+      if (banner) banner.hidden = true;
+      mapFailureShown = false;
+    }
     // Board source/layers are created empty and filled in once the
     // fetch resolves, so 'board-fill' exists immediately as a stable
     // beforeId for the overlay layers below.
@@ -2617,4 +2786,8 @@ async function main() {
   });
 }
 
-main();
+main().catch((err) => {
+  console.error('MeshWars map2: main() failed', err);
+  sendClientLog('main_failed', err && err.message);
+  showMapErrorBanner();
+});

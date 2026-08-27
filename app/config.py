@@ -286,6 +286,18 @@ class Settings(BaseSettings):
     node_api_rate_limit_attempts: int = 30
     node_api_rate_limit_window_seconds: int = 60
 
+    # Client-side failure reporting (POST /api/clientlog,
+    # app/clientlog_api.py). Public and unauthenticated -- reached by
+    # frontend/map2.js's window.onerror/unhandledrejection hooks and its
+    # map-failure paths (construction throw, map.on('error'), load
+    # timeout, webglcontextlost) -- so it is rate-limited per address,
+    # same shape as join_rate_limit_attempts above. A real failing page
+    # load fires a small handful of these at once (a thrown error plus
+    # the unhandledrejection it can trigger, say); 20 per minute covers
+    # that with room to spare without giving a flood a free log-filler.
+    clientlog_rate_limit_attempts: int = 20
+    clientlog_rate_limit_window_seconds: int = 60
+
     # Net check-ins (app/checkin.py): a second way to earn points,
     # alongside squares held. A weekly net runs Wednesday evenings;
     # checking in on either board's feed earns a registered player's
