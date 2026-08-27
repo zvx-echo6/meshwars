@@ -11,4 +11,4 @@ This folder holds design notes for game features: why a thing works the way it d
 |---|---|---|
 | [The Long Season](long-season.md) | Why seasons went from 30 days to 180, monthly results, check-in streaks, and the honors awarded each month | Shipped (August 2026) |
 | [Meshtastic Node Keys](meshtastic-node-keys.md) | Why node IDs stopped being stable identities under Meshtastic 2.8, and how key drift is tracked without changing how scoring attributes traffic | Shipped (August 2026) |
-| [Places Worth Going](places.md) | A design for scoring named destinations — summits, parks, landmarks — instead of treating every map square the same | Not built — design note only |
+| [Places Worth Going](places.md) | Scoring named destinations — summits, parks, landmarks — instead of treating every map square the same | Shipped (August 2026) |

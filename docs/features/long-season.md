@@ -39,16 +39,16 @@ Each month awards:
 - **Tourist** — most landmarks visited
 - **Park Hopper** — most parks visited
 - **Peak Tagger** — most summits visited
-- **Frontier**
+- **Frontier** — most squares claimed more than 20 miles past the edge of any town (`frontier_miles`); any capture out there counts, attack, retake or first claim alike
 - **Quick Fingers** — fastest average check-in after the net opened
 
 ## Naming
 
-The check-in activity was briefly called Netrunners, which is an active card-game trademark, then Phreaks, and is now NetOps. The rankings vocabulary is unified across both boards: the button says Top Operators, the two tabs are Wardrivers and NetOps. The award is Top NetOp, singular.
+The check-in activity was briefly called Netrunners, which is an active card-game trademark, then Phreaks, and is now NetOps. The rankings vocabulary is unified across both boards: the button says Top Operators, and the tabs are Wardrivers, NetOps and Explorer. The naming outlived the award it was coined for — a "Top NetOp" monthly honor existed under that name and was dropped 2026-08-25 (see "Decisions reversed" below). NetOps survives as the name of the activity and of the rankings tab, not as an award.
 
 ## Two guards, both deliberately narrow
 
-Squares claimed while moving faster than about 100 mph are marked as airborne and excluded from the exploration honors — but they still count as territory, because the radio genuinely reached those repeaters and that is what territory measures. An implausibly large jump is treated as a bad GPS fix rather than a flight. Nothing catches a hovering aircraft; that is a known gap.
+On MeshCore, squares claimed while moving faster than about 100 mph are marked as airborne and excluded from Places Worth Going and the exploration honors — but they still count as territory, because the radio genuinely reached those repeaters and that is what territory measures. Above about 900 mph (`_GLITCH_SPEED_MPS`) the jump is treated as a bad GPS fix rather than a flight, and is not labelled at all. Nothing catches a hovering aircraft; that is a known gap. The Meshtastic path has no airborne label at all (`app/ingest.py` passes `by_air=False` unconditionally): it rejects a fix implying more than `mt_max_speed_mps` (90 m/s, ~200 mph) outright instead, and separately rejects any position carrying less than `mt_min_precision_bits` (18) of GPS precision.
 
 Separately, Quick Fingers is an award for speed on a scheduled event, which invites a cron job, so a player whose check-in timing barely varies across enough nets is quietly skipped for that one award — not penalised, and nothing else is affected.
 

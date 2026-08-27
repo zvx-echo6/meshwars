@@ -165,8 +165,8 @@
 
         <section id="seasons">
           <h2>Seasons</h2>
-          <p>A season is 180 days. The two boards run their own seasons on their own clocks &mdash; the current MeshCore season ends 14 February 2027 and the Meshtastic one a day later.</p>
-          <p>A team's standing is the squares it holds plus the check-in points its players have earned. Both count, and they count in the same units: one square held is worth the same as one check-in point.</p>
+          <p>A season is 180 days. The two boards run their own seasons on their own clocks and started on different days, so they do not end together. The MeshCore season's end date is shown on the <a href="/about">about page</a>, read live rather than repeated here where it would go stale.</p>
+          <p>A team's standing is the squares it holds, plus the check-in points its players have earned, plus the points they have earned at <a href="#places">Places Worth Going</a>. All three count, and they count in the same units: one square held is worth the same as one check-in point.</p>
           <p>When a season ends, the board resets and check-in points reset with it. Streaks do not &mdash; see <a href="#streaks">streaks</a>.</p>
         </section>
 
@@ -207,7 +207,7 @@
 
         <section id="places">
           <h2>Places Worth Going</h2>
-          <p>Some squares aren't just squares. A summit, a park or a landmark inside one makes that square worth more than the ground around it. None of it is invented for the game: summits come from Summits On The Air, parks from Parks On The Air with their boundaries filled in from PAD-US where one exists, and landmarks from OpenStreetMap.</p>
+          <p>Some squares aren't just squares. A summit, a park or a landmark inside one makes that square worth more than the ground around it. None of it is invented for the game: summits come from Summits On The Air, parks from Parks On The Air and the national protected-areas database PAD-US, and landmarks from OpenStreetMap.</p>
 
           <h3>Scored by effort, not by category</h3>
           <p>What a place is worth depends on how far it made you go, not what kind of place it is. Anywhere inside a town's own limits &mdash; summit, park or landmark alike &mdash; is worth five points, the same nickel whether you drove up a peak or walked to the courthouse. Step outside a town and the category starts to matter.</p>
@@ -216,10 +216,11 @@
             <tbody>
               <tr><th>Landmark</th><td>5</td><td>10</td></tr>
               <tr><th>Park</th><td>5</td><td>25</td></tr>
-              <tr><th>Summit</th><td>5</td><td>100</td></tr>
+              <tr><th>Summit</th><td>5</td><td>50 to 100, by height</td></tr>
             </tbody>
           </table>
-          <p>That is on purpose. A summit you can park a car next to and a hot spring at the end of an hour of dirt road are both "a summit" and "a landmark" by category, but they are not the same errand. Scoring by effort instead of by category means the game rewards the drive, not the label: twenty remote landmarks, four remote parks or a single remote summit all reach the same weekly ceiling, while a town's own places are worth showing up for but not worth grinding.</p>
+          <p>A summit outside a town is the one value that is not flat. It slides with elevation: 50 points at 6,000 feet and below, climbing evenly to 100 points at 9,000 feet and above &mdash; a peak at 7,500 feet is worth 75. Being inside a town still overrules it outright. A summit you can park at in the middle of town is worth five points however tall it is.</p>
+          <p>That is on purpose. A summit you can park a car next to and a hot spring at the end of an hour of dirt road are both "a summit" and "a landmark" by category, but they are not the same errand. Scoring by effort instead of by category means the game rewards the drive, not the label, while a town's own places are worth showing up for but not worth grinding.</p>
 
           <h3>The weekly cap</h3>
           <table class="rules-table">
@@ -227,13 +228,20 @@
               <tr><th>Per place</th><td>one credit, per person, per week</td></tr>
               <tr><th>Weekly ceiling</th><td>100 points per person, whatever the mix</td></tr>
               <tr><th>To score</th><td>a scoring ping, same as claiming a square &mdash; being there is not enough</td></tr>
-              <tr><th>Aircraft</th><td>excluded, same as everywhere else that measures reach</td></tr>
+              <tr><th>Aircraft</th><td>excluded on MeshCore &mdash; see <a href="#fairplay">fair play</a></td></tr>
             </tbody>
           </table>
-          <p>Points go to your own Explorer Score and to your team's total, the same shape check-in points already have.</p>
+          <p>The ceiling is a budget, not a switch. Every place you reach spends its full value out of the hundred, and a place only pays out if its whole value still fits in what is left of the week &mdash; there is no partial credit. So a 100-point peak spends the week in a single trip, but two 75-point peaks do not: the first leaves 25 behind, and the second is turned away whole rather than paying you 25 for it. Nothing is lost by it &mdash; the place is simply still there next week.</p>
+          <p>Ten remote landmarks, four remote parks or one 9,000-foot summit all reach the ceiling. Anything lower leaves room for something else alongside it, which is the point: a big peak is a week's work, a lower one is an afternoon with room left over.</p>
+          <p>Points go to your own Explorer Score and to your team's total, the same shape check-in points already have. Your Explorer Score runs for the whole season rather than resetting each month.</p>
 
           <h3>Which square scores</h3>
-          <p>A landmark or a summit scores the single square its point falls in. A park with a mapped boundary at least the size of a grid square scores every square more than half inside that boundary &mdash; skirt its edge and only the squares mostly inside it count. A park smaller than a square, or without a boundary on file at all, scores the square containing its point instead, the same as a landmark. About a third of the seeded parks have no boundary data on file; they still score, just by that simpler rule.</p>
+          <p>A landmark or a summit scores the single square its point falls in. A park with a mapped boundary at least the size of a grid square scores every square more than half inside that boundary &mdash; skirt its edge and only the squares mostly inside it count. A park smaller than a square, or without a boundary on file at all, scores the square containing its point instead, the same as a landmark. About one park in twenty has no boundary data on file; those still score, just by that simpler rule.</p>
+          <p>One square can carry more than one place &mdash; a landmark standing inside a large park, say. Every live place on that square is credited from the same ping, most valuable first, until the week's ceiling stops it.</p>
+
+          <h3>What makes the list</h3>
+          <p>The list is deliberately narrow, and three things you might expect on it are not. Trailheads are left off because a trailhead is where you start going somewhere, not somewhere to go. Fire lookouts are left off because the peak a lookout stands on is already the summit you get credit for, and scoring both would pay you twice for one walk &mdash; for the same reason, a landmark sitting within about a hundred metres of a scoring summit is dropped in favour of the summit.</p>
+          <p>Summits have to have a real name. Roughly a fifth of the source list records unnamed peaks by their height instead of a name, or by a placeholder like "Peak 8", and those are left out &mdash; unless the number is 13,000 feet or more, where a peak genuinely is known by its elevation.</p>
 
           <h3>The weekly rotation</h3>
           <p>Summits and every park with a real, mapped boundary are always live. Landmarks, and the small parks whose mapped boundary doesn't fill a whole square, rotate instead: only some of them are live in any given week, chosen the same way for every player, with a minimum spacing between live picks so a dense downtown can't be farmed by visiting one block. A park with no boundary on file isn't treated as small for rotation, even though it scores like one &mdash; the game doesn't actually know its size, so it stays always active instead of guessing, the same as a summit.</p>
@@ -289,12 +297,18 @@
 
         <section id="fairplay">
           <h2>Fair play</h2>
-          <p>Three mechanics exist to keep the game about reaching the mesh. All of them are narrow on purpose.</p>
+          <p>A few mechanics exist to keep the game about reaching the mesh. All of them are narrow on purpose.</p>
 
-          <h3>Aircraft</h3>
-          <p>A radio at altitude reaches an absurd number of nodes, which would make the exploration awards meaningless. MeshWars works out your speed between consecutive positions, and anything moving faster than roughly 100 mph is marked as airborne.</p>
-          <p>Those squares <strong>still count as territory</strong> &mdash; the radio genuinely reached those nodes, and that is what territory measures. They do not count toward Tourist, Park Hopper, Peak Tagger or Frontier, which are about reach and effort rather than reception. Nothing is taken away and nobody is penalised.</p>
-          <p>An implausibly large jump between two positions is treated as a bad GPS fix rather than a flight, so a phone that briefly locates you in the next county does not disqualify a legitimate remote claim. Nothing catches a hovering aircraft; that is a known gap.</p>
+          <h3>How precise your position has to be</h3>
+          <p>A Meshtastic radio can be set to report its position roughly rather than exactly, and some are shipped that way. A rough position can put you anywhere inside a box a kilometre or more across, which is several squares wide &mdash; so a position that is not precise enough to say which square you were in claims nothing at all.</p>
+          <p>Squares are about 300 metres, so a position has to be good to roughly 180 metres or better to count. In the Meshtastic app that is the channel's position precision setting: leave it at full precision, or at least at the step that says within 182 metres. A packet that does not say how precise it is gets the same answer, because there is nothing to check &mdash; and the packets that omit it are the ones carrying no usable position in the first place.</p>
+          <p>This is a Meshtastic setting and it has no MeshCore equivalent. If you register a radio, drive somewhere with coverage, and nothing appears on the map, this is the first thing to look at.</p>
+
+          <h3>Aircraft and impossible jumps</h3>
+          <p>A radio at altitude reaches an absurd number of nodes, which would make the exploration awards meaningless. MeshWars works out your speed between consecutive positions &mdash; and the two boards act on that number differently, because they can afford to.</p>
+          <p><strong>On MeshCore</strong>, faster than roughly 100 mph is marked as airborne. Those squares <strong>still count as territory</strong> &mdash; the radio genuinely reached those nodes, and that is what territory measures. What they do not count toward is Places Worth Going, and the awards built on reach and effort: Tourist, Park Hopper, Peak Tagger and Frontier. Nothing is taken away and nobody is penalised. Above roughly 900 mph the jump is read as a bad GPS fix rather than a flight, so a phone that briefly locates you in the next county does not disqualify a legitimate remote claim.</p>
+          <p><strong>On Meshtastic</strong>, there is no airborne marking at all. A position that would have needed more than roughly 200 mph since your last one is thrown out instead, and claims nothing. The bar is deliberately far above MeshCore's: refusing a position costs you a square where labelling one does not, and two positions a few seconds apart in neighbouring squares can read as a surprisingly high speed from the grid alone. A refused position is also not used as the starting point for the next check, so one bad fix cannot make your next honest ping look like the impossible one.</p>
+          <p>Nothing catches a hovering aircraft; that is a known gap.</p>
 
           <h3>Automated check-ins</h3>
           <p>Quick Fingers is an award for reacting quickly to an event that happens on a schedule, which is an open invitation to a cron job. So it ships with its own defence.</p>
@@ -307,7 +321,7 @@
 
         <section id="protocols">
           <h2>MeshCore and Meshtastic</h2>
-          <p>Two boards, one game. Same seven teams, same grid, same scoring table, same rules on this page. What differs is how your position reaches MeshWars &mdash; and it is inverted between them.</p>
+          <p>Two boards, one game. Same seven teams, same grid, same scoring table, same rules on this page. What differs is how your position reaches MeshWars &mdash; and it is inverted between them &mdash; plus two checks on the ping itself, at the bottom of the table.</p>
           <table class="rules-table rules-table-compare">
             <thead><tr><th></th><th>MeshCore</th><th>Meshtastic</th></tr></thead>
             <tbody>
@@ -315,10 +329,12 @@
               <tr><th>What earns points</th><td>how many repeaters <em>you heard</em></td><td>how many MQTT feeders <em>heard you</em></td></tr>
               <tr><th>Registering</th><td>binds itself on your first wardrive</td><td>you add the node ID yourself</td></tr>
               <tr><th>Net check-in</th><td><code>#weekly-net</code> channel</td><td>any message containing <code>#freq51</code></td></tr>
+              <tr><th>Position precision</th><td>no setting to get wrong</td><td>must be good to ~180 m or the ping is refused</td></tr>
+              <tr><th>Going too fast</th><td>over ~100 mph is labelled airborne; the square still counts</td><td>over ~200 mph is refused outright; nothing is labelled airborne</td></tr>
             </tbody>
           </table>
           <p>The inversion is not a design choice, it is what each network lets anyone observe. MeshCore tells you what your radio reached; Meshtastic tells you who logged your radio.</p>
-          <p>Everything else &mdash; teams, squares, capture, decay, seasons, the net, streaks, the honors &mdash; is identical.</p>
+          <p>Everything else &mdash; teams, squares, capture, decay, seasons, the net, streaks, the honors &mdash; is identical. The two rows at the bottom of that table are the only places the boards judge a ping differently, and both are explained under <a href="#fairplay">fair play</a>.</p>
         </section>
 
 
