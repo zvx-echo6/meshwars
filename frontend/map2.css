@@ -64,6 +64,22 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
 }
 
+/* On a phone the map is narrow enough that MapLibre's attribution strip
+ * spans most of the bottom edge, and this panel -- bottom-left, and
+ * painted over it -- covered the "(c) OpenStreetMap" half of it, leaving
+ * only "contributors (c) CARTO" legible. CARTO's free basemap tier is
+ * conditional on that attribution staying visible, and OpenStreetMap's
+ * ODbL requires the credit independently of CARTO, so this is a licence
+ * term rather than a cosmetic detail. Lift the panel clear of the strip
+ * (~24px tall) instead of restyling the control, so both read in full.
+ * Desktop is unaffected -- there the strip only reaches the right-hand
+ * third and the two never meet. */
+@media (max-width: 600px) {
+  .mw-layers {
+    bottom: 44px;
+  }
+}
+
 .mw-layers-title {
   font-weight: 600;
   margin-bottom: 6px;
