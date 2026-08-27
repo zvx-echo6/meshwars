@@ -26,6 +26,27 @@
       }
     } catch (e) {}
   </script>
+
+  <!-- Mobile debug console (eruda), opt-in only via ?debug=1. Vendored
+       locally at /static/vendor/eruda.js -- deliberately NOT loaded from
+       a CDN, since a CDN dependency is one of the things under suspicion
+       in the mobile "Loading map..." hang this exists to diagnose.
+       Uses document.write so the script tag is inserted and executed
+       synchronously during head parsing, guaranteeing eruda.init() runs
+       to completion before map2.js (a deferred module script near the
+       end of body) ever starts -- so eruda captures errors from the very
+       first moment of module evaluation and map construction. Absent
+       entirely on a normal load: no fetch, no script tag, no console. -->
+  <script>
+    (function () {
+      try {
+        if (/(?:^|[?&])debug=1(?:&|$)/.test(location.search)) {
+          document.write('<script src="/static/vendor/eruda.js"><\/script>');
+          document.write('<script>eruda.init();<\/script>');
+        }
+      } catch (e) {}
+    })();
+  </script>
   <title>MeshWars — Live Territory Map</title>
   <meta name="description" content="MeshWars is a live mesh map: a real-world capture-the-flag game where seven teams claim ground on Meshtastic and MeshCore mesh coverage.">
   <link rel="canonical" href="https://meshwars.com/">
@@ -222,7 +243,7 @@
   <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
           crossorigin="anonymous"></script>
 
-  <script src="/static/map2.js?v=35" type="module"></script>
+  <script src="/static/map2.js?v=36" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
 </body>
 </html>
