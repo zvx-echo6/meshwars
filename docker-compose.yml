@@ -35,6 +35,7 @@ services:
       CHECKIN_POINTS: "${CHECKIN_POINTS:-25.0}"
       CHECKIN_NET_START_DATE: "${CHECKIN_NET_START_DATE:-}"
       MC_CHECKIN_BASE_URL: "${MC_CHECKIN_BASE_URL:-}"
+      CARTO_API_KEY: "${CARTO_API_KEY:-}"
     volumes:
       - meshwars-data:/data
       # Terrain/overlay PMTiles archives (USFS roads+trails, public

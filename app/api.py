@@ -98,6 +98,12 @@ async def config() -> dict:
         "maxDistanceMiles": 0,
         "meshview_url": settings.meshview_url,
         "mc_default_view": settings.mc_default_view,
+        # Basemap key for map2.js's CARTO raster source. Served to the
+        # browser deliberately -- a basemap key is inherently public to
+        # anyone who loads the map -- but it lives in the environment,
+        # not the repo. Empty string when unset, which map2.js treats as
+        # "request tiles without a key" (watermarked but working).
+        "carto_api_key": settings.carto_api_key,
         "join_meshtastic_enabled": settings.join_meshtastic_enabled,
         "play_area": {
             "north": settings.play_area_north,

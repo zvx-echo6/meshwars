@@ -20,6 +20,17 @@ class Settings(BaseSettings):
     # /static mount's frontend_dir.exists() check).
     tiles_dir: str = "/tiles-data"
 
+    # CARTO basemap tiles (frontend/map2.js). CARTO began serving
+    # "API KEY REQUIRED" watermark tiles for keyless usage; this key
+    # removes them. It is NOT a secret in the usual sense -- a basemap
+    # key is visible to every browser that loads the map and cannot be
+    # hidden from users -- but it stays out of the repo all the same, so
+    # it is set per-deployment via the environment (see .env.example and
+    # the CARTO_API_KEY line in docker-compose.yml). Empty is a fully
+    # supported state: the map still renders, just watermarked, so a
+    # fresh clone with no key works out of the box.
+    carto_api_key: str = ""
+
     # Polling
     poll_interval_seconds: int = 45
     upstream_rate_per_sec: float = 5.0  # global rate cap to upstream meshview
