@@ -2709,10 +2709,29 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 // reads for its own default board -- so both pages agree on which board
 // a fresh visitor sees first. One /config fetch serves both needs
 // rather than two.
+// CARTO now serves an "API KEY REQUIRED" watermark over keyless tiles.
+// The key arrives from /config (Settings.carto_api_key) and is appended
+// as ?key=... -- these URLs carry no query string of their own, so a
+// plain '?' is always the right separator. {ratio} is MapLibre's own
+// placeholder and it substitutes it wherever it sits in the string, so
+// the suffix after it is untouched. No key -> the original URLs,
+// unchanged: still a working basemap, just watermarked.
+const CARTO_TILE_URLS = [
+  'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+  'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+  'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+];
+
+function cartoTiles(key) {
+  const k = String(key || '').trim();
+  if (!k) return CARTO_TILE_URLS.slice();
+  return CARTO_TILE_URLS.map((u) => `${u}?key=${encodeURIComponent(k)}`);
+}
+
 async function fetchBootConfig() {
   try {
     const res = await fetch('/config');
-    if (!res.ok) return { playAreaBounds: null, defaultMode: 'meshcore' };
+    if (!res.ok) return { playAreaBounds: null, defaultMode: 'meshcore', cartoKey: '' };
     const cfgData = await res.json();
     const pa = cfgData && cfgData.play_area;
     // MapLibre bounds are [lng, lat] pairs, southwest first.
@@ -2722,9 +2741,13 @@ async function fetchBootConfig() {
       : null;
     const raw = String(cfgData.mc_default_view || '').trim().toLowerCase();
     const defaultMode = raw === 'meshtastic' ? 'meshtastic' : 'meshcore';
-    return { playAreaBounds, defaultMode };
+    // Basemap key, supplied by the server from its environment (see
+    // Settings.carto_api_key). Absent/blank is a supported state --
+    // cartoTiles() below then requests tiles exactly as it always did.
+    const cartoKey = String((cfgData && cfgData.carto_api_key) || '').trim();
+    return { playAreaBounds, defaultMode, cartoKey };
   } catch {
-    return { playAreaBounds: null, defaultMode: 'meshcore' };
+    return { playAreaBounds: null, defaultMode: 'meshcore', cartoKey: '' };
   }
 }
 
@@ -2746,7 +2769,7 @@ async function main() {
   // silent.
   loadNotice();
 
-  const { playAreaBounds, defaultMode } = await fetchBootConfig();
+  const { playAreaBounds, defaultMode, cartoKey } = await fetchBootConfig();
   mode = defaultMode;
   if (!playAreaBounds) {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
@@ -2805,11 +2828,7 @@ async function main() {
         sources: {
           [BASEMAP_ID]: {
             type: 'raster',
-            tiles: [
-              'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-              'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-              'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-            ],
+            tiles: cartoTiles(cartoKey),
             tileSize: 256,
             attribution: '© OpenStreetMap contributors © CARTO',
             maxzoom: 20,
