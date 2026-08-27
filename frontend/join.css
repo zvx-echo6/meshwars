@@ -763,7 +763,14 @@ body {
   padding: 8px 10px;
   font-size: 0.875rem;
 }
-.add-radio-form button {
+/* Direct child, not any descendant: this form now contains a node
+   picker, and the picker's own buttons -- each search result, "Change",
+   the two link-styled toggles -- are already styled by the
+   .node-picker-* rules above and must not be repainted as submit
+   buttons. Before this was scoped, "Enter its ID by hand instead" came
+   out as a chunky gold button in the middle of a sentence. The only
+   direct-child button here is Add radio. */
+.add-radio-form > button {
   background: var(--mw-raised);
   color: var(--mw-accent);
   border: 1px solid var(--mw-line-strong);
@@ -774,8 +781,26 @@ body {
   cursor: pointer;
   flex: 0 0 auto;
 }
-.add-radio-form button:hover { background: var(--mw-line); }
-.add-radio-form button:disabled { opacity: 0.5; cursor: default; }
+.add-radio-form > button:hover { background: var(--mw-line); }
+.add-radio-form > button:disabled { opacity: 0.5; cursor: default; }
+
+/* The add-a-radio form used to be two side-by-side fields and a button
+   on one line. It now carries a full node picker (the same one the join
+   flow uses -- issue #3), which needs the whole width for its results
+   list, so the row model becomes: protocol on its own short row, picker
+   underneath, button last.
+
+   The protocol <select> is held to a sensible width instead of being
+   allowed to grow across the panel -- it is a two-item menu, and a
+   two-item menu stretched to 600px looks like a mistake. */
+.add-radio-form > .join-field { flex: 0 1 200px; }
+.add-radio-form > .node-picker { flex: 1 1 100%; margin: 0; }
+
+/* Inside the picker the fields stack normally -- the .add-radio-form
+   .join-field rule above is scoped to direct children so it never
+   reaches these, but the margin reset would still make the search box
+   and its hint collide with the protocol row above. */
+.add-radio-form .node-picker .join-field { margin: 0 0 4px; }
 
 /* ---- MeshCore check-in fallback name (advanced, inside #status-radios) --
    A native <details> element, deliberately -- collapsed by default with

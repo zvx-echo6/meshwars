@@ -161,26 +161,37 @@ function nodePickerEntryLabel(node) {
 // picker passes one, to auto-fill the public key field from the
 // picked entry's public_key (GET /api/checkin/mt/nodes now carries one
 // when mt_node_key has exactly one distinct key on file for that node).
-function createNodePicker(protocol, onSelect) {
+//
+// `idPrefix` names the markup block this instance drives, defaulting to
+// the protocol so the two join-form pickers keep the ids they always
+// had. The add-a-radio picker at the bottom of the page is a SECOND
+// instance of each protocol on the same document -- two blocks reading
+// the same '/api/checkin/mt/nodes' list can't both answer to
+// `mt-node-picker-*`, so they use 'add-mt' / 'add-mc' instead. Nothing
+// else about them differs: same fetch, same filter, same manual-entry
+// escape hatch, same markup. (Issue #3 -- the add-radio form used to be
+// a bare text input, so a player who found their node by searching at
+// signup had to go dig out a hex ID to add a second radio.)
+function createNodePicker(protocol, onSelect, idPrefix = protocol) {
   const els = {
-    searchWrap: document.getElementById(`${protocol}-node-picker-search`),
-    searchInput: document.getElementById(`f-${protocol}-node-search`),
-    manualLink: document.getElementById(`${protocol}-node-manual-link`),
-    results: document.getElementById(`${protocol}-node-picker-results`),
-    status: document.getElementById(`${protocol}-node-picker-status`),
-    selectedWrap: document.getElementById(`${protocol}-node-picker-selected`),
-    selectedName: document.getElementById(`${protocol}-node-picker-selected-name`),
-    selectedRef: document.getElementById(`${protocol}-node-picker-selected-ref`),
-    changeBtn: document.getElementById(`${protocol}-node-picker-change`),
-    manualWrap: document.getElementById(`${protocol}-node-picker-manual`),
-    manualInput: document.getElementById(`f-${protocol}-node-ref`),
-    searchLink: document.getElementById(`${protocol}-node-search-link`),
+    searchWrap: document.getElementById(`${idPrefix}-node-picker-search`),
+    searchInput: document.getElementById(`f-${idPrefix}-node-search`),
+    manualLink: document.getElementById(`${idPrefix}-node-manual-link`),
+    results: document.getElementById(`${idPrefix}-node-picker-results`),
+    status: document.getElementById(`${idPrefix}-node-picker-status`),
+    selectedWrap: document.getElementById(`${idPrefix}-node-picker-selected`),
+    selectedName: document.getElementById(`${idPrefix}-node-picker-selected-name`),
+    selectedRef: document.getElementById(`${idPrefix}-node-picker-selected-ref`),
+    changeBtn: document.getElementById(`${idPrefix}-node-picker-change`),
+    manualWrap: document.getElementById(`${idPrefix}-node-picker-manual`),
+    manualInput: document.getElementById(`f-${idPrefix}-node-ref`),
+    searchLink: document.getElementById(`${idPrefix}-node-search-link`),
   };
   // Defensive only -- both protocol blocks always carry this markup
   // today, but a picker instance for a block that isn't on the page
   // should degrade to "nothing picked" rather than throw.
   if (!els.searchWrap || !els.selectedWrap || !els.manualWrap) {
-    return { getValue: () => null };
+    return { getValue: () => null, reset: () => {} };
   }
 
   let nodes = null; // null = not fetched yet; [] = fetched empty, or fetch failed
@@ -313,11 +324,61 @@ function createNodePicker(protocol, onSelect) {
       }
       return null;
     },
+
+    // Back to an untouched search box, keeping the fetched node list
+    // (that's a page-load-lifetime cache, not part of the picked
+    // value). Used by the add-a-radio form after a successful add, the
+    // same way it used to clear its text input -- someone adding two
+    // radios in a row must not find the first one still sitting there
+    // looking like it is about to be submitted again. The join-form
+    // pickers never call this: that form is submitted once.
+    reset() {
+      selectedNode = null;
+      els.searchInput.value = '';
+      els.manualInput.value = '';
+      setMode('search');
+      renderResults('');
+    },
   };
 }
 
 let mcPicker = null;
 let mtPicker = null;
+
+// The same two pickers again, for the add-a-radio form in the
+// setup-check panel at the bottom of the page. Separate instances
+// rather than the join-form ones moved around: the two forms are on
+// screen at the same time, submit independently, and a pick in one must
+// never show up as a pick in the other.
+let addMcPicker = null;
+let addMtPicker = null;
+
+// Which of the two add-form pickers the protocol <select> currently has
+// showing -- the one handleAddRadioSubmit() reads a node_ref out of.
+function activeAddPicker() {
+  return document.getElementById('f-add-protocol').value === 'mc' ? addMcPicker : addMtPicker;
+}
+
+// The protocol <select> shows one picker block and hides the other.
+// Whatever was picked in the block being hidden is cleared on the way
+// out: leaving it set would mean flipping the protocol back and forth
+// silently re-arms a node the player has visibly moved on from, and the
+// submit handler only ever reads the visible one anyway.
+function setupAddProtocolToggle() {
+  const select = document.getElementById('f-add-protocol');
+  const blocks = {
+    mc: document.getElementById('add-mc-node-picker'),
+    mt: document.getElementById('add-mt-node-picker'),
+  };
+  if (!select || !blocks.mc || !blocks.mt) return;
+  select.addEventListener('change', () => {
+    const chosen = select.value === 'mc' ? 'mc' : 'mt';
+    const leaving = chosen === 'mc' ? addMtPicker : addMcPicker;
+    if (leaving) leaving.reset();
+    blocks.mc.hidden = chosen !== 'mc';
+    blocks.mt.hidden = chosen !== 'mt';
+  });
+}
 
 let selectedTeam = null;
 
@@ -1190,11 +1251,14 @@ async function handleAddRadioSubmit(e) {
     return;
   }
 
-  const nodeRefInput = document.getElementById('f-add-node-ref');
   const protocol = document.getElementById('f-add-protocol').value;
-  const nodeRef = nodeRefInput.value;
+  const picker = activeAddPicker();
+  // null covers both "nothing picked yet" and "manual entry left
+  // empty" -- same rule the join form applies, except a node_ref is
+  // required here, so it's an error rather than a no-op.
+  const nodeRef = picker ? picker.getValue() : null;
   if (!nodeRef) {
-    showRadiosError('Enter a node ID.');
+    showRadiosError('Search for your node above, or enter its ID by hand.');
     return;
   }
 
@@ -1210,7 +1274,7 @@ async function handleAddRadioSubmit(e) {
     try { data = await res.json(); } catch (err) { data = null; }
     if (handleRadiosApiError(res, data)) return;
     applyRadiosUpdate(data.radios);
-    nodeRefInput.value = '';
+    if (picker) picker.reset();
   } catch (err) {
     showRadiosError('Could not reach the server. Check your connection and try again.');
   } finally {
@@ -1284,6 +1348,9 @@ function boot() {
       if (el) el.value = node.public_key;
     }
   });
+  addMcPicker = createNodePicker('mc', null, 'add-mc');
+  addMtPicker = createNodePicker('mt', null, 'add-mt');
+  setupAddProtocolToggle();
   setupProtocolToggle();
   applyMeshtasticAvailability();
   applyInviteCodeHint();

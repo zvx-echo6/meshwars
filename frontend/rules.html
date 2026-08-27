@@ -70,9 +70,9 @@
        fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
-  <link rel="stylesheet" href="/static/theme.css?v=20260824-2" />
+  <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260824-1" />
-  <link rel="stylesheet" href="/static/rules.css?v=20260824-1" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
 </head>
 <body>
 
@@ -123,7 +123,15 @@
       <div class="rules-body">
         <section id="basics">
           <h2>The basics</h2>
-          <p>Every player is on one of seven teams: RED, GREEN, BLUE, PURPLE, YELLOW, ORANGE or PINK. You pick one when you join and it does not change.</p>
+          <!-- Team names carry the board's own colours here (see
+               rules.css's .team-* rules, sourced from theme.css's
+               --mw-team-* tokens) so this sentence and the map agree.
+               Classes rather than inline styles: an inline colour is
+               unreachable from CSS, so it cannot be adjusted for
+               contrast, cannot follow the tokens if a value moves, and
+               cannot be stood down for a reader who asks for less
+               colour. -->
+          <p>Every player is on one of seven teams: <span class="team team-red">RED</span>, <span class="team team-green">GREEN</span>, <span class="team team-blue">BLUE</span>, <span class="team team-purple">PURPLE</span>, <span class="team team-yellow">YELLOW</span>, <span class="team team-orange">ORANGE</span> or <span class="team team-pink">PINK</span>. You pick one when you join and it does not change.</p>
           <p>The map is cut into fixed squares roughly 300 metres on a side. You claim a square for your team by being inside it and reaching the mesh from it &mdash; not by being there, and not by seeing it on a map. The radio has to actually get out.</p>
           <p>A season runs six months. The team holding the most ground when it ends wins. Inside the season, each calendar month has its own winner, so there is always something close to play for.</p>
         </section>

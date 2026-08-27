@@ -85,6 +85,25 @@ docker compose up -d --build
 
 Open `http://localhost:8090`.
 
+### Where the data and tiles live
+
+Two settings decide what docker mounts into the container, and both have
+defaults that suit this project's own deployment rather than yours:
+
+| Setting | Default | What it is |
+| --- | --- | --- |
+| `MESHWARS_DATA` | `meshwars-data` | Mounted at `/data`, holding the SQLite database. A bare name declared under `volumes:` in `docker-compose.yml` is a Docker named volume; a path (`/srv/meshwars/data`, `./data`) is a bind mount. |
+| `MESHWARS_TILES_DIR` | `/home/zvx/meshwars-tiles` | Host directory of optional PMTiles overlay archives, bind-mounted read-only at `/tiles-data`. |
+
+On a fresh clone, set `MESHWARS_TILES_DIR` to a directory you own — an
+empty one is fine, and the map simply draws without the overlays. Left
+at the default, docker will create that path on your machine.
+
+`MESHWARS_DATA` is best left alone. Changing it on an install that has
+already been running does not move the database; it points the game at
+different (probably empty) storage, and the site comes up looking wiped
+while the real database sits untouched in the old location.
+
 ## Configuration
 
 All settings live in `.env`. See `.env.example` for the full list. `MESHVIEW_BASE_URL` is the only setting with no default, so it is required to start the process at all — even on a deployment that only cares about the MeshCore board. Everything else, including whether MeshCore registration is open at all, has a safe default and can be left as-is. See `.env.example`'s comments for what each setting does.

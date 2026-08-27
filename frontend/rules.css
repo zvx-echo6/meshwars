@@ -166,6 +166,40 @@
 .rules-body p:last-child { margin-bottom: 0; }
 .rules-body strong { color: var(--mw-text-1); }
 
+/* ---- team names in prose -------------------------------------------
+   The seven teams, written out where the rules name them, in the
+   colours the board itself paints them -- so someone reading "you are
+   on one of seven teams" and then looking at the map is matching
+   colours, not words.
+
+   Values come from the --mw-team-* tokens in theme.css, never a literal
+   here: a hex typed into this file is a sixth copy that nobody would
+   remember to change, and it would also make these names the only thing
+   on the page a skin could not reach if a skin ever did need to.
+
+   Weight, not just hue. On a dark ground a coloured word at the same
+   weight as the sentence around it reads as a link more than as a
+   label; 700 makes it read as a name, and carries the colour at this
+   size besides.
+
+   PURPLE alone uses the -text variant -- see theme.css for why. */
+.rules-body .team { font-weight: 700; }
+.rules-body .team-red    { color: var(--mw-team-red); }
+.rules-body .team-green  { color: var(--mw-team-green); }
+.rules-body .team-blue   { color: var(--mw-team-blue); }
+.rules-body .team-purple { color: var(--mw-team-purple-text); }
+.rules-body .team-yellow { color: var(--mw-team-yellow); }
+.rules-body .team-orange { color: var(--mw-team-orange); }
+.rules-body .team-pink   { color: var(--mw-team-pink); }
+
+/* Readers who ask for less colour get the sentence back in body text
+   rather than seven hues at reduced saturation -- the point of the
+   colour is the match to the map, and a muted near-match is worse than
+   none. */
+@media (prefers-contrast: more) {
+  .rules-body .team { color: var(--mw-text-1); }
+}
+
 .rules-body a {
   color: var(--mw-accent);
   font-weight: 600;

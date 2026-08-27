@@ -8,9 +8,14 @@
    the aliases via var() instead of a literal hex, so a future colour
    change happens once, here, instead of in five places.
 
-   Team colours on the map are NOT represented here on purpose -- those
-   are gameplay (maximally distinguishable teams), not branding, and
-   stay exactly as they are wherever the map defines them. */
+   Team colours are gameplay, not branding: seven maximally
+   distinguishable hues, identical under every skin. The map still owns
+   its own copies (TEAM_COLORS in mc.js / map2.js / join.js /
+   results.js) and nothing here changes that -- the --mw-team-* tokens
+   further down exist only so CSS, which cannot reach a hex typed into a
+   page script, can colour a team NAME in prose. They are listed among
+   the brand tokens but are explicitly NOT brand: no skin redefines
+   them. */
 :root {
   --mw-gold-light: #EDD39F;
   --mw-gold:       #A9885B;
@@ -75,6 +80,43 @@
      warm black under a cyan lockup. Holding the whole gradient keeps it
      to one value per skin instead of four channels. */
   --mw-hero-scrim: linear-gradient(180deg, rgba(12, 11, 10, 0.80) 0%, rgba(12, 11, 10, 0.92) 100%);
+
+  /* ---- team colours (gameplay, NOT brand) ---------------------------
+     The same seven values TEAM_COLORS holds in frontend/mc.js,
+     map2.js, join.js and results.js -- a fifth copy, in CSS this time,
+     for the one thing those four cannot do: colour a team's NAME where
+     it is written out in prose (see .rules-body .team in rules.css).
+     Written here rather than in rules.css so a page that wants a team
+     name in its text later has one place to read it from, and so the
+     values sit next to the note explaining why a skin must not touch
+     them.
+
+     Deliberately NOT redefined in the neon block below. A player
+     reading "GREEN holds 40 squares" and then looking at the map has to
+     see the same green in both places, whichever skin is on -- the
+     colours identify a team, they are not decoration.
+
+     If a team colour ever changes it changes in five files, and this is
+     one of them. */
+  --mw-team-red:    #ff4136;
+  --mw-team-green:  #2ecc40;
+  --mw-team-blue:   #3d8bfd;
+  --mw-team-purple: #b10dc9;
+  --mw-team-yellow: #ffdc00;
+  --mw-team-orange: #ff9020;
+  --mw-team-pink:   #f01ec0;
+
+  /* The one exception, and only for text. Six of the seven clear 4.5:1
+     as body text on --mw-page and --mw-panel under both skins (RED
+     5.1, GREEN 8.3, BLUE 5.3, YELLOW 13.1, ORANGE 7.8, PINK 4.8 at
+     their worst). Purple does not: #b10dc9 lands at 3.18:1 on the gold
+     panel, which is a fail at this size and reads as muddy next to the
+     other six. Lifted to the same brightness band as its neighbours,
+     same hue -- 5.0:1 at worst. The MAP still uses --mw-team-purple
+     above: a filled square is a large block against a basemap, not
+     small text, and the darker purple is the more distinguishable of
+     the seven there. */
+  --mw-team-purple-text: #cc55e0;
 }
 
 /* -------------------------------------------------------------------------
@@ -92,11 +134,14 @@
 
    Two things deliberately do NOT change:
 
-   - Team colours. They live in the page scripts, not here, because they
-     are gameplay: seven maximally distinguishable colours on a map. Neon
-     versions of seven hues would collide with each other and with this
-     palette, and a player misreading who holds a square is a worse
-     outcome than a slightly off-palette dot.
+   - Team colours. They are gameplay: seven maximally distinguishable
+     colours on a map. Neon versions of seven hues would collide with
+     each other and with this palette, and a player misreading who holds
+     a square is a worse outcome than a slightly off-palette dot. The
+     map's copies live in the page scripts; the --mw-team-* tokens above
+     are the same values for prose. Neither is redefined below, on
+     purpose -- if you are adding a token here, check first that it is
+     not one of those.
    - The favicon and the social images. CSS cannot reach a favicon,
      people find a tab by its icon, and a link preview renders somewhere
      the reader's theme does not exist. */
