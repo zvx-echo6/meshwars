@@ -13,6 +13,10 @@
 // is exactly the kind of thing that silently disagrees with the server
 // a month later. Nothing here knows which states are in the box.
 //
+// The same /config read also carries the CARTO basemap key, so this
+// minimap requests keyed tiles like the main map does instead of the
+// watermarked keyless ones. No key configured is still fine.
+//
 // Deliberately not an interactive map. Dragging, scroll-zoom and
 // keyboard panning are all off, so a reader scrolling the page past this
 // panel on a phone never gets their scroll captured by it. It is a
@@ -36,13 +40,28 @@
 
   const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
+  // Basemap key, appended to the CARTO tile URL below. Same source and
+  // same treatment as the main map's (frontend/map2.js's cartoTiles):
+  // the server supplies it from its environment via /config, and blank
+  // or absent is a fully supported state -- the layer then requests
+  // tiles exactly as it did before, watermarked but working. Kept as a
+  // function so the "no key" path is the untouched original string
+  // rather than a URL with an empty ?key= glued on the end.
+  const cartoUrl = (key) => {
+    const k = String(key || '').trim();
+    const base = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+    return k ? `${base}?key=${encodeURIComponent(k)}` : base;
+  };
+
   (async () => {
     let pa;
+    let cartoKey = '';
     try {
       const res = await fetch('/config');
       if (!res.ok) return hide();
       const cfg = await res.json();
       pa = cfg && cfg.play_area;
+      cartoKey = String((cfg && cfg.carto_api_key) || '').trim();
     } catch {
       return hide();
     }
@@ -70,9 +89,16 @@
       tap: false,
     });
 
-    // Same basemap as the board (frontend/mc.js) so the two read as one
-    // site rather than two different maps that happen to share a nav bar.
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    // Same basemap as the board so the two read as one site rather than
+    // two different maps that happen to share a nav bar.
+    //
+    // The ?key= lands AFTER the .png, so it never collides with the
+    // {s}/{z}/{x}/{y}/{r} placeholders Leaflet expands in the path --
+    // and it introduces no braces of its own (encodeURIComponent cannot
+    // emit them), which matters because L.Util.template throws on any
+    // {placeholder} it has no value for. {r} still expands to '@2x' or
+    // '' in place, giving .../{y}@2x.png?key=... on a retina screen.
+    L.tileLayer(cartoUrl(cartoKey), {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
     }).addTo(map);
