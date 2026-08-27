@@ -80,29 +80,60 @@ cd meshwars
 cp .env.example .env
 # Edit .env: set MESHVIEW_BASE_URL, and if you want MeshCore registration
 # open, set JOIN_INVITE_CODE.
+mkdir -p data/data data/tiles
 docker compose up -d --build
 ```
 
 Open `http://localhost:8090`.
 
-### Where the data and tiles live
+### Who it runs as
 
-Two settings decide what docker mounts into the container, and both have
-defaults that suit this project's own deployment rather than yours:
+MeshWars runs as an unprivileged user, never root. The image builds its
+own account at uid/gid **1000** — the first regular account on most
+Linux systems, so on a single-user machine that is already you, and the
+files the app writes come out owned by you rather than by root.
+
+If your account is a different id, set `PUID` and `PGID` in `.env` to
+the output of `id -u` and `id -g`. That is a runtime override, so
+`docker compose up -d` picks it up with no rebuild.
 
 | Setting | Default | What it is |
 | --- | --- | --- |
-| `MESHWARS_DATA` | `meshwars-data` | Mounted at `/data`, holding the SQLite database. A bare name declared under `volumes:` in `docker-compose.yml` is a Docker named volume; a path (`/srv/meshwars/data`, `./data`) is a bind mount. |
-| `MESHWARS_TILES_DIR` | `/home/zvx/meshwars-tiles` | Host directory of optional PMTiles overlay archives, bind-mounted read-only at `/tiles-data`. |
+| `PUID` | `1000` | uid the container process runs as. Must own `./data`. |
+| `PGID` | `1000` | gid the container process runs as. |
 
-On a fresh clone, set `MESHWARS_TILES_DIR` to a directory you own — an
-empty one is fine, and the map simply draws without the overlays. Left
-at the default, docker will create that path on your machine.
+Whoever that is has to own the data directory, or the app cannot write
+its database:
 
-`MESHWARS_DATA` is best left alone. Changing it on an install that has
-already been running does not move the database; it points the game at
-different (probably empty) storage, and the site comes up looking wiped
-while the real database sits untouched in the old location.
+```bash
+sudo chown -R "$(id -u):$(id -g)" ./data
+```
+
+### Where the data and tiles live
+
+Both live in `./data`, beside `docker-compose.yml` — plain directories
+you own, not docker-managed volumes, so ordinary tools can back them up
+and move them.
+
+| Path | Mounted at | What it is |
+| --- | --- | --- |
+| `./data/data` | `/data` | The SQLite database (`game.db`) and its `-wal`/`-shm` sidecars. Must be writable by `PUID:PGID` — the **directory**, not just the file, because that is where SQLite creates the sidecars. |
+| `./data/tiles` | `/tiles-data` (read-only) | Optional PMTiles overlay archives (hillshade, public lands, USFS roads and trails). Read-only, so ownership does not matter. Leave it empty and the map just draws without the overlays. |
+
+These paths are set in `docker-compose.yml` directly; edit that file if
+you want them somewhere else.
+
+**Upgrading an existing install.** Two things changed and both are
+one-time:
+
+- Releases before this one stored the database in a docker named volume
+  called `meshwars-data`. Copy `game.db` out of it into `./data/data`
+  with the container stopped. Starting against an empty `./data/data`
+  brings the site up looking wiped — no players, no squares, no history
+  — because the real database is still in the volume nothing reads any
+  more.
+- Those files were written by a root container, so they are root-owned.
+  Run the `chown` above once, or the non-root app cannot open them.
 
 ## Configuration
 

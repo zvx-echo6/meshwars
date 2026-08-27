@@ -3,6 +3,14 @@ services:
     build: .
     image: meshwars:latest
     restart: unless-stopped
+    # Run the container as an ordinary account instead of root. The
+    # Dockerfile already switches to its own unprivileged `meshwars`
+    # user (uid/gid 1000); this line exists so an operator whose own
+    # account is a different uid can line the container up with it
+    # without rebuilding the image -- set PUID/PGID in .env to the
+    # output of `id -u` / `id -g`. It must match whoever owns ./data on
+    # the host, or the app cannot write the database.
+    user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "8090:8090"
     environment:
@@ -37,38 +45,33 @@ services:
       MC_CHECKIN_BASE_URL: "${MC_CHECKIN_BASE_URL:-}"
       CARTO_API_KEY: "${CARTO_API_KEY:-}"
     volumes:
-      # Where the game database lives. The default is the named volume
-      # declared at the bottom of this file -- unchanged behaviour for
-      # every existing deployment, which is why it must stay a bare
-      # volume NAME here, not a path. Docker Compose reads whatever this
-      # resolves to the same way it reads a literal: a value with no
-      # leading "/" or "./" and matching a name under `volumes:` is a
-      # named volume; anything path-shaped is a bind mount. So a
-      # deployment that would rather keep the database in a directory it
-      # can see and back up itself sets MESHWARS_DATA to an absolute or
-      # ./-relative path in .env and gets a bind mount instead, with no
-      # edit to this file. Do NOT change the default: pointing an
-      # existing install at an empty directory brings the site up
-      # looking wiped, because the live database is still sitting in the
-      # named volume nothing reads any more.
-      - ${MESHWARS_DATA:-meshwars-data}:/data
-      # Terrain/overlay PMTiles archives (USFS roads+trails, public
-      # lands) -- a bind mount to a directory that sits next to this
-      # repo checkout on the host, not the meshwars-data volume above.
-      # They're large (hundreds of MB each), static, and copied in from
-      # outside docker (see docs/ for how); a bind mount means they
-      # survive `docker compose down -v` and an image rebuild without
-      # having to be re-copied, which a volume wouldn't. Read-only from
-      # the container's side -- the app only ever serves these, never
-      # writes them. Absent on a checkout that hasn't set this directory
-      # up yet; app/api.py's /tiles mount just doesn't appear then.
-      # The default is this deployment's own directory, kept as the
-      # default so nothing here changes; MESHWARS_TILES_DIR in .env
-      # points it somewhere else. A clone that has no such directory
-      # should set it to a path that exists (an empty one is fine)
-      # rather than leave the default pointing at a home directory
-      # that isn't theirs -- docker will otherwise create one.
-      - ${MESHWARS_TILES_DIR:-/home/zvx/meshwars-tiles}:/tiles-data:ro
+      # The game database, in a directory beside this compose file. A
+      # plain directory rather than a named volume so the operator can
+      # see, back up and move their own data with ordinary tools -- and,
+      # with the non-root `user:` above, without sudo. It must be owned
+      # by the uid the container runs as (1000:1000 by default); an
+      # install migrating off the old root-owned layout does that once
+      # with `chown -R 1000:1000 ./data`. SQLite needs write permission
+      # on the DIRECTORY, not just game.db, to create its -wal and -shm
+      # sidecars.
+      - ./data/data:/data
+      # Terrain/overlay PMTiles archives (hillshade, public lands, USFS
+      # roads and trails) the map serves from /tiles. Large (hundreds of
+      # MB to GB each), static, and copied in from outside docker (see
+      # docs/), so a directory rather than a volume: they survive an
+      # image rebuild and a `docker compose down -v` without being
+      # re-copied. Read-only from the container's side -- the app only
+      # ever serves these, never writes them, so the mount needs no
+      # particular ownership. Optional: with the directory empty or
+      # absent, app/api.py's /tiles mount simply doesn't appear and the
+      # map draws without those overlays.
+      - ./data/tiles:/tiles-data:ro
 
 volumes:
+  # Kept only so an existing install's database is not orphaned by the
+  # move to ./data above: nothing mounts this any more, but declaring it
+  # here means `docker compose down -v` on an upgraded install still
+  # knows about the volume the data used to live in, and the volume is
+  # not silently left behind under a name compose no longer recognises.
+  # Remove this once every deployment has migrated its data out.
   meshwars-data:
