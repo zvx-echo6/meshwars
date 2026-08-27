@@ -76,6 +76,14 @@ let centerPos = [37.3382, -121.8863];
 let initialZoom = 10;
 let maxDistanceMiles = 0;
 
+// Basemap key, supplied by the server from its environment (see
+// Settings.carto_api_key) and appended to the CARTO tile URL below via
+// cartoUrl(). Absent/blank is a fully supported state -- the layer then
+// requests tiles exactly as it always did: watermarked but working.
+// Same source and same treatment as frontend/map2.js's cartoTiles() and
+// frontend/play-area-map.js's cartoUrl().
+let cartoApiKey = '';
+
 // Escapes text destined for an HTML string. display_name and team are
 // attacker-controlled (a MeshCore XSS bug hit ~20 analyzer sites this
 // spring) -- every interpolated value that goes into an HTML string in
@@ -1110,6 +1118,19 @@ function setMode(newMode) {
 
 // ===== Map bootstrap =====
 
+// The ?key= lands AFTER the .png, so it never collides with the
+// {s}/{z}/{x}/{y}/{r} placeholders Leaflet expands in the path -- and it
+// introduces no braces of its own (encodeURIComponent cannot emit them),
+// which matters because L.Util.template throws on any {placeholder} it
+// has no value for. {r} still expands to '@2x' or '' in place, giving
+// .../{y}@2x.png?key=... on a retina screen. No key -> the original
+// string, untouched: still a working (watermarked) basemap.
+function cartoUrl(key) {
+  const k = String(key || '').trim();
+  const base = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  return k ? `${base}?key=${encodeURIComponent(k)}` : base;
+}
+
 async function loadConfig() {
   try {
     const res = await fetch('/config');
@@ -1118,6 +1139,7 @@ async function loadConfig() {
     if (cfgData.centerPos) centerPos = cfgData.centerPos;
     if (typeof cfgData.initialZoom === 'number') initialZoom = cfgData.initialZoom;
     if (typeof cfgData.maxDistanceMiles === 'number') maxDistanceMiles = cfgData.maxDistanceMiles;
+    cartoApiKey = String(cfgData.carto_api_key || '').trim();
     const pa = cfgData.play_area;
     if (
       pa && typeof pa.north === 'number' && typeof pa.south === 'number' &&
@@ -1154,7 +1176,7 @@ async function boot() {
     localStorage.setItem('mapView', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
   });
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  L.tileLayer(cartoUrl(cartoApiKey), {
     maxZoom: 19,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>'
   }).addTo(map);
