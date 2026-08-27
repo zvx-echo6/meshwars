@@ -127,9 +127,9 @@ function showMapErrorBanner() {
 // map.on('error') gating in main()); without a cap that becomes a
 // burst of requests the server's own 20/min limiter
 // (app/clientlog_api.py) was only ever going to reject anyway. Raised
-// from 8 to 12 now that a healthy load alone sends five boot
-// checkpoints (t0-t4) before any failure path could even add one.
-const CLIENT_LOG_MAX_PER_LOAD = 12;
+// from 12 to 24 to fit the t4d/t4f/t5/t9 overlay-removal diagnostics
+// added alongside the t0-t4 boot checkpoints below.
+const CLIENT_LOG_MAX_PER_LOAD = 24;
 let clientLogSentCount = 0;
 
 function sendClientLog(kind, message) {
@@ -205,6 +205,43 @@ function mapGeomSnapshot(stage, canvas) {
     parts.push(`body_h=${document.body ? document.body.clientHeight : '?'}`);
   }
   return parts.join(' ');
+}
+
+// Real device evidence (see the section comment above) showed 'load'
+// firing with healthy geometry, every network request succeeding, and
+// no console errors -- yet #loading-overlay stayed up forever, because
+// its removal previously sat AFTER setBoardMode/loadPlacesViewport/
+// loadPlacesPanel inside map.on('load'), gating a startup-only overlay
+// behind data calls that can stall or throw. Pulled out into its own
+// idempotent function (guarded by loadingOverlayRemoved) so it can be
+// called both immediately once 'load' fires (see main() below) AND, as
+// a belt-and-braces fallback, from a one-shot map.on('idle') handler in
+// case the 'load' path is somehow never reached -- either caller is
+// harmless if the other already ran. The fade-out + setTimeout(...,
+// 500) removal mechanism itself is unchanged from before.
+let loadingOverlayRemoved = false;
+function removeLoadingOverlay() {
+  if (loadingOverlayRemoved) return;
+  loadingOverlayRemoved = true;
+  try {
+    const loadingOverlay = document.getElementById('loading-overlay');
+    bootCheckpoint('t4d_overlay', `t4d_overlay found=${loadingOverlay ? 1 : 0}`);
+    if (!loadingOverlay) return;
+    loadingOverlay.classList.add('fade-out');
+    setTimeout(() => {
+      try {
+        loadingOverlay.remove();
+        bootCheckpoint(
+          't4f_removed',
+          `t4f_removed gone=${document.getElementById('loading-overlay') ? 0 : 1}`
+        );
+      } catch {
+        bootCheckpoint('t4f_removed', 't4f_removed gone=0');
+      }
+    }, 500);
+  } catch {
+    bootCheckpoint('t4d_overlay', 't4d_overlay error');
+  }
 }
 
 // Page-wide safety net, not map-specific -- addEventListener rather
@@ -2824,6 +2861,18 @@ async function main() {
     if (mapLoaded) return;
     showMapErrorBanner();
   });
+  // Belt-and-braces for the loading overlay: registered here rather
+  // than inside map.on('load') below, so it still fires even if 'load'
+  // itself is somehow never reached (or its handler throws before
+  // getting to the overlay removal). 'idle' fires once the map has
+  // finished rendering everything currently queued, which in the
+  // healthy case happens shortly after 'load' -- removeLoadingOverlay()
+  // is idempotent, so this is a harmless no-op whenever the 'load' path
+  // already handled it.
+  map.on('idle', () => {
+    removeLoadingOverlay();
+  });
+
   const canvas = map.getCanvas && map.getCanvas();
   if (canvas) {
     canvas.addEventListener('webglcontextlost', (e) => {
@@ -2890,6 +2939,39 @@ async function main() {
       if (banner) banner.hidden = true;
       mapFailureShown = false;
     }
+
+    // Overlay removal runs HERE, immediately once 'load' has fired and
+    // before any of the board/places data calls below -- see
+    // removeLoadingOverlay()'s own comment for why: the overlay exists
+    // only to cover map startup, and 'load' means the map is up, so its
+    // removal must not be gated behind data loading that can stall or
+    // throw. (Belt-and-braces: also called from a one-shot
+    // map.on('idle') handler above, in case this line is never reached.)
+    removeLoadingOverlay();
+
+    // t9_probe: fires 4s after 'load' regardless of what else happens
+    // in this handler -- confirms whether #loading-overlay actually
+    // left the DOM, and if it somehow didn't, captures enough (computed
+    // opacity/display, rendered height) to tell a CSS/DOM problem apart
+    // from removeLoadingOverlay() never having run at all.
+    setTimeout(() => {
+      try {
+        const el = document.getElementById('loading-overlay');
+        if (!el) {
+          bootCheckpoint('t9_probe', 't9_probe present=0');
+        } else {
+          const cs = window.getComputedStyle ? window.getComputedStyle(el) : null;
+          const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+          bootCheckpoint(
+            't9_probe',
+            `t9_probe present=1 opacity=${cs ? cs.opacity : '?'} display=${cs ? cs.display : '?'} rect_h=${rect ? Math.round(rect.height) : '?'}`
+          );
+        }
+      } catch {
+        bootCheckpoint('t9_probe', 't9_probe error');
+      }
+    }, 4000);
+
     // Board source/layers are created empty and filled in once the
     // fetch resolves, so 'board-fill' exists immediately as a stable
     // beforeId for the overlay layers below.
@@ -2936,14 +3018,22 @@ async function main() {
     // the panel's title/toggle state for the /config-derived `mode` set
     // in main() above, and does the same board/scoreboard/banner load
     // the periodic refresh below repeats every 30s.
-    setBoardMode(mode, map);
-    loadPlacesViewport(map);
-    loadPlacesPanel(map);
-
-    const loadingOverlay = document.getElementById('loading-overlay');
-    if (loadingOverlay) {
-      loadingOverlay.classList.add('fade-out');
-      setTimeout(() => loadingOverlay.remove(), 500);
+    // Wrapped and re-thrown (not swallowed) rather than left bare: the
+    // overlay removal above no longer depends on these three calls
+    // completing, but a throw here would previously vanish silently
+    // past this point -- reporting it keeps that failure mode visible
+    // without changing what happens to the exception itself.
+    try {
+      setBoardMode(mode, map);
+      loadPlacesViewport(map);
+      loadPlacesPanel(map);
+      // t5_post_dataload: proves whether the three calls above complete
+      // (return control here) at all, independent of the overlay, which
+      // by this point has already been handled above regardless.
+      bootCheckpoint('t5_post_dataload', 't5_post_dataload');
+    } catch (err) {
+      sendClientLog('load_handler_threw', err && err.message);
+      throw err;
     }
 
     // Same 30s cadence as frontend/mc.js's own REFRESH_INTERVAL_MS --
