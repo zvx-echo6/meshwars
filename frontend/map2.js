@@ -1593,7 +1593,29 @@ const PLACE_GLYPHS = {
 // stretch past native resolution on ANY screen.
 function drawPlaceIcon(type, color, sizePx, outline, dpr) {
   const canvas = document.createElement('canvas');
-  const dim = sizePx * dpr;
+  // Rounded to an integer BEFORE it's used anywhere below -- a
+  // fractional dpr (2.625 on many real Android phones, not just a
+  // desktop testing artifact) made this fractional too (e.g.
+  // 22*2.625=57.75), and canvas.width/height silently truncate a
+  // fractional assignment to an integer backing store while dim
+  // itself stayed fractional. That mismatch fed forward into
+  // getImageData(0,0,dim,dim) (which itself gets truncated back to
+  // the canvas's real integer size, so the pixel DATA was always
+  // correctly sized) and, separately and fatally, into the `width`/
+  // `height` this function reports back to registerPlaceIcons for
+  // map.addImage -- MapLibre validates data.length against
+  // width*height*4 using the fractional value it was told, computes
+  // a different number than the data it actually received, and
+  // throws a RangeError from inside its own event dispatch. That
+  // throw happens with no console error, no window.onerror, and no
+  // map 'error' event (MapLibre's internal listener dispatch swallows
+  // it), silently aborting whatever else was running in the same
+  // map.on('load') handler -- see the try/catch registerPlaceIcons is
+  // now called through below for the belt-and-braces half of this
+  // fix. Rounding once, up front, keeps every dimension derived from
+  // `dim` (canvas size, getImageData rect, reported width/height)
+  // exactly self-consistent for ANY dpr, integer or not.
+  const dim = Math.round(sizePx * dpr);
   canvas.width = dim;
   canvas.height = dim;
   const ctx = canvas.getContext('2d');
@@ -3007,7 +3029,22 @@ async function main() {
     });
 
     setupOverlayLayers(map);
-    registerPlaceIcons(map);
+    // Wrapped on its own, separate from the try/catch already around
+    // setBoardMode/loadPlacesViewport/loadPlacesPanel below: icon
+    // registration draws/validates raster images against MapLibre's
+    // own internals (see drawPlaceIcon's dim-rounding comment above
+    // for the specific bug this guards against), which is a strictly
+    // narrower failure surface than the board/places data flow, and
+    // a thrown or future stall in here must not be able to take the
+    // rest of this handler down with it -- setupPlacesLayer and
+    // everything after it must still run even with no place icons
+    // registered at all (places would then fall back to whatever
+    // MapLibre does for a missing image, never a dead board).
+    try {
+      registerPlaceIcons(map);
+    } catch (err) {
+      sendClientLog('register_place_icons_failed', err && err.message);
+    }
     setupPlacesLayer(map);
     setupCellClickPopup(map);
     setupLayerSwitcher(map);
