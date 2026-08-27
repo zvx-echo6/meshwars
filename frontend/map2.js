@@ -58,13 +58,18 @@
 //   - a handful of boot checkpoints (kind: 'boot') at t0 (module top),
 //     t1 (right after the unpkg globals are available to check), t2
 //     (immediately before `new maplibregl.Map(...)`), t3 (immediately
-//     after it returns), and t4 (inside map.on('load')) -- so the next
+//     after it returns), and t4 (inside map.on('load')) -- so a
 //     real-device load shows exactly how far execution got instead of
-//     nothing at all.
+//     nothing at all. These are opt-in only, behind ?debug=1 (see
+//     DEBUG_REPORTING below); a normal visitor sends none of them.
 //   - a visibilitychange report: if the tab is backgrounded before the
-//     map has loaded, that's reported too, since a visitor who locks
-//     their phone or switches apps before any timer fires would
-//     otherwise leave no trail either.
+//     map has loaded, that's reported too (also ?debug=1 only, being a
+//     kind: 'boot' report), since a visitor who locks their phone or
+//     switches apps before any timer fires would otherwise leave no
+//     trail either.
+//
+// Failure reports are NOT gated -- they fire for every visitor,
+// always. Only the boot checkpoints are opt-in.
 //
 // None of this identifies the actual trigger -- that is still unknown
 // -- it only narrows down where execution actually stops.
@@ -89,6 +94,32 @@ let mapLoaded = false;
 // reporter below so a backgrounded-before-load report says how far
 // execution got rather than just that it didn't finish.
 let bootStage = 'start';
+
+// Boot checkpoints are a debugging instrument, not production
+// telemetry: on a healthy load they are pure noise, and firing 8+
+// beacons per visitor would both bury real failures in the clientlog
+// and add a request per page view for nothing. So they are opt-in
+// behind the SAME ?debug=1 flag that loads eruda in map2.html -- one
+// flag, one mental model: "?debug=1 turns diagnostics on".
+//
+// This gates ONLY `kind: 'boot'` reports. Every failure report
+// (map_construct_failed, map_error_event, map_load_timeout,
+// webgl_context_lost, register_place_icons_failed, load_handler_threw,
+// main_failed, window_onerror, unhandled_rejection) stays
+// unconditional for every visitor -- those are the entire reason the
+// endpoint exists, and a failure that only reports itself when someone
+// happened to append ?debug=1 is a failure nobody hears about.
+//
+// Evaluated once at module load rather than per call: location.search
+// cannot change without a navigation, and a checkpoint must never be
+// the thing that throws.
+const DEBUG_REPORTING = (() => {
+  try {
+    return /(?:^|[?&])debug=1(?:&|$)/.test(location.search);
+  } catch {
+    return false;
+  }
+})();
 
 // Swaps #loading-overlay for #map-error-banner. Idempotent: only the
 // first failure does anything, since several of these paths (e.g. a
@@ -166,7 +197,11 @@ function sendClientLog(kind, message) {
 // reporter always has the latest value even if sendClientLog itself
 // somehow threw.
 function bootCheckpoint(stage, message) {
+  // bootStage is updated unconditionally even when reporting is off --
+  // it costs nothing, and keeping it accurate means a debug-mode
+  // session behaves identically to a normal one up to the send.
   bootStage = stage;
+  if (!DEBUG_REPORTING) return;
   try {
     sendClientLog('boot', message || stage);
   } catch {
@@ -265,6 +300,7 @@ window.addEventListener('unhandledrejection', (e) => {
 // timer has fired -- without this, that load simply vanishes with no
 // trail at all instead of showing how far execution got.
 document.addEventListener('visibilitychange', () => {
+  if (!DEBUG_REPORTING) return;
   if (document.visibilityState === 'hidden' && !mapLoaded) {
     sendClientLog('boot', `hidden_after_${bootStage}`);
   }
