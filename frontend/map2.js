@@ -174,6 +174,39 @@ function bootCheckpoint(stage, message) {
   }
 }
 
+// Real numbers behind the t2/t3/t4 boot checkpoints below -- confirms
+// or refutes, with actual device measurements rather than a guess made
+// from a desktop browser where this has never reproduced, whether
+// #map (and the WebGL canvas MapLibre draws into) has non-zero size at
+// each stage. Compact k=v pairs, single line, to stay well inside the
+// clientlog endpoint's 500-char field cap. `canvas` is optional --
+// undefined/null before the map is constructed (t2) -- and its
+// width/height are the backing-store pixel size (the canvas element's
+// attributes), while canvas_cli is its CSS layout size, same
+// distinction as #map's clientWidth/clientHeight vs. its
+// getBoundingClientRect(). Every call site wraps this in its own
+// try/catch and falls back to a plain stage-name checkpoint if
+// anything here is missing or throws.
+function mapGeomSnapshot(stage, canvas) {
+  const el = document.getElementById('map');
+  const rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+  const parts = [
+    stage,
+    `map=${el ? el.clientWidth : '?'}x${el ? el.clientHeight : '?'}`,
+    `rect_h=${rect ? Math.round(rect.height) : '?'}`,
+  ];
+  if (canvas) {
+    parts.push(`canvas=${canvas.width}x${canvas.height}`);
+    parts.push(`canvas_cli=${canvas.clientWidth}x${canvas.clientHeight}`);
+  }
+  parts.push(`win=${window.innerWidth}x${window.innerHeight}`);
+  parts.push(`dpr=${window.devicePixelRatio}`);
+  if (stage === 't4_load') {
+    parts.push(`body_h=${document.body ? document.body.clientHeight : '?'}`);
+  }
+  return parts.join(' ');
+}
+
 // Page-wide safety net, not map-specific -- addEventListener rather
 // than assigning window.onerror/onunhandledrejection so this can never
 // clobber (or be clobbered by) some other handler. Reports only; it
@@ -2641,7 +2674,11 @@ async function main() {
     showMapErrorBanner();
   }, MAP_LOAD_TIMEOUT_MS);
 
-  bootCheckpoint('t2_pre_ctor', 't2_pre_ctor');
+  try {
+    bootCheckpoint('t2_pre_ctor', mapGeomSnapshot('t2_pre_ctor', null));
+  } catch {
+    bootCheckpoint('t2_pre_ctor', 't2_pre_ctor');
+  }
   try {
     map = new maplibregl.Map({
       container: 'map',
@@ -2727,7 +2764,38 @@ async function main() {
     showMapErrorBanner();
     return;
   }
-  bootCheckpoint('t3_post_ctor', 't3_post_ctor');
+  try {
+    bootCheckpoint('t3_post_ctor', mapGeomSnapshot('t3_post_ctor', map.getCanvas && map.getCanvas()));
+  } catch {
+    bootCheckpoint('t3_post_ctor', 't3_post_ctor');
+  }
+
+  // Standard corrective, independent of whatever mapGeomSnapshot above
+  // finds: a WebGL canvas never resizes itself when its container does,
+  // so if #map only gets its real height after layout settles --
+  // common on real mobile browsers whose chrome (address bar, etc.)
+  // resizes the viewport after first paint -- the canvas MapLibre sized
+  // at construction time stays at that stale size until something
+  // explicitly tells MapLibre to re-measure. Attached here (right after
+  // construction) rather than waiting for 'load', so a container that
+  // settles its size before the style finishes loading is still caught.
+  // Guarded: ResizeObserver may not exist, and this must never throw.
+  try {
+    const mapEl = document.getElementById('map');
+    if (mapEl && typeof ResizeObserver === 'function') {
+      const mapResizeObserver = new ResizeObserver(() => {
+        try {
+          map.resize();
+        } catch {
+          // Never let the corrective itself become a page error.
+        }
+      });
+      mapResizeObserver.observe(mapEl);
+    }
+  } catch {
+    // ResizeObserver unavailable -- the map.resize() call inside
+    // map.on('load') below still covers the common case.
+  }
 
   // Failure paths for everything a successful constructor above can
   // still go wrong on later: a runtime error MapLibre reports through
@@ -2807,7 +2875,11 @@ async function main() {
   }
 
   map.on('load', () => {
-    bootCheckpoint('t4_load', 't4_load');
+    try {
+      bootCheckpoint('t4_load', mapGeomSnapshot('t4_load', map.getCanvas && map.getCanvas()));
+    } catch {
+      bootCheckpoint('t4_load', 't4_load');
+    }
     mapLoaded = true; // read by the load-timeout setTimeout above
     // A 'load' arriving late, after the timeout above already swapped
     // in the error banner, means the map did in fact come up -- pull
@@ -2902,6 +2974,18 @@ async function main() {
         loadPlacesPanel(map);
       }, 250);
     });
+
+    // Standard corrective, run once the style has actually finished
+    // loading (rather than only at construction time, see the
+    // ResizeObserver set up right after `new maplibregl.Map(...)`
+    // above): harmless if the canvas was already sized correctly,
+    // fixes it if #map's height only settled sometime between t3 and
+    // t4.
+    try {
+      map.resize();
+    } catch {
+      // Never let this corrective become a page error.
+    }
   });
 }
 
