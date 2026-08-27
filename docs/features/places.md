@@ -35,7 +35,8 @@ A remote park is still worth exactly one check-in — that is the anchor for any
 ## Rules
 
 - One credit per reference, per person, per week.
-- 100 points per person per week, whatever the mix.
+- 100 points per person per week, whatever the mix. A place only credits if its FULL value still fits in what is left of the cap — no partial credit — and a place that does not fit is skipped rather than closing the week, so a cheaper place on the same square can still land.
+- EVERY live place mapped to the square is credited from one ping, highest value first, not just one of them. A landmark standing inside a big park pays both.
 - The week resets Wednesday just before the net, so the game has one clock — the gathering and the reset are the same moment.
 - Activating requires a scoring ping; being there is not enough, exactly as it is not enough anywhere else.
 - Points go to a personal Explorer Score AND to the team total, the same shape check-ins already have.
@@ -55,9 +56,9 @@ Sources ended up simpler than "a narrow OpenStreetMap tag list" alone implied: s
 - **Parks:** by POTA's own reference prefix — `CA-` (328) and `MX-` (70) excluded; `US-` kept.
 - **Landmarks:** not filtered — every row's coordinates fall inside the real US-Mexico and US-Canada borders already (the OSM extract they came from is western-US-only), verified rather than assumed.
 
-Kept after the country filter: **26,600 summits, 5,293 parks, 24,771 landmarks.**
+Kept after the country filter, as of the 2026-08-25 rebuild: **8,082 summits, 44,037 parks (2,224 POTA-only, 3,467 POTA with a PAD-US boundary, 38,346 PAD-US-sourced), 25,930 landmarks.** The summit count is much lower than the pre-2026-08-24 pull because `SUMMIT_MIN_SOTA_POINTS` now filters to SOTA 8+; the park count is much higher because PAD-US became a park SOURCE, not just a boundary lookup.
 
-**Park boundaries are not fully matched.** POTA publishes centre points only; a boundary is matched from PAD-US afterward (`scripts/build_places_seed.py`'s `match_parks()`). Of the 5,293 US parks, **3,465 matched a boundary and 1,828 did not (65.5%)**. An unmatched park is not treated as small — it scores like a summit, its point's own square, always active, never rotating. Of the matched parks, 3,184 are at or above one grid cell in area (score by the >50% rule, always active) and 281 are smaller than one cell (score their point's square, and rotate like a landmark — see below).
+**Park boundaries are not fully matched.** POTA publishes centre points only; a boundary is matched from PAD-US afterward (`scripts/build_places_seed.py`'s `match_parks()`), and PAD-US-sourced parks arrive with their own boundary already. Measured on the current seed CSV, **41,813 of 44,037 parks carry a boundary and 2,224 (5.1%) do not** — the unmatched remainder is exactly the POTA-only rows. (The 65.5%/34.5% split recorded here earlier was measured before PAD-US became a park source in its own right.) An unmatched park is not treated as small — it scores like a summit, its point's own square, always active, never rotating. Of the 41,813 parks that do carry a boundary, 10,657 are at or above one grid cell in area (score by the >50% rule, always active) and 31,156 are smaller than one cell (score their point's square, and rotate like a landmark — see below) — the PAD-US city/county parks that arrived in bulk are overwhelmingly in that second group.
 
 ## Containment: which square scores
 
@@ -121,9 +122,9 @@ It matches the existing rule that the first new person to paint a square earns e
 
 A narrow OpenStreetMap tag list, not every point of interest.
 
-**In (as actually pulled — see "The seed, as actually pulled" above):** town hall, courthouse, library, museum, viewpoint, attraction, visitor centre, historic marker, monument, memorial, trailhead.
+**In (as actually pulled — see "The seed, as actually pulled" above):** town hall, courthouse, library, museum, viewpoint, attraction, visitor centre, historic marker, monument, memorial, plus the 2026-08-24 outdoor/natural broadening.
 
-**Out:** fire station and post office (cut before the seed landed — nobody drives to one), schools, hospitals, churches, playgrounds, anything on private land, anything you would not tell a stranger to drive to at night.
+**Out:** fire station and post office (cut before the seed landed — nobody drives to one), trailheads and fire lookouts (cut 2026-08-25, see above), schools, hospitals, churches, playgrounds, anything on private land, anything you would not tell a stranger to drive to at night.
 
 The test is permanent, publicly accessible, distinctive. Narrow is the recoverable direction — adding tags later gives people new places, pruning later takes credits from people who already earned them.
 

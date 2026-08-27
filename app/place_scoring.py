@@ -13,17 +13,34 @@ Rules encoded here, from docs/features/places.md:
     correctly rather than discovered via a failed insert.
   - 100 points per person per week, whatever the mix -- WEEKLY_CAP_POINTS.
     A place only credits if its FULL point value fits in what is left
-    of the cap this week; there is no partial credit. This is not
-    incidental: landmark(5)*20, park(25)*4, and summit(100)*1 all land
-    on exactly 100, which is the point of a flat, type-based value in
-    the first place -- see docs/features/places.md.
+    of the cap this week; there is no partial credit, and a place that
+    does not fit is skipped rather than ending the loop -- a cheaper
+    place further down the cell's list can still fit where a dearer one
+    did not.
+  - Point values are NOT flat by ref_type. They are scored by effort at
+    seed-build time (scripts/build_places_seed.py's score_points(),
+    baked into place.points): anything inside a Census place's own
+    radius is 5, and outside it a landmark is 10, a park is 25, and a
+    summit scales linearly 50->100 from 6,000ft to 9,000ft of
+    elevation. Nothing here branches on ref_type or points_reason --
+    place.points is read as an opaque number, exactly as it was under
+    the old flat model, which is why the rescore needed no change in
+    this module.
+  - EVERY qualifying place mapped to the cell is credited, not just the
+    highest-value one, ordered points DESC so the dearest place gets
+    first call on the remaining budget. A cell carrying both a park and
+    a landmark pays both, subject only to the cap above.
   - A rotating place only credits while it is live this week
     (app/place_rotation.live_place_ids); an always-active place
-    (summit, or a park at/above one grid cell) always qualifies.
+    (summit, a park at/above one grid cell, or a park with no boundary
+    on file at all -- see app/places_seed.py) always qualifies.
   - A place that has left the seed (place.active = 0, set by
     app/places_seed.py's reconcile pass) never credits, even if a
     stale place_cell or place_week row still points at it.
-  - Aircraft excluded, same as the exploration awards.
+  - Aircraft excluded, same as the exploration awards -- MeshCore only;
+    the Meshtastic path never sets by_air (app/ingest.py passes False),
+    because it rejects an implausible fix outright instead of labelling
+    it.
 """
 from __future__ import annotations
 
