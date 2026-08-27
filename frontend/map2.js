@@ -22,6 +22,191 @@
  * regardless of theme and never touched by the theme code below.
  */
 
+// ---------------------------------------------------------------------
+// Failure reporting + boot checkpoints.
+//
+// The map has been seen never rendering at all on real mobile hardware
+// (GrapheneOS Vanadium and Brave, stock Android Chrome) -- #loading-
+// overlay stays up forever, with nothing in the console to say why. It
+// works on desktop and in headless Chromium emulating a mobile
+// viewport, so whatever fails only shows up on real devices. A first
+// pass added a try/catch around `new maplibregl.Map(...)`,
+// map.on('error'), a load timeout, and a webglcontextlost handler, but
+// a later real-device load still hung with NONE of those firing: no
+// /tiles/*.pmtiles requests, no /api/clientlog report, just the
+// spinner past the timeout. That means execution stops somewhere
+// between /config resolving and the load timeout ever being
+// *scheduled* -- and the previous version scheduled that timeout AFTER
+// `new maplibregl.Map(...)` returned, so a constructor that hangs
+// (rather than throws) would produce exactly this signature, with the
+// timeout's own setTimeout call never reached either.
+//
+// This section is deliberately placed as close to the very top of the
+// file as possible, ahead of everything else including TEAM_COLORS --
+// every one of the checkpoints below depends on it, including the
+// first one (t0), which is meant to fire before almost anything else
+// in the module has had a chance to throw. It exposes:
+//
+//   - sendClientLog/bootCheckpoint: a best-effort report to POST
+//     /api/clientlog (app/clientlog_api.py), now via navigator.sendBeacon
+//     (falling back to fetch) since sendBeacon is built to survive page
+//     teardown -- a fetch, even with keepalive, is not as reliable on
+//     mobile Chrome/Safari when the tab is backgrounded or the page is
+//     being torn down.
+//   - showMapErrorBanner: swaps #loading-overlay for #map-error-banner,
+//     unchanged from before.
+//   - a handful of boot checkpoints (kind: 'boot') at t0 (module top),
+//     t1 (right after the unpkg globals are available to check), t2
+//     (immediately before `new maplibregl.Map(...)`), t3 (immediately
+//     after it returns), and t4 (inside map.on('load')) -- so the next
+//     real-device load shows exactly how far execution got instead of
+//     nothing at all.
+//   - a visibilitychange report: if the tab is backgrounded before the
+//     map has loaded, that's reported too, since a visitor who locks
+//     their phone or switches apps before any timer fires would
+//     otherwise leave no trail either.
+//
+// None of this identifies the actual trigger -- that is still unknown
+// -- it only narrows down where execution actually stops.
+
+// 12s: comfortably longer than a slow cold TLS+tile fetch on a poor
+// mobile connection takes to reach MapLibre's 'load' event (which fires
+// once the initial style/sources are ready, well before every tile is
+// in), short enough that a visitor whose map really has hung isn't left
+// staring at the spinner for anywhere near the 30s periodic-refresh
+// cadence before being told it isn't coming.
+const MAP_LOAD_TIMEOUT_MS = 12000;
+
+let mapFailureShown = false;
+
+// Set true by map.on('load') (see main()); read by the load-timeout
+// watchdog and by the visibilitychange reporter below. Module-scoped
+// (not local to main()) so the visibilitychange listener -- registered
+// here, before main() has even been called -- can see it.
+let mapLoaded = false;
+
+// Furthest boot checkpoint reached so far, read by the visibilitychange
+// reporter below so a backgrounded-before-load report says how far
+// execution got rather than just that it didn't finish.
+let bootStage = 'start';
+
+// Swaps #loading-overlay for #map-error-banner. Idempotent: only the
+// first failure does anything, since several of these paths (e.g. a
+// map.on('error') followed by the load timeout it caused) can fire for
+// the same underlying problem, and the banner should not flash or
+// re-render on the second one.
+function showMapErrorBanner() {
+  if (mapFailureShown) return;
+  mapFailureShown = true;
+  const overlay = document.getElementById('loading-overlay');
+  if (overlay) overlay.remove();
+  const banner = document.getElementById('map-error-banner');
+  if (banner) banner.hidden = false;
+}
+
+// Best-effort report to the server. Deliberately paranoid about never
+// throwing itself -- a reporter that can fail loudly would turn "the
+// map broke" into "the map broke AND so did reporting it" -- so
+// everything from building the body to the send itself is swallowed.
+// Fields are pre-truncated here too (the server enforces its own caps
+// independently; this just avoids sending bytes that would only be
+// discarded).
+//
+// navigator.sendBeacon is tried first: it is specifically designed to
+// survive page teardown/backgrounding, which a fetch (even with
+// keepalive: true) is not as reliably able to do on mobile browsers.
+// sendBeacon has no way to set headers, so the JSON body is wrapped in
+// a Blob with an explicit type instead -- app/clientlog_api.py parses
+// the raw body as JSON regardless of Content-Type, so this changes
+// nothing server-side. Falls back to the previous fetch-based send if
+// sendBeacon is unavailable (very old browsers) or itself returns
+// false (queue already full).
+//
+// Caps how many reports a single page load will ever send. A flaky
+// connection can throw many tile errors in quick succession (see the
+// map.on('error') gating in main()); without a cap that becomes a
+// burst of requests the server's own 20/min limiter
+// (app/clientlog_api.py) was only ever going to reject anyway. Raised
+// from 8 to 12 now that a healthy load alone sends five boot
+// checkpoints (t0-t4) before any failure path could even add one.
+const CLIENT_LOG_MAX_PER_LOAD = 12;
+let clientLogSentCount = 0;
+
+function sendClientLog(kind, message) {
+  if (clientLogSentCount >= CLIENT_LOG_MAX_PER_LOAD) return;
+  clientLogSentCount += 1;
+  try {
+    const body = JSON.stringify({
+      kind: String(kind == null ? 'unknown' : kind).slice(0, 64),
+      message: String(message == null ? '' : message).slice(0, 500),
+      href: String((location && location.pathname) || '').slice(0, 200),
+    });
+    try {
+      if (navigator && typeof navigator.sendBeacon === 'function') {
+        const blob = new Blob([body], { type: 'application/json' });
+        if (navigator.sendBeacon('/api/clientlog', blob)) return;
+      }
+    } catch {
+      // Fall through to the fetch fallback below.
+    }
+    fetch('/api/clientlog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // Never let a reporting failure become a second error.
+  }
+}
+
+// Cheap, never-throwing boot markers -- `kind: 'boot'`, a short
+// `message` unique per call site (see main() and t0/t1 below for where
+// each fires). Updates bootStage first so the visibilitychange
+// reporter always has the latest value even if sendClientLog itself
+// somehow threw.
+function bootCheckpoint(stage, message) {
+  bootStage = stage;
+  try {
+    sendClientLog('boot', message || stage);
+  } catch {
+    // Never let a checkpoint become a second error.
+  }
+}
+
+// Page-wide safety net, not map-specific -- addEventListener rather
+// than assigning window.onerror/onunhandledrejection so this can never
+// clobber (or be clobbered by) some other handler. Reports only; it
+// does not show the map error banner itself, since an error anywhere
+// else on the page (theme-toggle.js, a browser extension, ...) is not
+// evidence the map itself failed -- the map's own paths in main() call
+// showMapErrorBanner() directly when they know that's what happened.
+window.addEventListener('error', (e) => {
+  sendClientLog('window_onerror', e && e.message);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e && e.reason;
+  const msg = reason && reason.message ? reason.message : String(reason);
+  sendClientLog('unhandled_rejection', msg);
+});
+
+// Catches a visitor backgrounding the tab (locking the phone, switching
+// apps, navigating away) before the map has loaded and before any
+// timer has fired -- without this, that load simply vanishes with no
+// trail at all instead of showing how far execution got.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && !mapLoaded) {
+    sendClientLog('boot', `hidden_after_${bootStage}`);
+  }
+});
+
+// t0: the very first executable statement in this module past wiring
+// up the reporting helpers directly above it (those are declarations,
+// not side effects) -- if a future real-device load never reports even
+// this, the module failed before doing anything at all, which rules
+// out every checkpoint after it in one shot.
+bootCheckpoint('t0_module', 't0_module');
+
 // Same team colors as frontend/mc.js's TEAM_COLORS -- kept as a second
 // copy on purpose, same reasoning as frontend/join.js: this page must
 // load independently of mc.js.
@@ -310,6 +495,20 @@ const MAX_FIT_ZOOM = 13;
 // Matches the breakpoint mc.css's collapsible-header media query uses
 // for "phone-width" (see setMcCollapsed below).
 const NARROW_BREAKPOINT_PX = 600;
+
+// t1: right after the two unpkg <script> tags in map2.html (maplibregl,
+// pmtiles) are the last thing to run before this module, and right
+// before the first use of either global below. `typeof` rather than a
+// direct reference so this can never itself throw a ReferenceError if
+// one of the CDN scripts failed to load -- that outcome is exactly what
+// this checkpoint exists to catch, so it has to survive it. Directly
+// tests the CDN-blocked hypothesis: if either reads 'undefined' here,
+// `new pmtiles.Protocol()` / `maplibregl.addProtocol` immediately below
+// throws before main() ever runs, and every checkpoint after this one
+// (and every failure path added later, since those are wired up inside
+// main()) simply never fires -- which is exactly the silent-hang
+// signature seen on real mobile.
+bootCheckpoint('t1_libs', `t1_libs maplibregl=${typeof maplibregl} pmtiles=${typeof pmtiles}`);
 
 // pmtiles.js registers no protocol on its own -- this wires the
 // pmtiles:// URL scheme into MapLibre's request pipeline so a raster
@@ -2401,107 +2600,12 @@ async function fetchBootConfig() {
   }
 }
 
-// ---------------------------------------------------------------------
-// Failure reporting.
-//
-// The map has been seen never rendering at all on real mobile hardware
-// (GrapheneOS Vanadium and Brave, stock Android Chrome) -- #loading-
-// overlay stays up forever, with nothing in the console to say why. It
-// works on desktop and in headless Chromium emulating a mobile
-// viewport, so whatever fails only shows up on real devices, and until
-// the trigger is caught, the map had NO error handling at all: no
-// try/catch around `new maplibregl.Map(...)`, no map.on('error'), no
-// load timeout, no webglcontextlost handler, and main() was called bare
-// with no .catch. Every one of those had exactly one way out --
-// map.on('load') removing #loading-overlay -- so every failure mode
-// collapsed into the same silent hang.
-//
-// This section makes each of those paths visible instead: a shared
-// banner (showMapErrorBanner, #map-error-banner in map2.html/map2.css)
-// that replaces the loading overlay the first time any of them fires,
-// and a best-effort report to POST /api/clientlog (app/clientlog_api.py)
-// so a future occurrence leaves a server-side trail instead of only a
-// phone screen nobody can inspect. This does NOT identify the actual
-// trigger -- that is still unknown -- it only stops it from being
-// silent.
-
-// 12s: comfortably longer than a slow cold TLS+tile fetch on a poor
-// mobile connection takes to reach MapLibre's 'load' event (which fires
-// once the initial style/sources are ready, well before every tile is
-// in), short enough that a visitor whose map really has hung isn't left
-// staring at the spinner for anywhere near the 30s periodic-refresh
-// cadence before being told it isn't coming.
-const MAP_LOAD_TIMEOUT_MS = 12000;
-
-let mapFailureShown = false;
-
-// Swaps #loading-overlay for #map-error-banner. Idempotent: only the
-// first failure does anything, since several of these paths (e.g. a
-// map.on('error') followed by the load timeout it caused) can fire for
-// the same underlying problem, and the banner should not flash or
-// re-render on the second one.
-function showMapErrorBanner() {
-  if (mapFailureShown) return;
-  mapFailureShown = true;
-  const overlay = document.getElementById('loading-overlay');
-  if (overlay) overlay.remove();
-  const banner = document.getElementById('map-error-banner');
-  if (banner) banner.hidden = false;
-}
-
-// Best-effort report to the server. Deliberately paranoid about never
-// throwing itself -- a reporter that can fail loudly would turn "the
-// map broke" into "the map broke AND so did reporting it" -- so
-// everything from building the body to the fetch itself is swallowed.
-// Fields are pre-truncated here too (the server enforces its own caps
-// independently; this just avoids sending bytes that would only be
-// discarded).
-// Caps how many reports a single page load will ever send. A flaky
-// connection can throw many tile errors in quick succession (see the
-// map.on('error') gating below); without a cap that becomes a burst of
-// requests the server's own 20/min limiter (app/clientlog_api.py) was
-// only ever going to reject anyway. 8 is enough to see a pattern across
-// the failure paths above without turning a bad connection into a
-// request spray.
-const CLIENT_LOG_MAX_PER_LOAD = 8;
-let clientLogSentCount = 0;
-
-function sendClientLog(kind, message) {
-  if (clientLogSentCount >= CLIENT_LOG_MAX_PER_LOAD) return;
-  clientLogSentCount += 1;
-  try {
-    const body = JSON.stringify({
-      kind: String(kind == null ? 'unknown' : kind).slice(0, 64),
-      message: String(message == null ? '' : message).slice(0, 500),
-      href: String((location && location.pathname) || '').slice(0, 200),
-    });
-    fetch('/api/clientlog', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-      keepalive: true,
-    }).catch(() => {});
-  } catch {
-    // Never let a reporting failure become a second error.
-  }
-}
-
-// Page-wide safety net, not map-specific -- addEventListener rather
-// than assigning window.onerror/onunhandledrejection so this can never
-// clobber (or be clobbered by) some other handler. Reports only; it
-// does not show the map error banner itself, since an error anywhere
-// else on the page (theme-toggle.js, a browser extension, ...) is not
-// evidence the map itself failed -- the map's own paths below call
-// showMapErrorBanner() directly when they know that's what happened.
-window.addEventListener('error', (e) => {
-  sendClientLog('window_onerror', e && e.message);
-});
-window.addEventListener('unhandledrejection', (e) => {
-  const reason = e && e.reason;
-  const msg = reason && reason.message ? reason.message : String(reason);
-  sendClientLog('unhandled_rejection', msg);
-});
-
+// Failure reporting + boot checkpoints (MAP_LOAD_TIMEOUT_MS,
+// sendClientLog, showMapErrorBanner, bootCheckpoint, and the
+// window/document listeners that use them) now live at the very top of
+// this file, not here -- see that section's comment for why. This
+// keeps only the DOM wiring that section didn't need to exist before
+// main() runs.
 const mapErrorReloadBtn = document.getElementById('mw-map-error-reload');
 if (mapErrorReloadBtn) {
   mapErrorReloadBtn.addEventListener('click', () => location.reload());
@@ -2521,6 +2625,23 @@ async function main() {
   }
 
   let map;
+
+  // Scheduled BEFORE `new maplibregl.Map(...)` below, not after: a
+  // constructor call that hangs rather than throws never returns
+  // control to this function, so anything scheduled only after it
+  // returns -- including this watchdog, in the previous version --
+  // never gets registered at all. Registering it first means a hanging
+  // OR throwing constructor can still be caught, as long as the main
+  // thread itself is not blocked. mapLoaded is module-scoped (declared
+  // near sendClientLog above) and flipped true in map.on('load') below.
+  setTimeout(() => {
+    if (mapLoaded) return;
+    console.error(`MeshWars map2: map did not fire 'load' within ${MAP_LOAD_TIMEOUT_MS}ms`);
+    sendClientLog('map_load_timeout', `no load event after ${MAP_LOAD_TIMEOUT_MS}ms`);
+    showMapErrorBanner();
+  }, MAP_LOAD_TIMEOUT_MS);
+
+  bootCheckpoint('t2_pre_ctor', 't2_pre_ctor');
   try {
     map = new maplibregl.Map({
       container: 'map',
@@ -2606,6 +2727,7 @@ async function main() {
     showMapErrorBanner();
     return;
   }
+  bootCheckpoint('t3_post_ctor', 't3_post_ctor');
 
   // Failure paths for everything a successful constructor above can
   // still go wrong on later: a runtime error MapLibre reports through
@@ -2616,7 +2738,9 @@ async function main() {
   // immediately after construction succeeds, rather than inside the
   // map.on('load') block below -- that block is exactly what a hang
   // looks like, so its own contents can't be where a hang gets caught.
-  let mapLoaded = false;
+  // (mapLoaded itself is module-scoped now -- see near sendClientLog
+  // above -- so the load-timeout watchdog can be scheduled before this
+  // point too.)
   map.on('error', (e) => {
     const inner = e && e.error;
     const msg = inner && inner.message ? inner.message : String(inner || (e && e.type) || 'map error');
@@ -2632,12 +2756,6 @@ async function main() {
     if (mapLoaded) return;
     showMapErrorBanner();
   });
-  setTimeout(() => {
-    if (mapLoaded) return;
-    console.error(`MeshWars map2: map did not fire 'load' within ${MAP_LOAD_TIMEOUT_MS}ms`);
-    sendClientLog('map_load_timeout', `no load event after ${MAP_LOAD_TIMEOUT_MS}ms`);
-    showMapErrorBanner();
-  }, MAP_LOAD_TIMEOUT_MS);
   const canvas = map.getCanvas && map.getCanvas();
   if (canvas) {
     canvas.addEventListener('webglcontextlost', (e) => {
@@ -2689,6 +2807,7 @@ async function main() {
   }
 
   map.on('load', () => {
+    bootCheckpoint('t4_load', 't4_load');
     mapLoaded = true; // read by the load-timeout setTimeout above
     // A 'load' arriving late, after the timeout above already swapped
     // in the error banner, means the map did in fact come up -- pull
