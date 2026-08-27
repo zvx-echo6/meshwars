@@ -89,6 +89,14 @@ AWARD_LABELS["top_netop"] = "Top NetOp"
 # remote summit alone spends the whole week) and so each one now
 # describes a real, distinct playstyle instead of three views of the
 # same points grind.
+#
+# The NAME survives the award, exactly as NetOps did: Explorer is still
+# the season-long Places Worth Going points ranking (the Explorer tab
+# under Top Operators, `explorer_points` in app/public_api._player_rows,
+# folded into a player's total_points in app/mc_api) -- and BECAUSE it
+# feeds the season total score it cannot be month-scoped or reset the
+# way an honour here is. The label below exists purely so months frozen
+# while the award still ran display a real name.
 AWARD_LABELS["explorer"] = "Explorer"
 
 # Display order. compute_month() emits awards in this order naturally,

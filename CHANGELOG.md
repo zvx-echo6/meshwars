@@ -2,6 +2,40 @@
 
 Notable, player-facing changes. Plain language, newest first.
 
+## 2026-08-27 — Places no longer stack
+
+**One square, one place, one credit.** A square that carries more than
+one place — a landmark standing inside a large park is the usual case —
+used to pay out for every live place on it from a single ping, most
+valuable first. That was never intended: one trip to one square is one
+errand, and it should pay once. Only the most valuable place on a
+square scores now. The lesser one is dropped rather than paid alongside
+it, and it is not a fallback either: if you already collected the
+valuable place this week, the square pays nothing rather than handing
+you the cheaper one. If the valuable place is worth more than what is
+left of your weekly hundred, it still pays — just for the remainder,
+capping you at the hundred instead of turning you away. Two places of
+exactly equal value on one square always resolve to the same winner,
+for every player and every week.
+
+**The weekly cap caps, it doesn't refuse.** This applies whether or not
+a square has a runner-up sitting on it: reach a place worth more than
+what's left of your hundred for the week and it no longer turns you
+away empty-handed — it pays out the rest of the budget and leaves you
+at the ceiling. A player at 50 points who then reaches a 100-point peak
+is credited the remaining 50, not zero. That place has used its one
+credit for the week either way.
+
+Nothing already earned changes. Past credits, past scores and frozen
+months stay exactly as they are — this is forward behaviour only.
+
+**Explorer, said properly.** Explorer is not a monthly honor and never
+was resettable: it is the name of an activity and of a rankings tab
+(alongside Wardrivers and NetOps under Top Operators), a season-long
+points figure that counts toward your total score. The rules said so in
+passing; they say so plainly now. The monthly honors built on places
+count visits, not points — Tourist, Park Hopper and Peak Tagger.
+
 ## 2026-08-25 — Places Worth Going, a new map, and self-hosted terrain
 
 **Scoring changed.** Reaching a summit, a park, or a landmark now earns

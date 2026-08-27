@@ -83,8 +83,11 @@ class Settings(BaseSettings):
     mc_key_cache_seconds: int = 60
     # About 100 mph. Two jobs: it logs an implausible-speed warning, and
     # it is the line above which a claim is marked by_air and stops
-    # counting toward the exploration awards (Explorer/Frontier) -- those
-    # reward reach and effort, and a plane trivialises both. Was 200 mph,
+    # counting toward Places Worth Going (app/place_scoring.py, and so
+    # toward the Tourist/Park Hopper/Peak Tagger honours and the
+    # season-long Explorer ranking built on it) and toward the Frontier
+    # award -- those reward reach and effort, and a plane trivialises
+    # both. Was 200 mph,
     # which a light aircraft at cruise sails straight under; an interstate
     # at 90 mph is only 40 m/s, so this separates the two cleanly.
     # Territory is NOT affected -- the radio really did hear the repeater.
