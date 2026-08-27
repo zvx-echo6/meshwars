@@ -39,6 +39,7 @@ from . import mc_api
 from .admin_api import router as admin_router
 from .admin_ops import router as admin_ops_router
 from .checkin_api import router as checkin_router
+from .clientlog_api import router as clientlog_router
 from .config import settings
 from .db import connect
 from .join_api import router as join_router
@@ -898,6 +899,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(public_router)
     app.include_router(places_router)
     app.include_router(notice_router)
+    app.include_router(clientlog_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"

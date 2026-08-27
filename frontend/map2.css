@@ -321,3 +321,57 @@
 .mw-notice-modal-rules-link:focus-visible {
   text-decoration: underline;
 }
+
+/* -------------------------------------------------------------------------
+   Map failure banner (map2.js's showMapErrorBanner) -- replaces
+   #loading-overlay the first time the map construction throws,
+   map.on('error') fires, the load timeout elapses, or the WebGL context
+   is lost. Same full-viewport z-index tier as #loading-overlay
+   (coverage.css) since it always takes that overlay's place, never
+   layers on top of it. Uses --mw-hostile (already themed red/pink for
+   both gold and neon -- see theme.css) as the one error accent this
+   page has, and --mw-panel/--mw-text-1 for the surface so it stays
+   readable in both themes and at phone width.
+   ------------------------------------------------------------------------- */
+.mw-map-error-banner {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+  background: var(--mw-page);
+}
+.mw-map-error-banner[hidden] { display: none; }
+.mw-map-error-inner {
+  max-width: 360px;
+  width: 100%;
+  text-align: center;
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-hostile);
+  border-radius: 6px;
+  padding: 20px;
+  box-sizing: border-box;
+}
+.mw-map-error-text {
+  margin: 0 0 14px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.mw-map-error-reload {
+  background: var(--mw-hostile);
+  color: var(--mw-text-1);
+  border: none;
+  border-radius: 4px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.mw-map-error-reload:hover,
+.mw-map-error-reload:focus-visible {
+  filter: brightness(1.15);
+}

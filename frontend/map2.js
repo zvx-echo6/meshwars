@@ -22,6 +22,297 @@
  * regardless of theme and never touched by the theme code below.
  */
 
+// ---------------------------------------------------------------------
+// Failure reporting + boot checkpoints.
+//
+// The map has been seen never rendering at all on real mobile hardware
+// (GrapheneOS Vanadium and Brave, stock Android Chrome) -- #loading-
+// overlay stays up forever, with nothing in the console to say why. It
+// works on desktop and in headless Chromium emulating a mobile
+// viewport, so whatever fails only shows up on real devices. A first
+// pass added a try/catch around `new maplibregl.Map(...)`,
+// map.on('error'), a load timeout, and a webglcontextlost handler, but
+// a later real-device load still hung with NONE of those firing: no
+// /tiles/*.pmtiles requests, no /api/clientlog report, just the
+// spinner past the timeout. That means execution stops somewhere
+// between /config resolving and the load timeout ever being
+// *scheduled* -- and the previous version scheduled that timeout AFTER
+// `new maplibregl.Map(...)` returned, so a constructor that hangs
+// (rather than throws) would produce exactly this signature, with the
+// timeout's own setTimeout call never reached either.
+//
+// This section is deliberately placed as close to the very top of the
+// file as possible, ahead of everything else including TEAM_COLORS --
+// every one of the checkpoints below depends on it, including the
+// first one (t0), which is meant to fire before almost anything else
+// in the module has had a chance to throw. It exposes:
+//
+//   - sendClientLog/bootCheckpoint: a best-effort report to POST
+//     /api/clientlog (app/clientlog_api.py), now via navigator.sendBeacon
+//     (falling back to fetch) since sendBeacon is built to survive page
+//     teardown -- a fetch, even with keepalive, is not as reliable on
+//     mobile Chrome/Safari when the tab is backgrounded or the page is
+//     being torn down.
+//   - showMapErrorBanner: swaps #loading-overlay for #map-error-banner,
+//     unchanged from before.
+//   - a handful of boot checkpoints (kind: 'boot') at t0 (module top),
+//     t1 (right after the unpkg globals are available to check), t2
+//     (immediately before `new maplibregl.Map(...)`), t3 (immediately
+//     after it returns), and t4 (inside map.on('load')) -- so a
+//     real-device load shows exactly how far execution got instead of
+//     nothing at all. These are opt-in only, behind ?debug=1 (see
+//     DEBUG_REPORTING below); a normal visitor sends none of them.
+//   - a visibilitychange report: if the tab is backgrounded before the
+//     map has loaded, that's reported too (also ?debug=1 only, being a
+//     kind: 'boot' report), since a visitor who locks their phone or
+//     switches apps before any timer fires would otherwise leave no
+//     trail either.
+//
+// Failure reports are NOT gated -- they fire for every visitor,
+// always. Only the boot checkpoints are opt-in.
+//
+// None of this identifies the actual trigger -- that is still unknown
+// -- it only narrows down where execution actually stops.
+
+// 12s: comfortably longer than a slow cold TLS+tile fetch on a poor
+// mobile connection takes to reach MapLibre's 'load' event (which fires
+// once the initial style/sources are ready, well before every tile is
+// in), short enough that a visitor whose map really has hung isn't left
+// staring at the spinner for anywhere near the 30s periodic-refresh
+// cadence before being told it isn't coming.
+const MAP_LOAD_TIMEOUT_MS = 12000;
+
+let mapFailureShown = false;
+
+// Set true by map.on('load') (see main()); read by the load-timeout
+// watchdog and by the visibilitychange reporter below. Module-scoped
+// (not local to main()) so the visibilitychange listener -- registered
+// here, before main() has even been called -- can see it.
+let mapLoaded = false;
+
+// Furthest boot checkpoint reached so far, read by the visibilitychange
+// reporter below so a backgrounded-before-load report says how far
+// execution got rather than just that it didn't finish.
+let bootStage = 'start';
+
+// Boot checkpoints are a debugging instrument, not production
+// telemetry: on a healthy load they are pure noise, and firing 8+
+// beacons per visitor would both bury real failures in the clientlog
+// and add a request per page view for nothing. So they are opt-in
+// behind the SAME ?debug=1 flag that loads eruda in map2.html -- one
+// flag, one mental model: "?debug=1 turns diagnostics on".
+//
+// This gates ONLY `kind: 'boot'` reports. Every failure report
+// (map_construct_failed, map_error_event, map_load_timeout,
+// webgl_context_lost, register_place_icons_failed, load_handler_threw,
+// main_failed, window_onerror, unhandled_rejection) stays
+// unconditional for every visitor -- those are the entire reason the
+// endpoint exists, and a failure that only reports itself when someone
+// happened to append ?debug=1 is a failure nobody hears about.
+//
+// Evaluated once at module load rather than per call: location.search
+// cannot change without a navigation, and a checkpoint must never be
+// the thing that throws.
+const DEBUG_REPORTING = (() => {
+  try {
+    return /(?:^|[?&])debug=1(?:&|$)/.test(location.search);
+  } catch {
+    return false;
+  }
+})();
+
+// Swaps #loading-overlay for #map-error-banner. Idempotent: only the
+// first failure does anything, since several of these paths (e.g. a
+// map.on('error') followed by the load timeout it caused) can fire for
+// the same underlying problem, and the banner should not flash or
+// re-render on the second one.
+function showMapErrorBanner() {
+  if (mapFailureShown) return;
+  mapFailureShown = true;
+  const overlay = document.getElementById('loading-overlay');
+  if (overlay) overlay.remove();
+  const banner = document.getElementById('map-error-banner');
+  if (banner) banner.hidden = false;
+}
+
+// Best-effort report to the server. Deliberately paranoid about never
+// throwing itself -- a reporter that can fail loudly would turn "the
+// map broke" into "the map broke AND so did reporting it" -- so
+// everything from building the body to the send itself is swallowed.
+// Fields are pre-truncated here too (the server enforces its own caps
+// independently; this just avoids sending bytes that would only be
+// discarded).
+//
+// navigator.sendBeacon is tried first: it is specifically designed to
+// survive page teardown/backgrounding, which a fetch (even with
+// keepalive: true) is not as reliably able to do on mobile browsers.
+// sendBeacon has no way to set headers, so the JSON body is wrapped in
+// a Blob with an explicit type instead -- app/clientlog_api.py parses
+// the raw body as JSON regardless of Content-Type, so this changes
+// nothing server-side. Falls back to the previous fetch-based send if
+// sendBeacon is unavailable (very old browsers) or itself returns
+// false (queue already full).
+//
+// Caps how many reports a single page load will ever send. A flaky
+// connection can throw many tile errors in quick succession (see the
+// map.on('error') gating in main()); without a cap that becomes a
+// burst of requests the server's own 20/min limiter
+// (app/clientlog_api.py) was only ever going to reject anyway. Raised
+// from 12 to 24 to fit the t4d/t4f/t5/t9 overlay-removal diagnostics
+// added alongside the t0-t4 boot checkpoints below.
+const CLIENT_LOG_MAX_PER_LOAD = 24;
+let clientLogSentCount = 0;
+
+function sendClientLog(kind, message) {
+  if (clientLogSentCount >= CLIENT_LOG_MAX_PER_LOAD) return;
+  clientLogSentCount += 1;
+  try {
+    const body = JSON.stringify({
+      kind: String(kind == null ? 'unknown' : kind).slice(0, 64),
+      message: String(message == null ? '' : message).slice(0, 500),
+      href: String((location && location.pathname) || '').slice(0, 200),
+    });
+    try {
+      if (navigator && typeof navigator.sendBeacon === 'function') {
+        const blob = new Blob([body], { type: 'application/json' });
+        if (navigator.sendBeacon('/api/clientlog', blob)) return;
+      }
+    } catch {
+      // Fall through to the fetch fallback below.
+    }
+    fetch('/api/clientlog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // Never let a reporting failure become a second error.
+  }
+}
+
+// Cheap, never-throwing boot markers -- `kind: 'boot'`, a short
+// `message` unique per call site (see main() and t0/t1 below for where
+// each fires). Updates bootStage first so the visibilitychange
+// reporter always has the latest value even if sendClientLog itself
+// somehow threw.
+function bootCheckpoint(stage, message) {
+  // bootStage is updated unconditionally even when reporting is off --
+  // it costs nothing, and keeping it accurate means a debug-mode
+  // session behaves identically to a normal one up to the send.
+  bootStage = stage;
+  if (!DEBUG_REPORTING) return;
+  try {
+    sendClientLog('boot', message || stage);
+  } catch {
+    // Never let a checkpoint become a second error.
+  }
+}
+
+// Real numbers behind the t2/t3/t4 boot checkpoints below -- confirms
+// or refutes, with actual device measurements rather than a guess made
+// from a desktop browser where this has never reproduced, whether
+// #map (and the WebGL canvas MapLibre draws into) has non-zero size at
+// each stage. Compact k=v pairs, single line, to stay well inside the
+// clientlog endpoint's 500-char field cap. `canvas` is optional --
+// undefined/null before the map is constructed (t2) -- and its
+// width/height are the backing-store pixel size (the canvas element's
+// attributes), while canvas_cli is its CSS layout size, same
+// distinction as #map's clientWidth/clientHeight vs. its
+// getBoundingClientRect(). Every call site wraps this in its own
+// try/catch and falls back to a plain stage-name checkpoint if
+// anything here is missing or throws.
+function mapGeomSnapshot(stage, canvas) {
+  const el = document.getElementById('map');
+  const rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+  const parts = [
+    stage,
+    `map=${el ? el.clientWidth : '?'}x${el ? el.clientHeight : '?'}`,
+    `rect_h=${rect ? Math.round(rect.height) : '?'}`,
+  ];
+  if (canvas) {
+    parts.push(`canvas=${canvas.width}x${canvas.height}`);
+    parts.push(`canvas_cli=${canvas.clientWidth}x${canvas.clientHeight}`);
+  }
+  parts.push(`win=${window.innerWidth}x${window.innerHeight}`);
+  parts.push(`dpr=${window.devicePixelRatio}`);
+  if (stage === 't4_load') {
+    parts.push(`body_h=${document.body ? document.body.clientHeight : '?'}`);
+  }
+  return parts.join(' ');
+}
+
+// Real device evidence (see the section comment above) showed 'load'
+// firing with healthy geometry, every network request succeeding, and
+// no console errors -- yet #loading-overlay stayed up forever, because
+// its removal previously sat AFTER setBoardMode/loadPlacesViewport/
+// loadPlacesPanel inside map.on('load'), gating a startup-only overlay
+// behind data calls that can stall or throw. Pulled out into its own
+// idempotent function (guarded by loadingOverlayRemoved) so it can be
+// called both immediately once 'load' fires (see main() below) AND, as
+// a belt-and-braces fallback, from a one-shot map.on('idle') handler in
+// case the 'load' path is somehow never reached -- either caller is
+// harmless if the other already ran. The fade-out + setTimeout(...,
+// 500) removal mechanism itself is unchanged from before.
+let loadingOverlayRemoved = false;
+function removeLoadingOverlay() {
+  if (loadingOverlayRemoved) return;
+  loadingOverlayRemoved = true;
+  try {
+    const loadingOverlay = document.getElementById('loading-overlay');
+    bootCheckpoint('t4d_overlay', `t4d_overlay found=${loadingOverlay ? 1 : 0}`);
+    if (!loadingOverlay) return;
+    loadingOverlay.classList.add('fade-out');
+    setTimeout(() => {
+      try {
+        loadingOverlay.remove();
+        bootCheckpoint(
+          't4f_removed',
+          `t4f_removed gone=${document.getElementById('loading-overlay') ? 0 : 1}`
+        );
+      } catch {
+        bootCheckpoint('t4f_removed', 't4f_removed gone=0');
+      }
+    }, 500);
+  } catch {
+    bootCheckpoint('t4d_overlay', 't4d_overlay error');
+  }
+}
+
+// Page-wide safety net, not map-specific -- addEventListener rather
+// than assigning window.onerror/onunhandledrejection so this can never
+// clobber (or be clobbered by) some other handler. Reports only; it
+// does not show the map error banner itself, since an error anywhere
+// else on the page (theme-toggle.js, a browser extension, ...) is not
+// evidence the map itself failed -- the map's own paths in main() call
+// showMapErrorBanner() directly when they know that's what happened.
+window.addEventListener('error', (e) => {
+  sendClientLog('window_onerror', e && e.message);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e && e.reason;
+  const msg = reason && reason.message ? reason.message : String(reason);
+  sendClientLog('unhandled_rejection', msg);
+});
+
+// Catches a visitor backgrounding the tab (locking the phone, switching
+// apps, navigating away) before the map has loaded and before any
+// timer has fired -- without this, that load simply vanishes with no
+// trail at all instead of showing how far execution got.
+document.addEventListener('visibilitychange', () => {
+  if (!DEBUG_REPORTING) return;
+  if (document.visibilityState === 'hidden' && !mapLoaded) {
+    sendClientLog('boot', `hidden_after_${bootStage}`);
+  }
+});
+
+// t0: the very first executable statement in this module past wiring
+// up the reporting helpers directly above it (those are declarations,
+// not side effects) -- if a future real-device load never reports even
+// this, the module failed before doing anything at all, which rules
+// out every checkpoint after it in one shot.
+bootCheckpoint('t0_module', 't0_module');
+
 // Same team colors as frontend/mc.js's TEAM_COLORS -- kept as a second
 // copy on purpose, same reasoning as frontend/join.js: this page must
 // load independently of mc.js.
@@ -310,6 +601,20 @@ const MAX_FIT_ZOOM = 13;
 // Matches the breakpoint mc.css's collapsible-header media query uses
 // for "phone-width" (see setMcCollapsed below).
 const NARROW_BREAKPOINT_PX = 600;
+
+// t1: right after the two unpkg <script> tags in map2.html (maplibregl,
+// pmtiles) are the last thing to run before this module, and right
+// before the first use of either global below. `typeof` rather than a
+// direct reference so this can never itself throw a ReferenceError if
+// one of the CDN scripts failed to load -- that outcome is exactly what
+// this checkpoint exists to catch, so it has to survive it. Directly
+// tests the CDN-blocked hypothesis: if either reads 'undefined' here,
+// `new pmtiles.Protocol()` / `maplibregl.addProtocol` immediately below
+// throws before main() ever runs, and every checkpoint after this one
+// (and every failure path added later, since those are wired up inside
+// main()) simply never fires -- which is exactly the silent-hang
+// signature seen on real mobile.
+bootCheckpoint('t1_libs', `t1_libs maplibregl=${typeof maplibregl} pmtiles=${typeof pmtiles}`);
 
 // pmtiles.js registers no protocol on its own -- this wires the
 // pmtiles:// URL scheme into MapLibre's request pipeline so a raster
@@ -1324,7 +1629,29 @@ const PLACE_GLYPHS = {
 // stretch past native resolution on ANY screen.
 function drawPlaceIcon(type, color, sizePx, outline, dpr) {
   const canvas = document.createElement('canvas');
-  const dim = sizePx * dpr;
+  // Rounded to an integer BEFORE it's used anywhere below -- a
+  // fractional dpr (2.625 on many real Android phones, not just a
+  // desktop testing artifact) made this fractional too (e.g.
+  // 22*2.625=57.75), and canvas.width/height silently truncate a
+  // fractional assignment to an integer backing store while dim
+  // itself stayed fractional. That mismatch fed forward into
+  // getImageData(0,0,dim,dim) (which itself gets truncated back to
+  // the canvas's real integer size, so the pixel DATA was always
+  // correctly sized) and, separately and fatally, into the `width`/
+  // `height` this function reports back to registerPlaceIcons for
+  // map.addImage -- MapLibre validates data.length against
+  // width*height*4 using the fractional value it was told, computes
+  // a different number than the data it actually received, and
+  // throws a RangeError from inside its own event dispatch. That
+  // throw happens with no console error, no window.onerror, and no
+  // map 'error' event (MapLibre's internal listener dispatch swallows
+  // it), silently aborting whatever else was running in the same
+  // map.on('load') handler -- see the try/catch registerPlaceIcons is
+  // now called through below for the belt-and-braces half of this
+  // fix. Rounding once, up front, keeps every dimension derived from
+  // `dim` (canvas size, getImageData rect, reported width/height)
+  // exactly self-consistent for ANY dpr, integer or not.
+  const dim = Math.round(sizePx * dpr);
   canvas.width = dim;
   canvas.height = dim;
   const ctx = canvas.getContext('2d');
@@ -2401,6 +2728,17 @@ async function fetchBootConfig() {
   }
 }
 
+// Failure reporting + boot checkpoints (MAP_LOAD_TIMEOUT_MS,
+// sendClientLog, showMapErrorBanner, bootCheckpoint, and the
+// window/document listeners that use them) now live at the very top of
+// this file, not here -- see that section's comment for why. This
+// keeps only the DOM wiring that section didn't need to exist before
+// main() runs.
+const mapErrorReloadBtn = document.getElementById('mw-map-error-reload');
+if (mapErrorReloadBtn) {
+  mapErrorReloadBtn.addEventListener('click', () => location.reload());
+}
+
 async function main() {
   // Not awaited: a single small GET against a one-row table, kicked off
   // in parallel with the map's own boot rather than gating first paint
@@ -2414,84 +2752,198 @@ async function main() {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
   }
 
-  const map = new maplibregl.Map({
-    container: 'map',
-    center: [-116.10, 43.76],
-    zoom: 10,
-    minZoom: 4,   // roughly the whole play area in view
-    maxZoom: 17,  // well past the 300 m grid; squares stay legible
-    ...(playAreaBounds ? { maxBounds: playAreaBounds } : {}),
-    // Pitching made the hillshade render with holes -- the DEM tiles are
-    // not all there once the camera tilts, with nothing erroring to say
-    // so -- and it took bandwidth from 8 MB to 32 MB for a worse picture.
-    // This is a top-down territory game, so the camera is locked flat
-    // rather than the rendering chased.
-    maxPitch: 0,
-    style: {
-      version: 8,
-      // Only needed once Places Worth Going's name labels
-      // (places-labels, setupPlacesLayer) added the first `text-field`
-      // layer this style has ever had -- MapLibre refuses to add ANY
-      // symbol layer using text-field without a glyphs template in the
-      // style, even one that never renders (board/overlay layers below
-      // are all fill/line/hillshade, no text). Served from our own
-      // /static mount (frontend/fonts/, see its README.md) rather than
-      // MapLibre's public demo glyph server -- the OSM/CARTO basemap
-      // tiles below are still fetched from their own public hosts, but
-      // the place labels the game itself put on the map should not
-      // depend on someone else's demo infrastructure staying up.
-      glyphs: '/static/fonts/{fontstack}/{range}.pbf',
-      sources: {
-        [BASEMAP_ID]: {
-          type: 'raster',
-          tiles: [
-            'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-            'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-            'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
-          ],
-          tileSize: 256,
-          attribution: '© OpenStreetMap contributors © CARTO',
-          maxzoom: 20,
+  let map;
+
+  // Scheduled BEFORE `new maplibregl.Map(...)` below, not after: a
+  // constructor call that hangs rather than throws never returns
+  // control to this function, so anything scheduled only after it
+  // returns -- including this watchdog, in the previous version --
+  // never gets registered at all. Registering it first means a hanging
+  // OR throwing constructor can still be caught, as long as the main
+  // thread itself is not blocked. mapLoaded is module-scoped (declared
+  // near sendClientLog above) and flipped true in map.on('load') below.
+  setTimeout(() => {
+    if (mapLoaded) return;
+    console.error(`MeshWars map2: map did not fire 'load' within ${MAP_LOAD_TIMEOUT_MS}ms`);
+    sendClientLog('map_load_timeout', `no load event after ${MAP_LOAD_TIMEOUT_MS}ms`);
+    showMapErrorBanner();
+  }, MAP_LOAD_TIMEOUT_MS);
+
+  try {
+    bootCheckpoint('t2_pre_ctor', mapGeomSnapshot('t2_pre_ctor', null));
+  } catch {
+    bootCheckpoint('t2_pre_ctor', 't2_pre_ctor');
+  }
+  try {
+    map = new maplibregl.Map({
+      container: 'map',
+      center: [-116.10, 43.76],
+      zoom: 10,
+      minZoom: 4,   // roughly the whole play area in view
+      maxZoom: 17,  // well past the 300 m grid; squares stay legible
+      ...(playAreaBounds ? { maxBounds: playAreaBounds } : {}),
+      // Pitching made the hillshade render with holes -- the DEM tiles are
+      // not all there once the camera tilts, with nothing erroring to say
+      // so -- and it took bandwidth from 8 MB to 32 MB for a worse picture.
+      // This is a top-down territory game, so the camera is locked flat
+      // rather than the rendering chased.
+      maxPitch: 0,
+      style: {
+        version: 8,
+        // Only needed once Places Worth Going's name labels
+        // (places-labels, setupPlacesLayer) added the first `text-field`
+        // layer this style has ever had -- MapLibre refuses to add ANY
+        // symbol layer using text-field without a glyphs template in the
+        // style, even one that never renders (board/overlay layers below
+        // are all fill/line/hillshade, no text). Served from our own
+        // /static mount (frontend/fonts/, see its README.md) rather than
+        // MapLibre's public demo glyph server -- the OSM/CARTO basemap
+        // tiles below are still fetched from their own public hosts, but
+        // the place labels the game itself put on the map should not
+        // depend on someone else's demo infrastructure staying up.
+        glyphs: '/static/fonts/{fontstack}/{range}.pbf',
+        sources: {
+          [BASEMAP_ID]: {
+            type: 'raster',
+            tiles: [
+              'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+              'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+              'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
+            ],
+            tileSize: 256,
+            attribution: '© OpenStreetMap contributors © CARTO',
+            maxzoom: 20,
+          },
+          // meshwars-hillshade-alpha.pmtiles is finished imagery (WEBP
+          // tiles, z0-12, RGBA), not elevation data -- there is nothing
+          // left for the browser to shade, so this is a plain raster
+          // source, not raster-dem, and carries no `encoding`. maxzoom
+          // marks the archive's real ceiling; MapLibre reuses and
+          // stretches that z12 tile above it (see the HILLSHADE_ID layer
+          // below and the overzoom comment near ROUTE_LINE_WIDTH).
+          'hillshade-source': {
+            type: 'raster',
+            url: `pmtiles://${DEM_URL}`,
+            tileSize: 256,
+            maxzoom: 12,
+          },
         },
-        // meshwars-hillshade-alpha.pmtiles is finished imagery (WEBP
-        // tiles, z0-12, RGBA), not elevation data -- there is nothing
-        // left for the browser to shade, so this is a plain raster
-        // source, not raster-dem, and carries no `encoding`. maxzoom
-        // marks the archive's real ceiling; MapLibre reuses and
-        // stretches that z12 tile above it (see the HILLSHADE_ID layer
-        // below and the overzoom comment near ROUTE_LINE_WIDTH).
-        'hillshade-source': {
-          type: 'raster',
-          url: `pmtiles://${DEM_URL}`,
-          tileSize: 256,
-          maxzoom: 12,
-        },
+        layers: [
+          {
+            id: BASEMAP_ID,
+            type: 'raster',
+            source: BASEMAP_ID,
+          },
+          {
+            id: HILLSHADE_ID,
+            type: 'raster',
+            source: 'hillshade-source',
+            // No `maxzoom` here (see the overzoom comment near
+            // ROUTE_LINE_WIDTH) -- the map's own maxZoom is 17, and a
+            // plain raster layer just keeps reusing the source's last
+            // real z12 tile above that rather than vanishing. No
+            // `raster-dem` exaggeration to set either: this archive's
+            // exaggeration (0.85, the dark theme's former value) is baked
+            // into the pixels at build time. raster-opacity is set by
+            // applyBasemapTheme (HILLSHADE_OPACITY) instead, right after
+            // the map loads, so the basemap underneath -- roads, water,
+            // place labels -- still shows through everywhere the imagery's
+            // own alpha channel already leaves transparent.
+          },
+        ],
       },
-      layers: [
-        {
-          id: BASEMAP_ID,
-          type: 'raster',
-          source: BASEMAP_ID,
-        },
-        {
-          id: HILLSHADE_ID,
-          type: 'raster',
-          source: 'hillshade-source',
-          // No `maxzoom` here (see the overzoom comment near
-          // ROUTE_LINE_WIDTH) -- the map's own maxZoom is 17, and a
-          // plain raster layer just keeps reusing the source's last
-          // real z12 tile above that rather than vanishing. No
-          // `raster-dem` exaggeration to set either: this archive's
-          // exaggeration (0.85, the dark theme's former value) is baked
-          // into the pixels at build time. raster-opacity is set by
-          // applyBasemapTheme (HILLSHADE_OPACITY) instead, right after
-          // the map loads, so the basemap underneath -- roads, water,
-          // place labels -- still shows through everywhere the imagery's
-          // own alpha channel already leaves transparent.
-        },
-      ],
-    },
+    });
+  } catch (err) {
+    console.error('MeshWars map2: map construction failed', err);
+    sendClientLog('map_construct_failed', err && err.message);
+    showMapErrorBanner();
+    return;
+  }
+  try {
+    bootCheckpoint('t3_post_ctor', mapGeomSnapshot('t3_post_ctor', map.getCanvas && map.getCanvas()));
+  } catch {
+    bootCheckpoint('t3_post_ctor', 't3_post_ctor');
+  }
+
+  // Standard corrective, independent of whatever mapGeomSnapshot above
+  // finds: a WebGL canvas never resizes itself when its container does,
+  // so if #map only gets its real height after layout settles --
+  // common on real mobile browsers whose chrome (address bar, etc.)
+  // resizes the viewport after first paint -- the canvas MapLibre sized
+  // at construction time stays at that stale size until something
+  // explicitly tells MapLibre to re-measure. Attached here (right after
+  // construction) rather than waiting for 'load', so a container that
+  // settles its size before the style finishes loading is still caught.
+  // Guarded: ResizeObserver may not exist, and this must never throw.
+  try {
+    const mapEl = document.getElementById('map');
+    if (mapEl && typeof ResizeObserver === 'function') {
+      const mapResizeObserver = new ResizeObserver(() => {
+        try {
+          map.resize();
+        } catch {
+          // Never let the corrective itself become a page error.
+        }
+      });
+      mapResizeObserver.observe(mapEl);
+    }
+  } catch {
+    // ResizeObserver unavailable -- the map.resize() call inside
+    // map.on('load') below still covers the common case.
+  }
+
+  // Failure paths for everything a successful constructor above can
+  // still go wrong on later: a runtime error MapLibre reports through
+  // the map itself (map.on('error') -- a failed tile/style/glyph
+  // fetch, a WebGL init problem it catches internally, ...), a 'load'
+  // that never arrives at all, and a WebGL context the browser or GPU
+  // driver drops out from under an already-running map. Wired here,
+  // immediately after construction succeeds, rather than inside the
+  // map.on('load') block below -- that block is exactly what a hang
+  // looks like, so its own contents can't be where a hang gets caught.
+  // (mapLoaded itself is module-scoped now -- see near sendClientLog
+  // above -- so the load-timeout watchdog can be scheduled before this
+  // point too.)
+  map.on('error', (e) => {
+    const inner = e && e.error;
+    const msg = inner && inner.message ? inner.message : String(inner || (e && e.type) || 'map error');
+    console.error('MeshWars map2: map.on(error)', e);
+    sendClientLog('map_error_event', msg);
+    // MapLibre also fires 'error' for routine, non-fatal problems --
+    // most commonly a single tile 404 or an aborted fetch -- which are
+    // common and expected on a flaky mobile connection. Once the map
+    // has already loaded, that's a hiccup on an otherwise-working map,
+    // not the silent-hang failure this section exists to catch: only
+    // show the banner (and cover a working map) if 'load' hasn't fired
+    // yet. The report above still goes out either way.
+    if (mapLoaded) return;
+    showMapErrorBanner();
   });
+  // Belt-and-braces for the loading overlay: registered here rather
+  // than inside map.on('load') below, so it still fires even if 'load'
+  // itself is somehow never reached (or its handler throws before
+  // getting to the overlay removal). 'idle' fires once the map has
+  // finished rendering everything currently queued, which in the
+  // healthy case happens shortly after 'load' -- removeLoadingOverlay()
+  // is idempotent, so this is a harmless no-op whenever the 'load' path
+  // already handled it.
+  map.on('idle', () => {
+    removeLoadingOverlay();
+  });
+
+  const canvas = map.getCanvas && map.getCanvas();
+  if (canvas) {
+    canvas.addEventListener('webglcontextlost', (e) => {
+      // Per spec this is cancelable and preventing default is what
+      // requests a restore -- done here regardless of whether MapLibre
+      // itself will ever act on it, since it costs nothing and is the
+      // documented way to even ask for one.
+      if (e && e.preventDefault) e.preventDefault();
+      console.error('MeshWars map2: webglcontextlost', e);
+      sendClientLog('webgl_context_lost', 'webglcontextlost');
+      showMapErrorBanner();
+    });
+  }
 
   // Referenced by the places panel's click-to-fly-to handler
   // (renderPlacesPanel) and by the territory panel's player-lookup
@@ -2530,6 +2982,54 @@ async function main() {
   }
 
   map.on('load', () => {
+    try {
+      bootCheckpoint('t4_load', mapGeomSnapshot('t4_load', map.getCanvas && map.getCanvas()));
+    } catch {
+      bootCheckpoint('t4_load', 't4_load');
+    }
+    mapLoaded = true; // read by the load-timeout setTimeout above
+    // A 'load' arriving late, after the timeout above already swapped
+    // in the error banner, means the map did in fact come up -- pull
+    // the banner back down rather than leaving a stale "failed" message
+    // over a map that is now working.
+    if (mapFailureShown) {
+      const banner = document.getElementById('map-error-banner');
+      if (banner) banner.hidden = true;
+      mapFailureShown = false;
+    }
+
+    // Overlay removal runs HERE, immediately once 'load' has fired and
+    // before any of the board/places data calls below -- see
+    // removeLoadingOverlay()'s own comment for why: the overlay exists
+    // only to cover map startup, and 'load' means the map is up, so its
+    // removal must not be gated behind data loading that can stall or
+    // throw. (Belt-and-braces: also called from a one-shot
+    // map.on('idle') handler above, in case this line is never reached.)
+    removeLoadingOverlay();
+
+    // t9_probe: fires 4s after 'load' regardless of what else happens
+    // in this handler -- confirms whether #loading-overlay actually
+    // left the DOM, and if it somehow didn't, captures enough (computed
+    // opacity/display, rendered height) to tell a CSS/DOM problem apart
+    // from removeLoadingOverlay() never having run at all.
+    setTimeout(() => {
+      try {
+        const el = document.getElementById('loading-overlay');
+        if (!el) {
+          bootCheckpoint('t9_probe', 't9_probe present=0');
+        } else {
+          const cs = window.getComputedStyle ? window.getComputedStyle(el) : null;
+          const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+          bootCheckpoint(
+            't9_probe',
+            `t9_probe present=1 opacity=${cs ? cs.opacity : '?'} display=${cs ? cs.display : '?'} rect_h=${rect ? Math.round(rect.height) : '?'}`
+          );
+        }
+      } catch {
+        bootCheckpoint('t9_probe', 't9_probe error');
+      }
+    }, 4000);
+
     // Board source/layers are created empty and filled in once the
     // fetch resolves, so 'board-fill' exists immediately as a stable
     // beforeId for the overlay layers below.
@@ -2565,7 +3065,22 @@ async function main() {
     });
 
     setupOverlayLayers(map);
-    registerPlaceIcons(map);
+    // Wrapped on its own, separate from the try/catch already around
+    // setBoardMode/loadPlacesViewport/loadPlacesPanel below: icon
+    // registration draws/validates raster images against MapLibre's
+    // own internals (see drawPlaceIcon's dim-rounding comment above
+    // for the specific bug this guards against), which is a strictly
+    // narrower failure surface than the board/places data flow, and
+    // a thrown or future stall in here must not be able to take the
+    // rest of this handler down with it -- setupPlacesLayer and
+    // everything after it must still run even with no place icons
+    // registered at all (places would then fall back to whatever
+    // MapLibre does for a missing image, never a dead board).
+    try {
+      registerPlaceIcons(map);
+    } catch (err) {
+      sendClientLog('register_place_icons_failed', err && err.message);
+    }
     setupPlacesLayer(map);
     setupCellClickPopup(map);
     setupLayerSwitcher(map);
@@ -2576,14 +3091,22 @@ async function main() {
     // the panel's title/toggle state for the /config-derived `mode` set
     // in main() above, and does the same board/scoreboard/banner load
     // the periodic refresh below repeats every 30s.
-    setBoardMode(mode, map);
-    loadPlacesViewport(map);
-    loadPlacesPanel(map);
-
-    const loadingOverlay = document.getElementById('loading-overlay');
-    if (loadingOverlay) {
-      loadingOverlay.classList.add('fade-out');
-      setTimeout(() => loadingOverlay.remove(), 500);
+    // Wrapped and re-thrown (not swallowed) rather than left bare: the
+    // overlay removal above no longer depends on these three calls
+    // completing, but a throw here would previously vanish silently
+    // past this point -- reporting it keeps that failure mode visible
+    // without changing what happens to the exception itself.
+    try {
+      setBoardMode(mode, map);
+      loadPlacesViewport(map);
+      loadPlacesPanel(map);
+      // t5_post_dataload: proves whether the three calls above complete
+      // (return control here) at all, independent of the overlay, which
+      // by this point has already been handled above regardless.
+      bootCheckpoint('t5_post_dataload', 't5_post_dataload');
+    } catch (err) {
+      sendClientLog('load_handler_threw', err && err.message);
+      throw err;
     }
 
     // Same 30s cadence as frontend/mc.js's own REFRESH_INTERVAL_MS --
@@ -2614,7 +3137,23 @@ async function main() {
         loadPlacesPanel(map);
       }, 250);
     });
+
+    // Standard corrective, run once the style has actually finished
+    // loading (rather than only at construction time, see the
+    // ResizeObserver set up right after `new maplibregl.Map(...)`
+    // above): harmless if the canvas was already sized correctly,
+    // fixes it if #map's height only settled sometime between t3 and
+    // t4.
+    try {
+      map.resize();
+    } catch {
+      // Never let this corrective become a page error.
+    }
   });
 }
 
-main();
+main().catch((err) => {
+  console.error('MeshWars map2: main() failed', err);
+  sendClientLog('main_failed', err && err.message);
+  showMapErrorBanner();
+});
