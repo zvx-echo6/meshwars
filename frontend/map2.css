@@ -49,19 +49,117 @@
   overflow-y: auto;
 }
 
+/* The layer switcher and the tab that slides it away (map2.html's
+ * #mw-layers, driven by map2.js's setupLayersCollapse). This element is
+ * only the positioner now -- the card itself is .mw-layers-panel below,
+ * and .mw-layers-toggle is a full-height tab welded to its right edge,
+ * so the two read as one card with a grab bar. Collapsing translates
+ * the pair leftwards by exactly enough to park the tab flush against
+ * the viewport edge and carry the panel off screen behind it; because
+ * the movement is a transform on a bottom-left anchored box it can
+ * never produce a horizontal scrollbar. */
 .mw-layers {
+  /* Also the width the collapsed tab is left showing -- the translate
+     below is written in terms of it, so the two can never disagree. */
+  --mw-layers-tab-w: 24px;
   position: absolute;
   bottom: 12px;
   left: 12px;
   z-index: 5;
+  display: flex;
+  align-items: stretch;
+  transition: transform 0.25s ease;
+}
+
+/* Park the tab's left edge on x=0: the box starts at left:12px and the
+   tab occupies its rightmost --mw-layers-tab-w, so shifting by
+   (tab width - own width - 12px) lands it exactly on the edge whatever
+   the panel's own width happens to be. */
+.mw-layers.mw-layers-collapsed {
+  transform: translateX(calc(var(--mw-layers-tab-w) - 100% - 12px));
+}
+
+.mw-layers-panel {
   background: var(--mw-panel);
   color: var(--mw-text-1);
   border: 1px solid var(--mw-line);
-  border-radius: 8px;
+  border-right: none;
+  border-radius: 8px 0 0 8px;
   padding: 10px 14px;
   min-width: 150px;
   font-size: 13px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  /* Delayed only on the way out (the collapsed rule below), so the card
+     stays painted for the whole slide and then goes properly hidden --
+     which is also what takes its checkboxes out of the tab order, so a
+     collapsed panel cannot be reached by keyboard or screen reader. */
+  visibility: visible;
+  transition: visibility 0s;
+}
+
+.mw-layers.mw-layers-collapsed .mw-layers-panel {
+  visibility: hidden;
+  transition: visibility 0s linear 0.25s;
+}
+
+/* The one control: it collapses the panel when open and restores it
+   when closed, and never moves out of reach because it travels with the
+   panel rather than being part of it. Stretched to the panel's height
+   so it is a comfortable target at either width, and so the collapsed
+   state still leaves an obvious bar rather than a dot. */
+.mw-layers-toggle {
+  flex: 0 0 auto;
+  width: var(--mw-layers-tab-w);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--mw-raised);
+  /* Accent rather than a text grey: collapsed, this caret is the only
+     thing left on screen, and it has to read as a control against a
+     dark satellite/hillshade basemap rather than disappear into it. */
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 0 8px 8px 0;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mw-layers-toggle:hover,
+.mw-layers-toggle:focus-visible {
+  background: var(--mw-accent-active);
+  color: var(--mw-gold-light);
+}
+
+.mw-layers-toggle-caret {
+  display: block;
+  transition: transform 0.25s ease;
+}
+
+.mw-layers.mw-layers-collapsed .mw-layers-toggle-caret {
+  transform: rotate(180deg);
+}
+
+/* Applied by setupLayersCollapse only while it writes the state it read
+   back from localStorage, so a visitor who left the panel collapsed
+   gets it collapsed rather than watching it slide shut on every load. */
+.mw-layers.mw-layers-no-anim,
+.mw-layers.mw-layers-no-anim .mw-layers-panel,
+.mw-layers.mw-layers-no-anim .mw-layers-toggle-caret {
+  transition: none;
+}
+
+/* The slide is the whole point of the affordance, so with motion
+   reduced it still collapses -- it just arrives there immediately. */
+@media (prefers-reduced-motion: reduce) {
+  .mw-layers,
+  .mw-layers .mw-layers-panel,
+  .mw-layers .mw-layers-toggle-caret {
+    transition: none;
+  }
 }
 
 /* On a phone the map is narrow enough that MapLibre's attribution strip
@@ -72,10 +170,15 @@
  * ODbL requires the credit independently of CARTO, so this is a licence
  * term rather than a cosmetic detail. Lift the panel clear of the strip
  * (~24px tall) instead of restyling the control, so both read in full.
+ * The lift is on the positioner, so the collapsed tab is carried clear
+ * of the strip too -- neither state may sit on top of that credit.
  * Desktop is unaffected -- there the strip only reaches the right-hand
  * third and the two never meet. */
 @media (max-width: 600px) {
   .mw-layers {
+    /* A wider tab for a fingertip; the collapse translate is written in
+       terms of this, so nothing else needs adjusting alongside it. */
+    --mw-layers-tab-w: 30px;
     bottom: 44px;
   }
 }

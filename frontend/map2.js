@@ -2762,6 +2762,71 @@ if (mapErrorReloadBtn) {
   mapErrorReloadBtn.addEventListener('click', () => location.reload());
 }
 
+// ===== Collapsible layer switcher =====
+//
+// The switcher sits bottom-left over the map and, on a phone, over a
+// good share of the little screen there is. This slides it off the left
+// edge and leaves its tab behind (see map2.html's #mw-layers and the
+// .mw-layers rules in map2.css, which own the movement itself -- all
+// this does is set the class and keep the button's label honest).
+//
+// Remembered per browser, same as the theme and the update notice: a
+// phone visitor who collapses it should not have to collapse it again
+// on every visit. Storage failures are swallowed in both directions --
+// an unreadable or unwritable key just means the panel starts open,
+// which is the state that hides nothing.
+const LAYERS_COLLAPSED_KEY = 'mwLayersCollapsed';
+
+function setupLayersCollapse() {
+  const container = document.getElementById('mw-layers');
+  const toggle = document.getElementById('mw-layers-toggle');
+  if (!container || !toggle) return;
+
+  function apply(collapsed) {
+    container.classList.toggle('mw-layers-collapsed', collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    const label = collapsed ? 'Show the layers panel' : 'Hide the layers panel';
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+  }
+
+  // A <button> already answers Enter and Space and already takes focus,
+  // so click is the whole keyboard story -- no key handler to get wrong.
+  toggle.addEventListener('click', () => {
+    const collapsed = !container.classList.contains('mw-layers-collapsed');
+    apply(collapsed);
+    try {
+      localStorage.setItem(LAYERS_COLLAPSED_KEY, collapsed ? '1' : '0');
+    } catch {
+      // Storage unavailable (private browsing, quota) -- the choice just
+      // lasts for this page view rather than the next one.
+    }
+  });
+
+  let stored = null;
+  try {
+    stored = localStorage.getItem(LAYERS_COLLAPSED_KEY);
+  } catch {
+    stored = null;
+  }
+  if (stored !== '1') return;
+
+  // Restoring a remembered state must not look like the panel closing
+  // itself, so the transitions are suppressed across this one write and
+  // released a frame later (two frames -- one is not enough to
+  // guarantee the class change has been through style resolution).
+  container.classList.add('mw-layers-no-anim');
+  apply(true);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => container.classList.remove('mw-layers-no-anim'));
+  });
+}
+
+// Wired here rather than from main()'s map 'load' handler: this is
+// static markup with no dependency on the map, and it should still work
+// if the map never finishes loading at all.
+setupLayersCollapse();
+
 async function main() {
   // Not awaited: a single small GET against a one-row table, kicked off
   // in parallel with the map's own boot rather than gating first paint
