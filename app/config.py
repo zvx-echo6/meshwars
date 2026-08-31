@@ -360,6 +360,14 @@ class Settings(BaseSettings):
     # switch -- the in-progress month is never frozen and nothing extra
     # is ever written to month_result/month_standing/month_award.
     results_preview_current_month: bool = False
+
+    # Longest Road is only worth winning if it is hard to hold. A chain
+    # this long crosses most of a valley, and ANY rival square landing in
+    # the middle of it cuts it in two -- so a leader can be denied the
+    # award outright by one well-placed capture, and nobody wins it that
+    # month. That is the point: it is the one honor another team can take
+    # off you without out-scoring you anywhere.
+    longest_road_min_squares: int = 300
     checkin_poll_interval_seconds: int = 30   # tight -- MeshCore's feed returns only its newest 100 messages, no pagination, and a busy net can approach that
 
     # The net window. Weekday follows Python's datetime.weekday()

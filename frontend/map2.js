@@ -2252,6 +2252,150 @@ async function loadPlacesPanel(map) {
   }
 }
 
+// ---- award highlight ---------------------------------------------------
+//
+// /results links an honor that happened somewhere ("Longest Road") to
+// this page, carrying board+month+award. We fetch that award's geometry
+// and draw it on top of the board, then frame it.
+//
+// Deliberately additive and failure-tolerant: no params, a bad award, a
+// 404, or a fetch error all leave the map exactly as it would have been.
+// A visitor arriving with a junk query string gets a normal map, not a
+// broken one.
+
+const AWARD_GEO_ENDPOINT = {
+  meshcore: (month, award) => `/api/mc/results/${encodeURIComponent(month)}/${encodeURIComponent(award)}/geo`,
+  meshtastic: (month, award) => `/api/results/${encodeURIComponent(month)}/${encodeURIComponent(award)}/geo`,
+};
+
+function featureCollectionBounds(fc) {
+  let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
+  for (const f of (fc.features || [])) {
+    const geom = f.geometry;
+    if (!geom || !geom.coordinates) continue;
+    // A Point is one coordinate pair; a Polygon is rings of them.
+    const rings = geom.type === 'Point' ? [[geom.coordinates]] : geom.coordinates;
+    for (const ring of rings) {
+      for (const [lon, lat] of ring) {
+        if (lon < west) west = lon;
+        if (lon > east) east = lon;
+        if (lat < south) south = lat;
+        if (lat > north) north = lat;
+      }
+    }
+  }
+  return Number.isFinite(west) ? [[west, south], [east, north]] : null;
+}
+
+function showAwardBanner(map, geo) {
+  const el = document.createElement('div');
+  el.className = 'award-banner';
+  el.innerHTML = `
+    <span class="award-banner-label"></span>
+    <span class="award-banner-detail"></span>
+    <button type="button" class="award-banner-close" aria-label="Clear highlight">&times;</button>`;
+  // textContent, not innerHTML -- these come from the API and one of
+  // them is a team name, which is player-adjacent data.
+  el.querySelector('.award-banner-label').textContent =
+    `${geo.label} — ${geo.team || geo.player || ''}`.trim();
+  el.querySelector('.award-banner-detail').textContent =
+    `${geo.value} ${geo.detail || ''}`.trim();
+  el.querySelector('.award-banner-close').addEventListener('click', () => {
+    const src = map.getSource('award-highlight');
+    if (src) src.setData({ type: 'FeatureCollection', features: [] });
+    el.remove();
+  });
+  document.body.appendChild(el);
+}
+
+function awardParams() {
+  let params;
+  try {
+    params = new URLSearchParams(window.location.search);
+  } catch {
+    return null;
+  }
+  const award = params.get('award');
+  const month = params.get('month');
+  if (!award || !month) return null;
+  return { award, month, board: boardParam() || 'meshcore' };
+}
+
+// ?lat=&lon=&zoom= -- go straight to a place on the map. There was no
+// way to link someone to a spot at all before this; the only way to show
+// somebody a square was to tell them to pan and hunt for it.
+function viewParams() {
+  let params;
+  try {
+    params = new URLSearchParams(window.location.search);
+  } catch {
+    return null;
+  }
+  const lat = parseFloat(params.get('lat'));
+  const lon = parseFloat(params.get('lon'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  const zoom = parseFloat(params.get('zoom'));
+  return { lat, lon, zoom: Number.isFinite(zoom) ? Math.min(Math.max(zoom, 1), 18) : 14 };
+}
+
+// ?board=meshcore|meshtastic, shared by the award links and any linked
+// view. Anything else is ignored rather than guessed at.
+function boardParam() {
+  let params;
+  try {
+    params = new URLSearchParams(window.location.search);
+  } catch {
+    return null;
+  }
+  const b = params.get('board');
+  return b === 'meshcore' || b === 'meshtastic' ? b : null;
+}
+
+function goToViewFromUrl(map) {
+  const v = viewParams();
+  if (!v) return;
+  map.jumpTo({ center: [v.lon, v.lat], zoom: v.zoom });
+}
+
+// Whether this page load is someone arriving to look at one specific
+// thing -- an award, or a place they were linked to. Read by
+// loadNotice() too, so the first-visit modal does not land on top of
+// whatever they came to see.
+function hasAwardParams() {
+  return awardParams() !== null || viewParams() !== null;
+}
+
+async function showAwardFromUrl(map) {
+  const p = awardParams();
+  if (!p) return;
+  const { award, month, board } = p;
+  const endpoint = AWARD_GEO_ENDPOINT[board];
+  if (!endpoint) return;
+
+  try {
+    const res = await fetch(endpoint(month, award));
+    if (!res.ok) return;   // 404 = that award has no geometry; leave the map alone
+    const geo = await res.json();
+    const fc = geo && geo.geojson;
+    if (!fc || !(fc.features || []).length) return;
+
+    const src = map.getSource('award-highlight');
+    if (!src) return;
+    src.setData(fc);
+
+    const bounds = featureCollectionBounds(fc);
+    if (bounds) {
+      map.fitBounds(bounds, { padding: 60, maxZoom: 12, duration: 800 });
+    }
+    showAwardBanner(map, geo);
+  } catch (err) {
+    // Never let a highlight failure take the map down with it.
+    console.warn('award highlight failed', err);
+  }
+}
+
+
 function teamMatchExpression() {
   // ['match', ['get', 'team'], 'RED', '#ff4136', 'GREEN', '#2ecc40', ..., fallback]
   const expr = ['match', ['get', 'team']];
@@ -2688,6 +2832,12 @@ async function loadNotice() {
     const notice = data && data.notice;
     if (!notice || !notice.version_key || !notice.title || !notice.body) return;
     if (noticeAlreadyDismissed(notice.version_key)) return;
+    // Someone who followed an award link from /results came here to
+    // look at one specific thing on the map, and a modal over it is the
+    // opposite of what they asked for. The notice is not dismissed --
+    // just not shown this once, so it still greets them on a normal
+    // visit.
+    if (hasAwardParams()) return;
     showNoticeModal(notice);
   } catch (err) {
     console.error('MeshWars map2: failed to load notice', err);
@@ -2851,7 +3001,13 @@ async function main() {
   loadNotice();
 
   const { playAreaBounds, defaultMode, cartoKey } = await fetchBootConfig();
-  mode = defaultMode;
+  // ?board= wins over the configured default. Without this an award link
+  // from the Meshtastic results page opened the map on whichever board
+  // the config preferred, and drew a Meshtastic highlight over MeshCore
+  // territory -- the square the link exists to show was simply not
+  // there.
+  const linked = boardParam();
+  mode = linked || defaultMode;
   if (!playAreaBounds) {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
   }
@@ -3213,6 +3369,49 @@ async function main() {
       },
     });
 
+    // An award highlight sits ON TOP of the board: same squares, drawn
+    // again opaque with a bright outline so the shape reads through the
+    // 0.45-opacity board fill underneath it. Empty until showAwardFromUrl
+    // puts something in it, so it costs nothing on a normal visit.
+    map.addSource('award-highlight', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+      tolerance: 0,
+    });
+    map.addLayer({
+      id: 'award-highlight-fill',
+      type: 'fill',
+      source: 'award-highlight',
+      paint: { 'fill-color': teamMatchExpression(), 'fill-opacity': 0.9 },
+    });
+    map.addLayer({
+      id: 'award-highlight-line',
+      type: 'line',
+      source: 'award-highlight',
+      paint: {
+        'line-color': '#ffffff',
+        // Frontier marks its furthest square -- the one the detail line
+        // on /results is quoting -- with a heavier ring than the rest.
+        'line-width': ['case', ['==', ['get', 'furthest'], true], 4, 2],
+        'line-opacity': 0.85,
+      },
+    });
+    // The place honors (Tourist / Park Hopper / Peak Tagger) are points,
+    // not squares: the places themselves, not the ground around them.
+    map.addLayer({
+      id: 'award-highlight-point',
+      type: 'circle',
+      source: 'award-highlight',
+      filter: ['==', ['geometry-type'], 'Point'],
+      paint: {
+        'circle-radius': 7,
+        'circle-color': '#d9b45b',
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 2,
+        'circle-opacity': 0.95,
+      },
+    });
+
     setupOverlayLayers(map);
     // Wrapped on its own, separate from the try/catch already around
     // setBoardMode/loadPlacesViewport/loadPlacesPanel below: icon
@@ -3249,6 +3448,15 @@ async function main() {
       setBoardMode(mode, map);
       loadPlacesViewport(map);
       loadPlacesPanel(map);
+      // Deliberately OUTSIDE the three calls above in effect: it is
+      // async and never awaited, so a slow or failing award fetch
+      // cannot delay or break the board coming up. It only ever runs
+      // when /results linked here with award params.
+      // Before the award fetch: a linked view should be framed even if
+      // the award geometry is slow or absent. showAwardFromUrl's own
+      // fitBounds overrides it when there IS geometry to frame.
+      goToViewFromUrl(map);
+      showAwardFromUrl(map);
       // t5_post_dataload: proves whether the three calls above complete
       // (return control here) at all, independent of the overlay, which
       // by this point has already been handled above regardless.

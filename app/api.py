@@ -315,6 +315,16 @@ async def mt_results() -> dict:
     return mc_api.results_for(MT_PROTOCOL)
 
 
+@router.get("/api/results/{month}/{award}/geo")
+async def mt_award_geometry(month: str, award: str) -> JSONResponse:
+    """Where a Meshtastic honor was earned, as GeoJSON. Meshtastic
+    counterpart of mc_api's route; see mc_api.award_geometry_for()."""
+    geo = mc_api.award_geometry_for(MT_PROTOCOL, month, award)
+    if geo is None:
+        return JSONResponse({"error": "no geometry for that award"}, status_code=404)
+    return JSONResponse(geo)
+
+
 @router.get("/get-samples")
 async def get_samples() -> dict:
     """Per-position sample data from the retired geohash board (the old

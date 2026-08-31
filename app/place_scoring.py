@@ -100,6 +100,7 @@ def credit_places(
     ts: int,
     repeater_ids: list,
     by_air: bool = False,
+    protocol: str = "",
 ) -> list[tuple[int, int]]:
     """Credit the single highest-value live place this cell activates,
     for this player, this week -- subject to the once-per-reference and
@@ -217,9 +218,9 @@ def credit_places(
     # see the module docstring.
     awarded = min(points, remaining)
     conn.execute(
-        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (place_id, player_id, week_start, awarded, ts),
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (place_id, player_id, week_start, awarded, ts, protocol),
     )
     credited = [(place_id, awarded)]
     if awarded < points:

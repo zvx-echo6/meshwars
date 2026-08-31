@@ -788,6 +788,15 @@ CREATE TABLE IF NOT EXISTS place_activation (
     week_start  TEXT NOT NULL,
     points      INTEGER NOT NULL,
     awarded_at  INTEGER NOT NULL,
+    -- Which board earned it, 'mc' or 'mt'. The place honors (Tourist,
+    -- Park Hopper, Peak Tagger) and the standings' exploration column
+    -- filter on it, so a trip made on one board stops being credited on
+    -- the other -- it used to show the same winner on both.
+    -- Deliberately NOT part of the UNIQUE below: a place is still one
+    -- credit per player per week across both boards, and the weekly cap
+    -- is still shared, because those are limits on the person and not on
+    -- the radio they were carrying.
+    protocol    TEXT NOT NULL DEFAULT '',
     UNIQUE (place_id, player_id, week_start)
 );
 CREATE INDEX IF NOT EXISTS idx_place_activation_week_player ON place_activation(week_start, player_id);
@@ -1007,6 +1016,11 @@ MIGRATIONS = [
     # wholesale by results.freeze_month() anyway.
     "ALTER TABLE month_standing ADD COLUMN squares INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE month_standing ADD COLUMN explorer_points REAL NOT NULL DEFAULT 0",
+    # Which board earned a place credit. Backfilled for existing rows
+    # by scripts/backfill_activation_protocol.py, which traces each one
+    # to the capture that earned it; rows it cannot place keep '' and
+    # are simply invisible to the per-board honors.
+    "ALTER TABLE place_activation ADD COLUMN protocol TEXT NOT NULL DEFAULT ''",
     # Game-integrity gates added 2026-08-25 (see app/config.py's
     # mt_min_precision_bits/mt_max_speed_mps and app/ingest.py): every
     # existing player_cell_ping/player_ingest_stat row predates both

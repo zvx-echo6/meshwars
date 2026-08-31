@@ -1068,19 +1068,27 @@ def score_points(row: dict, buckets: dict) -> tuple[int, str]:
     effort-based value, replacing whatever placeholder points value the
     row's originating stage wrote. See module docstring.
 
-    In-city checked FIRST, for every ref_type including summit: a
-    summit inside a town's limits is worth IN_CITY_POINTS regardless of
-    elevation, because you can park at it -- see ELEVATION SCALING
-    above. Only a summit that fails that check goes on to
-    _summit_points() for its elevation-scaled value; park/landmark keep
-    the flat REMOTE_POINTS value they always had."""
+    A summit is ALWAYS scored on its elevation, and never by the in-city
+    rule. That order was the other way round until 2026-08-31, on the
+    reasoning that a summit inside a town's limits is worth
+    IN_CITY_POINTS because you can park at it. It could not survive
+    contact with the data: 95 summits were being flattened to 5 points,
+    among them Humphreys Peak (12,633ft, the highest point in Arizona)
+    and four Wasatch peaks over 10,000ft. A town anchor's radius is a
+    flat circle and takes no notice of the 6,000ft of relief inside it,
+    so "inside a town" said nothing at all about the effort to reach a
+    summit. A peak is a peak.
+
+    Park and landmark still check in-city first and keep the flat
+    REMOTE_POINTS value otherwise -- that rule was only ever wrong for
+    summits, which are the one ref_type with an elevation to score on."""
     lat, lon = float(row["lat"]), float(row["lon"])
-    if _in_city_limits(lat, lon, buckets):
-        return IN_CITY_POINTS, "in_city"
     if row["ref_type"] == "summit":
         elev_s = row.get("elevation_ft")
         elevation_ft = float(elev_s) if elev_s not in (None, "") else None
         return _summit_points(elevation_ft), "remote_scaled"
+    if _in_city_limits(lat, lon, buckets):
+        return IN_CITY_POINTS, "in_city"
     return REMOTE_POINTS[row["ref_type"]], "remote"
 
 

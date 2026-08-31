@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from .config import settings
-from .grid import cell_center
+from .grid import cell_bounds, cell_center
 from . import places
 
 log = logging.getLogger("results")
@@ -287,53 +287,73 @@ def _ownership_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> list[s
 _NEIGHBOURS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
 
-def _longest_road(cells: set[tuple[int, int]]) -> int:
-    """Longest unbroken chain of touching squares a team holds, counted
-    in squares.
+def _longest_road_path(cells: set[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The longest unbroken chain of touching squares in `cells`, as the
+    squares themselves in order along the chain.
 
     Cell ids are "<latIdx>_<lonIdx>" on a fixed grid (app/grid.py), so
     adjacency is plain integer arithmetic. Two squares are linked if they
     touch on a side or a corner.
 
-    Measured as the longest shortest-path across each connected patch --
-    walk to the furthest square, then walk to the furthest square from
-    THERE. That is exact for a chain and can only understate a patch with
-    loops in it, which is the safe direction to be wrong in: it never
-    credits a road longer than one that exists. It is also what makes the
-    award mean something, since a big round blob scores near its width
-    while a thin run along a highway scores its whole length -- in August
-    2026 RED led with 330 squares while holding half of GREEN's ground.
+    Found by walking to the furthest square of each connected patch, then
+    walking to the furthest square from THERE and following parent
+    pointers back. That is exact for a chain and can only understate a
+    patch with loops in it, which is the safe direction to be wrong in:
+    it never claims a road longer than one that exists. It is also what
+    makes the award mean something, since a big round blob scores near
+    its width while a thin run along a highway scores its whole length --
+    in August 2026 RED led with 330 squares while holding half of GREEN's
+    ground.
 
-    Linear in the number of squares: each patch is walked twice and
-    never revisited.
+    Returns the path rather than just its length so the award can be
+    drawn on the map (app/mc_api's award geometry route); _longest_road()
+    below is the length of it, so the number on the results page and the
+    line on the map can never disagree.
+
+    Linear in the number of squares: each patch is walked twice and never
+    revisited.
     """
     from collections import deque
 
     def walk(src):
-        dist = {src: 0}
+        parent = {src: None}
         q = deque([src])
         far = src
+        depth = {src: 0}
         while q:
             cur = q.popleft()
             for dy, dx in _NEIGHBOURS:
                 nxt = (cur[0] + dy, cur[1] + dx)
-                if nxt in cells and nxt not in dist:
-                    dist[nxt] = dist[cur] + 1
+                if nxt in cells and nxt not in parent:
+                    parent[nxt] = cur
+                    depth[nxt] = depth[cur] + 1
                     q.append(nxt)
-                    if dist[nxt] > dist[far]:
+                    if depth[nxt] > depth[far]:
                         far = nxt
-        return far, dist
+        return far, parent
 
     seen: set[tuple[int, int]] = set()
-    best = 0
+    best: list[tuple[int, int]] = []
     for cell in cells:
         if cell in seen:
             continue
-        end, reached = walk(cell)
+        end_cell, reached = walk(cell)
         seen |= reached.keys()
-        _, back = walk(end)
-        best = max(best, max(back.values()) + 1)   # squares, not steps
+        far, parent = walk(end_cell)
+        path = []
+        node = far
+        while node is not None:
+            path.append(node)
+            node = parent[node]
+        if len(path) > len(best):
+            best = path
     return best
+
+
+def _longest_road(cells: set[tuple[int, int]]) -> int:
+    """Length, in squares, of the longest unbroken chain a team holds --
+    see _longest_road_path() for how it is found and why."""
+    return len(_longest_road_path(cells))
 
 
 def _cell_xy(cell_id: str) -> tuple[int, int] | None:
@@ -361,15 +381,14 @@ def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlit
     ).fetchall()
 
 
-def _place_points(conn: sqlite3.Connection, start: int, end: int) -> dict[str, float]:
+def _place_points(conn: sqlite3.Connection, protocol: str, start: int, end: int) -> dict[str, float]:
     """Places Worth Going points earned inside the month, per team,
     summed by each activation's player's CURRENT team -- the same live
     team choice _checkins() and mc_scoring.team_place_points() make.
 
-    NOT filtered by protocol, because place_activation has no protocol
-    column: a place credit is week-scoped and belongs to the player, not
-    to a board. Both boards therefore report the same exploration
-    figure, exactly as Tourist/Park Hopper/Peak Tagger already do.
+    Scoped to the board that earned it, same as the place honors -- both
+    boards used to report an identical exploration figure because
+    place_activation carried no protocol.
     """
     return {
         r["team"]: r["pts"] or 0.0
@@ -377,9 +396,9 @@ def _place_points(conn: sqlite3.Connection, start: int, end: int) -> dict[str, f
             "SELECT p.team AS team, SUM(a.points) AS pts "
             "  FROM place_activation a "
             "  JOIN player p ON p.player_id = a.player_id "
-            " WHERE a.awarded_at >= ? AND a.awarded_at < ? "
+            " WHERE a.protocol = ? AND a.awarded_at >= ? AND a.awarded_at < ? "
             " GROUP BY p.team",
-            (start, end),
+            (protocol, start, end),
         )
     }
 
@@ -392,6 +411,28 @@ def _names(conn: sqlite3.Connection) -> dict[int, tuple[str, str]]:
 
 
 # ---- award helpers -----------------------------------------------------
+
+
+def _top_with_tiebreak(counts: dict, tiebreak: dict, minimum: float = 1):
+    """Like _top(), but a tie on the count is settled by `tiebreak`
+    (higher wins) instead of being refused.
+
+    Peak Tagger uses it, broken by the tallest summit the player reached:
+    two people who each tagged one peak have not done the same thing if
+    one of them climbed 3,000 feet higher. Only that award has an
+    obvious "harder" axis -- landmarks and parks do not, so Tourist and
+    Park Hopper keep refusing ties.
+
+    A tie on BOTH count and tiebreak is still refused, same as _top().
+    """
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], -(tiebreak.get(kv[0]) or 0)))
+    if not ranked or ranked[0][1] < minimum:
+        return None
+    if len(ranked) > 1:
+        a, b = ranked[0], ranked[1]
+        if a[1] == b[1] and (tiebreak.get(a[0]) or 0) == (tiebreak.get(b[0]) or 0):
+            return None
+    return ranked[0]
 
 
 def _top(counts: dict, minimum: float = 1):
@@ -477,7 +518,7 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     # the month (Largest Territory); check-in and exploration points are
     # shown because they are real work, not because they place a team.
     # Adding them would put a team ahead on ground it does not hold.
-    explored = _place_points(conn, start, end)
+    explored = _place_points(conn, protocol, start, end)
 
     def _blank():
         return {"squares": 0, "checkin_points": 0.0, "explorer_points": 0.0}
@@ -514,7 +555,8 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     # scaled by team size -- a small team that drove a long road beats a
     # big one that filled in a city.
     roads = {t: _longest_road(cs) for t, cs in cells_by_team.items()}
-    add(_award("longest_road", *(_top(roads, 2) or (None, 0)),
+    add(_award("longest_road",
+               *(_top(roads, settings.longest_road_min_squares) or (None, 0)),
                names=names, detail="squares in an unbroken run"))
 
     # Empire Builder honors whoever holds the most ground they painted
@@ -558,11 +600,16 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     # ---- tourist / park hopper / peak tagger: most VISITS this month ---
     # One award per place type (docs/features/places.md), counting rows
     # in place_activation joined to place.ref_type, scoped by awarded_at
-    # falling inside the month -- the same time-only scoping every other
-    # award here uses. place_activation has no protocol column (a
-    # scoring ping credits places the same way regardless of which
-    # board sent it -- see app/place_scoring.py), so this does not
-    # filter by protocol either, matching that existing convention.
+    # falling inside the month AND by the board that earned it.
+    #
+    # The protocol filter is new (2026-08-31). place_activation had no
+    # protocol column, so a trip made on one board won the honor on both:
+    # a single Meshtastic drive up Big Cottonwood put the same name on
+    # MeshCore's Peak Tagger, and MeshCore activity was deciding the
+    # Meshtastic Tourist and Park Hopper. Rows written before the column
+    # existed carry '' and match neither board -- see
+    # scripts/backfill_activation_protocol.py, which traces the old rows
+    # back to the captures that earned them.
     #
     # A VISIT, not a point total: place.points is never read here.
     # Replaced "explorer" (most place points earned that month) because
@@ -583,11 +630,30 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
         visits: dict[int, int] = dict(conn.execute(
             "SELECT a.player_id, COUNT(*) FROM place_activation a "
             "  JOIN place p ON p.id = a.place_id "
-            " WHERE p.ref_type = ? AND a.awarded_at >= ? AND a.awarded_at < ? "
+            " WHERE p.ref_type = ? AND a.protocol = ? "
+            "   AND a.awarded_at >= ? AND a.awarded_at < ? "
             " GROUP BY a.player_id",
-            (ref_type, start, end),
+            (ref_type, protocol, start, end),
         ).fetchall())
-        add(_award(award, *(_top(visits) or (None, 0)), names=names, detail=label_detail))
+        if award == "peak_tagger":
+            # Tallest peak reached breaks a tie -- see
+            # _top_with_tiebreak(). Elevation is nullable, and a summit
+            # missing one loses the tiebreak rather than winning it.
+            tallest: dict[int, float] = dict(conn.execute(
+                "SELECT a.player_id, MAX(COALESCE(p.elevation_ft, 0)) FROM place_activation a "
+                "  JOIN place p ON p.id = a.place_id "
+                " WHERE p.ref_type = 'summit' AND a.protocol = ? "
+                "   AND a.awarded_at >= ? AND a.awarded_at < ? "
+                " GROUP BY a.player_id",
+                (protocol, start, end),
+            ).fetchall())
+            winner = _top_with_tiebreak(visits, tallest)
+            detail = label_detail
+            if winner is not None and tallest.get(winner[0]):
+                detail = "%s, highest %.0f ft" % (label_detail, tallest[winner[0]])
+            add(_award(award, *(winner or (None, 0)), names=names, detail=detail))
+        else:
+            add(_award(award, *(_top(visits) or (None, 0)), names=names, detail=label_detail))
 
     for team in settings.teams_list:
         add(_award("team_builder", *(_top(per_team_built.get(team, {})) or (None, 0)),
@@ -811,4 +877,144 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
         "open_month": current,
         "open_month_closes_at": closes_at,
         "months": out,
+    }
+
+
+# ---- award geometry ----------------------------------------------------
+#
+# Some honors happen SOMEWHERE. Longest Road is the clearest case: the
+# award is a shape, and the results page can only state it as a number.
+# These build GeoJSON for the ones that have a real place, so the page
+# can link them onto the map.
+#
+# Deliberately NOT offered for Largest Territory, Empire Builder, or the
+# attack awards: those are thousands of squares scattered across the whole
+# board, so a link would either re-draw the team colour the map already
+# shows or scatter pins with no shape to them.
+
+GEOMETRIC_AWARDS = ("longest_road", "frontier", "tourist", "park_hopper", "peak_tagger")
+
+# The three place honors differ only in which kind of place they count.
+_PLACE_AWARD_TYPE = {"tourist": "landmark", "park_hopper": "park", "peak_tagger": "summit"}
+
+
+def _cell_feature(cell: tuple[int, int], props: dict) -> dict:
+    """One grid square as a GeoJSON polygon, in the same units the board
+    layer uses so a highlight sits exactly on top of the cells beneath."""
+    south, west, north, east = cell_bounds("%d_%d" % cell)
+    return {
+        "type": "Feature",
+        "properties": props,
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[west, south], [east, south],
+                             [east, north], [west, north], [west, south]]],
+        },
+    }
+
+
+def _point_feature(lat: float, lon: float, props: dict) -> dict:
+    return {"type": "Feature", "properties": props,
+            "geometry": {"type": "Point", "coordinates": [lon, lat]}}
+
+
+def _road_geometry(conn, protocol, at, team):
+    """The winning team's longest chain, as the squares along it."""
+    by_team: dict[str, set[tuple[int, int]]] = {}
+    for row in _ownership_at(conn, protocol, at):
+        xy = _cell_xy(row["cell_id"])
+        if xy is not None:
+            by_team.setdefault(row["team"], set()).add(xy)
+    path = _longest_road_path(by_team.get(team, set()))
+    return [_cell_feature(c, {"team": team}) for c in path]
+
+
+def _frontier_geometry(conn, protocol, start, end, player_id, team):
+    """Every square this player claimed out past the towns in the month,
+    with the furthest one marked. Re-walks the same scan the award does
+    (see the frontier block in compute_month) rather than storing it."""
+    feats = []
+    best = None
+    for c in _windowed_captures(conn, protocol, start, end):
+        if c["by_air"] or c["player_id"] != player_id:
+            continue
+        lat, lon = cell_center(c["cell_id"])
+        d = places.distance_to_nearest_town_m(lat, lon)
+        if d is None:
+            continue   # place data unavailable -- skip, never guess
+        miles = d / places.MILE_M
+        if miles > settings.frontier_miles:
+            xy = _cell_xy(c["cell_id"])
+            if xy is None:
+                continue
+            feats.append((miles, xy))
+            if best is None or miles > best[0]:
+                best = (miles, xy)
+    return [
+        _cell_feature(xy, {"team": team, "miles": round(miles, 1),
+                           "furthest": bool(best and xy == best[1])})
+        for miles, xy in feats
+    ]
+
+
+def _place_geometry(conn, protocol, start, end, player_id, ref_type):
+    """The places of one kind this player reached inside the month."""
+    return [
+        _point_feature(r["lat"], r["lon"], {"name": r["name"], "kind": ref_type})
+        for r in conn.execute(
+            "SELECT p.name, p.lat, p.lon FROM place_activation a "
+            "  JOIN place p ON p.id = a.place_id "
+            " WHERE a.player_id = ? AND p.ref_type = ? AND a.protocol = ? "
+            "   AND a.awarded_at >= ? AND a.awarded_at < ? "
+            " ORDER BY a.awarded_at",
+            (player_id, ref_type, protocol, start, end),
+        )
+    ]
+
+
+def award_geometry(conn: sqlite3.Connection, protocol: str, month: str,
+                   award: str, now: int | None = None) -> dict | None:
+    """GeoJSON for where an award was earned, or None if that award has
+    no place on the map (or nobody won it).
+
+    The winner is taken from compute_month() rather than re-derived, so
+    the map can never disagree with the page about who won; only the
+    geometry itself is looked up afterwards. Recomputed on demand rather
+    than stored -- it is linear in squares held, and persisting a
+    330-square path per month per board would be a schema change earning
+    milliseconds.
+    """
+    if award not in GEOMETRIC_AWARDS:
+        return None
+
+    start, end = month_bounds(month)
+    at = min(end - 1, now if now is not None else int(time.time()))
+
+    result = compute_month(conn, protocol, month, now)
+    row = next((a for a in result["awards"]
+                if a["award"] == award and not a.get("scope")), None)
+    if row is None or (row["player_id"] is None and row["team"] is None):
+        return None   # listed but unwon -- nothing to draw
+
+    if award == "longest_road":
+        features = _road_geometry(conn, protocol, at, row["team"])
+    elif award == "frontier":
+        features = _frontier_geometry(conn, protocol, start, end,
+                                      row["player_id"], row["team"])
+    else:
+        features = _place_geometry(conn, protocol, start, end, row["player_id"],
+                                   _PLACE_AWARD_TYPE[award])
+    if not features:
+        return None
+
+    return {
+        "award": award,
+        "label": row["label"],
+        "month": month,
+        "protocol": protocol,
+        "team": row["team"],
+        "player": row["player"],
+        "value": row["value"],
+        "detail": row["detail"],
+        "geojson": {"type": "FeatureCollection", "features": features},
     }

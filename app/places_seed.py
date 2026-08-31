@@ -83,6 +83,58 @@ from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
 log = logging.getLogger("places_seed")
 
 _DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv")
+# Summit -> squares, built by scripts/build_summit_cells.py against the
+# planet DEM on navi. A summit's squares cannot be derived here the way a
+# park's are from its boundary: the test is terrain (within 1.5km AND
+# within 200m of the summit's own elevation, plus the peak's own square), and the app host has no
+# elevation data. So it ships precomputed, same as the seed itself.
+_SUMMIT_CELLS_PATH = os.path.join(os.path.dirname(__file__), "reference", "summit_cells.csv")
+
+
+def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
+    """ref_code -> the squares that credit that summit.
+
+    Stored as offsets from each summit's own square rather than absolute
+    ids -- 0.55MB for 92k squares instead of several times that.
+
+    Every square is already assigned to exactly ONE summit (its nearest)
+    by the build script. That is the whole reason this file exists rather
+    than a radius computed at load time: summits cluster, so without the exclusivity pass one hike
+    would credit several peaks at once. It cannot be redone here, because
+    "nearest" is global across all summits, not a property of one row.
+
+    A missing or unreadable file is not fatal: summits fall back to their
+    own single square, which is what they had before this existed.
+    """
+    out: dict[str, set[str]] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            header = fh.readline()
+            if not header.startswith("ref_code"):
+                return {}
+            for line in fh:
+                parts = line.rstrip("\n").split(",", 3)
+                if len(parts) != 4:
+                    continue
+                ref_code, by, bx, offs = parts
+                try:
+                    base_y, base_x = int(by), int(bx)
+                except ValueError:
+                    continue
+                cells = set()
+                for off in offs.split():
+                    dy, _, dx = off.partition(":")
+                    try:
+                        cells.add(f"{base_y + int(dy)}_{base_x + int(dx)}")
+                    except ValueError:
+                        continue
+                if cells:
+                    out[ref_code] = cells
+    except OSError as e:
+        log.warning("places_seed: summit cells unavailable (%s) -- "
+                    "summits fall back to their own square", e)
+        return {}
+    return out
 
 _METERS_PER_DEG_LAT = 111_320.0
 
@@ -365,7 +417,10 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     needs to, since those rows already carry their own frozen points
     and never join back to `place` for eligibility.
     """
+    # Read once, not per row: 4,823 summits and 655k squares.
+    summit_cells = _load_summit_cells()
     stats = {
+        "summit_cells_loaded": len(summit_cells),
         "excluded": {"summit": 0, "park": 0, "landmark": 0},
         "kept": {"summit": 0, "park": 0, "landmark": 0},
         # Of kept parks: matched a PAD-US boundary at all, vs not.
@@ -422,9 +477,29 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # which rows get kept changed" situation, so a DB fingerprinted
     # under v2 needs this bump to actually deactivate the newly-excluded
     # co-located landmarks.
-    _RECONCILE_VERSION = 3
+    #
+    # v4 (2026-08-31): summits stopped being a single square and became
+    # their terrain-qualified set (reference/summit_cells.csv, see
+    # _load_summit_cells). The seed CSV's own bytes did not move, but
+    # every summit's place_cell rows did, so a DB fingerprinted under v3
+    # would keep the old one-square-per-summit mapping forever without
+    # this bump.
+    _RECONCILE_VERSION = 4
     st = os.stat(_DATA_PATH)
-    fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}"
+    # summit_cells.csv rides along in the fingerprint too. It decides
+    # every summit's place_cell rows but is a SEPARATE file from the seed
+    # CSV, so a change to it alone would leave the fingerprint untouched
+    # and the old mapping loaded forever. (Tightening the radius from 5km
+    # to 1.5km only reloaded because the deploy happened to rewrite the
+    # seed CSV and move its mtime -- luck, not design.) Missing file
+    # contributes a constant, so its absence is stable rather than
+    # re-triggering a load every startup.
+    try:
+        sc = os.stat(_SUMMIT_CELLS_PATH)
+        summit_fp = f"{sc.st_size}:{int(sc.st_mtime)}"
+    except OSError:
+        summit_fp = "none"
+    fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}:s{summit_fp}"
     row = conn.execute("SELECT v FROM cursor WHERE k = 'places_seed_csv_fingerprint'").fetchone()
     if row is not None and row[0] == fingerprint:
         log.info("places_seed: CSV unchanged since last load (%s), skipping", fingerprint)
@@ -508,6 +583,13 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                         else:
                             stats["park_unmatched"] += 1
                             rotates = False
+                elif ref_type == "summit":
+                    # Terrain-qualified squares (see _load_summit_cells).
+                    # Falls back to the summit's own square when the file
+                    # is absent or has no row for this summit -- which is
+                    # exactly the behaviour summits had before, so a
+                    # missing artifact degrades rather than breaks.
+                    cells = summit_cells.get(row["ref_code"]) or {cell_id(lat, lon)}
                 else:
                     cells = {cell_id(lat, lon)}
 

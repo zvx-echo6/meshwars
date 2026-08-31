@@ -325,3 +325,50 @@ def test_upgrading_to_the_reconcile_fix_forces_one_full_reload(conn, tmp_path, m
     assert conn.execute(
         "SELECT active FROM place WHERE ref_code = 'stale'"
     ).fetchone()[0] == 0
+
+
+# --- summits are a terrain-qualified set of squares, not one square -----
+
+
+def test_load_summit_cells_expands_offsets(tmp_path):
+    from app import places_seed
+    p = tmp_path / "summit_cells.csv"
+    p.write_text("ref_code,base_y,base_x,offsets\nW7U/SL-001,15000,-29000,0:0 1:0 -1:2\n")
+    out = places_seed._load_summit_cells(str(p))
+    assert out == {"W7U/SL-001": {"15000_-29000", "15001_-29000", "14999_-28998"}}
+
+
+def test_load_summit_cells_survives_a_missing_file(tmp_path):
+    from app import places_seed
+    # Not fatal: summits fall back to their own square, which is exactly
+    # what they had before the artifact existed.
+    assert places_seed._load_summit_cells(str(tmp_path / "nope.csv")) == {}
+
+
+def test_load_summit_cells_skips_malformed_rows(tmp_path):
+    from app import places_seed
+    p = tmp_path / "summit_cells.csv"
+    p.write_text(
+        "ref_code,base_y,base_x,offsets\n"
+        "GOOD/1,10,20,0:0\n"
+        "BAD/NOINT,x,20,0:0\n"
+        "BAD/SHORT,10,20\n"
+        "GOOD/2,30,40,1:1 bogus 2:2\n"
+    )
+    out = places_seed._load_summit_cells(str(p))
+    assert set(out) == {"GOOD/1", "GOOD/2"}
+    assert out["GOOD/1"] == {"10_20"}
+    assert out["GOOD/2"] == {"31_41", "32_42"}   # "bogus" dropped, rest kept
+
+
+def test_shipped_summit_cells_artifact_is_loadable_and_exclusive():
+    """The real file: every square belongs to exactly one summit."""
+    from app import places_seed
+    cells = places_seed._load_summit_cells()
+    assert len(cells) > 4500, "shipped summit_cells.csv looks truncated"
+    seen = {}
+    for ref_code, squares in cells.items():
+        for sq in squares:
+            assert sq not in seen, f"{sq} claimed by {seen[sq]} and {ref_code}"
+            seen[sq] = ref_code
+    assert len(seen) > 80_000

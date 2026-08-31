@@ -857,7 +857,7 @@ class Ingestor:
             # always False here; nothing on the Meshtastic path detects
             # aircraft speed today.
             try:
-                credit_places(conn, player_id, cell, ts, feeder_ids, False)
+                credit_places(conn, player_id, cell, ts, feeder_ids, False, PROTOCOL)
             except Exception:
                 log.exception(
                     "place scoring: credit_places failed for player %d cell %s",
