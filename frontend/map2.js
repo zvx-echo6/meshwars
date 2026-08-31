@@ -1465,6 +1465,10 @@ function setBoardMode(newMode, map) {
   loadBoardData(map);
   loadScoreboard();
   refreshWinnerBanner();
+  // Place claims are per board, so the pins have to be refetched too --
+  // otherwise switching boards leaves the other board's colours on them.
+  loadPlacesViewport(map);
+  loadPlacesPanel(map);
 }
 
 // ---- Places Worth Going (docs/features/places.md) ----------------------
@@ -1472,7 +1476,13 @@ function setBoardMode(newMode, map) {
 function placeToFeature(p) {
   return {
     type: 'Feature',
-    properties: { id: p.id, type: p.type, name: p.name, points: p.points },
+    properties: {
+      id: p.id, type: p.type, name: p.name, points: p.points,
+      // Drives the icon's colour (placeIconExpression). Absent rather
+      // than null when unclaimed, so the match expression falls through
+      // to the theme glyph.
+      ...(p.claimed_by_team ? { claimed_by_team: p.claimed_by_team } : {}),
+    },
     geometry: { type: 'Point', coordinates: [p.lon, p.lat] },
   };
 }
@@ -1487,6 +1497,9 @@ async function fetchPlacesInViewport(bounds, zoom) {
     // two constants staying in sync is visible by reading either file,
     // not by remembering to gate the param here too.
     zoom,
+    // Claims are scoped to the board that earned them, so the colours
+    // have to follow the board the map is showing.
+    board: mode,
   });
   const res = await fetch(`/api/places?${params}`);
   if (!res.ok) throw new Error(`places fetch failed: ${res.status}`);
@@ -1698,8 +1711,31 @@ function registerPlaceIcons(map) {
     for (const type of PLACE_TYPES) {
       const icon = drawPlaceIcon(type, color, sizePx, outline, dpr);
       map.addImage(`place-icon-${type}-${theme}`, icon, { pixelRatio: dpr });
+      // One tinted glyph per team, so a claimed place can wear the
+      // claimer's colour. icon-color would be cheaper but only works on
+      // SDF images, and these are drawn as full-colour canvases -- so
+      // the variants are drawn up front instead. 3 types x 7 teams x 2
+      // themes, once at boot.
+      for (const team of TEAM_ORDER) {
+        map.addImage(
+          `place-icon-${type}-${theme}-${team}`,
+          drawPlaceIcon(type, TEAM_COLORS[team], sizePx, outline, dpr),
+          { pixelRatio: dpr });
+      }
     }
   }
+}
+
+// A place wears the colour of the team that most recently CLAIMED it,
+// falling back to the theme colour when nobody has. Attribution only --
+// the points stay with whoever earned them (see app/places_api.py).
+function placeIconExpression(type, theme) {
+  const expr = ['match', ['get', 'claimed_by_team']];
+  for (const team of TEAM_ORDER) {
+    expr.push(team, `place-icon-${type}-${theme}-${team}`);
+  }
+  expr.push(`place-icon-${type}-${theme}`);
+  return expr;
 }
 
 function setupPlacesLayer(map) {
@@ -1783,7 +1819,7 @@ function setupPlacesLayer(map) {
         // Theme is filled in properly by applyBasemapTheme right after
         // this layer is added (see boot sequence); this initial value
         // is just a safe default before that first call.
-        'icon-image': `place-icon-${type}-${currentTheme()}`,
+        'icon-image': placeIconExpression(type, currentTheme()),
         'icon-allow-overlap': true,
         'icon-size': PLACE_ICON_SIZE_ZOOM,
       },
@@ -2436,7 +2472,7 @@ function applyBasemapTheme(map) {
   map.setPaintProperty('park-boundaries-line', 'line-opacity', PARK_BOUNDARY_LINE_OPACITY[theme]);
   map.setPaintProperty('park-boundaries-line', 'line-color', PLACE_COLORS[theme]);
   for (const type of PLACE_TYPES) {
-    map.setLayoutProperty(`places-icons-${type}`, 'icon-image', `place-icon-${type}-${theme}`);
+    map.setLayoutProperty(`places-icons-${type}`, 'icon-image', placeIconExpression(type, theme));
   }
 }
 

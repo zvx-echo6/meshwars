@@ -129,7 +129,7 @@ def _live_where(week_start: str) -> str:
 
 
 def _row_to_place(r: sqlite3.Row) -> dict:
-    return {
+    out = {
         "id": r["id"],
         "type": r["ref_type"],
         "name": r["name"],
@@ -138,6 +138,14 @@ def _row_to_place(r: sqlite3.Row) -> dict:
         "points": r["points"],
         "rotates": bool(r["rotates"]),
     }
+    # Most recently CLAIMED BY, and nothing more. It is a display
+    # attribution, not a scoring one: the credit and the points stay
+    # with whoever earned them (place_activation is never rewritten), so
+    # a place flipping colour costs the previous claimer nothing. None
+    # when nobody has claimed it on this board yet.
+    if "claimed_by_team" in r.keys():
+        out["claimed_by_team"] = r["claimed_by_team"]
+    return out
 
 
 def _park_boundaries_in_viewport(
@@ -198,6 +206,7 @@ async def places_in_viewport(
     west: float = Query(...),
     east: float = Query(...),
     zoom: float | None = None,
+    board: str = "meshcore",
 ) -> JSONResponse:
     """Live places inside a map viewport -- always-active plus this
     week's live rotating set, capped at MAX_VIEWPORT_RESULTS and ordered
@@ -225,13 +234,23 @@ async def places_in_viewport(
     conn = connect()
     try:
         resolve_week(conn, week_start)
+        protocol = "mt" if board == "meshtastic" else "mc"
         rows = conn.execute(
-            "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
+            "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates, "
+            # Newest claim on this place, on this board. place_activation
+            # is small and indexed by place_id (its UNIQUE), so this is a
+            # cheap correlated lookup rather than a walk of the capture
+            # log. Team is read live off `player`, the same choice every
+            # other team attribution in the game makes.
+            "       (SELECT pl.team FROM place_activation a "
+            "          JOIN player pl ON pl.player_id = a.player_id "
+            "         WHERE a.place_id = p.id AND a.protocol = ? "
+            "         ORDER BY a.awarded_at DESC LIMIT 1) AS claimed_by_team "
             "  FROM place p "
             " WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
             f"  AND {_live_where(week_start)} "
             f" ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT ?",
-            (south, north, west, east, week_start, MAX_VIEWPORT_RESULTS),
+            (protocol, south, north, west, east, week_start, MAX_VIEWPORT_RESULTS),
         ).fetchall()
         boundary_features = (
             _park_boundaries_in_viewport(conn, north, south, west, east)
