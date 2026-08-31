@@ -21,11 +21,12 @@ conn.row_factory = sqlite3.Row
 conn.execute("PRAGMA busy_timeout=15000")
 
 rows = conn.execute("""
-  SELECT l.by_player_id pid, l.ts, l.cell_id,
+  SELECT l.by_player_id pid, l.ts, l.cell_id, s.protocol,
          (SELECT p.id FROM place_cell pc JOIN place p ON p.id=pc.place_id
            WHERE pc.cell_id=l.cell_id AND p.active=1
            ORDER BY p.points DESC, p.id ASC LIMIT 1) place_id
     FROM mc_tile_capture_log l
+    JOIN mc_season s ON s.id = l.season_id
    WHERE l.by_air = 0 AND l.by_player_id IS NOT NULL
    ORDER BY l.ts
 """).fetchall()
@@ -66,14 +67,17 @@ for r in rows:
         # too would double-count the spend and under-award a place that
         # should still fit inside the remaining cap.
         sim_spent[(r["pid"], ws)] = sim_spent.get((r["pid"], ws), 0) + awarded
-    made.append((p["id"], r["pid"], ws, awarded, r["ts"], p["name"]))
+    made.append((p["id"], r["pid"], ws, awarded, r["ts"], p["name"], r["protocol"]))
     if not DRY:
+        # The protocol matters: the place honors filter on it, so a credit
+        # written without one is invisible to both boards.
         conn.execute(
-            "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
-            "VALUES (?,?,?,?,?)", (p["id"], r["pid"], ws, awarded, r["ts"]))
+            "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, "
+            "protocol) VALUES (?,?,?,?,?,?)",
+            (p["id"], r["pid"], ws, awarded, r["ts"], r["protocol"]))
 
 names = {x["player_id"]: x["display_name"] for x in conn.execute("SELECT player_id,display_name FROM player")}
 print(f"\n  {'DRY RUN -- would insert' if DRY else 'INSERTED'} {len(made)} summit activation(s):")
-for pid_place, pid, ws, awarded, ts, nm in made:
-    print(f"    {nm[:26]:28} -> {names.get(pid,'?'):14} week {ws}  {awarded} pts")
+for pid_place, pid, ws, awarded, ts, nm, proto in made:
+    print(f"    {nm[:26]:28} -> {names.get(pid,'?'):14} {proto}  week {ws}  {awarded} pts")
 conn.close()
