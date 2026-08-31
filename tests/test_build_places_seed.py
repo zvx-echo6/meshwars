@@ -47,18 +47,32 @@ def _buckets_with_one_anchor(lat: float, lon: float, radius_m: float) -> dict:
     return {key: [(lat, lon, radius_m)]}
 
 
-def test_score_points_in_city_summit_stays_5_regardless_of_elevation():
-    """The in-city rule wins outright: a summit inside a town's limits
-    is worth IN_CITY_POINTS (you can park at it), whatever the
-    elevation -- checked BEFORE the elevation scaling ever runs."""
+def test_score_points_summit_ignores_the_in_city_rule():
+    """A peak is a peak. The in-city rule used to win outright here, on
+    the reasoning that you can park at a summit inside a town -- which
+    flattened 95 summits to 5 points, Humphreys Peak (12,633ft, the
+    highest point in Arizona) among them. A town anchor is a flat circle
+    and cannot see the relief inside it, so summits are scored on
+    elevation whether or not an anchor reaches them (2026-08-31)."""
     buckets = _buckets_with_one_anchor(43.6, -116.2, 5000)
     row = {
         "ref_type": "summit", "lat": "43.6001", "lon": "-116.2001",
         "elevation_ft": "12662",
     }
     points, reason = bps.score_points(row, buckets)
-    assert points == bps.IN_CITY_POINTS == 5
-    assert reason == "in_city"
+    assert points == bps.SUMMIT_MAX_REMOTE_POINTS == 100
+    assert reason == "remote_scaled"
+
+
+def test_score_points_in_city_still_applies_to_park_and_landmark():
+    """Only summits were exempted -- the in-city rule is untouched for
+    everything without an elevation to score on."""
+    buckets = _buckets_with_one_anchor(43.6, -116.2, 5000)
+    for ref_type in ("park", "landmark"):
+        points, reason = bps.score_points(
+            {"ref_type": ref_type, "lat": "43.6001", "lon": "-116.2001",
+             "elevation_ft": ""}, buckets)
+        assert (points, reason) == (bps.IN_CITY_POINTS, "in_city"), ref_type
 
 
 def test_score_points_remote_summit_scales_by_elevation():
