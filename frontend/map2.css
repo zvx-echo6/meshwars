@@ -516,6 +516,10 @@
   font-size: 0.9rem;
 }
 .award-banner-label { font-weight: 600; color: var(--mw-gold, #d9b45b); }
+/* The winner's own name, then their team in the team's colour. A team
+   award has no player, so its name is coloured directly instead. */
+.award-banner-who { font-weight: 600; }
+.award-banner-team { font-size: 0.82em; letter-spacing: 0.04em; }
 .award-banner-detail { color: var(--mw-text-4, #9a9a9a); }
 .award-banner-close {
   margin-left: auto;

@@ -2328,12 +2328,26 @@ function showAwardBanner(map, geo) {
   el.className = 'award-banner';
   el.innerHTML = `
     <span class="award-banner-label"></span>
+    <span class="award-banner-who"></span>
+    <span class="award-banner-team"></span>
     <span class="award-banner-detail"></span>
     <button type="button" class="award-banner-close" aria-label="Clear highlight">&times;</button>`;
-  // textContent, not innerHTML -- these come from the API and one of
-  // them is a team name, which is player-adjacent data.
-  el.querySelector('.award-banner-label').textContent =
-    `${geo.label} — ${geo.team || geo.player || ''}`.trim();
+  // The PLAYER is the subject of a player award -- naming the team
+  // instead dropped the person who actually earned it. A team award
+  // (Longest Road, Largest Territory) has no player, so the team is the
+  // subject there and stands alone.
+  // textContent throughout, not innerHTML: a display name is player-
+  // supplied.
+  el.querySelector('.award-banner-label').textContent = `${geo.label} —`;
+  el.querySelector('.award-banner-who').textContent = geo.player || geo.team || '';
+  const teamEl = el.querySelector('.award-banner-team');
+  if (geo.player && geo.team) {
+    teamEl.textContent = geo.team;
+    teamEl.style.color = TEAM_COLORS[geo.team] || 'inherit';
+  } else if (!geo.player && geo.team) {
+    // Team award: colour the name itself rather than repeating it.
+    el.querySelector('.award-banner-who').style.color = TEAM_COLORS[geo.team] || 'inherit';
+  }
   el.querySelector('.award-banner-detail').textContent =
     `${geo.value} ${geo.detail || ''}`.trim();
   el.querySelector('.award-banner-close').addEventListener('click', () => {
