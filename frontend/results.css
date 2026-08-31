@@ -183,6 +183,48 @@
   white-space: nowrap;
 }
 
+/* ---- by team -------------------------------------------------------
+   The per-team awards as one row per team instead of fourteen honor
+   lines. Inherits .rs-table for the rules, the header type and the
+   tabular figures; only the things a five-column table needs are set
+   here, and only in tokens, so the neon skin follows for free. */
+.rs-table-scroll {
+  overflow-x: auto;
+  /* A table that has to scroll should say so by being scrollable, not
+     by dragging the whole page sideways on a phone. */
+  -webkit-overflow-scrolling: touch;
+}
+
+.rs-team-table {
+  /* Player names are the variable-width part; the two number columns
+     stay narrow so the pairs read as name-then-count. */
+  min-width: 30rem;
+}
+
+/* "Taken back" is two words in a column sized for three digits, and it
+   wrapped, making the header row twice as tall as the standings one
+   directly above. The column widens to hold it instead. */
+.rs-team-table th { white-space: nowrap; }
+
+.rs-team-table .rs-team-cell {
+  color: var(--mw-gold-light);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* .rs-num zeroes its right padding because in the standings it is
+   always the last column. Here one number column sits mid-table with a
+   name after it, so the gap is given back -- except on the last cell,
+   which keeps the flush right edge the standings table has. */
+.rs-team-table .rs-num { width: 5.25rem; padding-right: 18px !important; }
+.rs-team-table th:last-child.rs-num,
+.rs-team-table td:last-child.rs-num { padding-right: 0 !important; }
+
+/* A team that holds one award and not the other. Quiet on purpose: the
+   dash is a stated absence, and should not compete with the names
+   either side of it. */
+.rs-team-table .rs-none { color: var(--mw-text-6); }
+
 /* The one line about the month still being played. Sits above the
    finished months and reads as a note, not as a result -- no card, no
    panel, nothing that looks like a standing. */

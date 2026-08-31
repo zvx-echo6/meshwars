@@ -118,6 +118,75 @@ function renderHonors(awards) {
   }).join('')}</ul>`;
 }
 
+// ---- per-team awards -------------------------------------------------
+// Every team gets its own Top Attacker and Top Defender, so as honor
+// rows they are up to fourteen lines repeating two award names and two
+// detail strings. The facts are a comparison between teams, so they are
+// rendered as one row per team instead. Only the two team awards move:
+// anything else scoped stays an honor, so a future scoped award is not
+// silently swallowed by a table with no column for it.
+const TEAM_AWARDS = ['team_attacker', 'team_defender'];
+
+function splitAwards(awards) {
+  const league = [];
+  const byTeam = new Map();
+  awards.forEach((a) => {
+    if (a.scope && TEAM_AWARDS.indexOf(a.award) !== -1) {
+      const row = byTeam.get(a.scope) || {};
+      row[a.award] = a;
+      byTeam.set(a.scope, row);
+    } else {
+      league.push(a);
+    }
+  });
+  return { league, byTeam };
+}
+
+// A team can hold one of the two and not the other -- a team that took
+// ground but never took any back has an attacker and no defender. The
+// gap is a fact about the month, so it is drawn as a dash rather than
+// left blank, which would read as a rendering fault.
+function awardCells(a) {
+  if (!a) {
+    return '<td class="rs-none">&mdash;</td><td class="rs-num rs-none">&mdash;</td>';
+  }
+  const who = a.player || a.team || '\u2014';
+  return `<td>${escapeHtml(who)}</td><td class="rs-num">${num(a.value)}</td>`;
+}
+
+function renderTeamAwards(byTeam, standings) {
+  if (!byTeam.size) return '';
+  // Same order as the standings table directly above, so the eye tracks
+  // between the two. Any team holding an award but absent from the
+  // standings follows, rather than being dropped.
+  const order = [];
+  standings.forEach((s) => { if (byTeam.has(s.team)) order.push(s.team); });
+  byTeam.forEach((_row, team) => { if (order.indexOf(team) === -1) order.push(team); });
+
+  const rows = order.map((team) => {
+    const row = byTeam.get(team) || {};
+    return `<tr>
+      <td class="rs-team-cell">${teamDot(team)}${escapeHtml(team)}</td>
+      ${awardCells(row.team_attacker)}
+      ${awardCells(row.team_defender)}
+    </tr>`;
+  }).join('');
+
+  return `<h3 class="rs-sub">By team</h3>
+    <div class="rs-table-scroll">
+      <table class="rs-table rs-team-table">
+        <thead><tr>
+          <th>Team</th>
+          <th>Attacker</th>
+          <th class="rs-num">Taken</th>
+          <th>Defender</th>
+          <th class="rs-num">Retaken</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 // A month object carries preview:true only on a preview host, where
 // app/config.py's results_preview_current_month is on and the open month
 // is computed live rather than read back from a frozen row. Production
@@ -133,12 +202,15 @@ function renderMonth(m) {
       being played. These standings and honors are computed from data so far and will
       change before the month closes.</p>`
     : '';
+  const standings = m.standings || [];
+  const { league, byTeam } = splitAwards(m.awards || []);
   return `<section class="${cls}">
     <h2 class="rs-month-title">${escapeHtml(monthTitle(m.month))}${badge}</h2>${notice}
     <h3 class="rs-sub">Standings</h3>
-    ${renderStandings(m.standings || [])}
+    ${renderStandings(standings)}
     <h3 class="rs-sub">Honors</h3>
-    ${renderHonors(m.awards || [])}
+    ${renderHonors(league)}
+    ${renderTeamAwards(byTeam, standings)}
   </section>`;
 }
 
