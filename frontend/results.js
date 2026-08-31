@@ -67,6 +67,17 @@ function teamDot(team) {
   return `<span class="mc-dot" style="background:${TEAM_COLORS[team] || '#888'}"></span>`;
 }
 
+// Any name that belongs to a team is written in that team's colour --
+// team names and player names alike, everywhere they appear. The colour
+// IS the team, so it never has to be spelled out beside the name.
+// `title` keeps it recoverable for anyone who cannot separate seven
+// colours by eye.
+function teamName(name, team) {
+  const c = TEAM_COLORS[team];
+  if (!c) return escapeHtml(name);
+  return `<span class="rs-teamed" style="color:${c}" title="${escapeHtml(team)}">${escapeHtml(name)}</span>`;
+}
+
 // A number that is whole reads as whole. Check-in points are always
 // whole today, but the column is REAL and a future half-point bonus
 // should not make every other row grow a ".0".
@@ -94,7 +105,7 @@ function renderStandings(standings) {
   // not hold, which is exactly what this page used to do.
   const rows = active.map((s, i) => `<tr>
       <td class="rs-rank">${i + 1}</td>
-      <td>${teamDot(s.team)}${escapeHtml(s.team)}</td>
+      <td>${teamDot(s.team)}${teamName(s.team, s.team)}</td>
       <td class="rs-num rs-total">${num(s.squares)}</td>
       <td class="rs-num">${num(s.checkin_points)}</td>
       <td class="rs-num">${num(s.explorer_points)}</td>
@@ -134,8 +145,7 @@ function renderHonors(awards, board, month) {
       </li>`;
     }
     const who = a.player || a.team;
-    const scope = a.scope ? ` <span class="rs-scope">${teamDot(a.scope)}${escapeHtml(a.scope)}</span>` : '';
-    const team = a.player && a.team ? ` <span class="rs-scope">${teamDot(a.team)}${escapeHtml(a.team)}</span>` : '';
+    const scope = a.scope ? ` <span class="rs-scope">${teamDot(a.scope)}${teamName(a.scope, a.scope)}</span>` : '';
     const detail = a.detail ? `<span class="rs-detail">${escapeHtml(a.detail)}</span>` : '';
     // Only the award NAME is the link, not the whole row: the row also
     // carries a player and a team, and making all of it clickable would
@@ -149,7 +159,7 @@ function renderHonors(awards, board, month) {
       : escapeHtml(a.label);
     return `<li class="rs-honor">
       <span class="rs-honor-name">${name}${scope}${detail}</span>
-      <span class="rs-honor-who">${escapeHtml(who)}${team}</span>
+      <span class="rs-honor-who">${teamName(who, a.team)}</span>
       <span class="rs-honor-value">${num(a.value)}</span>
     </li>`;
   }).join('')}</ul>`;
@@ -188,7 +198,7 @@ function awardCells(a) {
     return '<td class="rs-none">&mdash;</td><td class="rs-num rs-none">&mdash;</td>';
   }
   const who = a.player || a.team || '\u2014';
-  return `<td>${escapeHtml(who)}</td><td class="rs-num">${num(a.value)}</td>`;
+  return `<td>${teamName(who, a.team)}</td><td class="rs-num">${num(a.value)}</td>`;
 }
 
 function renderTeamAwards(byTeam, standings) {
@@ -203,7 +213,7 @@ function renderTeamAwards(byTeam, standings) {
   const rows = order.map((team) => {
     const row = byTeam.get(team) || {};
     return `<tr>
-      <td class="rs-team-cell">${teamDot(team)}${escapeHtml(team)}</td>
+      <td class="rs-team-cell">${teamDot(team)}${teamName(team, team)}</td>
       ${awardCells(row.team_builder)}
       ${awardCells(row.team_attacker)}
       ${awardCells(row.team_defender)}

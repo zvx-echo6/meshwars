@@ -48,6 +48,17 @@ const TEAM_COLORS = {
 
 const TEAM_ORDER = Object.keys(TEAM_COLORS);
 
+// Any name that belongs to a team is written in that team's colour --
+// team names and player names alike. The colour IS the team, so it is
+// never spelled out beside the name; `title` keeps it recoverable for
+// anyone who cannot separate seven colours by eye.
+function teamName(name, team) {
+  const c = TEAM_COLORS[team];
+  if (!c) return escapeHtml(name);
+  return `<span class="mc-teamed" style="color:${c}" title="${escapeHtml(team)}">${escapeHtml(name)}</span>`;
+}
+
+
 // Same cadence the retired code.js used for its own coverage/scoreboard
 // refresh.
 const REFRESH_INTERVAL_MS = 30000;
@@ -705,7 +716,7 @@ async function openHistoryModal() {
       const teams = Array.isArray(s.teams) ? s.teams : [];
       const tallyText = teams
         .filter((t) => teamTotal(t) > 0)
-        .map((t) => `${escapeHtml(t.team)} <span class="mc-tally-count" data-total="${escapeHtml(teamTotal(t))}" data-compact="${escapeHtml(teamBreakdownCompact(t))}" title="${escapeHtml(teamBreakdown(t))}">${escapeHtml(teamTotal(t))}</span>`)
+        .map((t) => `${teamName(t.team, t.team)} <span class="mc-tally-count" data-total="${escapeHtml(teamTotal(t))}" data-compact="${escapeHtml(teamBreakdownCompact(t))}" title="${escapeHtml(teamBreakdown(t))}">${escapeHtml(teamTotal(t))}</span>`)
         .join(', ') || 'no tiles recorded';
       return `<tr>
         <td>#${escapeHtml(s.id)}</td>
@@ -738,7 +749,7 @@ async function openRosterModal() {
     const sections = teamOrder.map((team) => {
       const list = (byTeam.get(team) || []).slice()
         .sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''));
-      const rows = list.map((p) => `<tr><td>${escapeHtml(p.display_name)}</td></tr>`).join('');
+      const rows = list.map((p) => `<tr><td>${teamName(p.display_name, team)}</td></tr>`).join('');
       const color = TEAM_COLORS[team] || '#888';
       return `<div class="mc-roster-team">
         <h3 style="color:${color};">${escapeHtml(team)} &mdash; ${list.length}</h3>

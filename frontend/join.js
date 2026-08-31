@@ -562,6 +562,9 @@ function showJoinSuccess(data) {
   el.appendChild(document.createTextNode('Registered as '));
   const nameStrong = document.createElement('strong');
   nameStrong.textContent = data.display_name;
+  // Your own name, in your team's colour -- the same rule the map and
+  // the results page follow.
+  nameStrong.style.color = TEAM_COLORS[data.team] || 'inherit';
   el.appendChild(nameStrong);
   el.appendChild(document.createTextNode(' on '));
   const dot = document.createElement('span');
@@ -841,6 +844,9 @@ function renderStatusResult(data) {
   nameLine.appendChild(document.createTextNode('Name: '));
   const nameStrong = document.createElement('strong');
   nameStrong.textContent = data.display_name;
+  // Your own name, in your team's colour -- the same rule the map and
+  // the results page follow.
+  nameStrong.style.color = TEAM_COLORS[data.team] || 'inherit';
   nameLine.appendChild(nameStrong);
   panel.appendChild(nameLine);
 
