@@ -365,10 +365,10 @@ def test_shipped_summit_cells_artifact_is_loadable_and_exclusive():
     """The real file: every square belongs to exactly one summit."""
     from app import places_seed
     cells = places_seed._load_summit_cells()
-    assert len(cells) > 4000, "shipped summit_cells.csv looks truncated"
+    assert len(cells) > 4500, "shipped summit_cells.csv looks truncated"
     seen = {}
     for ref_code, squares in cells.items():
         for sq in squares:
             assert sq not in seen, f"{sq} claimed by {seen[sq]} and {ref_code}"
             seen[sq] = ref_code
-    assert len(seen) > 150_000
+    assert len(seen) > 25_000

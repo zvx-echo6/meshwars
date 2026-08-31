@@ -22,7 +22,8 @@ only 40 of 4,851 summits statewide. Wide enough to matter in flat country
 is wide enough to give away the Wasatch.
 
 So a square credits a summit only if it is within H_RADIUS_M horizontally
-AND within V_TOL_M of the summit's own elevation. 5km was tried first and
+AND within V_TOL_M of the summit's own elevation -- or is the summit's own
+square, which always counts (see build()). 5km was tried first and
 was too generous -- it covered 655k squares, four times as much ground as
 1.5km, for one extra reachable summit. The vertical test is
 what makes it mean "you got up there": downtown SLC reads 4,264ft against
@@ -55,7 +56,7 @@ import sys
 
 CELL_LAT, CELL_LON = 0.0027, 0.00384   # must match app/grid.py
 H_RADIUS_M = 1500.0
-V_TOL_M = 300.0
+V_TOL_M = 100.0
 FT = 0.3048
 DEM_PATH = os.environ.get("MW_DEM", "/data/nav/dem/planet-dem.pmtiles")
 
@@ -104,6 +105,16 @@ def build(summits, elevation_m):
     """[(ref_code, lat, lon, elev_m)] -> {ref_code: {(y, x), ...}}."""
     best = {}
     for i, (ref_code, lat, lon, elev) in enumerate(summits):
+        # A summit ALWAYS gets the square its own peak stands in, at
+        # distance 0, whatever the vertical test says about it. A 300m
+        # square is wide enough that on a sharp peak its centre can sit
+        # more than V_TOL_M below the apex, which would make the summit
+        # untaggable even standing on top of it -- 289 summits at
+        # V_TOL_M=100 before this. Distance 0 also means it wins its own
+        # square outright in the exclusivity pass below, unless another
+        # summit stands in the very same square.
+        own = (math.floor(lat / CELL_LAT), math.floor(lon / CELL_LON))
+        best[own] = min(best.get(own, (math.inf, None)), (0.0, i))
         dlat = H_RADIUS_M / 111320.0
         dlon = H_RADIUS_M / (111320.0 * math.cos(math.radians(lat)))
         y0 = math.floor((lat - dlat) / CELL_LAT); y1 = math.floor((lat + dlat) / CELL_LAT)

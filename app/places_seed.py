@@ -86,7 +86,7 @@ _DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_
 # Summit -> squares, built by scripts/build_summit_cells.py against the
 # planet DEM on navi. A summit's squares cannot be derived here the way a
 # park's are from its boundary: the test is terrain (within 1.5km AND
-# within 300m of the summit's own elevation), and the app host has no
+# within 100m of the summit's own elevation, plus the peak's own square), and the app host has no
 # elevation data. So it ships precomputed, same as the seed itself.
 _SUMMIT_CELLS_PATH = os.path.join(os.path.dirname(__file__), "reference", "summit_cells.csv")
 
@@ -95,7 +95,7 @@ def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
     """ref_code -> the squares that credit that summit.
 
     Stored as offsets from each summit's own square rather than absolute
-    ids -- 0.9MB for 167k squares instead of several times that.
+    ids -- 0.24MB for 28k squares instead of several times that.
 
     Every square is already assigned to exactly ONE summit (its nearest)
     by the build script. That is the whole reason this file exists rather
