@@ -713,3 +713,43 @@ def test_quick_fingers_averages_a_single_timed_checkin(conn):
     qf = _award(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "quick_fingers")
     assert qf is not None
     assert qf["player_id"] == 1      # 90s beats 300s
+
+
+def test_a_failed_freeze_is_retried_rather_than_memoised_away(conn, monkeypatch):
+    """The month-roll memo must be set after the work, not before.
+
+    The callers catch and log, and the write session rolls back, so a
+    freeze that raises leaves no month_result row. If the memo were set
+    first, that failure would be suppressed for the rest of the calendar
+    month and the month would stay unfrozen until a process restart.
+    """
+    _player(conn, 1, "RED")
+    sid = _season(conn, "mc", started_at=START - 86400 * 40)
+    # Activity in a month that has already ended, so there is work to do.
+    prev_month_ts = START - 86400 * 5
+    _capture(conn, sid, cell_id(43.6, -116.2), prev_month_ts, 1, "RED")
+
+    results._LAST_CHECKED.pop("mc", None)
+    calls = []
+
+    def boom(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("freeze failed")
+
+    monkeypatch.setattr(results, "freeze_month", boom)
+    for _ in range(2):
+        try:
+            results.maybe_roll_months(conn, NOW, "mc")
+        except RuntimeError:
+            pass
+    assert len(calls) == 2, "a failed freeze must be retried on the next poll"
+    results._LAST_CHECKED.pop("mc", None)
+
+
+def test_a_successful_roll_is_memoised(conn):
+    """The memo still has to stop a rescan on every single poll."""
+    results._LAST_CHECKED.pop("mc", None)
+    _season(conn, "mc")
+    assert results.maybe_roll_months(conn, NOW, "mc") == 0
+    assert results._LAST_CHECKED.get("mc") == results.month_key(NOW)
+    results._LAST_CHECKED.pop("mc", None)

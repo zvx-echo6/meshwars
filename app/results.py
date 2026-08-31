@@ -791,7 +791,6 @@ def maybe_roll_months(conn: sqlite3.Connection, now: int, protocol: str) -> int:
     current = month_key(now)
     if _LAST_CHECKED.get(protocol) == current:
         return 0
-    _LAST_CHECKED[protocol] = current
 
     have = {
         r["month"] for r in conn.execute(
@@ -815,6 +814,17 @@ def maybe_roll_months(conn: sqlite3.Connection, now: int, protocol: str) -> int:
     pending = sorted(m for m in active if m and m < current and m not in have)
     for month in pending:
         freeze_month(conn, protocol, month, now)
+
+    # Memoised only AFTER the work, never before. The callers wrap this
+    # in a poll that catches and logs (app/checkin.py), and WriteSession
+    # rolls the transaction back on exception -- so a freeze that raised
+    # leaves no month_result row. Setting the memo first meant that
+    # failure was then suppressed for the rest of the calendar month:
+    # every later poll returned 0 without retrying, and the month stayed
+    # unfrozen until the process happened to restart. Set here, a failed
+    # freeze is simply retried on the next poll, which is what the
+    # catch-up behaviour described above is supposed to give.
+    _LAST_CHECKED[protocol] = current
     return len(pending)
 
 
