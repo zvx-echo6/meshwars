@@ -30,6 +30,7 @@ MC_PROTOCOL explicitly, same as before this module had a second caller.
 """
 from __future__ import annotations
 
+import re
 import json
 import sqlite3
 import time
@@ -914,6 +915,11 @@ def top_checkin_for(protocol: str) -> list[dict]:
     return result if result is not None else []
 
 
+# "YYYY-MM" and nothing else. The month reaches award_geometry() from a
+# URL path, and month_bounds() would raise on anything else.
+_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
 def results_for(protocol: str, limit: int = 12) -> dict:
     """Finished months for `protocol`, newest first, plus when the month
     in progress closes. See app/results.py for why the open month is not
@@ -935,6 +941,33 @@ def results_for(protocol: str, limit: int = 12) -> dict:
 async def mc_results() -> dict:
     """Monthly results for the MeshCore board. See results_for()."""
     return results_for(MC_PROTOCOL)
+
+
+def award_geometry_for(protocol: str, month: str, award: str) -> dict | None:
+    """GeoJSON for where one honor was earned, or None when that honor
+    has no place on the map, nobody won it, or the month is malformed.
+
+    Same *_for() pattern as results_for above, so app/api.py's Meshtastic
+    route calls this rather than duplicating it.
+    """
+    if not _MONTH_RE.match(month or ""):
+        return None
+
+    def run(conn):
+        return results.award_geometry(conn, protocol, month, award, int(time.time()))
+
+    return _safe_query(run)
+
+
+@router.get("/api/mc/results/{month}/{award}/geo")
+async def mc_award_geometry(month: str, award: str) -> JSONResponse:
+    """Where a MeshCore honor was earned, as GeoJSON, for the map to
+    draw. 404 rather than an empty collection when there is nothing to
+    show, so the map can tell "no such thing" from "an empty road"."""
+    geo = award_geometry_for(MC_PROTOCOL, month, award)
+    if geo is None:
+        return JSONResponse({"error": "no geometry for that award"}, status_code=404)
+    return JSONResponse(geo)
 
 
 @router.get("/api/mc/top-checkins")

@@ -33,6 +33,12 @@ const BOARDS = {
   meshtastic: { endpoint: '/api/results', label: 'Meshtastic' },
 };
 
+// Honors that happened SOMEWHERE, so the row can link onto the map.
+// Mirrors app/results.GEOMETRIC_AWARDS -- if that grows, grow this too;
+// a key listed here that the backend has no geometry for just 404s and
+// the link is dropped rather than breaking the row.
+const MAPPABLE_AWARDS = ['longest_road', 'frontier', 'tourist', 'park_hopper', 'peak_tagger'];
+
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
                      'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -105,7 +111,7 @@ function renderStandings(standings) {
 }
 
 
-function renderHonors(awards) {
+function renderHonors(awards, board, month) {
   if (!awards.length) {
     return '<p class="rs-empty">No honors awarded yet this month.</p>';
   }
@@ -131,8 +137,18 @@ function renderHonors(awards) {
     const scope = a.scope ? ` <span class="rs-scope">${teamDot(a.scope)}${escapeHtml(a.scope)}</span>` : '';
     const team = a.player && a.team ? ` <span class="rs-scope">${teamDot(a.team)}${escapeHtml(a.team)}</span>` : '';
     const detail = a.detail ? `<span class="rs-detail">${escapeHtml(a.detail)}</span>` : '';
+    // Only the award NAME is the link, not the whole row: the row also
+    // carries a player and a team, and making all of it clickable would
+    // suggest those go somewhere too.
+    const mappable = MAPPABLE_AWARDS.indexOf(a.award) !== -1 && board && month;
+    const href = mappable
+      ? `/map2?board=${encodeURIComponent(board)}&month=${encodeURIComponent(month)}&award=${encodeURIComponent(a.award)}`
+      : '';
+    const name = mappable
+      ? `<a class="rs-honor-link" href="${href}" title="Show this on the map">${escapeHtml(a.label)}</a>`
+      : escapeHtml(a.label);
     return `<li class="rs-honor">
-      <span class="rs-honor-name">${escapeHtml(a.label)}${scope}${detail}</span>
+      <span class="rs-honor-name">${name}${scope}${detail}</span>
       <span class="rs-honor-who">${escapeHtml(who)}${team}</span>
       <span class="rs-honor-value">${num(a.value)}</span>
     </li>`;
@@ -217,7 +233,7 @@ function renderTeamAwards(byTeam, standings) {
 // never sets it, and a frozen month renders byte for byte as it always
 // has -- the badge, the notice and the extra class are all empty
 // strings unless the flag put them there.
-function renderMonth(m) {
+function renderMonth(m, board) {
   const preview = m.preview === true;
   const cls = preview ? 'rs-month rs-month-preview' : 'rs-month';
   const badge = preview ? '<span class="rs-preview-badge">IN PROGRESS</span>' : '';
@@ -233,7 +249,7 @@ function renderMonth(m) {
     <h3 class="rs-sub">Standings</h3>
     ${renderStandings(standings)}
     <h3 class="rs-sub">Honors</h3>
-    ${renderHonors(league)}
+    ${renderHonors(league, board, m.month)}
     ${renderTeamAwards(byTeam, standings)}
   </section>`;
 }
@@ -263,7 +279,7 @@ async function load(board) {
     const months = Array.isArray(data.months) ? data.months : [];
     const open = renderOpenMonth(data);
     monthsEl.innerHTML = months.length
-      ? open + months.map(renderMonth).join('')
+      ? open + months.map((m) => renderMonth(m, board)).join('')
       : open + '<p class="rs-empty">No month has finished yet. The first result lands when this one does.</p>';
   } catch (err) {
     monthsEl.innerHTML = `<p class="rs-empty">Couldn't load results: ${escapeHtml(err.message)}</p>`;

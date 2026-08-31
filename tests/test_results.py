@@ -467,3 +467,109 @@ def test_team_builders_add_up_to_the_team_square_count(conn):
                 if a["award"] == "team_builder" and a["scope"] == "RED"]
     assert red["squares"] == 6
     assert builders[0]["value"] == 4   # the top builder, not the sum
+
+
+# --- award geometry -----------------------------------------------------
+
+
+def test_longest_road_path_length_matches_the_reported_number():
+    cells = {(0, x) for x in range(9)} | {(20, y) for y in range(4)}
+    path = results._longest_road_path(cells)
+    assert len(path) == results._longest_road(cells) == 9
+
+
+def test_longest_road_path_is_contiguous():
+    cells = {(i, i) for i in range(6)} | {(5, 6), (5, 7)}
+    path = results._longest_road_path(cells)
+    for a, b in zip(path, path[1:]):
+        assert max(abs(a[0] - b[0]), abs(a[1] - b[1])) == 1
+    assert set(path) <= cells
+
+
+def test_award_geometry_refuses_an_award_with_no_place_on_the_map(conn):
+    assert results.award_geometry(conn, "mc", MONTH, "empire_builder", NOW) is None
+    assert results.award_geometry(conn, "mc", MONTH, "largest_territory", NOW) is None
+
+
+def test_award_geometry_draws_the_winning_road(conn, monkeypatch):
+    monkeypatch.setattr(results.settings, "longest_road_min_squares", 2)
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    sid = _season(conn, "mc")
+    # RED lays a five-square run; BLUE holds two, so RED wins the road.
+    for i in range(5):
+        _capture(conn, sid, cell_id(43.60, -116.20 + i * 0.00384), START + 100 + i, 1, "RED")
+    for i in range(2):
+        _capture(conn, sid, cell_id(45.00, -116.20 + i * 0.00384), START + 200 + i, 2, "BLUE")
+
+    geo = results.award_geometry(conn, "mc", MONTH, "longest_road", NOW)
+    assert geo["team"] == "RED"
+    assert geo["value"] == 5
+    feats = geo["geojson"]["features"]
+    assert len(feats) == 5
+    assert all(f["geometry"]["type"] == "Polygon" for f in feats)
+    # Each square is a closed ring of five points.
+    assert all(len(f["geometry"]["coordinates"][0]) == 5 for f in feats)
+
+
+def test_award_geometry_returns_nothing_when_nobody_won(conn):
+    _season(conn, "mc")
+    assert results.award_geometry(conn, "mc", MONTH, "longest_road", NOW) is None
+
+
+# --- the 300-square floor, and cutting a chain to deny the award --------
+#
+# Longest Road only pays out at settings.longest_road_min_squares. That
+# makes it the one honor a rival can take off you without out-scoring you
+# anywhere: land a single square in the middle of the run and it becomes
+# two shorter runs, and if neither clears the floor, nobody wins it.
+
+
+def _run(conn, sid, player_id, team, n, lat=43.60, start_ts=None):
+    """Lay a straight west-to-east run of n squares for one player."""
+    for i in range(n):
+        _capture(conn, sid, cell_id(lat, -116.20 + i * 0.00384),
+                 (start_ts or START + 100) + i, player_id, team)
+
+
+def test_longest_road_is_not_awarded_below_the_floor(conn, monkeypatch):
+    monkeypatch.setattr(results.settings, "longest_road_min_squares", 300)
+    _player(conn, 1, "RED")
+    sid = _season(conn, "mc")
+    _run(conn, sid, 1, "RED", 299)
+
+    assert _unawarded(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "longest_road")
+
+
+def test_longest_road_is_awarded_at_the_floor(conn, monkeypatch):
+    monkeypatch.setattr(results.settings, "longest_road_min_squares", 300)
+    _player(conn, 1, "RED")
+    sid = _season(conn, "mc")
+    _run(conn, sid, 1, "RED", 300)
+
+    road = _award(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "longest_road")
+    assert road["team"] == "RED"
+    assert road["value"] == 300
+
+
+def test_cutting_a_chain_denies_the_award(conn, monkeypatch):
+    monkeypatch.setattr(results.settings, "longest_road_min_squares", 300)
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    sid = _season(conn, "mc")
+    _run(conn, sid, 1, "RED", 400)
+    # RED holds 400 in a row -- comfortably over the floor.
+    road = _award(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "longest_road")
+    assert road["value"] == 400
+
+    # BLUE takes ONE square in the middle. RED still holds 399 squares,
+    # but as two runs of 200 and 199 -- neither clears 300, and BLUE's
+    # single square is nowhere near it either. Nobody wins.
+    _capture(conn, sid, cell_id(43.60, -116.20 + 200 * 0.00384),
+             START + 5000, 2, "BLUE", from_team="RED")
+
+    awards = results.compute_month(conn, "mc", MONTH, NOW)["awards"]
+    assert _unawarded(awards, "longest_road")
+    red = next(s for s in results.compute_month(conn, "mc", MONTH, NOW)["standings"]
+               if s["team"] == "RED")
+    assert red["squares"] == 399   # the ground is still theirs; only the road is gone
