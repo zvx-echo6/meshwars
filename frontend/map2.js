@@ -2318,7 +2318,7 @@ function awardParams() {
   const award = params.get('award');
   const month = params.get('month');
   if (!award || !month) return null;
-  return { award, month, board: params.get('board') || 'meshcore' };
+  return { award, month, board: boardParam() || 'meshcore' };
 }
 
 // ?lat=&lon=&zoom= -- go straight to a place on the map. There was no
@@ -2337,6 +2337,19 @@ function viewParams() {
   if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
   const zoom = parseFloat(params.get('zoom'));
   return { lat, lon, zoom: Number.isFinite(zoom) ? Math.min(Math.max(zoom, 1), 18) : 14 };
+}
+
+// ?board=meshcore|meshtastic, shared by the award links and any linked
+// view. Anything else is ignored rather than guessed at.
+function boardParam() {
+  let params;
+  try {
+    params = new URLSearchParams(window.location.search);
+  } catch {
+    return null;
+  }
+  const b = params.get('board');
+  return b === 'meshcore' || b === 'meshtastic' ? b : null;
 }
 
 function goToViewFromUrl(map) {
@@ -2988,7 +3001,13 @@ async function main() {
   loadNotice();
 
   const { playAreaBounds, defaultMode, cartoKey } = await fetchBootConfig();
-  mode = defaultMode;
+  // ?board= wins over the configured default. Without this an award link
+  // from the Meshtastic results page opened the map on whichever board
+  // the config preferred, and drew a Meshtastic highlight over MeshCore
+  // territory -- the square the link exists to show was simply not
+  // there.
+  const linked = boardParam();
+  mode = linked || defaultMode;
   if (!playAreaBounds) {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
   }
