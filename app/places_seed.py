@@ -486,7 +486,20 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # this bump.
     _RECONCILE_VERSION = 4
     st = os.stat(_DATA_PATH)
-    fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}"
+    # summit_cells.csv rides along in the fingerprint too. It decides
+    # every summit's place_cell rows but is a SEPARATE file from the seed
+    # CSV, so a change to it alone would leave the fingerprint untouched
+    # and the old mapping loaded forever. (Tightening the radius from 5km
+    # to 1.5km only reloaded because the deploy happened to rewrite the
+    # seed CSV and move its mtime -- luck, not design.) Missing file
+    # contributes a constant, so its absence is stable rather than
+    # re-triggering a load every startup.
+    try:
+        sc = os.stat(_SUMMIT_CELLS_PATH)
+        summit_fp = f"{sc.st_size}:{int(sc.st_mtime)}"
+    except OSError:
+        summit_fp = "none"
+    fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}:s{summit_fp}"
     row = conn.execute("SELECT v FROM cursor WHERE k = 'places_seed_csv_fingerprint'").fetchone()
     if row is not None and row[0] == fingerprint:
         log.info("places_seed: CSV unchanged since last load (%s), skipping", fingerprint)
