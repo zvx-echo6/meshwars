@@ -2696,6 +2696,22 @@ async function loadNotice() {
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 
+// Opening view, in priority order: (1) the viewer's own location, if the
+// browser will give it up quickly, (2) failing that -- denied, no
+// permission prompt answered, no geolocation API at all, or just too
+// slow -- this fixed box. It runs from Boise (Treasure Valley) at the
+// northwest corner down to the southeast corner of Utah (Wasatch Front)
+// at the southeast: [[west, south], [east, north]], same convention as
+// playAreaBounds below. That span is where MeshWars players actually
+// are today, unlike the empty mountains northeast of Boise the map used
+// to open on by default. This box is what's on screen from first
+// paint -- see the `bounds` passed to the constructor below -- and
+// geolocation, when it resolves, is layered on top afterward rather
+// than gating it.
+const FALLBACK_VIEW_BOUNDS = [[-116.21, 37.00], [-109.05, 43.62]];
+const GEOLOCATION_TIMEOUT_MS = 5000;
+const GEOLOCATION_ZOOM = 11; // city-level -- close enough to orient, not so close it feels like a snap-to
+
 // Read from /config rather than written down here, same reasoning as
 // frontend/play-area-map.js: the play area is an operator setting that
 // has moved before, and a hardcoded copy in this file would silently
@@ -2865,8 +2881,8 @@ async function main() {
   try {
     map = new maplibregl.Map({
       container: 'map',
-      center: [-116.10, 43.76],
-      zoom: 10,
+      bounds: FALLBACK_VIEW_BOUNDS, // opening view -- see its own comment above; geolocation (below, once loaded) can move off it
+      fitBoundsOptions: { padding: 40 },
       minZoom: 4,   // roughly the whole play area in view
       maxZoom: 17,  // well past the 300 m grid; squares stay legible
       ...(playAreaBounds ? { maxBounds: playAreaBounds } : {}),
@@ -3047,6 +3063,55 @@ async function main() {
   if (map.dragRotate) map.dragRotate.disable();
   if (map.touchZoomRotate) map.touchZoomRotate.disableRotation();
   if (map.keyboard) map.keyboard.disableRotation();
+
+  // Opening view, step 2: try to ease onto the viewer's own location,
+  // asked for here (never gating the constructor above) so a slow or
+  // unanswered permission prompt cannot delay first paint -- the map is
+  // already sitting on FALLBACK_VIEW_BOUNDS by the time this fires.
+  // movestart's originalEvent is only set when a real drag/scroll/pinch/
+  // keyboard action caused it -- MapLibre leaves it undefined for its
+  // own programmatic moves (the constructor's bounds fit, and the
+  // easeTo below) -- so this is how a viewer who has already grabbed
+  // the map is told apart from the map moving itself. Once set, the
+  // easeTo below is skipped: don't yank the view out from under someone
+  // who has already started looking around.
+  let mapViewerInteracted = false;
+  map.on('movestart', (e) => {
+    if (e && e.originalEvent) mapViewerInteracted = true;
+  });
+  if (navigator.geolocation && typeof navigator.geolocation.getCurrentPosition === 'function') {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (mapViewerInteracted) return;
+        const lng = pos.coords.longitude;
+        const lat = pos.coords.latitude;
+        // A fix outside the configured play area would just get clamped
+        // by maxBounds above -- fighting that clamp reads as a broken,
+        // jittery fly-to rather than "no move happened", so detect it
+        // up front and stay on the fallback box instead. No playAreaBounds
+        // at all (server unreachable) means nothing to check against.
+        if (playAreaBounds) {
+          const [[west, south], [east, north]] = playAreaBounds;
+          if (lng < west || lng > east || lat < south || lat > north) return;
+        }
+        map.easeTo({ center: [lng, lat], zoom: GEOLOCATION_ZOOM, duration: 1000 });
+      },
+      () => {
+        // Denied, timed out, errored, or otherwise unavailable: this is
+        // a nice-to-have, not something the viewer asked for, so stay
+        // silent and stay on the fallback box -- no banner, no console
+        // noise, no retry.
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: GEOLOCATION_TIMEOUT_MS,
+        maximumAge: 5 * 60 * 1000, // a fix from the last 5 minutes is close enough to skip a fresh GPS read
+      }
+    );
+  }
+  // Nothing above is sent to the server, logged, or persisted (no
+  // fetch/sendClientLog/localStorage touches pos.coords) -- it only
+  // ever reaches this map.easeTo() call, in this browser tab.
 
   // Territory panel + winner banner (ported from frontend/mc.js -- see
   // the "Territory panel" section above). Built here, alongside the
