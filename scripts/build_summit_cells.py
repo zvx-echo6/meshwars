@@ -22,14 +22,17 @@ only 40 of 4,851 summits statewide. Wide enough to matter in flat country
 is wide enough to give away the Wasatch.
 
 So a square credits a summit only if it is within H_RADIUS_M horizontally
-AND within V_TOL_M of the summit's own elevation. The vertical test is
+AND within V_TOL_M of the summit's own elevation. 5km was tried first and
+was too generous -- it covered 655k squares, four times as much ground as
+1.5km, for one extra reachable summit. The vertical test is
 what makes it mean "you got up there": downtown SLC reads 4,264ft against
 Twin Peaks' 11,473ft, 2,197m apart, so the valley fails on any sane
 tolerance while Guardsman Pass or the Willard Peak road passes.
 
 EXCLUSIVITY -- the reason this is a global build, not a per-summit rule
-65% of summits (3,152 of 4,851) have another summit within 5km AND 300m;
-the worst has 17 neighbours. Without exclusivity one hike would credit 18
+At 5km, 65% of summits (3,152 of 4,851) have another summit within range
+and the worst has 17 neighbours; 1.5km narrows that but does not remove
+it. Without exclusivity one hike would credit 18
 peaks at once. Each square is therefore assigned to its NEAREST qualifying
 summit and no other. It must be decided by DISTANCE here, not left to the
 runtime non-stacking rule, which resolves a square to its DEAREST place --
@@ -51,7 +54,7 @@ import os
 import sys
 
 CELL_LAT, CELL_LON = 0.0027, 0.00384   # must match app/grid.py
-H_RADIUS_M = 5000.0
+H_RADIUS_M = 1500.0
 V_TOL_M = 300.0
 FT = 0.3048
 DEM_PATH = os.environ.get("MW_DEM", "/data/nav/dem/planet-dem.pmtiles")

@@ -113,6 +113,12 @@
 
 .rs-table tr:last-child td { border-bottom: 0; }
 .rs-num { text-align: right; padding-right: 0 !important; }
+/* A numeric column's HEADER has to sit over its numbers. `.rs-table th`
+   (0,1,1) outranks a bare `.rs-num` (0,1,0), so every numeric header
+   stayed left-aligned above right-aligned values -- a gap as wide as the
+   column, and glaring once a third number column with a long name
+   (EXPLORATION) arrived. */
+.rs-table th.rs-num { text-align: right; }
 .rs-rank { color: var(--mw-text-6); width: 2rem; }
 .rs-total { color: var(--mw-gold-light); font-weight: 700; }
 
