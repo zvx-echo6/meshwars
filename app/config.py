@@ -340,9 +340,15 @@ class Settings(BaseSettings):
     # with no winner, which is the point of a prestige award.
     frontier_miles: float = 20.0
 
-    # Quick Fingers needs more than one check-in to average, or a single
-    # lucky night wins it.
-    quick_fingers_min_checkins: int = 2
+    # Quick Fingers averages however many timed check-ins a player has,
+    # down to one. It was two, so that a single lucky night could not win
+    # it -- but that assumed every net carries timings, and the first one
+    # ever run did not: message_ts shipped 2026-08-22, between the
+    # 2026-08-19 and 2026-08-26 nets, so August had exactly one timed net
+    # and the award could not be won by anyone at all. An award that
+    # silently cannot fire is worse than one a lucky night can win, and
+    # the anti-automation guard below is what actually protects it.
+    quick_fingers_min_checkins: int = 1
 
     # Automation guard, applied to Quick Fingers ONLY. A player whose
     # check-in lands within this many seconds of the same offset every

@@ -59,6 +59,16 @@ def _capture(conn, season_id, cell, ts, player_id, team, from_team=None, by_air=
     )
 
 
+def _checkin(conn, season_id, player_id, net_date, points=25, message_ts=None,
+             protocol="mc", streak=1):
+    conn.execute(
+        "INSERT INTO mc_checkin_award(season_id, player_id, net_date, points, protocol, "
+        "message_id, awarded_at, streak, message_ts) VALUES (?,?,?,?,?,?,?,?,?)",
+        (season_id, player_id, net_date, points, protocol,
+         f"msg-{player_id}-{net_date}", NOW, streak, message_ts),
+    )
+
+
 def _place_activation(conn, place_id, player_id, points, awarded_at, week_start="2026-01-07",
                       protocol="mt"):
     # place_activation has no foreign-key enforcement in the test schema's
@@ -687,3 +697,19 @@ def test_rows_written_before_the_protocol_column_credit_neither_board(conn):
         "VALUES (?,?,?,?,?)", (703, 1, "2026-08-19", 5, START + 10))
     for proto in ("mc", "mt"):
         assert _unawarded(results.compute_month(conn, proto, MONTH, NOW)["awards"], "tourist")
+
+
+def test_quick_fingers_averages_a_single_timed_checkin(conn):
+    """One timed net is enough. It used to need two, which made the award
+    unwinnable in a month where only one net carried timings."""
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    sid = _season(conn, "mc")
+    net_date = time.strftime("%Y-%m-%d", time.localtime(START + 86400))
+    open_ts = results._net_window_open(net_date)
+    _checkin(conn, sid, 1, net_date, message_ts=open_ts + 90)
+    _checkin(conn, sid, 2, net_date, message_ts=open_ts + 300)
+
+    qf = _award(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "quick_fingers")
+    assert qf is not None
+    assert qf["player_id"] == 1      # 90s beats 300s

@@ -719,6 +719,11 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
         offs = [o for o in offs if o >= 0]
         if len(offs) < settings.quick_fingers_min_checkins:
             continue
+        # The automation guard below needs several nets before a low
+        # spread means anything, so a player with one or two timed
+        # check-ins is never screened by it -- deliberately. Averaging
+        # one night is the point of the minimum being 1; see
+        # settings.quick_fingers_min_checkins.
         if (len(offs) >= settings.automation_min_samples
                 and statistics.pstdev(offs) < settings.automation_stdev_seconds):
             log.info("results: player %d skipped for quick_fingers (offset stdev %.2fs over %d nets)",

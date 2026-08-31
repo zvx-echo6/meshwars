@@ -1137,8 +1137,25 @@ class WriteSession:
 
     async def __aenter__(self) -> sqlite3.Connection:
         await _WRITE_LOCK.acquire()
-        self.conn = connect()
-        self.conn.execute("BEGIN IMMEDIATE")
+        # Invariant: from here to __aexit__, the lock is held only once
+        # BEGIN IMMEDIATE has actually succeeded. Python only calls
+        # __aexit__ when __aenter__ returns, so if connect() or BEGIN
+        # IMMEDIATE raises -- a busy database past the pragma's
+        # busy_timeout, a bad db_path, a cancellation, anything -- we
+        # must release the lock and close whatever connection we opened
+        # ourselves, right here, or the lock is held forever and every
+        # write anywhere in the process deadlocks behind it. Catching
+        # BaseException (not Exception) matters because this is asyncio
+        # code: a task cancellation must not leak the lock either.
+        try:
+            self.conn = connect()
+            self.conn.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
+            _WRITE_LOCK.release()
+            raise
         return self.conn
 
     async def __aexit__(self, exc_type, exc, tb):
