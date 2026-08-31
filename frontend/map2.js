@@ -2321,11 +2321,36 @@ function awardParams() {
   return { award, month, board: params.get('board') || 'meshcore' };
 }
 
-// Whether this page load is someone arriving to look at one award --
-// read by loadNotice() too, so the first-visit modal does not land on
-// top of the thing they clicked through to see.
+// ?lat=&lon=&zoom= -- go straight to a place on the map. There was no
+// way to link someone to a spot at all before this; the only way to show
+// somebody a square was to tell them to pan and hunt for it.
+function viewParams() {
+  let params;
+  try {
+    params = new URLSearchParams(window.location.search);
+  } catch {
+    return null;
+  }
+  const lat = parseFloat(params.get('lat'));
+  const lon = parseFloat(params.get('lon'));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  const zoom = parseFloat(params.get('zoom'));
+  return { lat, lon, zoom: Number.isFinite(zoom) ? Math.min(Math.max(zoom, 1), 18) : 14 };
+}
+
+function goToViewFromUrl(map) {
+  const v = viewParams();
+  if (!v) return;
+  map.jumpTo({ center: [v.lon, v.lat], zoom: v.zoom });
+}
+
+// Whether this page load is someone arriving to look at one specific
+// thing -- an award, or a place they were linked to. Read by
+// loadNotice() too, so the first-visit modal does not land on top of
+// whatever they came to see.
 function hasAwardParams() {
-  return awardParams() !== null;
+  return awardParams() !== null || viewParams() !== null;
 }
 
 async function showAwardFromUrl(map) {
@@ -3408,6 +3433,10 @@ async function main() {
       // async and never awaited, so a slow or failing award fetch
       // cannot delay or break the board coming up. It only ever runs
       // when /results linked here with award params.
+      // Before the award fetch: a linked view should be framed even if
+      // the award geometry is slow or absent. showAwardFromUrl's own
+      // fitBounds overrides it when there IS geometry to frame.
+      goToViewFromUrl(map);
       showAwardFromUrl(map);
       // t5_post_dataload: proves whether the three calls above complete
       // (return control here) at all, independent of the overlay, which
