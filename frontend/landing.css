@@ -651,8 +651,12 @@ body {
 
 @media (min-width: 900px) {
   /* Spans both columns, so it sits under the whole page rather than
-     landing at the bottom of whichever column it flowed into. */
-  .landing-footnote { column-span: all; }
+     landing at the bottom of whichever column it flowed into. The
+     disclaimer needs it for the same reason -- it is addressed to
+     everyone reading the page, not to whichever column it happened to
+     flow into. */
+  .landing-footnote,
+  .landing-disclaimer { column-span: all; }
 }
 
 /* Coverage disclaimer, foot of the about page. Bold enough that someone
