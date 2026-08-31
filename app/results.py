@@ -414,6 +414,28 @@ def _names(conn: sqlite3.Connection) -> dict[int, tuple[str, str]]:
 # ---- award helpers -----------------------------------------------------
 
 
+def _top_with_tiebreak(counts: dict, tiebreak: dict, minimum: float = 1):
+    """Like _top(), but a tie on the count is settled by `tiebreak`
+    (higher wins) instead of being refused.
+
+    Peak Tagger uses it, broken by the tallest summit the player reached:
+    two people who each tagged one peak have not done the same thing if
+    one of them climbed 3,000 feet higher. Only that award has an
+    obvious "harder" axis -- landmarks and parks do not, so Tourist and
+    Park Hopper keep refusing ties.
+
+    A tie on BOTH count and tiebreak is still refused, same as _top().
+    """
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], -(tiebreak.get(kv[0]) or 0)))
+    if not ranked or ranked[0][1] < minimum:
+        return None
+    if len(ranked) > 1:
+        a, b = ranked[0], ranked[1]
+        if a[1] == b[1] and (tiebreak.get(a[0]) or 0) == (tiebreak.get(b[0]) or 0):
+            return None
+    return ranked[0]
+
+
 def _top(counts: dict, minimum: float = 1):
     """The single highest entry, or None if nothing reached `minimum` or
     the lead is shared.
@@ -608,7 +630,24 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
             " GROUP BY a.player_id",
             (ref_type, start, end),
         ).fetchall())
-        add(_award(award, *(_top(visits) or (None, 0)), names=names, detail=label_detail))
+        if award == "peak_tagger":
+            # Tallest peak reached breaks a tie -- see
+            # _top_with_tiebreak(). Elevation is nullable, and a summit
+            # missing one loses the tiebreak rather than winning it.
+            tallest: dict[int, float] = dict(conn.execute(
+                "SELECT a.player_id, MAX(COALESCE(p.elevation_ft, 0)) FROM place_activation a "
+                "  JOIN place p ON p.id = a.place_id "
+                " WHERE p.ref_type = 'summit' AND a.awarded_at >= ? AND a.awarded_at < ? "
+                " GROUP BY a.player_id",
+                (start, end),
+            ).fetchall())
+            winner = _top_with_tiebreak(visits, tallest)
+            detail = label_detail
+            if winner is not None and tallest.get(winner[0]):
+                detail = "%s, highest %.0f ft" % (label_detail, tallest[winner[0]])
+            add(_award(award, *(winner or (None, 0)), names=names, detail=detail))
+        else:
+            add(_award(award, *(_top(visits) or (None, 0)), names=names, detail=label_detail))
 
     for team in settings.teams_list:
         add(_award("team_builder", *(_top(per_team_built.get(team, {})) or (None, 0)),

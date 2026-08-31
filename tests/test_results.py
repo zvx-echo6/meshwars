@@ -573,3 +573,71 @@ def test_cutting_a_chain_denies_the_award(conn, monkeypatch):
     red = next(s for s in results.compute_month(conn, "mc", MONTH, NOW)["standings"]
                if s["team"] == "RED")
     assert red["squares"] == 399   # the ground is still theirs; only the road is gone
+
+
+# --- Peak Tagger breaks a tie on the tallest peak -----------------------
+
+
+def _summit(conn, place_id, name, elevation_ft):
+    conn.execute(
+        "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+        "elevation_ft, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (place_id, "summit", f"X/{place_id}", name, 43.6, -116.2, 100, "SOTA",
+         elevation_ft, NOW),
+    )
+
+
+def test_peak_tagger_tie_goes_to_the_taller_peak(conn):
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    _summit(conn, 501, "Lower Peak", 9602)
+    _summit(conn, 502, "Higher Peak", 9763)
+    _place_activation(conn, 501, player_id=1, points=100, awarded_at=START + 10)
+    _place_activation(conn, 502, player_id=2, points=100, awarded_at=START + 20)
+
+    peak = _award(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "peak_tagger")
+    assert peak is not None, "a tie on count must now resolve, not vanish"
+    assert peak["player_id"] == 2          # climbed 161 ft higher
+    assert peak["value"] == 1
+    assert "9763" in peak["detail"]
+
+
+def test_peak_tagger_count_still_beats_a_taller_peak(conn):
+    # The tiebreak only applies ON a tie -- two summits beat one, however tall.
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    _summit(conn, 501, "Small One", 7000)
+    _summit(conn, 502, "Small Two", 7100)
+    _summit(conn, 503, "Giant", 13000)
+    _place_activation(conn, 501, player_id=1, points=50, awarded_at=START + 10)
+    _place_activation(conn, 502, player_id=1, points=50, awarded_at=START + 20)
+    _place_activation(conn, 503, player_id=2, points=100, awarded_at=START + 30)
+
+    peak = _award(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "peak_tagger")
+    assert peak["player_id"] == 1
+    assert peak["value"] == 2
+
+
+def test_peak_tagger_refuses_a_tie_on_the_same_peak(conn):
+    # Same count AND same height: nothing separates them, so it stays unawarded.
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    _summit(conn, 501, "Twin A", 9000)
+    _summit(conn, 502, "Twin B", 9000)
+    _place_activation(conn, 501, player_id=1, points=100, awarded_at=START + 10)
+    _place_activation(conn, 502, player_id=2, points=100, awarded_at=START + 20)
+
+    awards = results.compute_month(conn, "mc", MONTH, NOW)["awards"]
+    assert _unawarded(awards, "peak_tagger")
+
+
+def test_tourist_and_park_hopper_still_refuse_ties(conn):
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    _place(conn, 601, "landmark")
+    _place(conn, 602, "landmark")
+    _place_activation(conn, 601, player_id=1, points=5, awarded_at=START + 10)
+    _place_activation(conn, 602, player_id=2, points=5, awarded_at=START + 20)
+
+    awards = results.compute_month(conn, "mc", MONTH, NOW)["awards"]
+    assert _unawarded(awards, "tourist")
