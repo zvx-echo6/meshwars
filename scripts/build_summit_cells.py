@@ -56,7 +56,7 @@ import sys
 
 CELL_LAT, CELL_LON = 0.0027, 0.00384   # must match app/grid.py
 H_RADIUS_M = 1500.0
-V_TOL_M = 100.0
+V_TOL_M = 200.0
 FT = 0.3048
 DEM_PATH = os.environ.get("MW_DEM", "/data/nav/dem/planet-dem.pmtiles")
 
