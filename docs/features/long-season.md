@@ -14,7 +14,9 @@ Seasons were 30 days; they are now 180. The reason a longer season works is that
 A six-month season leaves five months with nothing to show for it, so each calendar month closes with its own standings and honors on the `/results` page. Two rules matter here:
 
 - A month is judged when it ENDS, not as it goes. Nothing is shown for the month in progress except when it closes, because an award you can watch changing hands daily is not an award.
-- A month is scored ON the month — ground taken and points earned between its own start and end dates, never a snapshot of season standings — because a snapshot would name the same leader every month.
+- A month is scored on the ground a team HOLDS when it closes, plus the check-in points earned inside it. Squares are counted the way the scoreboard counts them (`mc_scoring.team_tile_counts`), so the two pages agree.
+
+  This replaced counting capture events on 2026-08-31. Events were the original choice, on the reasoning that "a capture is worth one point, the same as a held square is worth one in the season total, so the two numbers stay in the same units". That reasoning was wrong twice over: a square that changed hands five times scored five, and ground a team had taken and then lost still counted for them. In August 2026 RED read 4570 against a scoreboard figure of 2898, 58% high. The original concern — that scoring on held ground makes a month a snapshot of the season, naming the same leader every time — is real and accepted; matching the scoreboard was judged worth it. `results._held_at()` reconstructs ownership at the closing instant, which is exact because a cell has no neutral state, so a capture landing after the month ended cannot change that month's result.
 
 Months are calendar months in the net's timezone (America/Boise), not offsets from a season start, because the two boards began on different days and offsets would have drifted apart. Ties are refused rather than split: if two players share a lead, nobody gets that honor that month.
 

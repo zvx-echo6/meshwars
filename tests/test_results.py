@@ -347,3 +347,54 @@ def test_preview_on_writes_nothing(conn, monkeypatch):
     results.month_results_for(conn, "mt", now=NOW)
     results.month_results_for(conn, "mt", now=NOW)
     assert counts() == before == (0, 0, 0)
+
+
+# --- standings score ground HELD, not captures made ---------------------
+#
+# The month card used to count rows in mc_tile_capture_log, so a square
+# that changed hands five times scored five and ground a team had lost
+# still counted for them. That put /results in different units from the
+# scoreboard, which has always counted current ownership -- in August
+# 2026 RED read 58% above its scoreboard figure. Standings now count the
+# owner of each square at the close, the same quantity the scoreboard
+# shows (mc_scoring.team_tile_counts).
+
+
+def test_standings_count_a_repeatedly_captured_square_once(conn):
+    _player(conn, 1, "RED")
+    sid = _season(conn, "mc")
+    cell = cell_id(43.6, -116.2)
+    for i in range(5):
+        _capture(conn, sid, cell, START + 100 + i, 1, "RED", from_team=None if i == 0 else "RED")
+
+    rows = {s["team"]: s for s in results.compute_month(conn, "mc", MONTH, NOW)["standings"]}
+    assert rows["RED"]["squares"] == 1
+    assert rows["RED"]["points"] == 1
+
+
+def test_standings_credit_the_current_owner_not_whoever_took_it_first(conn):
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    sid = _season(conn, "mc")
+    cell = cell_id(43.6, -116.2)
+    _capture(conn, sid, cell, START + 100, 1, "RED")
+    _capture(conn, sid, cell, START + 200, 2, "BLUE", from_team="RED")
+
+    rows = {s["team"]: s for s in results.compute_month(conn, "mc", MONTH, NOW)["standings"]}
+    assert rows["BLUE"]["squares"] == 1
+    assert rows["RED"]["squares"] == 0
+
+
+def test_standings_reconstruct_ownership_as_of_the_month_close(conn):
+    # A capture AFTER the month ended must not change that month's result.
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    sid = _season(conn, "mc")
+    cell = cell_id(43.6, -116.2)
+    _capture(conn, sid, cell, START + 100, 1, "RED")
+    _capture(conn, sid, cell, END + 5_000, 2, "BLUE", from_team="RED")
+
+    rows = {s["team"]: s
+            for s in results.compute_month(conn, "mc", MONTH, END + 10_000)["standings"]}
+    assert rows["RED"]["squares"] == 1
+    assert rows["BLUE"]["squares"] == 0

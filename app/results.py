@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import statistics
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -207,6 +208,46 @@ def _windowed_captures(conn: sqlite3.Connection, protocol: str, start: int, end:
     return out
 
 
+def _held_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> dict[str, int]:
+    """Squares each team OWNS at `at_ts` -- the same quantity the live
+    scoreboard shows, reconstructed at a chosen instant.
+
+    A month is scored on ground HELD when it closes, not on capture
+    events. A square that changed hands five times is one square, and
+    ground taken and then lost is ground you do not have. Counting
+    events instead put this page in different units from the scoreboard
+    and inflated every figure (RED read 58% high in August 2026), which
+    is the whole reason this helper exists -- see compute_month().
+
+    The reconstruction is exact because a cell has no neutral state
+    (see app/mc_scoring.py): once captured it always has an owner, so
+    the newest capture at or before `at_ts` names the owner then. Scoped
+    to the season active at that instant, because a season boundary
+    clears the board and counting across one would be meaningless.
+    """
+    season = conn.execute(
+        "SELECT id FROM mc_season "
+        " WHERE protocol = ? AND started_at <= ? "
+        " ORDER BY started_at DESC LIMIT 1",
+        (protocol, at_ts),
+    ).fetchone()
+    if season is None:
+        return {}
+    return {
+        r["team"]: r["n"]
+        for r in conn.execute(
+            "SELECT by_team AS team, COUNT(*) AS n FROM ("
+            "  SELECT cell_id, by_team,"
+            "         ROW_NUMBER() OVER (PARTITION BY cell_id"
+            "                            ORDER BY ts DESC, rowid DESC) AS rn"
+            "    FROM mc_tile_capture_log"
+            "   WHERE season_id = ? AND ts <= ?"
+            ") WHERE rn = 1 GROUP BY by_team",
+            (season["id"], at_ts),
+        )
+    }
+
+
 def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlite3.Row]:
     """Check-in awards earned in this month, with the player's current
     team -- the same live-team choice mc_scoring.team_checkin_points()
@@ -275,26 +316,39 @@ def _award(award, key, value, names, detail=None, scope="", team=None):
 # ---- the month ---------------------------------------------------------
 
 
-def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
-    """Standings and honors for one month, derived from scratch."""
+def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
+                  now: int | None = None) -> dict:
+    """Standings and honors for one month, derived from scratch.
+
+    `now` only matters for a month still being played, where ground
+    held "at the close" can only mean as of now; it defaults to the
+    clock. A finished month always reads its own end.
+    """
     start, end = month_bounds(month)
     caps = _windowed_captures(conn, protocol, start, end)
     chk = _checkins(conn, protocol, month)
     names = _names(conn)
 
-    # ---- standings: captures made plus check-in points earned --------
-    # Captures, not squares held: held is a snapshot and would just
-    # re-report the season. A capture is worth one point, the same as a
-    # held square is worth one in the season total, so the two numbers
-    # stay in the same units.
-    teams = {t: {"captures": 0, "checkin_points": 0.0} for t in settings.teams_list}
-    for c in caps:
-        teams.setdefault(c["team"], {"captures": 0, "checkin_points": 0.0})["captures"] += 1
+    # ---- standings: ground HELD at the close, plus check-in points ----
+    # Squares held, not captures made. These are the units the scoreboard
+    # is in (mc_scoring.team_tile_counts), so the two pages finally agree;
+    # counting capture events instead let one square score many times and
+    # kept crediting ground a team had already lost.
+    #
+    # For a month still being played "the close" can only mean now, which
+    # is what the preview on a preview host shows.
+    # end is the first instant of the NEXT month, so the close is end-1.
+    at = min(end - 1, now if now is not None else int(time.time()))
+    held = _held_at(conn, protocol, at)
+
+    teams = {t: {"squares": 0, "checkin_points": 0.0} for t in settings.teams_list}
+    for t, n in held.items():
+        teams.setdefault(t, {"squares": 0, "checkin_points": 0.0})["squares"] = n
     for r in chk:
-        teams.setdefault(r["team"], {"captures": 0, "checkin_points": 0.0})["checkin_points"] += r["points"]
+        teams.setdefault(r["team"], {"squares": 0, "checkin_points": 0.0})["checkin_points"] += r["points"]
     standings = sorted(
-        ({"team": t, "captures": v["captures"], "checkin_points": v["checkin_points"],
-          "points": v["captures"] + v["checkin_points"]} for t, v in teams.items()),
+        ({"team": t, "squares": v["squares"], "checkin_points": v["checkin_points"],
+          "points": v["squares"] + v["checkin_points"]} for t, v in teams.items()),
         key=lambda s: (-s["points"], s["team"]),
     )
 
@@ -448,15 +502,15 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
 
 def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) -> None:
     """Write a finished month's result. Caller holds the write lock."""
-    result = compute_month(conn, protocol, month)
+    result = compute_month(conn, protocol, month, now)
     conn.execute("INSERT OR REPLACE INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
                  (month, protocol, now))
     conn.execute("DELETE FROM month_standing WHERE month = ? AND protocol = ?", (month, protocol))
     for s in result["standings"]:
         conn.execute(
-            "INSERT INTO month_standing(month, protocol, team, captures, checkin_points, points) "
+            "INSERT INTO month_standing(month, protocol, team, squares, checkin_points, points) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (month, protocol, s["team"], s["captures"], s["checkin_points"], s["points"]),
+            (month, protocol, s["team"], s["squares"], s["checkin_points"], s["points"]),
         )
     conn.execute("DELETE FROM month_award WHERE month = ? AND protocol = ?", (month, protocol))
     for a in result["awards"]:
@@ -550,7 +604,7 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
     for r in rows:
         month = r["month"]
         standings = [dict(x) for x in conn.execute(
-            "SELECT team, captures, checkin_points, points FROM month_standing "
+            "SELECT team, squares, checkin_points, points FROM month_standing "
             " WHERE month = ? AND protocol = ? ORDER BY points DESC, team",
             (month, protocol))]
         awards = []

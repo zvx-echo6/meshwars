@@ -81,14 +81,14 @@ function renderStandings(standings) {
   const rows = active.map((s, i) => `<tr>
       <td class="rs-rank">${i + 1}</td>
       <td>${teamDot(s.team)}${escapeHtml(s.team)}</td>
-      <td class="rs-num">${num(s.captures)}</td>
+      <td class="rs-num">${num(s.squares)}</td>
       <td class="rs-num">${num(s.checkin_points)}</td>
       <td class="rs-num rs-total">${num(s.points)}</td>
     </tr>`).join('');
   return `<table class="rs-table">
     <thead><tr>
       <th>#</th><th>Team</th>
-      <th class="rs-num">Captures</th>
+      <th class="rs-num">Squares</th>
       <th class="rs-num">Check-ins</th>
       <th class="rs-num">Points</th>
     </tr></thead>
