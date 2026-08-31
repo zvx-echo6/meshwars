@@ -50,6 +50,13 @@ function monthTitle(month) {
   return `${MONTH_NAMES[m - 1] || month} ${y}`;
 }
 
+// The month's name on its own, for prose that already sits under a
+// heading carrying the year.
+function monthName(month) {
+  const m = parseInt(month.slice(5, 7), 10);
+  return MONTH_NAMES[m - 1] || month;
+}
+
 function teamDot(team) {
   return `<span class="mc-dot" style="background:${TEAM_COLORS[team] || '#888'}"></span>`;
 }
@@ -111,9 +118,23 @@ function renderHonors(awards) {
   }).join('')}</ul>`;
 }
 
+// A month object carries preview:true only on a preview host, where
+// app/config.py's results_preview_current_month is on and the open month
+// is computed live rather than read back from a frozen row. Production
+// never sets it, and a frozen month renders byte for byte as it always
+// has -- the badge, the notice and the extra class are all empty
+// strings unless the flag put them there.
 function renderMonth(m) {
-  return `<section class="rs-month">
-    <h2 class="rs-month-title">${escapeHtml(monthTitle(m.month))}</h2>
+  const preview = m.preview === true;
+  const cls = preview ? 'rs-month rs-month-preview' : 'rs-month';
+  const badge = preview ? '<span class="rs-preview-badge">IN PROGRESS</span>' : '';
+  const notice = preview
+    ? `\n    <p class="rs-preview-note">Provisional &mdash; ${escapeHtml(monthName(m.month))} is still
+      being played. These standings and honors are computed from data so far and will
+      change before the month closes.</p>`
+    : '';
+  return `<section class="${cls}">
+    <h2 class="rs-month-title">${escapeHtml(monthTitle(m.month))}${badge}</h2>${notice}
     <h3 class="rs-sub">Standings</h3>
     ${renderStandings(m.standings || [])}
     <h3 class="rs-sub">Honors</h3>
@@ -121,9 +142,11 @@ function renderMonth(m) {
   </section>`;
 }
 
-// The month in progress is never rendered -- see app/results.py for why.
+// The month in progress carries no result -- see app/results.py for why.
 // All this says is when it closes, so the page is not silent about the
-// month everyone is currently playing.
+// month everyone is currently playing. (A preview host additionally
+// renders that month's live figures above; this banner stays either
+// way, since the closing date is the part that is not provisional.)
 function renderOpenMonth(data) {
   if (!data.open_month || !data.open_month_closes_at) return '';
   const left = data.open_month_closes_at * 1000 - Date.now();

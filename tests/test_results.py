@@ -263,3 +263,87 @@ def test_frozen_month_keeps_a_stored_explorer_award_with_its_label(conn):
     assert explorer["label"] == "Explorer"
     assert explorer["value"] == 125
     assert explorer["player"] == "player-1"
+
+
+# ---- the in-progress month preview (app/config.results_preview_current_month)
+# Off in production: month_results_for() reads frozen rows only, and the
+# month being played is absent from "months" entirely. A preview host
+# turns the flag on to see it early, computed live -- which must stay a
+# purely read-side change.
+
+
+def _preview(monkeypatch, on):
+    monkeypatch.setattr(results.settings, "results_preview_current_month", on)
+
+
+def _seed_open_month(conn):
+    """A little real activity inside the month currently being played."""
+    _player(conn, 1, "RED")
+    season_id = _season(conn, "mt")
+    _place(conn, 1, "landmark")
+    _place_activation(conn, 1, player_id=1, points=5, awarded_at=START + 10)
+    _capture(conn, season_id, cell_id(43.0, -116.0), START + 20, 1, "RED", from_team=None)
+    return season_id
+
+
+def test_preview_off_leaves_the_open_month_out(conn, monkeypatch):
+    _preview(monkeypatch, False)
+    _seed_open_month(conn)
+    # A finished month to prove the frozen path still returns normally.
+    past_month = results.previous_month(MONTH)
+    conn.execute(
+        "INSERT INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
+        (past_month, "mt", NOW),
+    )
+
+    out = results.month_results_for(conn, "mt", now=NOW)
+    assert [m["month"] for m in out["months"]] == [past_month]
+    assert MONTH not in [m["month"] for m in out["months"]]
+    assert all("preview" not in m for m in out["months"])
+
+
+def test_preview_on_prepends_the_open_month_marked_provisional(conn, monkeypatch):
+    _preview(monkeypatch, True)
+    _seed_open_month(conn)
+    past_month = results.previous_month(MONTH)
+    conn.execute(
+        "INSERT INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
+        (past_month, "mt", NOW),
+    )
+
+    out = results.month_results_for(conn, "mt", now=NOW)
+    assert [m["month"] for m in out["months"]] == [MONTH, past_month]
+
+    live = out["months"][0]
+    assert live["preview"] is True
+    assert live["protocol"] == "mt"
+    # It is a real computation, not an empty placeholder: the seeded
+    # landmark visit shows up as Tourist.
+    tourist = _award(live["awards"], "tourist")
+    assert tourist is not None and tourist["value"] == 1
+    # Award order matches the frozen path's, which re-sorts on read.
+    assert live["awards"] == sorted(live["awards"], key=results._award_sort_key)
+
+    # The frozen month is untouched and stays unmarked.
+    assert "preview" not in out["months"][1]
+    # The open-month banner still says what it always said.
+    assert out["open_month"] == MONTH
+
+
+def test_preview_on_writes_nothing(conn, monkeypatch):
+    """The whole point of the flag is that it is display-only: reading a
+    provisional month must never freeze it.
+    """
+    _preview(monkeypatch, True)
+    _seed_open_month(conn)
+
+    def counts():
+        return tuple(
+            conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            for t in ("month_result", "month_standing", "month_award")
+        )
+
+    before = counts()
+    results.month_results_for(conn, "mt", now=NOW)
+    results.month_results_for(conn, "mt", now=NOW)
+    assert counts() == before == (0, 0, 0)

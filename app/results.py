@@ -566,6 +566,19 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
         awards.sort(key=_award_sort_key)
         out.append({"month": month, "protocol": protocol, "standings": standings,
                     "awards": awards})
+
+    # Preview hosts only (settings.results_preview_current_month, off by
+    # default -- see app/config.py). The month in progress is computed
+    # live and prepended, marked so the frontend can label it
+    # provisional. compute_month() is pure SELECTs, so this writes
+    # nothing and never freezes the open month; the frozen months above
+    # are returned exactly as they were, without a "preview" key.
+    if settings.results_preview_current_month:
+        live = compute_month(conn, protocol, current)
+        live["awards"] = sorted(live.get("awards") or [], key=_award_sort_key)
+        live["preview"] = True
+        out.insert(0, live)
+
     return {
         "protocol": protocol,
         "open_month": current,

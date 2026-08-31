@@ -195,6 +195,41 @@
   border-left: 2px solid var(--mw-gold);
 }
 
+/* ---- the month in progress (preview hosts only) ---------------------
+   Rendered only when app/config.py's results_preview_current_month is
+   on, which it is not in production. The card has to read as unfinished
+   at a glance so nobody quotes it as a result: a dashed border instead
+   of the solid one a finished month gets, an accent-washed ground, and
+   the state said in words as well as colour. Tokens only, so the neon
+   skin gets it for free. */
+.rs-month-preview {
+  border-style: dashed;
+  border-color: var(--mw-accent-wash-line);
+  background: var(--mw-accent-deep);
+}
+
+.rs-preview-badge {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mw-gold-light);
+  background: var(--mw-accent-wash);
+  border: 1px dashed var(--mw-accent-wash-line);
+  border-radius: 4px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.rs-preview-note {
+  color: var(--mw-text-4);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  margin: 10px 0 0;
+  padding-left: 12px;
+  border-left: 2px dashed var(--mw-gold);
+}
+
 .rs-empty, .rs-loading {
   color: var(--mw-text-6);
   font-size: 0.9375rem;
