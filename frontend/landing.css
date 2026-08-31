@@ -654,3 +654,26 @@ body {
      landing at the bottom of whichever column it flowed into. */
   .landing-footnote { column-span: all; }
 }
+
+/* Coverage disclaimer, foot of the about page. Bold enough that someone
+   from another mesh does not read the whole site before finding out it
+   cannot see them, quiet enough that it is not the loudest thing on the
+   page -- a left rule and a bold lead sentence, not a warning banner. */
+.landing-disclaimer {
+  max-width: 68ch;
+  margin: 28px 0 20px;
+  padding: 14px 0 14px 16px;
+  border-left: 3px solid var(--mw-gold, #d9b45b);
+  color: var(--mw-text-3, #b9b2a6);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+.landing-disclaimer strong { display: block; margin-bottom: 6px; color: var(--mw-text-1); }
+.landing-disclaimer a { color: var(--mw-gold); text-decoration: none; }
+.landing-disclaimer a:hover { text-decoration: underline; }
+.landing-disclaimer code {
+  font-size: 0.9em;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--mw-surface-2, rgba(255,255,255,0.06));
+}
