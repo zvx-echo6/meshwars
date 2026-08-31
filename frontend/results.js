@@ -198,7 +198,11 @@ function awardCells(a) {
     return '<td class="rs-none">&mdash;</td><td class="rs-num rs-none">&mdash;</td>';
   }
   const who = a.player || a.team || '\u2014';
-  return `<td>${teamName(who, a.team)}</td><td class="rs-num">${num(a.value)}</td>`;
+  // Plain, NOT team-coloured. Every name in a By team row belongs to the
+  // same team, so colouring all three said it three more times and the
+  // row became a block of one hue. The row's team is carried once, by
+  // the first cell and the coloured edge on the row (results.css).
+  return `<td>${escapeHtml(who)}</td><td class="rs-num">${num(a.value)}</td>`;
 }
 
 function renderTeamAwards(byTeam, standings) {
@@ -212,7 +216,8 @@ function renderTeamAwards(byTeam, standings) {
 
   const rows = order.map((team) => {
     const row = byTeam.get(team) || {};
-    return `<tr>
+    const edge = TEAM_COLORS[team] || '#888';
+    return `<tr class="rs-team-row" style="--rs-team-edge:${edge}">
       <td class="rs-team-cell">${teamDot(team)}${teamName(team, team)}</td>
       ${awardCells(row.team_builder)}
       ${awardCells(row.team_attacker)}

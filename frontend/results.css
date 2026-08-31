@@ -309,3 +309,11 @@
 .rs-honor-link { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--mw-text-4); }
 .rs-honor-link:hover,
 .rs-honor-link:focus-visible { color: var(--mw-gold); border-bottom-color: currentColor; }
+
+/* A By team row belongs to one team throughout, so the colour is carried
+   once -- by the team cell and this edge -- rather than smeared across
+   every name in the row. */
+.rs-team-row .rs-team-cell {
+  border-left: 3px solid var(--rs-team-edge, transparent);
+  padding-left: 8px;
+}
