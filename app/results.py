@@ -42,7 +42,7 @@ log = logging.getLogger("results")
 # Awards, in the order the page shows them. The key is what goes in
 # month_award.award; the label is what a reader sees.
 TEAM_AWARDS = [
-    ("month_winner", "Month Winner"),
+    ("largest_territory", "Largest Territory"),
 ]
 PLAYER_AWARDS = [
     ("top_attacker", "Top Attacker"),
@@ -100,6 +100,13 @@ AWARD_LABELS["top_netop"] = "Top NetOp"
 # while the award still ran display a real name.
 AWARD_LABELS["explorer"] = "Explorer"
 
+# "Month Winner" was the team with the most points, where points meant
+# captures plus check-ins. Scoring moved to ground held (2026-08-31) and
+# the award moved with it: Largest Territory, the team holding the most
+# squares when the month closes. Label kept so a month frozen under the
+# old name still reads as one.
+AWARD_LABELS["month_winner"] = "Month Winner"
+
 # Display order. compute_month() emits awards in this order naturally,
 # but a frozen month is read back out of a table with no inherent order,
 # and SQLite returned them alphabetised -- Explorer above Month Winner.
@@ -115,6 +122,35 @@ def _award_sort_key(a: dict) -> tuple:
         _AWARD_RANK.get(a["award"], len(_AWARD_RANK)),
         teams.index(scope) if scope in teams else len(teams),
     )
+
+
+def with_placeholders(awards: list[dict]) -> list[dict]:
+    """Every league-wide honor listed, won or not, in display order.
+
+    An award that silently disappears reads as an award that does not
+    exist: Peak Tagger was absent for the whole of August 2026 and looked
+    broken, when in fact nobody had reached a summit (each of the 4,851
+    summits is a single square you have to stand on). A placeholder
+    carries no winner -- player_id and team both None -- and the page
+    says so rather than hiding the row.
+
+    Placeholders are NEVER stored. month_award.value is NOT NULL, and a
+    frozen month should record what was won, not what wasn't; they are
+    added on the way out, by both compute_month() and the frozen read
+    path, so the two render identically.
+
+    Per-team awards get no placeholder -- the By team table already draws
+    a dash for a team missing one.
+    """
+    won = {a["award"] for a in awards if not a.get("scope")}
+    out = list(awards)
+    for key, label in TEAM_AWARDS + PLAYER_AWARDS:
+        if key not in won:
+            out.append({"award": key, "label": label, "scope": "",
+                        "player_id": None, "player": None, "team": None,
+                        "value": None, "detail": None})
+    out.sort(key=_award_sort_key)
+    return out
 
 
 # ---- month arithmetic --------------------------------------------------
@@ -262,6 +298,29 @@ def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlit
     ).fetchall()
 
 
+def _place_points(conn: sqlite3.Connection, start: int, end: int) -> dict[str, float]:
+    """Places Worth Going points earned inside the month, per team,
+    summed by each activation's player's CURRENT team -- the same live
+    team choice _checkins() and mc_scoring.team_place_points() make.
+
+    NOT filtered by protocol, because place_activation has no protocol
+    column: a place credit is week-scoped and belongs to the player, not
+    to a board. Both boards therefore report the same exploration
+    figure, exactly as Tourist/Park Hopper/Peak Tagger already do.
+    """
+    return {
+        r["team"]: r["pts"] or 0.0
+        for r in conn.execute(
+            "SELECT p.team AS team, SUM(a.points) AS pts "
+            "  FROM place_activation a "
+            "  JOIN player p ON p.player_id = a.player_id "
+            " WHERE a.awarded_at >= ? AND a.awarded_at < ? "
+            " GROUP BY p.team",
+            (start, end),
+        )
+    }
+
+
 def _names(conn: sqlite3.Connection) -> dict[int, tuple[str, str]]:
     return {
         r["player_id"]: (r["display_name"], r["team"])
@@ -341,15 +400,25 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     at = min(end - 1, now if now is not None else int(time.time()))
     held = _held_at(conn, protocol, at)
 
-    teams = {t: {"squares": 0, "checkin_points": 0.0} for t in settings.teams_list}
+    # Three figures side by side, never added together. Territory decides
+    # the month (Largest Territory); check-in and exploration points are
+    # shown because they are real work, not because they place a team.
+    # Adding them would put a team ahead on ground it does not hold.
+    explored = _place_points(conn, start, end)
+
+    def _blank():
+        return {"squares": 0, "checkin_points": 0.0, "explorer_points": 0.0}
+
+    teams = {t: _blank() for t in settings.teams_list}
     for t, n in held.items():
-        teams.setdefault(t, {"squares": 0, "checkin_points": 0.0})["squares"] = n
+        teams.setdefault(t, _blank())["squares"] = n
     for r in chk:
-        teams.setdefault(r["team"], {"squares": 0, "checkin_points": 0.0})["checkin_points"] += r["points"]
+        teams.setdefault(r["team"], _blank())["checkin_points"] += r["points"]
+    for t, pts in explored.items():
+        teams.setdefault(t, _blank())["explorer_points"] = pts
     standings = sorted(
-        ({"team": t, "squares": v["squares"], "checkin_points": v["checkin_points"],
-          "points": v["squares"] + v["checkin_points"]} for t, v in teams.items()),
-        key=lambda s: (-s["points"], s["team"]),
+        ({"team": t, **v} for t, v in teams.items()),
+        key=lambda s: (-s["squares"], s["team"]),
     )
 
     awards: list[dict] = []
@@ -363,8 +432,9 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     # names the same team almost every month -- captures dominate the
     # points total -- and two team titles that usually agree is a thing to
     # explain rather than a thing to win.
-    add(_award("month_winner", *(_top({s["team"]: s["points"] for s in standings}, 0.001) or (None, 0)),
-               names=names, detail="points this month"))
+    add(_award("largest_territory",
+               *(_top({s["team"]: s["squares"] for s in standings}, 1) or (None, 0)),
+               names=names, detail="squares held"))
 
     # ---- attack and defence -------------------------------------------
     attacks: dict[int, int] = {}
@@ -494,7 +564,8 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
         add(_award("quick_fingers", fastest[0], round(-fastest[1], 1), names,
                    detail="%.0f s after the net opened" % (-fastest[1])))
 
-    return {"month": month, "protocol": protocol, "standings": standings, "awards": awards}
+    return {"month": month, "protocol": protocol, "standings": standings,
+            "awards": with_placeholders(awards)}
 
 
 # ---- freeze ------------------------------------------------------------
@@ -508,12 +579,14 @@ def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) 
     conn.execute("DELETE FROM month_standing WHERE month = ? AND protocol = ?", (month, protocol))
     for s in result["standings"]:
         conn.execute(
-            "INSERT INTO month_standing(month, protocol, team, squares, checkin_points, points) "
+            "INSERT INTO month_standing(month, protocol, team, squares, checkin_points, explorer_points) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (month, protocol, s["team"], s["squares"], s["checkin_points"], s["points"]),
+            (month, protocol, s["team"], s["squares"], s["checkin_points"], s["explorer_points"]),
         )
     conn.execute("DELETE FROM month_award WHERE month = ? AND protocol = ?", (month, protocol))
     for a in result["awards"]:
+        if a["player_id"] is None and a["team"] is None:
+            continue   # placeholder for an honor nobody won -- see with_placeholders()
         conn.execute(
             "INSERT INTO month_award(month, protocol, award, scope, player_id, team, value, detail) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -604,8 +677,8 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
     for r in rows:
         month = r["month"]
         standings = [dict(x) for x in conn.execute(
-            "SELECT team, squares, checkin_points, points FROM month_standing "
-            " WHERE month = ? AND protocol = ? ORDER BY points DESC, team",
+            "SELECT team, squares, checkin_points, explorer_points FROM month_standing "
+            " WHERE month = ? AND protocol = ? ORDER BY squares DESC, team",
             (month, protocol))]
         awards = []
         for a in conn.execute(
@@ -617,7 +690,7 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
         names = _names(conn)
         for a in awards:
             a["player"] = names.get(a["player_id"], (None, None))[0] if a["player_id"] else None
-        awards.sort(key=_award_sort_key)
+        awards = with_placeholders(awards)
         out.append({"month": month, "protocol": protocol, "standings": standings,
                     "awards": awards})
 

@@ -32,9 +32,11 @@ Two rules make this fair. A Wednesday only counts as a net if at least one perso
 
 ## The honors
 
+Every honor below is listed every month, won or not. One nobody earned shows as "not awarded" rather than vanishing — Peak Tagger was absent for all of August 2026 and read as a missing feature when in fact nobody had reached a summit. Placeholders are never stored; a frozen month records what was won, and the empty rows are added on the way out so a frozen month and a live one render alike.
+
 Each month awards:
 
-- **Month Winner** — team with the most points gained
+- **Largest Territory** — team holding the most ground when the month closes (was "Month Winner", most points gained, until 2026-08-31)
 - **Top Attacker** — most squares taken off other teams
 - **Top Defender** — most squares won back (a capture counts as a defence when the previous capture of that same square took it from the team now taking it back)
 - **Team Attacker** and **Team Defender** — the same two, given within each team

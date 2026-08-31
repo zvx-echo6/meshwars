@@ -289,3 +289,10 @@
   .rs-honor-value { grid-column: 2; grid-row: 1; }
   .rs-month { padding: 16px 14px; }
 }
+
+/* An honor nobody won is listed rather than hidden, but must not read
+   as loudly as one that was earned -- see results.js renderHonors. */
+.rs-honor-none .rs-honor-name,
+.rs-honor-none .rs-honor-who,
+.rs-honor-none .rs-honor-value { color: var(--mw-text-5); }
+.rs-honor-none .rs-honor-who { font-style: italic; }

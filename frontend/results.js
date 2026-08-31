@@ -74,27 +74,36 @@ function renderStandings(standings) {
   // zero. The map panel zero-fills because it reports a live season
   // where a team may yet appear; a finished month is a record of what
   // happened, and seven rows of nothing buries the three that matter.
-  const active = standings.filter((s) => s.points > 0);
+  // A team is "active" if it did ANY of the three, so a team that only
+  // ran the net still appears -- an honor can otherwise name a team the
+  // standings above it never mentioned.
+  const active = standings.filter(
+    (s) => (s.squares || 0) > 0 || (s.checkin_points || 0) > 0 || (s.explorer_points || 0) > 0);
   if (!active.length) {
-    return '<p class="rs-empty">No ground taken and no check-ins this month.</p>';
+    return '<p class="rs-empty">No ground held, no check-ins and no places visited this month.</p>';
   }
+  // Squares alone place a team -- see app/results.py. The other two
+  // columns are work worth showing, not score, so nothing is totalled
+  // here: a combined figure would put a team ahead on ground it does
+  // not hold, which is exactly what this page used to do.
   const rows = active.map((s, i) => `<tr>
       <td class="rs-rank">${i + 1}</td>
       <td>${teamDot(s.team)}${escapeHtml(s.team)}</td>
-      <td class="rs-num">${num(s.squares)}</td>
+      <td class="rs-num rs-total">${num(s.squares)}</td>
       <td class="rs-num">${num(s.checkin_points)}</td>
-      <td class="rs-num rs-total">${num(s.points)}</td>
+      <td class="rs-num">${num(s.explorer_points)}</td>
     </tr>`).join('');
   return `<table class="rs-table">
     <thead><tr>
       <th>#</th><th>Team</th>
       <th class="rs-num">Squares</th>
       <th class="rs-num">Check-ins</th>
-      <th class="rs-num">Points</th>
+      <th class="rs-num">Exploration</th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
+
 
 function renderHonors(awards) {
   if (!awards.length) {
@@ -105,8 +114,20 @@ function renderHonors(awards) {
   // The value and what it counts are both shown -- the detail sits under
   // the award name rather than replacing the number, because "Top NetOp
   // 130" without a unit is the exact ambiguity the detail exists to fix.
+  //
+  // An honor nobody won still gets its row (app/results.with_placeholders):
+  // player and team are both null, and it reads "not awarded" rather than
+  // disappearing, which made Peak Tagger look like a missing feature.
   return `<ul class="rs-honors">${awards.map((a) => {
-    const who = a.player || a.team || '—';
+    const unawarded = !a.player && !a.team;
+    if (unawarded) {
+      return `<li class="rs-honor rs-honor-none">
+        <span class="rs-honor-name">${escapeHtml(a.label)}</span>
+        <span class="rs-honor-who">not awarded</span>
+        <span class="rs-honor-value">&mdash;</span>
+      </li>`;
+    }
+    const who = a.player || a.team;
     const scope = a.scope ? ` <span class="rs-scope">${teamDot(a.scope)}${escapeHtml(a.scope)}</span>` : '';
     const team = a.player && a.team ? ` <span class="rs-scope">${teamDot(a.team)}${escapeHtml(a.team)}</span>` : '';
     const detail = a.detail ? `<span class="rs-detail">${escapeHtml(a.detail)}</span>` : '';
@@ -118,7 +139,7 @@ function renderHonors(awards) {
   }).join('')}</ul>`;
 }
 
-// ---- per-team awards -------------------------------------------------
+
 // Every team gets its own Top Attacker and Top Defender, so as honor
 // rows they are up to fourteen lines repeating two award names and two
 // detail strings. The facts are a comparison between teams, so they are

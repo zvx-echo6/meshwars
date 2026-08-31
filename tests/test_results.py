@@ -22,6 +22,14 @@ from app import results
 from app.grid import cell_id
 
 
+def _unawarded(awards, key):
+    """An honor nobody won is listed with no winner rather than omitted
+    (results.with_placeholders) -- except `explorer`, retired outright,
+    which is not in the slate at all."""
+    a = _award(awards, key)
+    return a is None or (a["player_id"] is None and a["team"] is None)
+
+
 NOW = int(time.time())
 MONTH = results.month_key(NOW)
 START, END = results.month_bounds(MONTH)
@@ -105,9 +113,9 @@ def test_tourist_counts_landmark_visits_not_points(conn):
     assert tourist["value"] == 2
     assert tourist["detail"] == "landmarks visited"
     # Ignored entirely: park_hopper/peak_tagger must not fire on landmark data.
-    assert _award(result["awards"], "park_hopper") is None
-    assert _award(result["awards"], "peak_tagger") is None
-    assert _award(result["awards"], "explorer") is None
+    assert _unawarded(result["awards"], "park_hopper")
+    assert _unawarded(result["awards"], "peak_tagger")
+    assert _unawarded(result["awards"], "explorer")
 
 
 def test_park_hopper_counts_park_visits_only(conn):
@@ -151,9 +159,9 @@ def test_place_visit_awards_ignore_activity_outside_the_month(conn):
     _place_activation(conn, 3, player_id=1, points=100, awarded_at=END + 1)   # after the month
 
     result = results.compute_month(conn, "mt", MONTH)
-    assert _award(result["awards"], "tourist") is None
-    assert _award(result["awards"], "park_hopper") is None
-    assert _award(result["awards"], "peak_tagger") is None
+    assert _unawarded(result["awards"], "tourist")
+    assert _unawarded(result["awards"], "park_hopper")
+    assert _unawarded(result["awards"], "peak_tagger")
 
 
 def test_place_visit_awards_tie_refuses_a_winner(conn):
@@ -169,7 +177,7 @@ def test_place_visit_awards_tie_refuses_a_winner(conn):
     _place_activation(conn, 2, player_id=2, points=5, awarded_at=START + 20)
 
     result = results.compute_month(conn, "mt", MONTH)
-    assert _award(result["awards"], "tourist") is None
+    assert _unawarded(result["awards"], "tourist")
 
 
 def test_frontier_counts_out_of_town_captures_without_virgin_restriction(conn, monkeypatch):
@@ -369,7 +377,6 @@ def test_standings_count_a_repeatedly_captured_square_once(conn):
 
     rows = {s["team"]: s for s in results.compute_month(conn, "mc", MONTH, NOW)["standings"]}
     assert rows["RED"]["squares"] == 1
-    assert rows["RED"]["points"] == 1
 
 
 def test_standings_credit_the_current_owner_not_whoever_took_it_first(conn):
