@@ -373,7 +373,13 @@ class Settings(BaseSettings):
     # award outright by one well-placed capture, and nobody wins it that
     # month. That is the point: it is the one honor another team can take
     # off you without out-scoring you anywhere.
-    longest_road_min_squares: int = 300
+    #
+    # 300 for its first month, lowered to 200 on 2026-08-31. It worked
+    # exactly as designed, and that was the problem: RED held a 330-square
+    # run in the morning, it was cut during the day, and by evening their
+    # best was 237 with nobody clearing the floor -- so the award nobody
+    # had ever seen was going to go unawarded in the month it launched.
+    longest_road_min_squares: int = 200
     checkin_poll_interval_seconds: int = 30   # tight -- MeshCore's feed returns only its newest 100 messages, no pagination, and a busy net can approach that
 
     # The net window. Weekday follows Python's datetime.weekday()
