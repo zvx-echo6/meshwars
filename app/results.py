@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import statistics
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -41,9 +42,11 @@ log = logging.getLogger("results")
 # Awards, in the order the page shows them. The key is what goes in
 # month_award.award; the label is what a reader sees.
 TEAM_AWARDS = [
-    ("month_winner", "Month Winner"),
+    ("largest_territory", "Largest Territory"),
+    ("longest_road", "Longest Road"),
 ]
 PLAYER_AWARDS = [
+    ("empire_builder", "Empire Builder"),
     ("top_attacker", "Top Attacker"),
     ("top_defender", "Top Defender"),
     ("quick_fingers", "Quick Fingers"),
@@ -53,6 +56,7 @@ PLAYER_AWARDS = [
     ("frontier", "Frontier"),
 ]
 PER_TEAM_AWARDS = [
+    ("team_builder", "Team Builder"),
     ("team_attacker", "Team Attacker"),
     ("team_defender", "Team Defender"),
 ]
@@ -99,6 +103,13 @@ AWARD_LABELS["top_netop"] = "Top NetOp"
 # while the award still ran display a real name.
 AWARD_LABELS["explorer"] = "Explorer"
 
+# "Month Winner" was the team with the most points, where points meant
+# captures plus check-ins. Scoring moved to ground held (2026-08-31) and
+# the award moved with it: Largest Territory, the team holding the most
+# squares when the month closes. Label kept so a month frozen under the
+# old name still reads as one.
+AWARD_LABELS["month_winner"] = "Month Winner"
+
 # Display order. compute_month() emits awards in this order naturally,
 # but a frozen month is read back out of a table with no inherent order,
 # and SQLite returned them alphabetised -- Explorer above Month Winner.
@@ -114,6 +125,35 @@ def _award_sort_key(a: dict) -> tuple:
         _AWARD_RANK.get(a["award"], len(_AWARD_RANK)),
         teams.index(scope) if scope in teams else len(teams),
     )
+
+
+def with_placeholders(awards: list[dict]) -> list[dict]:
+    """Every league-wide honor listed, won or not, in display order.
+
+    An award that silently disappears reads as an award that does not
+    exist: Peak Tagger was absent for the whole of August 2026 and looked
+    broken, when in fact nobody had reached a summit (each of the 4,851
+    summits is a single square you have to stand on). A placeholder
+    carries no winner -- player_id and team both None -- and the page
+    says so rather than hiding the row.
+
+    Placeholders are NEVER stored. month_award.value is NOT NULL, and a
+    frozen month should record what was won, not what wasn't; they are
+    added on the way out, by both compute_month() and the frozen read
+    path, so the two render identically.
+
+    Per-team awards get no placeholder -- the By team table already draws
+    a dash for a team missing one.
+    """
+    won = {a["award"] for a in awards if not a.get("scope")}
+    out = list(awards)
+    for key, label in TEAM_AWARDS + PLAYER_AWARDS:
+        if key not in won:
+            out.append({"award": key, "label": label, "scope": "",
+                        "player_id": None, "player": None, "team": None,
+                        "value": None, "detail": None})
+    out.sort(key=_award_sort_key)
+    return out
 
 
 # ---- month arithmetic --------------------------------------------------
@@ -207,6 +247,106 @@ def _windowed_captures(conn: sqlite3.Connection, protocol: str, start: int, end:
     return out
 
 
+def _ownership_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> list[sqlite3.Row]:
+    """Who owns every square at `at_ts`: one row per cell, carrying the
+    owning team and the player whose paint put it there.
+
+    Exact, because a cell has no neutral state (see app/mc_scoring.py):
+    once captured it always has an owner, so the newest capture at or
+    before `at_ts` names both the owner and the last painter then.
+    Scoped to the season active at that instant, because a season
+    boundary clears the board and counting across one is meaningless.
+
+    Three things read this: the standings (grouped by team -- the same
+    figure the scoreboard shows), Empire Builder (grouped by player, so
+    the per-player numbers add up to the team's own), and Longest Road
+    (the cell ids themselves).
+    """
+    season = conn.execute(
+        "SELECT id FROM mc_season "
+        " WHERE protocol = ? AND started_at <= ? "
+        " ORDER BY started_at DESC LIMIT 1",
+        (protocol, at_ts),
+    ).fetchone()
+    if season is None:
+        return []
+    return conn.execute(
+        "SELECT cell_id, by_team AS team, by_player_id AS player_id FROM ("
+        "  SELECT cell_id, by_team, by_player_id,"
+        "         ROW_NUMBER() OVER (PARTITION BY cell_id"
+        "                            ORDER BY ts DESC, rowid DESC) AS rn"
+        "    FROM mc_tile_capture_log"
+        "   WHERE season_id = ? AND ts <= ?"
+        ") WHERE rn = 1",
+        (season["id"], at_ts),
+    ).fetchall()
+
+
+# The eight neighbours of a square: sides AND corners. Corner contact
+# counts because a road crossing the grid diagonally is still one road.
+_NEIGHBOURS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+
+def _longest_road(cells: set[tuple[int, int]]) -> int:
+    """Longest unbroken chain of touching squares a team holds, counted
+    in squares.
+
+    Cell ids are "<latIdx>_<lonIdx>" on a fixed grid (app/grid.py), so
+    adjacency is plain integer arithmetic. Two squares are linked if they
+    touch on a side or a corner.
+
+    Measured as the longest shortest-path across each connected patch --
+    walk to the furthest square, then walk to the furthest square from
+    THERE. That is exact for a chain and can only understate a patch with
+    loops in it, which is the safe direction to be wrong in: it never
+    credits a road longer than one that exists. It is also what makes the
+    award mean something, since a big round blob scores near its width
+    while a thin run along a highway scores its whole length -- in August
+    2026 RED led with 330 squares while holding half of GREEN's ground.
+
+    Linear in the number of squares: each patch is walked twice and
+    never revisited.
+    """
+    from collections import deque
+
+    def walk(src):
+        dist = {src: 0}
+        q = deque([src])
+        far = src
+        while q:
+            cur = q.popleft()
+            for dy, dx in _NEIGHBOURS:
+                nxt = (cur[0] + dy, cur[1] + dx)
+                if nxt in cells and nxt not in dist:
+                    dist[nxt] = dist[cur] + 1
+                    q.append(nxt)
+                    if dist[nxt] > dist[far]:
+                        far = nxt
+        return far, dist
+
+    seen: set[tuple[int, int]] = set()
+    best = 0
+    for cell in cells:
+        if cell in seen:
+            continue
+        end, reached = walk(cell)
+        seen |= reached.keys()
+        _, back = walk(end)
+        best = max(best, max(back.values()) + 1)   # squares, not steps
+    return best
+
+
+def _cell_xy(cell_id: str) -> tuple[int, int] | None:
+    """"<latIdx>_<lonIdx>" as integers, or None if it is not that shape.
+    Nothing else in the codebase parses a cell id this way -- grid.py
+    hands back coordinates in degrees, and the road walk needs indices."""
+    try:
+        lat_str, lon_str = cell_id.split("_")
+        return int(lat_str), int(lon_str)
+    except (ValueError, AttributeError):
+        return None
+
+
 def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlite3.Row]:
     """Check-in awards earned in this month, with the player's current
     team -- the same live-team choice mc_scoring.team_checkin_points()
@@ -219,6 +359,29 @@ def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlit
         " WHERE a.protocol = ? AND substr(a.net_date, 1, 7) = ?",
         (protocol, month),
     ).fetchall()
+
+
+def _place_points(conn: sqlite3.Connection, start: int, end: int) -> dict[str, float]:
+    """Places Worth Going points earned inside the month, per team,
+    summed by each activation's player's CURRENT team -- the same live
+    team choice _checkins() and mc_scoring.team_place_points() make.
+
+    NOT filtered by protocol, because place_activation has no protocol
+    column: a place credit is week-scoped and belongs to the player, not
+    to a board. Both boards therefore report the same exploration
+    figure, exactly as Tourist/Park Hopper/Peak Tagger already do.
+    """
+    return {
+        r["team"]: r["pts"] or 0.0
+        for r in conn.execute(
+            "SELECT p.team AS team, SUM(a.points) AS pts "
+            "  FROM place_activation a "
+            "  JOIN player p ON p.player_id = a.player_id "
+            " WHERE a.awarded_at >= ? AND a.awarded_at < ? "
+            " GROUP BY p.team",
+            (start, end),
+        )
+    }
 
 
 def _names(conn: sqlite3.Connection) -> dict[int, tuple[str, str]]:
@@ -275,27 +438,60 @@ def _award(award, key, value, names, detail=None, scope="", team=None):
 # ---- the month ---------------------------------------------------------
 
 
-def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
-    """Standings and honors for one month, derived from scratch."""
+def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
+                  now: int | None = None) -> dict:
+    """Standings and honors for one month, derived from scratch.
+
+    `now` only matters for a month still being played, where ground
+    held "at the close" can only mean as of now; it defaults to the
+    clock. A finished month always reads its own end.
+    """
     start, end = month_bounds(month)
     caps = _windowed_captures(conn, protocol, start, end)
     chk = _checkins(conn, protocol, month)
     names = _names(conn)
 
-    # ---- standings: captures made plus check-in points earned --------
-    # Captures, not squares held: held is a snapshot and would just
-    # re-report the season. A capture is worth one point, the same as a
-    # held square is worth one in the season total, so the two numbers
-    # stay in the same units.
-    teams = {t: {"captures": 0, "checkin_points": 0.0} for t in settings.teams_list}
-    for c in caps:
-        teams.setdefault(c["team"], {"captures": 0, "checkin_points": 0.0})["captures"] += 1
+    # ---- standings: ground HELD at the close, plus check-in points ----
+    # Squares held, not captures made. These are the units the scoreboard
+    # is in (mc_scoring.team_tile_counts), so the two pages finally agree;
+    # counting capture events instead let one square score many times and
+    # kept crediting ground a team had already lost.
+    #
+    # For a month still being played "the close" can only mean now, which
+    # is what the preview on a preview host shows.
+    # end is the first instant of the NEXT month, so the close is end-1.
+    at = min(end - 1, now if now is not None else int(time.time()))
+    ownership = _ownership_at(conn, protocol, at)
+    held: dict[str, int] = {}
+    held_by_player: dict[int, int] = {}
+    cells_by_team: dict[str, set[tuple[int, int]]] = {}
+    for row in ownership:
+        held[row["team"]] = held.get(row["team"], 0) + 1
+        if row["player_id"] is not None:
+            held_by_player[row["player_id"]] = held_by_player.get(row["player_id"], 0) + 1
+        xy = _cell_xy(row["cell_id"])
+        if xy is not None:
+            cells_by_team.setdefault(row["team"], set()).add(xy)
+
+    # Three figures side by side, never added together. Territory decides
+    # the month (Largest Territory); check-in and exploration points are
+    # shown because they are real work, not because they place a team.
+    # Adding them would put a team ahead on ground it does not hold.
+    explored = _place_points(conn, start, end)
+
+    def _blank():
+        return {"squares": 0, "checkin_points": 0.0, "explorer_points": 0.0}
+
+    teams = {t: _blank() for t in settings.teams_list}
+    for t, n in held.items():
+        teams.setdefault(t, _blank())["squares"] = n
     for r in chk:
-        teams.setdefault(r["team"], {"captures": 0, "checkin_points": 0.0})["checkin_points"] += r["points"]
+        teams.setdefault(r["team"], _blank())["checkin_points"] += r["points"]
+    for t, pts in explored.items():
+        teams.setdefault(t, _blank())["explorer_points"] = pts
     standings = sorted(
-        ({"team": t, "captures": v["captures"], "checkin_points": v["checkin_points"],
-          "points": v["captures"] + v["checkin_points"]} for t, v in teams.items()),
-        key=lambda s: (-s["points"], s["team"]),
+        ({"team": t, **v} for t, v in teams.items()),
+        key=lambda s: (-s["squares"], s["team"]),
     )
 
     awards: list[dict] = []
@@ -309,14 +505,40 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
     # names the same team almost every month -- captures dominate the
     # points total -- and two team titles that usually agree is a thing to
     # explain rather than a thing to win.
-    add(_award("month_winner", *(_top({s["team"]: s["points"] for s in standings}, 0.001) or (None, 0)),
-               names=names, detail="points this month"))
+    add(_award("largest_territory",
+               *(_top({s["team"]: s["squares"] for s in standings}, 1) or (None, 0)),
+               names=names, detail="squares held"))
+
+    # Longest Road rewards a shape rather than an amount: ground taken in
+    # one continuous run, the way a highway paints. Deliberately NOT
+    # scaled by team size -- a small team that drove a long road beats a
+    # big one that filled in a city.
+    roads = {t: _longest_road(cs) for t, cs in cells_by_team.items()}
+    add(_award("longest_road", *(_top(roads, 2) or (None, 0)),
+               names=names, detail="squares in an unbroken run"))
+
+    # Empire Builder honors whoever holds the most ground they painted
+    # themselves. Counted from the same ownership rows as the standings,
+    # so every player's figure is a share of their team's own total and
+    # the two can be read against each other -- unlike the attack awards,
+    # which count only contested captures and so look tiny beside a team
+    # score.
+    add(_award("empire_builder", *(_top(held_by_player, 1) or (None, 0)),
+               names=names, detail="squares held"))
 
     # ---- attack and defence -------------------------------------------
     attacks: dict[int, int] = {}
     retakes: dict[int, int] = {}
     per_team_attacks: dict[str, dict[int, int]] = {}
     per_team_retakes: dict[str, dict[int, int]] = {}
+    # Ground held, split by the player who painted it, per team. Comes
+    # from the ownership rows rather than the capture window, so a team's
+    # builders add up to the team's own square count exactly.
+    per_team_built: dict[str, dict[int, int]] = {}
+    for row in ownership:
+        if row["player_id"] is not None:
+            bucket = per_team_built.setdefault(row["team"], {})
+            bucket[row["player_id"]] = bucket.get(row["player_id"], 0) + 1
     for c in caps:
         pid, tm = c["player_id"], c["team"]
         if c["from_team"] is None:
@@ -368,6 +590,8 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
         add(_award(award, *(_top(visits) or (None, 0)), names=names, detail=label_detail))
 
     for team in settings.teams_list:
+        add(_award("team_builder", *(_top(per_team_built.get(team, {})) or (None, 0)),
+                   names=names, scope=team, team=team, detail="squares held"))
         add(_award("team_attacker", *(_top(per_team_attacks.get(team, {})) or (None, 0)),
                    names=names, scope=team, team=team, detail="squares taken from other teams"))
         add(_award("team_defender", *(_top(per_team_retakes.get(team, {})) or (None, 0)),
@@ -440,7 +664,8 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
         add(_award("quick_fingers", fastest[0], round(-fastest[1], 1), names,
                    detail="%.0f s after the net opened" % (-fastest[1])))
 
-    return {"month": month, "protocol": protocol, "standings": standings, "awards": awards}
+    return {"month": month, "protocol": protocol, "standings": standings,
+            "awards": with_placeholders(awards)}
 
 
 # ---- freeze ------------------------------------------------------------
@@ -448,18 +673,20 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str) -> dict:
 
 def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) -> None:
     """Write a finished month's result. Caller holds the write lock."""
-    result = compute_month(conn, protocol, month)
+    result = compute_month(conn, protocol, month, now)
     conn.execute("INSERT OR REPLACE INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
                  (month, protocol, now))
     conn.execute("DELETE FROM month_standing WHERE month = ? AND protocol = ?", (month, protocol))
     for s in result["standings"]:
         conn.execute(
-            "INSERT INTO month_standing(month, protocol, team, captures, checkin_points, points) "
+            "INSERT INTO month_standing(month, protocol, team, squares, checkin_points, explorer_points) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (month, protocol, s["team"], s["captures"], s["checkin_points"], s["points"]),
+            (month, protocol, s["team"], s["squares"], s["checkin_points"], s["explorer_points"]),
         )
     conn.execute("DELETE FROM month_award WHERE month = ? AND protocol = ?", (month, protocol))
     for a in result["awards"]:
+        if a["player_id"] is None and a["team"] is None:
+            continue   # placeholder for an honor nobody won -- see with_placeholders()
         conn.execute(
             "INSERT INTO month_award(month, protocol, award, scope, player_id, team, value, detail) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -550,8 +777,8 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
     for r in rows:
         month = r["month"]
         standings = [dict(x) for x in conn.execute(
-            "SELECT team, captures, checkin_points, points FROM month_standing "
-            " WHERE month = ? AND protocol = ? ORDER BY points DESC, team",
+            "SELECT team, squares, checkin_points, explorer_points FROM month_standing "
+            " WHERE month = ? AND protocol = ? ORDER BY squares DESC, team",
             (month, protocol))]
         awards = []
         for a in conn.execute(
@@ -563,9 +790,22 @@ def month_results_for(conn: sqlite3.Connection, protocol: str, now: int, limit: 
         names = _names(conn)
         for a in awards:
             a["player"] = names.get(a["player_id"], (None, None))[0] if a["player_id"] else None
-        awards.sort(key=_award_sort_key)
+        awards = with_placeholders(awards)
         out.append({"month": month, "protocol": protocol, "standings": standings,
                     "awards": awards})
+
+    # Preview hosts only (settings.results_preview_current_month, off by
+    # default -- see app/config.py). The month in progress is computed
+    # live and prepended, marked so the frontend can label it
+    # provisional. compute_month() is pure SELECTs, so this writes
+    # nothing and never freezes the open month; the frozen months above
+    # are returned exactly as they were, without a "preview" key.
+    if settings.results_preview_current_month:
+        live = compute_month(conn, protocol, current)
+        live["awards"] = sorted(live.get("awards") or [], key=_award_sort_key)
+        live["preview"] = True
+        out.insert(0, live)
+
     return {
         "protocol": protocol,
         "open_month": current,

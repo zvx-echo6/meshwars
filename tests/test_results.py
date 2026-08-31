@@ -22,6 +22,14 @@ from app import results
 from app.grid import cell_id
 
 
+def _unawarded(awards, key):
+    """An honor nobody won is listed with no winner rather than omitted
+    (results.with_placeholders) -- except `explorer`, retired outright,
+    which is not in the slate at all."""
+    a = _award(awards, key)
+    return a is None or (a["player_id"] is None and a["team"] is None)
+
+
 NOW = int(time.time())
 MONTH = results.month_key(NOW)
 START, END = results.month_bounds(MONTH)
@@ -105,9 +113,9 @@ def test_tourist_counts_landmark_visits_not_points(conn):
     assert tourist["value"] == 2
     assert tourist["detail"] == "landmarks visited"
     # Ignored entirely: park_hopper/peak_tagger must not fire on landmark data.
-    assert _award(result["awards"], "park_hopper") is None
-    assert _award(result["awards"], "peak_tagger") is None
-    assert _award(result["awards"], "explorer") is None
+    assert _unawarded(result["awards"], "park_hopper")
+    assert _unawarded(result["awards"], "peak_tagger")
+    assert _unawarded(result["awards"], "explorer")
 
 
 def test_park_hopper_counts_park_visits_only(conn):
@@ -151,9 +159,9 @@ def test_place_visit_awards_ignore_activity_outside_the_month(conn):
     _place_activation(conn, 3, player_id=1, points=100, awarded_at=END + 1)   # after the month
 
     result = results.compute_month(conn, "mt", MONTH)
-    assert _award(result["awards"], "tourist") is None
-    assert _award(result["awards"], "park_hopper") is None
-    assert _award(result["awards"], "peak_tagger") is None
+    assert _unawarded(result["awards"], "tourist")
+    assert _unawarded(result["awards"], "park_hopper")
+    assert _unawarded(result["awards"], "peak_tagger")
 
 
 def test_place_visit_awards_tie_refuses_a_winner(conn):
@@ -169,7 +177,7 @@ def test_place_visit_awards_tie_refuses_a_winner(conn):
     _place_activation(conn, 2, player_id=2, points=5, awarded_at=START + 20)
 
     result = results.compute_month(conn, "mt", MONTH)
-    assert _award(result["awards"], "tourist") is None
+    assert _unawarded(result["awards"], "tourist")
 
 
 def test_frontier_counts_out_of_town_captures_without_virgin_restriction(conn, monkeypatch):
@@ -263,3 +271,199 @@ def test_frozen_month_keeps_a_stored_explorer_award_with_its_label(conn):
     assert explorer["label"] == "Explorer"
     assert explorer["value"] == 125
     assert explorer["player"] == "player-1"
+
+
+# ---- the in-progress month preview (app/config.results_preview_current_month)
+# Off in production: month_results_for() reads frozen rows only, and the
+# month being played is absent from "months" entirely. A preview host
+# turns the flag on to see it early, computed live -- which must stay a
+# purely read-side change.
+
+
+def _preview(monkeypatch, on):
+    monkeypatch.setattr(results.settings, "results_preview_current_month", on)
+
+
+def _seed_open_month(conn):
+    """A little real activity inside the month currently being played."""
+    _player(conn, 1, "RED")
+    season_id = _season(conn, "mt")
+    _place(conn, 1, "landmark")
+    _place_activation(conn, 1, player_id=1, points=5, awarded_at=START + 10)
+    _capture(conn, season_id, cell_id(43.0, -116.0), START + 20, 1, "RED", from_team=None)
+    return season_id
+
+
+def test_preview_off_leaves_the_open_month_out(conn, monkeypatch):
+    _preview(monkeypatch, False)
+    _seed_open_month(conn)
+    # A finished month to prove the frozen path still returns normally.
+    past_month = results.previous_month(MONTH)
+    conn.execute(
+        "INSERT INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
+        (past_month, "mt", NOW),
+    )
+
+    out = results.month_results_for(conn, "mt", now=NOW)
+    assert [m["month"] for m in out["months"]] == [past_month]
+    assert MONTH not in [m["month"] for m in out["months"]]
+    assert all("preview" not in m for m in out["months"])
+
+
+def test_preview_on_prepends_the_open_month_marked_provisional(conn, monkeypatch):
+    _preview(monkeypatch, True)
+    _seed_open_month(conn)
+    past_month = results.previous_month(MONTH)
+    conn.execute(
+        "INSERT INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
+        (past_month, "mt", NOW),
+    )
+
+    out = results.month_results_for(conn, "mt", now=NOW)
+    assert [m["month"] for m in out["months"]] == [MONTH, past_month]
+
+    live = out["months"][0]
+    assert live["preview"] is True
+    assert live["protocol"] == "mt"
+    # It is a real computation, not an empty placeholder: the seeded
+    # landmark visit shows up as Tourist.
+    tourist = _award(live["awards"], "tourist")
+    assert tourist is not None and tourist["value"] == 1
+    # Award order matches the frozen path's, which re-sorts on read.
+    assert live["awards"] == sorted(live["awards"], key=results._award_sort_key)
+
+    # The frozen month is untouched and stays unmarked.
+    assert "preview" not in out["months"][1]
+    # The open-month banner still says what it always said.
+    assert out["open_month"] == MONTH
+
+
+def test_preview_on_writes_nothing(conn, monkeypatch):
+    """The whole point of the flag is that it is display-only: reading a
+    provisional month must never freeze it.
+    """
+    _preview(monkeypatch, True)
+    _seed_open_month(conn)
+
+    def counts():
+        return tuple(
+            conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            for t in ("month_result", "month_standing", "month_award")
+        )
+
+    before = counts()
+    results.month_results_for(conn, "mt", now=NOW)
+    results.month_results_for(conn, "mt", now=NOW)
+    assert counts() == before == (0, 0, 0)
+
+
+# --- standings score ground HELD, not captures made ---------------------
+#
+# The month card used to count rows in mc_tile_capture_log, so a square
+# that changed hands five times scored five and ground a team had lost
+# still counted for them. That put /results in different units from the
+# scoreboard, which has always counted current ownership -- in August
+# 2026 RED read 58% above its scoreboard figure. Standings now count the
+# owner of each square at the close, the same quantity the scoreboard
+# shows (mc_scoring.team_tile_counts).
+
+
+def test_standings_count_a_repeatedly_captured_square_once(conn):
+    _player(conn, 1, "RED")
+    sid = _season(conn, "mc")
+    cell = cell_id(43.6, -116.2)
+    for i in range(5):
+        _capture(conn, sid, cell, START + 100 + i, 1, "RED", from_team=None if i == 0 else "RED")
+
+    rows = {s["team"]: s for s in results.compute_month(conn, "mc", MONTH, NOW)["standings"]}
+    assert rows["RED"]["squares"] == 1
+
+
+def test_standings_credit_the_current_owner_not_whoever_took_it_first(conn):
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    sid = _season(conn, "mc")
+    cell = cell_id(43.6, -116.2)
+    _capture(conn, sid, cell, START + 100, 1, "RED")
+    _capture(conn, sid, cell, START + 200, 2, "BLUE", from_team="RED")
+
+    rows = {s["team"]: s for s in results.compute_month(conn, "mc", MONTH, NOW)["standings"]}
+    assert rows["BLUE"]["squares"] == 1
+    assert rows["RED"]["squares"] == 0
+
+
+def test_standings_reconstruct_ownership_as_of_the_month_close(conn):
+    # A capture AFTER the month ended must not change that month's result.
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    sid = _season(conn, "mc")
+    cell = cell_id(43.6, -116.2)
+    _capture(conn, sid, cell, START + 100, 1, "RED")
+    _capture(conn, sid, cell, END + 5_000, 2, "BLUE", from_team="RED")
+
+    rows = {s["team"]: s
+            for s in results.compute_month(conn, "mc", MONTH, END + 10_000)["standings"]}
+    assert rows["RED"]["squares"] == 1
+    assert rows["BLUE"]["squares"] == 0
+
+
+# --- Longest Road and Empire Builder ------------------------------------
+
+
+def test_longest_road_counts_a_straight_run_in_squares():
+    cells = {(10, x) for x in range(7)}
+    assert results._longest_road(cells) == 7
+
+
+def test_longest_road_follows_corners_not_just_sides():
+    # A staircase touches only at the corners; it is still one road.
+    cells = {(i, i) for i in range(5)}
+    assert results._longest_road(cells) == 5
+
+
+def test_longest_road_takes_the_longest_patch_not_the_total():
+    cells = {(0, x) for x in range(6)} | {(50, x) for x in range(3)}
+    assert results._longest_road(cells) == 6
+
+
+def test_longest_road_prefers_a_thin_run_over_a_fat_blob():
+    # 4x4 solid block (16 squares) against a 12-square line: the line is
+    # the longer road even though the blob holds more ground. This is the
+    # whole point of the award.
+    blob = {(y, x) for y in range(4) for x in range(4)}
+    line = {(100, x) for x in range(12)}
+    assert results._longest_road(blob) < results._longest_road(line)
+
+
+def test_empire_builder_credits_the_last_painter_of_held_ground(conn):
+    _player(conn, 1, "RED")
+    _player(conn, 2, "RED")
+    sid = _season(conn, "mc")
+    # Player 1 paints three squares; player 2 repaints one of them, so
+    # player 1 is left holding two.
+    for i in range(3):
+        _capture(conn, sid, cell_id(43.6 + i * 0.01, -116.2), START + 100 + i, 1, "RED")
+    _capture(conn, sid, cell_id(43.6, -116.2), START + 500, 2, "RED", from_team="RED")
+
+    awards = results.compute_month(conn, "mc", MONTH, NOW)["awards"]
+    builder = _award(awards, "empire_builder")
+    assert builder["player_id"] == 1
+    assert builder["value"] == 2
+    assert builder["detail"] == "squares held"
+
+
+def test_team_builders_add_up_to_the_team_square_count(conn):
+    _player(conn, 1, "RED")
+    _player(conn, 2, "RED")
+    sid = _season(conn, "mc")
+    for i in range(4):
+        _capture(conn, sid, cell_id(43.6 + i * 0.01, -116.2), START + 100 + i, 1, "RED")
+    for i in range(2):
+        _capture(conn, sid, cell_id(44.6 + i * 0.01, -116.2), START + 200 + i, 2, "RED")
+
+    result = results.compute_month(conn, "mc", MONTH, NOW)
+    red = next(s for s in result["standings"] if s["team"] == "RED")
+    builders = [a for a in result["awards"]
+                if a["award"] == "team_builder" and a["scope"] == "RED"]
+    assert red["squares"] == 6
+    assert builders[0]["value"] == 4   # the top builder, not the sum

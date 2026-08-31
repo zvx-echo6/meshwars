@@ -50,6 +50,13 @@ function monthTitle(month) {
   return `${MONTH_NAMES[m - 1] || month} ${y}`;
 }
 
+// The month's name on its own, for prose that already sits under a
+// heading carrying the year.
+function monthName(month) {
+  const m = parseInt(month.slice(5, 7), 10);
+  return MONTH_NAMES[m - 1] || month;
+}
+
 function teamDot(team) {
   return `<span class="mc-dot" style="background:${TEAM_COLORS[team] || '#888'}"></span>`;
 }
@@ -67,27 +74,36 @@ function renderStandings(standings) {
   // zero. The map panel zero-fills because it reports a live season
   // where a team may yet appear; a finished month is a record of what
   // happened, and seven rows of nothing buries the three that matter.
-  const active = standings.filter((s) => s.points > 0);
+  // A team is "active" if it did ANY of the three, so a team that only
+  // ran the net still appears -- an honor can otherwise name a team the
+  // standings above it never mentioned.
+  const active = standings.filter(
+    (s) => (s.squares || 0) > 0 || (s.checkin_points || 0) > 0 || (s.explorer_points || 0) > 0);
   if (!active.length) {
-    return '<p class="rs-empty">No ground taken and no check-ins this month.</p>';
+    return '<p class="rs-empty">No ground held, no check-ins and no places visited this month.</p>';
   }
+  // Squares alone place a team -- see app/results.py. The other two
+  // columns are work worth showing, not score, so nothing is totalled
+  // here: a combined figure would put a team ahead on ground it does
+  // not hold, which is exactly what this page used to do.
   const rows = active.map((s, i) => `<tr>
       <td class="rs-rank">${i + 1}</td>
       <td>${teamDot(s.team)}${escapeHtml(s.team)}</td>
-      <td class="rs-num">${num(s.captures)}</td>
+      <td class="rs-num rs-total">${num(s.squares)}</td>
       <td class="rs-num">${num(s.checkin_points)}</td>
-      <td class="rs-num rs-total">${num(s.points)}</td>
+      <td class="rs-num">${num(s.explorer_points)}</td>
     </tr>`).join('');
   return `<table class="rs-table">
     <thead><tr>
       <th>#</th><th>Team</th>
-      <th class="rs-num">Captures</th>
+      <th class="rs-num">Squares</th>
       <th class="rs-num">Check-ins</th>
-      <th class="rs-num">Points</th>
+      <th class="rs-num">Exploration</th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 }
+
 
 function renderHonors(awards) {
   if (!awards.length) {
@@ -98,8 +114,20 @@ function renderHonors(awards) {
   // The value and what it counts are both shown -- the detail sits under
   // the award name rather than replacing the number, because "Top NetOp
   // 130" without a unit is the exact ambiguity the detail exists to fix.
+  //
+  // An honor nobody won still gets its row (app/results.with_placeholders):
+  // player and team are both null, and it reads "not awarded" rather than
+  // disappearing, which made Peak Tagger look like a missing feature.
   return `<ul class="rs-honors">${awards.map((a) => {
-    const who = a.player || a.team || '—';
+    const unawarded = !a.player && !a.team;
+    if (unawarded) {
+      return `<li class="rs-honor rs-honor-none">
+        <span class="rs-honor-name">${escapeHtml(a.label)}</span>
+        <span class="rs-honor-who">not awarded</span>
+        <span class="rs-honor-value">&mdash;</span>
+      </li>`;
+    }
+    const who = a.player || a.team;
     const scope = a.scope ? ` <span class="rs-scope">${teamDot(a.scope)}${escapeHtml(a.scope)}</span>` : '';
     const team = a.player && a.team ? ` <span class="rs-scope">${teamDot(a.team)}${escapeHtml(a.team)}</span>` : '';
     const detail = a.detail ? `<span class="rs-detail">${escapeHtml(a.detail)}</span>` : '';
@@ -111,19 +139,110 @@ function renderHonors(awards) {
   }).join('')}</ul>`;
 }
 
+
+// Every team gets its own Top Attacker and Top Defender, so as honor
+// rows they are up to fourteen lines repeating two award names and two
+// detail strings. The facts are a comparison between teams, so they are
+// rendered as one row per team instead. Only the two team awards move:
+// anything else scoped stays an honor, so a future scoped award is not
+// silently swallowed by a table with no column for it.
+const TEAM_AWARDS = ['team_builder', 'team_attacker', 'team_defender'];
+
+function splitAwards(awards) {
+  const league = [];
+  const byTeam = new Map();
+  awards.forEach((a) => {
+    if (a.scope && TEAM_AWARDS.indexOf(a.award) !== -1) {
+      const row = byTeam.get(a.scope) || {};
+      row[a.award] = a;
+      byTeam.set(a.scope, row);
+    } else {
+      league.push(a);
+    }
+  });
+  return { league, byTeam };
+}
+
+// A team can hold one of the two and not the other -- a team that took
+// ground but never took any back has an attacker and no defender. The
+// gap is a fact about the month, so it is drawn as a dash rather than
+// left blank, which would read as a rendering fault.
+function awardCells(a) {
+  if (!a) {
+    return '<td class="rs-none">&mdash;</td><td class="rs-num rs-none">&mdash;</td>';
+  }
+  const who = a.player || a.team || '\u2014';
+  return `<td>${escapeHtml(who)}</td><td class="rs-num">${num(a.value)}</td>`;
+}
+
+function renderTeamAwards(byTeam, standings) {
+  if (!byTeam.size) return '';
+  // Same order as the standings table directly above, so the eye tracks
+  // between the two. Any team holding an award but absent from the
+  // standings follows, rather than being dropped.
+  const order = [];
+  standings.forEach((s) => { if (byTeam.has(s.team)) order.push(s.team); });
+  byTeam.forEach((_row, team) => { if (order.indexOf(team) === -1) order.push(team); });
+
+  const rows = order.map((team) => {
+    const row = byTeam.get(team) || {};
+    return `<tr>
+      <td class="rs-team-cell">${teamDot(team)}${escapeHtml(team)}</td>
+      ${awardCells(row.team_builder)}
+      ${awardCells(row.team_attacker)}
+      ${awardCells(row.team_defender)}
+    </tr>`;
+  }).join('');
+
+  return `<h3 class="rs-sub">By team</h3>
+    <div class="rs-table-scroll">
+      <table class="rs-table rs-team-table">
+        <thead><tr>
+          <th>Team</th>
+          <th>Builder</th>
+          <th class="rs-num">Held</th>
+          <th>Attacker</th>
+          <th class="rs-num">Taken</th>
+          <th>Defender</th>
+          <th class="rs-num">Retaken</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+// A month object carries preview:true only on a preview host, where
+// app/config.py's results_preview_current_month is on and the open month
+// is computed live rather than read back from a frozen row. Production
+// never sets it, and a frozen month renders byte for byte as it always
+// has -- the badge, the notice and the extra class are all empty
+// strings unless the flag put them there.
 function renderMonth(m) {
-  return `<section class="rs-month">
-    <h2 class="rs-month-title">${escapeHtml(monthTitle(m.month))}</h2>
+  const preview = m.preview === true;
+  const cls = preview ? 'rs-month rs-month-preview' : 'rs-month';
+  const badge = preview ? '<span class="rs-preview-badge">IN PROGRESS</span>' : '';
+  const notice = preview
+    ? `\n    <p class="rs-preview-note">Provisional &mdash; ${escapeHtml(monthName(m.month))} is still
+      being played. These standings and honors are computed from data so far and will
+      change before the month closes.</p>`
+    : '';
+  const standings = m.standings || [];
+  const { league, byTeam } = splitAwards(m.awards || []);
+  return `<section class="${cls}">
+    <h2 class="rs-month-title">${escapeHtml(monthTitle(m.month))}${badge}</h2>${notice}
     <h3 class="rs-sub">Standings</h3>
-    ${renderStandings(m.standings || [])}
+    ${renderStandings(standings)}
     <h3 class="rs-sub">Honors</h3>
-    ${renderHonors(m.awards || [])}
+    ${renderHonors(league)}
+    ${renderTeamAwards(byTeam, standings)}
   </section>`;
 }
 
-// The month in progress is never rendered -- see app/results.py for why.
+// The month in progress carries no result -- see app/results.py for why.
 // All this says is when it closes, so the page is not silent about the
-// month everyone is currently playing.
+// month everyone is currently playing. (A preview host additionally
+// renders that month's live figures above; this banner stays either
+// way, since the closing date is the part that is not provisional.)
 function renderOpenMonth(data) {
   if (!data.open_month || !data.open_month_closes_at) return '';
   const left = data.open_month_closes_at * 1000 - Date.now();

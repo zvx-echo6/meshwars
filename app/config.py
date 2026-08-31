@@ -351,6 +351,15 @@ class Settings(BaseSettings):
     # elsewhere. A human posting from a phone scatters over minutes.
     automation_stdev_seconds: float = 2.0
     automation_min_samples: int = 3
+
+    # PREVIEW HOSTS ONLY. Off in production, deliberately: a month is
+    # judged once, when it is over, and a standings table that reshuffles
+    # under people mid-month is not a result. Turning this on makes
+    # /results additionally render the month currently being played,
+    # computed live and labelled provisional. It is a read-only display
+    # switch -- the in-progress month is never frozen and nothing extra
+    # is ever written to month_result/month_standing/month_award.
+    results_preview_current_month: bool = False
     checkin_poll_interval_seconds: int = 30   # tight -- MeshCore's feed returns only its newest 100 messages, no pagination, and a busy net can approach that
 
     # The net window. Weekday follows Python's datetime.weekday()

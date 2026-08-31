@@ -13,8 +13,10 @@ Seasons were 30 days; they are now 180. The reason a longer season works is that
 
 A six-month season leaves five months with nothing to show for it, so each calendar month closes with its own standings and honors on the `/results` page. Two rules matter here:
 
-- A month is judged when it ENDS, not as it goes. Nothing is shown for the month in progress except when it closes, because an award you can watch changing hands daily is not an award.
-- A month is scored ON the month — ground taken and points earned between its own start and end dates, never a snapshot of season standings — because a snapshot would name the same leader every month.
+- A month is judged when it ENDS, not as it goes. Nothing is shown for the month in progress except when it closes, because an award you can watch changing hands daily is not an award. A preview host can render the open month anyway, behind `results_preview_current_month` (default off, `app/config.py`), for looking at a month's awards before it closes; it computes read-only and never freezes anything.
+- A month is scored on the ground a team HOLDS when it closes, plus the check-in points earned inside it. Squares are counted the way the scoreboard counts them (`mc_scoring.team_tile_counts`), so the two pages agree.
+
+  This replaced counting capture events on 2026-08-31. Events were the original choice, on the reasoning that "a capture is worth one point, the same as a held square is worth one in the season total, so the two numbers stay in the same units". That reasoning was wrong twice over: a square that changed hands five times scored five, and ground a team had taken and then lost still counted for them. In August 2026 RED read 4570 against a scoreboard figure of 2898, 58% high. The original concern — that scoring on held ground makes a month a snapshot of the season, naming the same leader every time — is real and accepted; matching the scoreboard was judged worth it. `results._held_at()` reconstructs ownership at the closing instant, which is exact because a cell has no neutral state, so a capture landing after the month ended cannot change that month's result.
 
 Months are calendar months in the net's timezone (America/Boise), not offsets from a season start, because the two boards began on different days and offsets would have drifted apart. Ties are refused rather than split: if two players share a lead, nobody gets that honor that month.
 
@@ -30,12 +32,16 @@ Two rules make this fair. A Wednesday only counts as a net if at least one perso
 
 ## The honors
 
+Every honor below is listed every month, won or not. One nobody earned shows as "not awarded" rather than vanishing — Peak Tagger was absent for all of August 2026 and read as a missing feature when in fact nobody had reached a summit. Placeholders are never stored; a frozen month records what was won, and the empty rows are added on the way out so a frozen month and a live one render alike.
+
 Each month awards:
 
-- **Month Winner** — team with the most points gained
+- **Largest Territory** — team holding the most ground when the month closes (was "Month Winner", most points gained, until 2026-08-31)
+- **Longest Road** — team holding the longest unbroken chain of squares, linked on sides *or corners*. Measured as the longest shortest-path across each connected patch (`results._longest_road`): exact for a chain, and on a patch with loops it can only understate, never credit a road that is not there. Deliberately not scaled by team size — it rewards a shape, so a small team that drove a highway beats a big one that filled in a city. In August 2026 RED led on 330 while holding half of GREEN's ground.
+- **Empire Builder** — player holding the most ground they painted themselves, counted from the same ownership rows as the standings so a player's figure is a readable share of their team's own total
 - **Top Attacker** — most squares taken off other teams
 - **Top Defender** — most squares won back (a capture counts as a defence when the previous capture of that same square took it from the team now taking it back)
-- **Team Attacker** and **Team Defender** — the same two, given within each team
+- **Team Builder**, **Team Attacker** and **Team Defender** — the same three, given within each team
 - **Tourist** — most landmarks visited
 - **Park Hopper** — most parks visited
 - **Peak Tagger** — most summits visited

@@ -601,9 +601,9 @@ CREATE TABLE IF NOT EXISTS month_standing (
     month          TEXT NOT NULL,
     protocol       TEXT NOT NULL,
     team           TEXT NOT NULL,
-    captures       INTEGER NOT NULL DEFAULT 0,
+    squares        INTEGER NOT NULL DEFAULT 0,  -- ground HELD at the close; this alone places the team
     checkin_points REAL NOT NULL DEFAULT 0,
-    points         REAL NOT NULL DEFAULT 0,   -- captures + checkin_points; what places the team
+    explorer_points REAL NOT NULL DEFAULT 0,  -- shown beside squares, never added to them
     PRIMARY KEY (month, protocol, team)
 );
 
@@ -996,6 +996,17 @@ MIGRATIONS = [
     # it in from the CSV, same one-startup window points_reason's own
     # migration note describes).
     "ALTER TABLE place ADD COLUMN elevation_ft REAL",
+    # A month is scored on ground HELD at the close, not captures made:
+    # the old `captures` column counted capture events, so one square
+    # could score many times and it read in different units from the
+    # scoreboard. Added rather than renamed, because a RENAME raises on
+    # a database created from the current schema and only "duplicate
+    # column" is tolerated above. On an already-existing database the
+    # dead `captures` column stays behind, harmless -- it is NOT NULL
+    # DEFAULT 0 and nothing writes it, and month_standing is rewritten
+    # wholesale by results.freeze_month() anyway.
+    "ALTER TABLE month_standing ADD COLUMN squares INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE month_standing ADD COLUMN explorer_points REAL NOT NULL DEFAULT 0",
     # Game-integrity gates added 2026-08-25 (see app/config.py's
     # mt_min_precision_bits/mt_max_speed_mps and app/ingest.py): every
     # existing player_cell_ping/player_ingest_stat row predates both
