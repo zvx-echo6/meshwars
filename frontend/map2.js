@@ -2329,24 +2329,23 @@ function showAwardBanner(map, geo) {
   el.innerHTML = `
     <span class="award-banner-label"></span>
     <span class="award-banner-who"></span>
-    <span class="award-banner-team"></span>
     <span class="award-banner-detail"></span>
     <button type="button" class="award-banner-close" aria-label="Clear highlight">&times;</button>`;
   // The PLAYER is the subject of a player award -- naming the team
-  // instead dropped the person who actually earned it. A team award
-  // (Longest Road, Largest Territory) has no player, so the team is the
-  // subject there and stands alone.
-  // textContent throughout, not innerHTML: a display name is player-
-  // supplied.
+  // instead dropped the person who actually earned it. The team is
+  // carried by the COLOUR of that name rather than spelled out beside
+  // it, which said the same thing twice. A team award (Longest Road,
+  // Largest Territory) has no player, so its team name is the subject
+  // and is coloured the same way.
+  // textContent, not innerHTML: a display name is player-supplied.
   el.querySelector('.award-banner-label').textContent = `${geo.label} —`;
-  el.querySelector('.award-banner-who').textContent = geo.player || geo.team || '';
-  const teamEl = el.querySelector('.award-banner-team');
-  if (geo.player && geo.team) {
-    teamEl.textContent = geo.team;
-    teamEl.style.color = TEAM_COLORS[geo.team] || 'inherit';
-  } else if (!geo.player && geo.team) {
-    // Team award: colour the name itself rather than repeating it.
-    el.querySelector('.award-banner-who').style.color = TEAM_COLORS[geo.team] || 'inherit';
+  const who = el.querySelector('.award-banner-who');
+  who.textContent = geo.player || geo.team || '';
+  if (geo.team) {
+    who.style.color = TEAM_COLORS[geo.team] || 'inherit';
+    // Colour alone carries the team, so name it on hover for anyone who
+    // cannot tell the seven apart.
+    who.title = geo.team;
   }
   el.querySelector('.award-banner-detail').textContent =
     `${geo.value} ${geo.detail || ''}`.trim();
