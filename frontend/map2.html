@@ -4,27 +4,24 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0C0B0A" />
-  <!-- Applied before any stylesheet paints, so a reader never sees a
-       frame of the wrong theme first. Deliberately inline and tiny: a
-       fetched script here would block first paint, which is the thing
-       this exists to avoid. Mirrors theme-toggle.js, which owns
-       everything after load.
+  <!-- Applied before any stylesheet paints, so a reader who chose the
+       neon skin never sees a frame of gold first. Deliberately inline
+       and tiny: a fetched script here would block first paint, which is
+       the thing this exists to avoid. Mirrors theme-toggle.js, which
+       owns everything after load.
 
-       This is the ONE page where an absent stored choice does not mean
-       gold: the front page's map reads better dark by default (the
-       owner's explicit call), so a never-chosen visitor lands on neon
-       here specifically. An explicit choice always wins regardless --
-       theme-toggle.js's apply() now writes 'gold' explicitly rather
-       than clearing the key, so "never chosen" and "chose gold" are
-       distinguishable here where every other page's boot snippet still
-       only checks for 'neon'. -->
+       Identical to every other page's snippet, deliberately. This page
+       used to treat an ABSENT choice as neon -- the front page's map
+       reads better dark -- which meant a visitor who had never touched
+       the toggle got neon here and gold everywhere else, and the site
+       looked like the pages were not sharing a theme at all. They were:
+       they read the same key and only disagreed about what "unset"
+       meant. Gold is now the default everywhere, and choosing neon
+       anywhere carries to every page. -->
   <script>
-    try {
-      var t = localStorage.getItem('mwTheme');
-      if (t === 'neon' || t === null) {
-        document.documentElement.setAttribute('data-theme', 'neon');
-      }
-    } catch (e) {}
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
   </script>
 
   <!-- Mobile debug console (eruda), opt-in only via ?debug=1. Vendored
