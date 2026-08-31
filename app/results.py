@@ -43,8 +43,10 @@ log = logging.getLogger("results")
 # month_award.award; the label is what a reader sees.
 TEAM_AWARDS = [
     ("largest_territory", "Largest Territory"),
+    ("longest_road", "Longest Road"),
 ]
 PLAYER_AWARDS = [
+    ("empire_builder", "Empire Builder"),
     ("top_attacker", "Top Attacker"),
     ("top_defender", "Top Defender"),
     ("quick_fingers", "Quick Fingers"),
@@ -54,6 +56,7 @@ PLAYER_AWARDS = [
     ("frontier", "Frontier"),
 ]
 PER_TEAM_AWARDS = [
+    ("team_builder", "Team Builder"),
     ("team_attacker", "Team Attacker"),
     ("team_defender", "Team Defender"),
 ]
@@ -244,22 +247,20 @@ def _windowed_captures(conn: sqlite3.Connection, protocol: str, start: int, end:
     return out
 
 
-def _held_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> dict[str, int]:
-    """Squares each team OWNS at `at_ts` -- the same quantity the live
-    scoreboard shows, reconstructed at a chosen instant.
+def _ownership_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> list[sqlite3.Row]:
+    """Who owns every square at `at_ts`: one row per cell, carrying the
+    owning team and the player whose paint put it there.
 
-    A month is scored on ground HELD when it closes, not on capture
-    events. A square that changed hands five times is one square, and
-    ground taken and then lost is ground you do not have. Counting
-    events instead put this page in different units from the scoreboard
-    and inflated every figure (RED read 58% high in August 2026), which
-    is the whole reason this helper exists -- see compute_month().
+    Exact, because a cell has no neutral state (see app/mc_scoring.py):
+    once captured it always has an owner, so the newest capture at or
+    before `at_ts` names both the owner and the last painter then.
+    Scoped to the season active at that instant, because a season
+    boundary clears the board and counting across one is meaningless.
 
-    The reconstruction is exact because a cell has no neutral state
-    (see app/mc_scoring.py): once captured it always has an owner, so
-    the newest capture at or before `at_ts` names the owner then. Scoped
-    to the season active at that instant, because a season boundary
-    clears the board and counting across one would be meaningless.
+    Three things read this: the standings (grouped by team -- the same
+    figure the scoreboard shows), Empire Builder (grouped by player, so
+    the per-player numbers add up to the team's own), and Longest Road
+    (the cell ids themselves).
     """
     season = conn.execute(
         "SELECT id FROM mc_season "
@@ -268,20 +269,82 @@ def _held_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> dict[str, i
         (protocol, at_ts),
     ).fetchone()
     if season is None:
-        return {}
-    return {
-        r["team"]: r["n"]
-        for r in conn.execute(
-            "SELECT by_team AS team, COUNT(*) AS n FROM ("
-            "  SELECT cell_id, by_team,"
-            "         ROW_NUMBER() OVER (PARTITION BY cell_id"
-            "                            ORDER BY ts DESC, rowid DESC) AS rn"
-            "    FROM mc_tile_capture_log"
-            "   WHERE season_id = ? AND ts <= ?"
-            ") WHERE rn = 1 GROUP BY by_team",
-            (season["id"], at_ts),
-        )
-    }
+        return []
+    return conn.execute(
+        "SELECT cell_id, by_team AS team, by_player_id AS player_id FROM ("
+        "  SELECT cell_id, by_team, by_player_id,"
+        "         ROW_NUMBER() OVER (PARTITION BY cell_id"
+        "                            ORDER BY ts DESC, rowid DESC) AS rn"
+        "    FROM mc_tile_capture_log"
+        "   WHERE season_id = ? AND ts <= ?"
+        ") WHERE rn = 1",
+        (season["id"], at_ts),
+    ).fetchall()
+
+
+# The eight neighbours of a square: sides AND corners. Corner contact
+# counts because a road crossing the grid diagonally is still one road.
+_NEIGHBOURS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+
+def _longest_road(cells: set[tuple[int, int]]) -> int:
+    """Longest unbroken chain of touching squares a team holds, counted
+    in squares.
+
+    Cell ids are "<latIdx>_<lonIdx>" on a fixed grid (app/grid.py), so
+    adjacency is plain integer arithmetic. Two squares are linked if they
+    touch on a side or a corner.
+
+    Measured as the longest shortest-path across each connected patch --
+    walk to the furthest square, then walk to the furthest square from
+    THERE. That is exact for a chain and can only understate a patch with
+    loops in it, which is the safe direction to be wrong in: it never
+    credits a road longer than one that exists. It is also what makes the
+    award mean something, since a big round blob scores near its width
+    while a thin run along a highway scores its whole length -- in August
+    2026 RED led with 330 squares while holding half of GREEN's ground.
+
+    Linear in the number of squares: each patch is walked twice and
+    never revisited.
+    """
+    from collections import deque
+
+    def walk(src):
+        dist = {src: 0}
+        q = deque([src])
+        far = src
+        while q:
+            cur = q.popleft()
+            for dy, dx in _NEIGHBOURS:
+                nxt = (cur[0] + dy, cur[1] + dx)
+                if nxt in cells and nxt not in dist:
+                    dist[nxt] = dist[cur] + 1
+                    q.append(nxt)
+                    if dist[nxt] > dist[far]:
+                        far = nxt
+        return far, dist
+
+    seen: set[tuple[int, int]] = set()
+    best = 0
+    for cell in cells:
+        if cell in seen:
+            continue
+        end, reached = walk(cell)
+        seen |= reached.keys()
+        _, back = walk(end)
+        best = max(best, max(back.values()) + 1)   # squares, not steps
+    return best
+
+
+def _cell_xy(cell_id: str) -> tuple[int, int] | None:
+    """"<latIdx>_<lonIdx>" as integers, or None if it is not that shape.
+    Nothing else in the codebase parses a cell id this way -- grid.py
+    hands back coordinates in degrees, and the road walk needs indices."""
+    try:
+        lat_str, lon_str = cell_id.split("_")
+        return int(lat_str), int(lon_str)
+    except (ValueError, AttributeError):
+        return None
 
 
 def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlite3.Row]:
@@ -398,7 +461,17 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     # is what the preview on a preview host shows.
     # end is the first instant of the NEXT month, so the close is end-1.
     at = min(end - 1, now if now is not None else int(time.time()))
-    held = _held_at(conn, protocol, at)
+    ownership = _ownership_at(conn, protocol, at)
+    held: dict[str, int] = {}
+    held_by_player: dict[int, int] = {}
+    cells_by_team: dict[str, set[tuple[int, int]]] = {}
+    for row in ownership:
+        held[row["team"]] = held.get(row["team"], 0) + 1
+        if row["player_id"] is not None:
+            held_by_player[row["player_id"]] = held_by_player.get(row["player_id"], 0) + 1
+        xy = _cell_xy(row["cell_id"])
+        if xy is not None:
+            cells_by_team.setdefault(row["team"], set()).add(xy)
 
     # Three figures side by side, never added together. Territory decides
     # the month (Largest Territory); check-in and exploration points are
@@ -436,11 +509,36 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
                *(_top({s["team"]: s["squares"] for s in standings}, 1) or (None, 0)),
                names=names, detail="squares held"))
 
+    # Longest Road rewards a shape rather than an amount: ground taken in
+    # one continuous run, the way a highway paints. Deliberately NOT
+    # scaled by team size -- a small team that drove a long road beats a
+    # big one that filled in a city.
+    roads = {t: _longest_road(cs) for t, cs in cells_by_team.items()}
+    add(_award("longest_road", *(_top(roads, 2) or (None, 0)),
+               names=names, detail="squares in an unbroken run"))
+
+    # Empire Builder honors whoever holds the most ground they painted
+    # themselves. Counted from the same ownership rows as the standings,
+    # so every player's figure is a share of their team's own total and
+    # the two can be read against each other -- unlike the attack awards,
+    # which count only contested captures and so look tiny beside a team
+    # score.
+    add(_award("empire_builder", *(_top(held_by_player, 1) or (None, 0)),
+               names=names, detail="squares held"))
+
     # ---- attack and defence -------------------------------------------
     attacks: dict[int, int] = {}
     retakes: dict[int, int] = {}
     per_team_attacks: dict[str, dict[int, int]] = {}
     per_team_retakes: dict[str, dict[int, int]] = {}
+    # Ground held, split by the player who painted it, per team. Comes
+    # from the ownership rows rather than the capture window, so a team's
+    # builders add up to the team's own square count exactly.
+    per_team_built: dict[str, dict[int, int]] = {}
+    for row in ownership:
+        if row["player_id"] is not None:
+            bucket = per_team_built.setdefault(row["team"], {})
+            bucket[row["player_id"]] = bucket.get(row["player_id"], 0) + 1
     for c in caps:
         pid, tm = c["player_id"], c["team"]
         if c["from_team"] is None:
@@ -492,6 +590,8 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
         add(_award(award, *(_top(visits) or (None, 0)), names=names, detail=label_detail))
 
     for team in settings.teams_list:
+        add(_award("team_builder", *(_top(per_team_built.get(team, {})) or (None, 0)),
+                   names=names, scope=team, team=team, detail="squares held"))
         add(_award("team_attacker", *(_top(per_team_attacks.get(team, {})) or (None, 0)),
                    names=names, scope=team, team=team, detail="squares taken from other teams"))
         add(_award("team_defender", *(_top(per_team_retakes.get(team, {})) or (None, 0)),

@@ -405,3 +405,65 @@ def test_standings_reconstruct_ownership_as_of_the_month_close(conn):
             for s in results.compute_month(conn, "mc", MONTH, END + 10_000)["standings"]}
     assert rows["RED"]["squares"] == 1
     assert rows["BLUE"]["squares"] == 0
+
+
+# --- Longest Road and Empire Builder ------------------------------------
+
+
+def test_longest_road_counts_a_straight_run_in_squares():
+    cells = {(10, x) for x in range(7)}
+    assert results._longest_road(cells) == 7
+
+
+def test_longest_road_follows_corners_not_just_sides():
+    # A staircase touches only at the corners; it is still one road.
+    cells = {(i, i) for i in range(5)}
+    assert results._longest_road(cells) == 5
+
+
+def test_longest_road_takes_the_longest_patch_not_the_total():
+    cells = {(0, x) for x in range(6)} | {(50, x) for x in range(3)}
+    assert results._longest_road(cells) == 6
+
+
+def test_longest_road_prefers_a_thin_run_over_a_fat_blob():
+    # 4x4 solid block (16 squares) against a 12-square line: the line is
+    # the longer road even though the blob holds more ground. This is the
+    # whole point of the award.
+    blob = {(y, x) for y in range(4) for x in range(4)}
+    line = {(100, x) for x in range(12)}
+    assert results._longest_road(blob) < results._longest_road(line)
+
+
+def test_empire_builder_credits_the_last_painter_of_held_ground(conn):
+    _player(conn, 1, "RED")
+    _player(conn, 2, "RED")
+    sid = _season(conn, "mc")
+    # Player 1 paints three squares; player 2 repaints one of them, so
+    # player 1 is left holding two.
+    for i in range(3):
+        _capture(conn, sid, cell_id(43.6 + i * 0.01, -116.2), START + 100 + i, 1, "RED")
+    _capture(conn, sid, cell_id(43.6, -116.2), START + 500, 2, "RED", from_team="RED")
+
+    awards = results.compute_month(conn, "mc", MONTH, NOW)["awards"]
+    builder = _award(awards, "empire_builder")
+    assert builder["player_id"] == 1
+    assert builder["value"] == 2
+    assert builder["detail"] == "squares held"
+
+
+def test_team_builders_add_up_to_the_team_square_count(conn):
+    _player(conn, 1, "RED")
+    _player(conn, 2, "RED")
+    sid = _season(conn, "mc")
+    for i in range(4):
+        _capture(conn, sid, cell_id(43.6 + i * 0.01, -116.2), START + 100 + i, 1, "RED")
+    for i in range(2):
+        _capture(conn, sid, cell_id(44.6 + i * 0.01, -116.2), START + 200 + i, 2, "RED")
+
+    result = results.compute_month(conn, "mc", MONTH, NOW)
+    red = next(s for s in result["standings"] if s["team"] == "RED")
+    builders = [a for a in result["awards"]
+                if a["award"] == "team_builder" and a["scope"] == "RED"]
+    assert red["squares"] == 6
+    assert builders[0]["value"] == 4   # the top builder, not the sum

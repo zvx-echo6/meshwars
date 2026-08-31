@@ -146,7 +146,7 @@ function renderHonors(awards) {
 // rendered as one row per team instead. Only the two team awards move:
 // anything else scoped stays an honor, so a future scoped award is not
 // silently swallowed by a table with no column for it.
-const TEAM_AWARDS = ['team_attacker', 'team_defender'];
+const TEAM_AWARDS = ['team_builder', 'team_attacker', 'team_defender'];
 
 function splitAwards(awards) {
   const league = [];
@@ -188,6 +188,7 @@ function renderTeamAwards(byTeam, standings) {
     const row = byTeam.get(team) || {};
     return `<tr>
       <td class="rs-team-cell">${teamDot(team)}${escapeHtml(team)}</td>
+      ${awardCells(row.team_builder)}
       ${awardCells(row.team_attacker)}
       ${awardCells(row.team_defender)}
     </tr>`;
@@ -198,6 +199,8 @@ function renderTeamAwards(byTeam, standings) {
       <table class="rs-table rs-team-table">
         <thead><tr>
           <th>Team</th>
+          <th>Builder</th>
+          <th class="rs-num">Held</th>
           <th>Attacker</th>
           <th class="rs-num">Taken</th>
           <th>Defender</th>
