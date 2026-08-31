@@ -381,15 +381,14 @@ def _checkins(conn: sqlite3.Connection, protocol: str, month: str) -> list[sqlit
     ).fetchall()
 
 
-def _place_points(conn: sqlite3.Connection, start: int, end: int) -> dict[str, float]:
+def _place_points(conn: sqlite3.Connection, protocol: str, start: int, end: int) -> dict[str, float]:
     """Places Worth Going points earned inside the month, per team,
     summed by each activation's player's CURRENT team -- the same live
     team choice _checkins() and mc_scoring.team_place_points() make.
 
-    NOT filtered by protocol, because place_activation has no protocol
-    column: a place credit is week-scoped and belongs to the player, not
-    to a board. Both boards therefore report the same exploration
-    figure, exactly as Tourist/Park Hopper/Peak Tagger already do.
+    Scoped to the board that earned it, same as the place honors -- both
+    boards used to report an identical exploration figure because
+    place_activation carried no protocol.
     """
     return {
         r["team"]: r["pts"] or 0.0
@@ -397,9 +396,9 @@ def _place_points(conn: sqlite3.Connection, start: int, end: int) -> dict[str, f
             "SELECT p.team AS team, SUM(a.points) AS pts "
             "  FROM place_activation a "
             "  JOIN player p ON p.player_id = a.player_id "
-            " WHERE a.awarded_at >= ? AND a.awarded_at < ? "
+            " WHERE a.protocol = ? AND a.awarded_at >= ? AND a.awarded_at < ? "
             " GROUP BY p.team",
-            (start, end),
+            (protocol, start, end),
         )
     }
 
@@ -519,7 +518,7 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     # the month (Largest Territory); check-in and exploration points are
     # shown because they are real work, not because they place a team.
     # Adding them would put a team ahead on ground it does not hold.
-    explored = _place_points(conn, start, end)
+    explored = _place_points(conn, protocol, start, end)
 
     def _blank():
         return {"squares": 0, "checkin_points": 0.0, "explorer_points": 0.0}
@@ -601,11 +600,16 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     # ---- tourist / park hopper / peak tagger: most VISITS this month ---
     # One award per place type (docs/features/places.md), counting rows
     # in place_activation joined to place.ref_type, scoped by awarded_at
-    # falling inside the month -- the same time-only scoping every other
-    # award here uses. place_activation has no protocol column (a
-    # scoring ping credits places the same way regardless of which
-    # board sent it -- see app/place_scoring.py), so this does not
-    # filter by protocol either, matching that existing convention.
+    # falling inside the month AND by the board that earned it.
+    #
+    # The protocol filter is new (2026-08-31). place_activation had no
+    # protocol column, so a trip made on one board won the honor on both:
+    # a single Meshtastic drive up Big Cottonwood put the same name on
+    # MeshCore's Peak Tagger, and MeshCore activity was deciding the
+    # Meshtastic Tourist and Park Hopper. Rows written before the column
+    # existed carry '' and match neither board -- see
+    # scripts/backfill_activation_protocol.py, which traces the old rows
+    # back to the captures that earned them.
     #
     # A VISIT, not a point total: place.points is never read here.
     # Replaced "explorer" (most place points earned that month) because
@@ -626,9 +630,10 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
         visits: dict[int, int] = dict(conn.execute(
             "SELECT a.player_id, COUNT(*) FROM place_activation a "
             "  JOIN place p ON p.id = a.place_id "
-            " WHERE p.ref_type = ? AND a.awarded_at >= ? AND a.awarded_at < ? "
+            " WHERE p.ref_type = ? AND a.protocol = ? "
+            "   AND a.awarded_at >= ? AND a.awarded_at < ? "
             " GROUP BY a.player_id",
-            (ref_type, start, end),
+            (ref_type, protocol, start, end),
         ).fetchall())
         if award == "peak_tagger":
             # Tallest peak reached breaks a tie -- see
@@ -637,9 +642,10 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
             tallest: dict[int, float] = dict(conn.execute(
                 "SELECT a.player_id, MAX(COALESCE(p.elevation_ft, 0)) FROM place_activation a "
                 "  JOIN place p ON p.id = a.place_id "
-                " WHERE p.ref_type = 'summit' AND a.awarded_at >= ? AND a.awarded_at < ? "
+                " WHERE p.ref_type = 'summit' AND a.protocol = ? "
+                "   AND a.awarded_at >= ? AND a.awarded_at < ? "
                 " GROUP BY a.player_id",
-                (start, end),
+                (protocol, start, end),
             ).fetchall())
             winner = _top_with_tiebreak(visits, tallest)
             detail = label_detail
@@ -951,17 +957,17 @@ def _frontier_geometry(conn, protocol, start, end, player_id, team):
     ]
 
 
-def _place_geometry(conn, start, end, player_id, ref_type):
+def _place_geometry(conn, protocol, start, end, player_id, ref_type):
     """The places of one kind this player reached inside the month."""
     return [
         _point_feature(r["lat"], r["lon"], {"name": r["name"], "kind": ref_type})
         for r in conn.execute(
             "SELECT p.name, p.lat, p.lon FROM place_activation a "
             "  JOIN place p ON p.id = a.place_id "
-            " WHERE a.player_id = ? AND p.ref_type = ? "
+            " WHERE a.player_id = ? AND p.ref_type = ? AND a.protocol = ? "
             "   AND a.awarded_at >= ? AND a.awarded_at < ? "
             " ORDER BY a.awarded_at",
-            (player_id, ref_type, start, end),
+            (player_id, ref_type, protocol, start, end),
         )
     ]
 
@@ -996,7 +1002,7 @@ def award_geometry(conn: sqlite3.Connection, protocol: str, month: str,
         features = _frontier_geometry(conn, protocol, start, end,
                                       row["player_id"], row["team"])
     else:
-        features = _place_geometry(conn, start, end, row["player_id"],
+        features = _place_geometry(conn, protocol, start, end, row["player_id"],
                                    _PLACE_AWARD_TYPE[award])
     if not features:
         return None

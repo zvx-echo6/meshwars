@@ -59,16 +59,17 @@ def _capture(conn, season_id, cell, ts, player_id, team, from_team=None, by_air=
     )
 
 
-def _place_activation(conn, place_id, player_id, points, awarded_at, week_start="2026-01-07"):
+def _place_activation(conn, place_id, player_id, points, awarded_at, week_start="2026-01-07",
+                      protocol="mt"):
     # place_activation has no foreign-key enforcement in the test schema's
     # in-memory connection (see conftest.py), so a bare place_id is fine --
     # nothing here reads app/place. Tests that need ref_type (tourist /
     # park_hopper / peak_tagger are joined against place.ref_type) go
     # through _place() below instead, for a real place row to join to.
     conn.execute(
-        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
-        "VALUES (?,?,?,?,?)",
-        (place_id, player_id, week_start, points, awarded_at),
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, "
+        "protocol) VALUES (?,?,?,?,?,?)",
+        (place_id, player_id, week_start, points, awarded_at, protocol),
     )
 
 
@@ -592,8 +593,8 @@ def test_peak_tagger_tie_goes_to_the_taller_peak(conn):
     _player(conn, 2, "BLUE")
     _summit(conn, 501, "Lower Peak", 9602)
     _summit(conn, 502, "Higher Peak", 9763)
-    _place_activation(conn, 501, player_id=1, points=100, awarded_at=START + 10)
-    _place_activation(conn, 502, player_id=2, points=100, awarded_at=START + 20)
+    _place_activation(conn, 501, player_id=1, points=100, awarded_at=START + 10, protocol="mc")
+    _place_activation(conn, 502, player_id=2, points=100, awarded_at=START + 20, protocol="mc")
 
     peak = _award(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "peak_tagger")
     assert peak is not None, "a tie on count must now resolve, not vanish"
@@ -609,9 +610,9 @@ def test_peak_tagger_count_still_beats_a_taller_peak(conn):
     _summit(conn, 501, "Small One", 7000)
     _summit(conn, 502, "Small Two", 7100)
     _summit(conn, 503, "Giant", 13000)
-    _place_activation(conn, 501, player_id=1, points=50, awarded_at=START + 10)
-    _place_activation(conn, 502, player_id=1, points=50, awarded_at=START + 20)
-    _place_activation(conn, 503, player_id=2, points=100, awarded_at=START + 30)
+    _place_activation(conn, 501, player_id=1, points=50, awarded_at=START + 10, protocol="mc")
+    _place_activation(conn, 502, player_id=1, points=50, awarded_at=START + 20, protocol="mc")
+    _place_activation(conn, 503, player_id=2, points=100, awarded_at=START + 30, protocol="mc")
 
     peak = _award(results.compute_month(conn, "mc", MONTH, NOW)["awards"], "peak_tagger")
     assert peak["player_id"] == 1
@@ -624,8 +625,8 @@ def test_peak_tagger_refuses_a_tie_on_the_same_peak(conn):
     _player(conn, 2, "BLUE")
     _summit(conn, 501, "Twin A", 9000)
     _summit(conn, 502, "Twin B", 9000)
-    _place_activation(conn, 501, player_id=1, points=100, awarded_at=START + 10)
-    _place_activation(conn, 502, player_id=2, points=100, awarded_at=START + 20)
+    _place_activation(conn, 501, player_id=1, points=100, awarded_at=START + 10, protocol="mc")
+    _place_activation(conn, 502, player_id=2, points=100, awarded_at=START + 20, protocol="mc")
 
     awards = results.compute_month(conn, "mc", MONTH, NOW)["awards"]
     assert _unawarded(awards, "peak_tagger")
@@ -636,8 +637,53 @@ def test_tourist_and_park_hopper_still_refuse_ties(conn):
     _player(conn, 2, "BLUE")
     _place(conn, 601, "landmark")
     _place(conn, 602, "landmark")
-    _place_activation(conn, 601, player_id=1, points=5, awarded_at=START + 10)
-    _place_activation(conn, 602, player_id=2, points=5, awarded_at=START + 20)
+    _place_activation(conn, 601, player_id=1, points=5, awarded_at=START + 10, protocol="mc")
+    _place_activation(conn, 602, player_id=2, points=5, awarded_at=START + 20, protocol="mc")
 
     awards = results.compute_month(conn, "mc", MONTH, NOW)["awards"]
     assert _unawarded(awards, "tourist")
+
+
+# --- place honors are scoped to the board that earned them --------------
+
+
+def test_place_honors_do_not_cross_boards(conn):
+    """A trip on one board must not decide the other board's honor.
+
+    Before place_activation carried a protocol, one Meshtastic drive put
+    the same name on MeshCore's Peak Tagger, and MeshCore activity
+    decided the Meshtastic Tourist and Park Hopper.
+    """
+    _player(conn, 1, "RED")
+    _place(conn, 701, "landmark")
+    _place_activation(conn, 701, player_id=1, points=5, awarded_at=START + 10,
+                      protocol="mt")
+
+    mt = results.compute_month(conn, "mt", MONTH, NOW)["awards"]
+    mc = results.compute_month(conn, "mc", MONTH, NOW)["awards"]
+    assert _award(mt, "tourist")["player_id"] == 1
+    assert _unawarded(mc, "tourist"), "a Meshtastic visit must not win MeshCore's Tourist"
+
+
+def test_exploration_points_do_not_cross_boards(conn):
+    _player(conn, 1, "RED")
+    _place(conn, 702, "park", points=25)
+    _place_activation(conn, 702, player_id=1, points=25, awarded_at=START + 10,
+                      protocol="mc")
+
+    mc = {s["team"]: s for s in results.compute_month(conn, "mc", MONTH, NOW)["standings"]}
+    mt = {s["team"]: s for s in results.compute_month(conn, "mt", MONTH, NOW)["standings"]}
+    assert mc["RED"]["explorer_points"] == 25
+    assert mt["RED"]["explorer_points"] == 0
+
+
+def test_rows_written_before_the_protocol_column_credit_neither_board(conn):
+    # Untagged legacy rows carry '' and match neither board, rather than
+    # silently counting for both the way they used to.
+    _player(conn, 1, "RED")
+    _place(conn, 703, "landmark")
+    conn.execute(
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (?,?,?,?,?)", (703, 1, "2026-08-19", 5, START + 10))
+    for proto in ("mc", "mt"):
+        assert _unawarded(results.compute_month(conn, proto, MONTH, NOW)["awards"], "tourist")

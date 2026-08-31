@@ -784,7 +784,7 @@ class McIngestor:
             # disagree (a square-scoring "cooldown" ping still credits a
             # place).
             try:
-                credit_places(conn, player_id, cell, ts, repeater_ids, by_air)
+                credit_places(conn, player_id, cell, ts, repeater_ids, by_air, PROTOCOL)
             except Exception:
                 log.exception(
                     "place scoring: credit_places failed for player %d cell %s",
