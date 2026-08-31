@@ -35,6 +35,12 @@ services:
       PUBLIC_HOST: "${PUBLIC_HOST:-meshwars.com}"
       GOOGLE_SITE_VERIFICATION: "${GOOGLE_SITE_VERIFICATION:-}"
       ADMIN_TOKEN: "${ADMIN_TOKEN:-}"
+      # Preview hosts only -- renders the month in progress on /results,
+      # which production deliberately does not do. Defaults false, so
+      # naming it here changes nothing for a normal deploy; it exists so
+      # a preview box can turn it on from its own (gitignored) .env
+      # instead of hand-editing this file, where a deploy would wipe it.
+      RESULTS_PREVIEW_CURRENT_MONTH: "${RESULTS_PREVIEW_CURRENT_MONTH:-false}"
       MC_RAW_LOG_ENABLED: "${MC_RAW_LOG_ENABLED:-false}"
       MC_RAW_LOG_PATH: "${MC_RAW_LOG_PATH:-/data/mc_raw.log}"
       MT_POINTS_PER_FEEDER: "${MT_POINTS_PER_FEEDER:-0.1}"
