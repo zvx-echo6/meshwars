@@ -664,7 +664,9 @@ body {
    cannot see them, quiet enough that it is not the loudest thing on the
    page -- a left rule and a bold lead sentence, not a warning banner. */
 .landing-disclaimer {
-  max-width: 68ch;
+  /* No max-width, unlike the body copy above it: this is meant to run
+     the full width of the page so it reads as a statement about the
+     whole site rather than another paragraph in a column. */
   margin: 28px 0 20px;
   padding: 14px 0 14px 16px;
   border-left: 3px solid var(--mw-gold, #d9b45b);
