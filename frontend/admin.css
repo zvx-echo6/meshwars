@@ -490,6 +490,15 @@ body {
 .adm-field-label input,
 .adm-field-label select { width: 9rem; }
 
+/* Add-net's first row pairs a captioned .adm-field-label (Protocol)
+   with a bare, uncaptioned label input -- .adm-form's default
+   align-items: center then centers each on its own height, and since
+   the captioned field is taller (caption line + gap on top of the
+   control), the bare input's center sits higher than the select's.
+   Bottom-aligning just this row puts both controls' bottom edges on
+   the same line regardless of the caption above one of them. */
+#nf-protocol-row { align-items: flex-end; }
+
 /* ---- nets -------------------------------------------------------- */
 .adm-net {
   border-bottom: 1px solid var(--mw-line);
