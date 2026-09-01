@@ -436,7 +436,13 @@ body {
 .adm-result { margin-top: 8px; font-size: 0.8125rem; color: var(--mw-text-3); }
 
 .adm-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
-.adm-form input { flex: 1 1 180px; }
+/* Direct child only. As a plain descendant selector this also matched
+   inputs nested inside .adm-field-label / .adm-check-label -- and
+   since those wrappers are themselves flex containers (the former
+   column-direction), the 180px flex-basis was read as their main-axis
+   size, stretching number/date inputs into ~180px-tall boxes and
+   growing checkboxes wide enough to wrap their label text. */
+.adm-form > input { flex: 1 1 180px; }
 
 /* Notice section's body field -- the only textarea in the panel, so
    sized and colored to match the plain <input>s around it (same
