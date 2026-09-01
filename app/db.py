@@ -595,10 +595,37 @@ CREATE TABLE IF NOT EXISTS mc_checkin_seen_message (
 CREATE TABLE IF NOT EXISTS checkin_net (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     label         TEXT NOT NULL,
-    protocol      TEXT NOT NULL,              -- 'mc' | 'mt'
+    protocol      TEXT NOT NULL,              -- 'mc' | 'mt' -- the SCORING-BOARD
+                                                -- discriminator (mc_checkin_award.protocol,
+                                                -- checkin_streak, mc_season). DERIVED from
+                                                -- `kind` on every admin write (see
+                                                -- app/admin_ops.py's _validate_net_fields /
+                                                -- app/checkin.py's KIND_PROTOCOL) and stored
+                                                -- alongside it rather than computed on every
+                                                -- read, so the two columns are validated to
+                                                -- agree at write time and every scoring query
+                                                -- can keep reading the plain column it always
+                                                -- has.
+    kind          TEXT NOT NULL DEFAULT '',   -- 'corescope' | 'beacon' | 'meshview' -- the
+                                                -- admin-CHOSEN connector implementation:
+                                                -- which upstream API this net's connector_url
+                                                -- actually speaks. Two kinds ('corescope' and
+                                                -- 'beacon') both drive protocol='mc' -- see
+                                                -- app/checkin.py's CoreScopeClient/BeaconClient
+                                                -- for why both are channel-scoped, directory-
+                                                -- backed MeshCore feeds that normalize to the
+                                                -- exact same shape and can therefore share
+                                                -- every line of identity-resolution code below
+                                                -- them, even though their upstream APIs
+                                                -- disagree on nearly everything else (field
+                                                -- names, timestamp units, whether a channel is
+                                                -- addressed by name or by an instance-local
+                                                -- numeric id).
     connector_url TEXT NOT NULL,              -- base URL, no trailing slash
-    channel       TEXT NOT NULL DEFAULT '',   -- mc: channel name.  mt: unused, ''
-    hashtag       TEXT NOT NULL DEFAULT '',   -- mt: '#freq51'.     mc: unused, ''
+    channel       TEXT NOT NULL DEFAULT '',   -- corescope/beacon: channel NAME (never a
+                                                -- Beacon instance-local numeric id -- see
+                                                -- BeaconClient).  meshview: unused, ''
+    hashtag       TEXT NOT NULL DEFAULT '',   -- meshview: '#freq51'.  corescope/beacon: unused, ''
     weekday       INTEGER NOT NULL,           -- python datetime.weekday(): 0=Mon .. 6=Sun
     start_hour    INTEGER NOT NULL,
     end_hour      INTEGER NOT NULL,           -- inclusive, so 23 means 23:59:59
@@ -1146,6 +1173,31 @@ MIGRATIONS = [
     # "an operator already edited it") -- this migration only has to
     # guarantee the row EXISTS, not what it holds.
     "INSERT OR IGNORE INTO checkin_config(id) VALUES (1)",
+    # Connector KIND made first-class (app/checkin.py's CoreScopeClient/
+    # BeaconClient/KIND_PROTOCOL): `protocol` alone used to imply exactly
+    # one hardcoded connector implementation per value ('mc' meant
+    # CoreScope, full stop) -- now that a second MeshCore-family
+    # connector (Beacon) exists, `kind` is the admin's actual choice and
+    # `protocol` is derived FROM it, so this column has to exist
+    # separately rather than being read back out of `protocol`. Added
+    # with a blank default (not one of the three real values) so the
+    # backfill immediately below can tell "never touched by this
+    # migration" apart from "an operator genuinely configured something"
+    # on a database that somehow already had a non-empty kind column
+    # from a previous partial run of this same migration list.
+    "ALTER TABLE checkin_net ADD COLUMN kind TEXT NOT NULL DEFAULT ''",
+    # Backfill: every net that exists before this migration ever runs
+    # was necessarily hardcoded to the one connector implementation its
+    # protocol always meant -- 'mc' rows are all CoreScope (Beacon did
+    # not exist as an option yet), 'mt' rows are all meshview (the only
+    # Meshtastic connector this app has ever spoken to). Plain UPDATEs,
+    # not folded into the ALTER's own DEFAULT, because the default has
+    # to stay '' (see above) for the "never touched yet" check to mean
+    # anything; idempotent on every later run since the `kind=''` guard
+    # matches nothing once a row has already been backfilled or an
+    # operator has since edited it through the admin API.
+    "UPDATE checkin_net SET kind='corescope' WHERE kind='' AND protocol='mc'",
+    "UPDATE checkin_net SET kind='meshview'  WHERE kind='' AND protocol='mt'",
 ]
 
 PRAGMAS = [

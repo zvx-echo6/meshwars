@@ -33,7 +33,10 @@ from fastapi.responses import JSONResponse
 
 from . import mc_api, results
 from .admin_api import _api_guard
-from .checkin import checkin_streak, load_checkin_config, streak_points, MC_PROTOCOL as CHK_MC
+from .checkin import (
+    checkin_streak, load_checkin_config, streak_points, MC_PROTOCOL as CHK_MC,
+    KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_PROTOCOL,
+)
 from .config import settings
 from .db import connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
@@ -46,7 +49,11 @@ router = APIRouter()
 
 MT_PROTOCOL = "mt"
 _STALE_DAYS = 14
-_NET_PROTOCOLS = ("mc", "mt")
+# The admin-chosen field a net's connector actually is -- protocol
+# ('mc'/'mt') is derived FROM this on every write (see
+# _validate_net_fields and app/checkin.py's KIND_PROTOCOL), never
+# accepted as an independent choice, so the two can never disagree.
+_NET_KINDS = (KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW)
 
 
 # ---- needs attention ---------------------------------------------------
@@ -527,10 +534,28 @@ def _validate_net_fields(body) -> tuple[dict, JSONResponse | None]:
     if not label:
         return {}, JSONResponse({"error": "label is required"}, status_code=400)
 
-    protocol = body.get("protocol")
-    if protocol not in _NET_PROTOCOLS:
+    # `kind` is the admin's actual choice -- which connector
+    # implementation this net's connector_url speaks (see
+    # app/checkin.py's CoreScopeClient/BeaconClient/MeshviewClient).
+    # `protocol` is the scoring-board discriminator and is DERIVED from
+    # kind here, never accepted as an independent field: a caller MAY
+    # send `protocol` (existing behavior, and the admin panel's own GET
+    # /api/admin/checkin/nets response echoes it back), but if they do
+    # it must agree with what this kind derives to, or be rejected --
+    # otherwise a client could persist a net whose protocol (and
+    # therefore which scoring board/season/streak it feeds) disagrees
+    # with which connector it is actually polled through.
+    kind = body.get("kind")
+    if kind not in _NET_KINDS:
         return {}, JSONResponse(
-            {"error": "protocol must be one of: " + ", ".join(_NET_PROTOCOLS)},
+            {"error": "kind must be one of: " + ", ".join(_NET_KINDS)},
+            status_code=400)
+    protocol = KIND_PROTOCOL[kind]
+    explicit_protocol = body.get("protocol")
+    if explicit_protocol is not None and explicit_protocol != protocol:
+        return {}, JSONResponse(
+            {"error": "protocol %r does not match kind %r (expected %r)" % (
+                explicit_protocol, kind, protocol)},
             status_code=400)
 
     connector_url = (body.get("connector_url") or "").strip().rstrip("/")
@@ -567,16 +592,21 @@ def _validate_net_fields(body) -> tuple[dict, JSONResponse | None]:
             return {}, JSONResponse(
                 {"error": "start_date must be YYYY-MM-DD or empty"}, status_code=400)
 
-    # channel/hashtag: required for the protocol that uses it, forced
-    # blank for the one that doesn't -- see app/db.py's checkin_net
-    # schema comment for why storage keeps the unused field '' rather
-    # than whatever a caller happened to send for it.
+    # channel/hashtag: required for the kind that uses it, forced blank
+    # for the one that doesn't -- see app/db.py's checkin_net schema
+    # comment for why storage keeps the unused field '' rather than
+    # whatever a caller happened to send for it. corescope and beacon
+    # are both channel-scoped (see app/checkin.py's module docstring
+    # for why that's the right model for both); for beacon this stores
+    # the channel NAME, never the instance-local numeric id BeaconClient
+    # resolves it to at poll time (see that class -- the id means
+    # nothing outside one Beacon instance and would silently go stale).
     channel = (body.get("channel") or "").strip()
     hashtag = (body.get("hashtag") or "").strip()
-    if protocol == "mc":
+    if kind in (KIND_CORESCOPE, KIND_BEACON):
         if not channel:
             return {}, JSONResponse(
-                {"error": "channel is required for a MeshCore net"}, status_code=400)
+                {"error": "channel is required for a %s net" % kind}, status_code=400)
         hashtag = ""
     else:
         if not hashtag:
@@ -587,7 +617,7 @@ def _validate_net_fields(body) -> tuple[dict, JSONResponse | None]:
     enabled = bool(body.get("enabled", True))
 
     return {
-        "label": label, "protocol": protocol, "connector_url": connector_url,
+        "label": label, "kind": kind, "protocol": protocol, "connector_url": connector_url,
         "channel": channel, "hashtag": hashtag, "weekday": weekday,
         "start_hour": start_hour, "end_hour": end_hour, "timezone": timezone,
         "start_date": start_date, "enabled": int(enabled),
@@ -623,9 +653,10 @@ async def admin_checkin_nets(request: Request):
 @router.post("/api/admin/checkin/nets/create")
 async def admin_checkin_net_create(request: Request):
     """Add a net. See app/db.py's checkin_net table for the model: one
-    row carries a connector, a window, and a channel or hashtag
-    depending on protocol -- see that table's own comment for the mc/mt
-    asymmetry this deliberately preserves rather than unifies.
+    row carries a connector KIND (which upstream API it speaks), a
+    window, and a channel or hashtag depending on that kind -- see that
+    table's own comment for the corescope/beacon/meshview asymmetry
+    this deliberately preserves rather than unifies.
     """
     guard = _api_guard(request)
     if guard is not None:
@@ -643,9 +674,9 @@ async def admin_checkin_net_create(request: Request):
     try:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
-            "INSERT INTO checkin_net(label, protocol, connector_url, channel, hashtag, "
+            "INSERT INTO checkin_net(label, kind, protocol, connector_url, channel, hashtag, "
             " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at) "
-            "VALUES (:label, :protocol, :connector_url, :channel, :hashtag, :weekday, "
+            "VALUES (:label, :kind, :protocol, :connector_url, :channel, :hashtag, :weekday, "
             " :start_hour, :end_hour, :timezone, :start_date, :enabled, :created_at)",
             {**fields, "created_at": now},
         )
@@ -657,7 +688,7 @@ async def admin_checkin_net_create(request: Request):
     finally:
         conn.close()
     log.info("admin: created checkin net %d (%s, %s, %s)",
-              net_id, fields["label"], fields["protocol"], fields["connector_url"])
+              net_id, fields["label"], fields["kind"], fields["connector_url"])
     return JSONResponse({"id": net_id, "created_at": now, **fields}, status_code=201)
 
 
@@ -689,7 +720,7 @@ async def admin_checkin_net_update(request: Request):
     try:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
-            "UPDATE checkin_net SET label=:label, protocol=:protocol, "
+            "UPDATE checkin_net SET label=:label, kind=:kind, protocol=:protocol, "
             " connector_url=:connector_url, channel=:channel, hashtag=:hashtag, "
             " weekday=:weekday, start_hour=:start_hour, end_hour=:end_hour, "
             " timezone=:timezone, start_date=:start_date, enabled=:enabled "
@@ -825,11 +856,36 @@ async def admin_checkin_config_update(request: Request):
     })
 
 
+def _channel_names(items: list) -> list[str]:
+    """Normalize a raw channel listing (a list of bare name strings, or
+    a list of objects each carrying a `name`) down to one simple list
+    of names -- what the admin panel's dropdown actually wants,
+    regardless of which kind's shape it came from. Anything that isn't
+    one of those two shapes per-entry is silently skipped rather than
+    guessed at.
+    """
+    names: list[str] = []
+    for item in items:
+        if isinstance(item, str) and item:
+            names.append(item)
+        elif isinstance(item, dict):
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+    return names
+
+
 @router.get("/api/admin/checkin/channels")
 async def admin_checkin_channels(request: Request):
-    """Proxy one CoreScope connector's channel list, so the admin panel
-    can offer a dropdown instead of a free-text channel name -- a typo
-    here is invisible until the net silently never matches a message.
+    """Proxy one connector's channel list, so the admin panel can offer
+    a dropdown instead of a free-text channel name -- a typo here is
+    invisible until the net silently never matches a message. Kind-
+    aware: corescope and beacon each expose channels through a
+    completely different endpoint and shape (see app/checkin.py's
+    CoreScopeClient/BeaconClient), and meshview has no channel concept
+    at all (it is hashtag-scoped -- see the module docstring), so this
+    always returns a clean, explicit response for that kind rather than
+    an error the admin panel would have to special-case.
 
     Read-only and short-timeout: this is a person filling out a form,
     not anything the poller depends on, so a slow or dead connector
@@ -845,32 +901,65 @@ async def admin_checkin_channels(request: Request):
         return JSONResponse(
             {"error": "connector must be an http:// or https:// URL"}, status_code=400)
 
+    kind = (request.query_params.get("kind") or "").strip()
+    if kind not in _NET_KINDS:
+        return JSONResponse(
+            {"error": "kind must be one of: " + ", ".join(_NET_KINDS)}, status_code=400)
+
+    if kind == KIND_MESHVIEW:
+        # Not an error -- a Meshtastic net is hashtag-scoped, on every
+        # channel, so there is genuinely nothing to list here. See the
+        # docstring above.
+        return JSONResponse({"channels": [], "applicable": False})
+
     try:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(5.0, connect=5.0),
             headers={"Accept": "application/json", "User-Agent": "meshwars/1.0"},
         ) as client:
-            r = await client.get("%s/api/channels" % connector)
+            if kind == KIND_BEACON:
+                r = await client.get("%s/api/v1/channels" % connector, params={"limit": 1000})
+            else:
+                r = await client.get("%s/api/channels" % connector)
             r.raise_for_status()
             data = r.json()
     except Exception as e:
         return JSONResponse({"error": "could not reach connector: %s" % e}, status_code=502)
 
-    # Tolerant of shape, same reasoning app/meshview_client.py's
-    # _unwrap_list applies to meshview's own envelopes -- CoreScope's
-    # exact /api/channels shape is not otherwise documented here, so
-    # this accepts a bare list or any of the common wrapper keys rather
-    # than assuming one and returning empty for the others.
-    channels: list = []
+    if kind == KIND_BEACON:
+        # Only keyKnown channels carry a `name` at all -- the rest are
+        # unnamed and can never be typed into a net's `channel`, so
+        # they are excluded here rather than offered as a dead-end
+        # dropdown entry -- see BeaconClient's own comment on this.
+        items = data.get("items") if isinstance(data, dict) else None
+        channels: list[str] = []
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict) or item.get("keyKnown") is not True:
+                    continue
+                name = item.get("name")
+                if isinstance(name, str) and name:
+                    channels.append(name)
+        return JSONResponse({"channels": channels, "applicable": True})
+
+    # corescope: tolerant of shape, same reasoning
+    # app/meshview_client.py's _unwrap_list applies to meshview's own
+    # envelopes -- CoreScope's exact /api/channels shape is not
+    # otherwise documented here, so this accepts a bare list or any of
+    # the common wrapper keys rather than assuming one and returning
+    # empty for the others. Normalized down to plain names either way
+    # (see _channel_names) so the admin panel gets one simple shape
+    # regardless of which kind it asked for.
+    raw: list = []
     if isinstance(data, list):
-        channels = data
+        raw = data
     elif isinstance(data, dict):
         for key in ("channels", "data", "results"):
             v = data.get(key)
             if isinstance(v, list):
-                channels = v
+                raw = v
                 break
-    return JSONResponse({"channels": channels})
+    return JSONResponse({"channels": _channel_names(raw), "applicable": True})
 
 
 @router.get("/api/admin/notice")

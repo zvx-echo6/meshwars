@@ -10,7 +10,7 @@
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260901-3" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260901-4" />
 </head>
 <body>
 
@@ -93,7 +93,7 @@
 
         <section class="adm-section" data-section="nets" hidden>
           <h2 class="adm-h2">Nets</h2>
-          <p class="adm-hint">Every weekly net the poller watches, on either board, plus the settings that apply to all of them at once. MeshCore and Meshtastic nets are found differently &mdash; a MeshCore net is scoped to one channel on its connector, a Meshtastic net is found by its hashtag appearing in a message on any channel &mdash; so the two protocols keep their own fields below rather than sharing one merged form.</p>
+          <p class="adm-hint">Every weekly net the poller watches, on either board, plus the settings that apply to all of them at once. Nets are found differently depending on their connector kind &mdash; a MeshCore net (CoreScope or Beacon) is scoped to one channel on its connector, a Meshtastic net (Meshview) is found by its hashtag appearing in a message on any channel &mdash; so the form below shows different fields per connector kind rather than one merged form.</p>
 
           <h3 class="adm-h3">Settings</h3>
           <p class="adm-hint">Applies to every net at once. Read fresh on the poller's next cycle &mdash; no restart.</p>
@@ -119,11 +119,12 @@
           <div id="nets"></div>
 
           <h3 class="adm-h3" id="net-form-title">Add a net</h3>
-          <div class="adm-form" id="nf-protocol-row">
-            <label class="adm-field-label">Protocol
-              <select id="nf-protocol">
-                <option value="mc">MeshCore</option>
-                <option value="mt">Meshtastic</option>
+          <div class="adm-form" id="nf-kind-row">
+            <label class="adm-field-label">Connector
+              <select id="nf-kind">
+                <option value="corescope">MC: CoreScope</option>
+                <option value="beacon">MC: Beacon</option>
+                <option value="meshview">MT: Meshview</option>
               </select>
             </label>
             <input type="text" id="nf-label" autocomplete="off" placeholder="label, e.g. Wednesday Net" />
@@ -232,6 +233,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260901-1"></script>
+  <script src="/static/admin.js?v=20260901-4"></script>
 </body>
 </html>

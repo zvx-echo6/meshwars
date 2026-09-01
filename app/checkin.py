@@ -178,6 +178,25 @@ log = logging.getLogger("checkin")
 MC_PROTOCOL = "mc"
 MT_PROTOCOL = "mt"
 
+# Connector KIND is the admin-chosen field (checkin_net.kind) -- which
+# upstream API a net's connector_url actually speaks. `protocol` above
+# is the scoring-board discriminator every award/season/streak query
+# keys on and stays exactly {mc, mt} forever; `kind` is free to grow a
+# third option (as it just did, adding 'beacon') without either board
+# gaining a third identity. KIND_PROTOCOL is the ONE place that mapping
+# is expressed -- app/admin_ops.py's _validate_net_fields derives and
+# validates `protocol` through this same dict on every write, so the
+# two columns can never independently drift out of agreement.
+KIND_CORESCOPE = "corescope"
+KIND_BEACON = "beacon"
+KIND_MESHVIEW = "meshview"
+
+KIND_PROTOCOL = {
+    KIND_CORESCOPE: MC_PROTOCOL,
+    KIND_BEACON: MC_PROTOCOL,
+    KIND_MESHVIEW: MT_PROTOCOL,
+}
+
 
 def net_date_for_net(net, ts: int) -> str | None:
     """Local net date (YYYY-MM-DD) for `ts` if it falls inside THIS net's
@@ -303,10 +322,15 @@ def seed_nets_from_env(conn) -> None:
 
     now = int(time.time())
     if settings.mc_checkin_base_url:
+        # settings.mc_checkin_base_url has only ever pointed at a
+        # CoreScope instance (live.mwmesh.com in production) -- 'beacon'
+        # was never an option when this env var was the only way to
+        # configure a MeshCore net, so 'corescope' is not a guess, it is
+        # what this seed has always meant.
         conn.execute(
-            "INSERT INTO checkin_net(label, protocol, connector_url, channel, hashtag, "
+            "INSERT INTO checkin_net(label, kind, protocol, connector_url, channel, hashtag, "
             " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at) "
-            "VALUES (?, 'mc', ?, ?, '', ?, ?, ?, ?, ?, 1, ?)",
+            "VALUES (?, 'corescope', 'mc', ?, ?, '', ?, ?, ?, ?, ?, 1, ?)",
             (
                 "Weekly Net",
                 settings.mc_checkin_base_url.rstrip("/"),
@@ -320,9 +344,9 @@ def seed_nets_from_env(conn) -> None:
             ),
         )
     conn.execute(
-        "INSERT INTO checkin_net(label, protocol, connector_url, channel, hashtag, "
+        "INSERT INTO checkin_net(label, kind, protocol, connector_url, channel, hashtag, "
         " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at) "
-        "VALUES (?, 'mt', ?, '', ?, ?, ?, ?, ?, ?, 1, ?)",
+        "VALUES (?, 'meshview', 'mt', ?, '', ?, ?, ?, ?, ?, ?, 1, ?)",
         (
             "Weekly Net (Meshtastic)",
             settings.meshview_url.rstrip("/"),
@@ -527,10 +551,43 @@ def _mark_seen(conn, connector: str, packet_id: str, seen_at: int) -> None:
     )
 
 
-# ---- MeshCore: feed client -------------------------------------------
+# ---- MeshCore-family connector clients ---------------------------------
+#
+# Two kinds (KIND_CORESCOPE, KIND_BEACON) share one identity-resolution
+# model -- a channel-scoped message feed plus a public-key node
+# directory (see the module docstring's MeshCore section) -- even though
+# their upstream APIs agree on almost nothing else: field names,
+# timestamp encoding, how a channel is even addressed. Both clients
+# below implement the same small two-method shape:
+#
+#   fetch_messages(channel) -> list of NORMALIZED message dicts, each
+#     carrying at minimum packet_id (str), sender_name (raw, un-
+#     normalized display name or None), text, and ts (epoch seconds,
+#     or None if the upstream timestamp was missing/unparseable).
+#   fetch_directory(limit)  -> list of directory entries carrying at
+#     minimum name/public_key (see each class for what else it carries).
+#
+# Normalizing HERE, once, at the one place each upstream's raw shape
+# enters this module, is what lets every downstream reader --
+# _process_mc_message, _build_directory_bridge, _resolve_mc_identities --
+# stay completely kind-agnostic: none of them know or care whether a
+# given message/directory entry came from a CoreScope instance or a
+# Beacon instance, and a Beacon directory + a CoreScope directory can be
+# unioned together (CheckinPoller's cross-connector identity fallback)
+# with no special-casing at all, because both already agree on shape by
+# the time either function sees them.
+#
+# packet_id is filtered to a valid one at THIS boundary, not downstream:
+# an upstream message with no usable id can never be dedup-tracked or
+# awarded no matter what else it carries, so dropping it here (rather
+# than handing it to _process_mc_message to discover that) is a pure
+# no-op for behavior -- exactly the same messages end up silently
+# skipped either way, see below for why a mark-seen skip and a drop-at-
+# the-client skip are equivalent when nothing ever reads or writes a
+# checkin_seen_message row for either case.
 
 
-class McLiveClient:
+class CoreScopeClient:
     """HTTP client for one CoreScope instance's two check-in feeds: a
     channel's messages, and the public-key node directory used by the
     identity bridge (see the module docstring). Not
@@ -550,7 +607,7 @@ class McLiveClient:
     nets on the same CoreScope instance (different channels) share one
     connection pool instead of opening a second one to the same host.
     `base_url` is always net-supplied now (there is no longer a single
-    settings.mc_checkin_base_url a bare McLiveClient() could default
+    settings.mc_checkin_base_url a bare CoreScopeClient() could default
     to -- that setting is only ever read once, by seed_nets_from_env,
     to create the FIRST such net).
     """
@@ -571,33 +628,249 @@ class McLiveClient:
             r.raise_for_status()
             return r.json()
         except (httpx.HTTPError, httpx.TimeoutException) as e:
-            log.warning("checkin: mc request %s failed: %s", path, e)
+            log.warning("checkin: corescope request %s failed: %s", path, e)
             return None
 
-    async def messages(self, channel: str) -> list[dict]:
-        """Newest 100 messages in `channel`, oldest first. `channel` is
-        percent-encoded here (not by the caller) -- it contains a literal
-        "#", which is a URL fragment separator and must never reach
-        httpx unescaped or everything after it would be silently dropped
-        from the request.
+    async def fetch_messages(self, channel: str, directory_refresh_seconds: int = 900) -> list[dict]:
+        """Newest 100 messages in `channel`, oldest first, normalized to
+        packet_id/sender_name/text/ts. `channel` is percent-encoded here
+        (not by the caller) -- it contains a literal "#", which is a URL
+        fragment separator and must never reach httpx unescaped or
+        everything after it would be silently dropped from the request.
+
+        `directory_refresh_seconds` is accepted and ignored -- CoreScope
+        has no channel-name-to-id cache to keep fresh (a channel IS its
+        name here, see BeaconClient for the kind that needs this), but
+        both clients take the same call signature so CheckinPoller never
+        has to branch on kind just to make the call.
         """
         data = await self._get(f"/api/channels/{quote(channel, safe='')}/messages")
         if not isinstance(data, dict):
             return []
-        msgs = data.get("messages")
-        return msgs if isinstance(msgs, list) else []
+        raw = data.get("messages")
+        if not isinstance(raw, list):
+            return []
+        out: list[dict] = []
+        for m in raw:
+            if not isinstance(m, dict):
+                continue
+            packet_id = m.get("packetId")
+            if not isinstance(packet_id, int):
+                # No usable id -- see this section's header comment for
+                # why dropping it here is behaviorally identical to the
+                # old per-message `return` inside _process_mc_message.
+                continue
+            out.append({
+                "packet_id": str(packet_id),
+                "sender_name": m.get("sender"),
+                "text": m.get("text"),
+                "ts": _parse_iso_ts(m.get("timestamp")),
+            })
+        return out
 
-    async def nodes(self, limit: int) -> list[dict]:
-        """Up to `limit` directory entries. `limit` is the one paging
-        parameter this endpoint actually honors -- per-page/page/size
-        and similar are silently ignored, so passing anything else would
-        look like it worked while quietly returning the default page.
+    async def fetch_directory(self, limit: int) -> list[dict]:
+        """Up to `limit` directory entries, passed through as-is --
+        CoreScope's /api/nodes shape already carries every field this
+        module's readers need (name, public_key for the identity bridge;
+        role, last_seen, lat, lon for companion_directory_entries' node
+        picker), so there is nothing to translate here, unlike
+        BeaconClient's directory below which only ever carries
+        name/public_key. `limit` is the one paging parameter this
+        endpoint actually honors -- per-page/page/size and similar are
+        silently ignored, so passing anything else would look like it
+        worked while quietly returning the default page.
         """
         data = await self._get("/api/nodes", {"limit": limit})
         if not isinstance(data, dict):
             return []
         nodes = data.get("nodes")
         return nodes if isinstance(nodes, list) else []
+
+
+class BeaconClient:
+    """HTTP client for one MeshCore-Beacon (beacon-server) instance --
+    the second KIND_BEACON option for a MeshCore-family net, alongside
+    CoreScopeClient above. Same tolerant-of-slow-or-down style and same
+    two-method shape (fetch_messages/fetch_directory), but talks a
+    materially different API in four specific, non-obvious ways:
+
+    1. Channels are addressed by a NUMERIC, INSTANCE-LOCAL id, never a
+       name -- checkin_net.channel still stores the human channel NAME
+       (the same column corescope nets use; see app/db.py), so every
+       message fetch has to resolve name -> id first. That id means
+       nothing on a different Beacon instance, or even the same
+       instance after a channel is re-created, so it is never persisted
+       to the database -- only cached in memory, per client instance
+       (i.e. per connector_url, the same scope the HTTP connection pool
+       already has), and re-resolved on a miss or once the cache goes
+       stale. See _resolve_channel_id below.
+    2. Only a channel with keyKnown: true carries a `name` at all -- the
+       rest have no name and can therefore never be matched by one, so
+       they can never be configured as a net's `channel` in the first
+       place; _refresh_channel_cache filters to exactly those.
+    3. Message timestamps (`sentAt`) are epoch MILLISECONDS, not the
+       RFC3339 strings CoreScope uses -- divided down to seconds at
+       normalization time so nothing downstream ever has to know which
+       kind produced a given message.
+    4. Node-directory pagination is CURSOR-based (`nextCursor`/
+       `hasMore`), not a single limit-capped page like CoreScope's --
+       see fetch_directory.
+
+    If the configured channel name cannot be resolved to a keyKnown
+    channel, fetch_messages raises a plain RuntimeError with a clean
+    message rather than returning silently -- CheckinPoller's existing
+    per-feed try/except (the same one that already catches a connector
+    being down) turns that into exactly the per-net last_poll_error this
+    needs, with no separate error-plumbing path required.
+    """
+
+    def __init__(self, base_url: str) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            headers={"Accept": "application/json", "User-Agent": "meshwars/1.0"},
+        )
+        # channel NAME -> instance-local numeric id, and when that cache
+        # was last (re)populated (monotonic clock, same convention
+        # CheckinPoller._mc_directory_fetched_at uses) -- see
+        # _resolve_channel_id. Deliberately scoped to this client (one
+        # Beacon instance), not per-net: two nets on the same Beacon
+        # connector share this cache exactly the way they already share
+        # the underlying HTTP connection pool.
+        self._channel_cache: dict[str, int] = {}
+        self._channel_cache_fetched_at: float = 0.0
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def _get(self, path: str, params: dict | None = None) -> dict | None:
+        try:
+            r = await self._client.get(path, params=params)
+            r.raise_for_status()
+            return r.json()
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            log.warning("checkin: beacon request %s failed: %s", path, e)
+            return None
+
+    async def _refresh_channel_cache(self) -> None:
+        data = await self._get("/api/v1/channels", {"limit": 1000})
+        if not isinstance(data, dict):
+            return  # request failed -- leave the previous cache (if any) in place
+        items = data.get("items")
+        if not isinstance(items, list):
+            return
+        cache: dict[str, int] = {}
+        for item in items:
+            if not isinstance(item, dict) or item.get("keyKnown") is not True:
+                continue  # no `name` at all on these -- see class docstring, point 2
+            name = item.get("name")
+            cid = item.get("id")
+            if isinstance(name, str) and name and isinstance(cid, int):
+                cache[name] = cid
+        self._channel_cache = cache
+        self._channel_cache_fetched_at = time.monotonic()
+
+    async def _resolve_channel_id(self, channel_name: str, refresh_seconds: int) -> int | None:
+        """channel NAME -> this instance's current numeric id for it, or
+        None if no keyKnown channel by that name exists. Refreshes the
+        cache if it's past `refresh_seconds` old (reusing
+        checkin_config.directory_refresh_seconds -- the same knob that
+        already governs how often the MeshCore directory itself is
+        re-fetched, rather than inventing a second timing knob for a
+        second kind of cache) -- and, separately, re-resolves on a
+        cache MISS even when the cache is still fresh, since a channel
+        an admin just created should not have to wait out a full
+        refresh interval before its net can ever poll successfully.
+        """
+        stale = (time.monotonic() - self._channel_cache_fetched_at) >= refresh_seconds
+        if stale or not self._channel_cache:
+            await self._refresh_channel_cache()
+        cid = self._channel_cache.get(channel_name)
+        if cid is None and self._channel_cache_fetched_at:
+            await self._refresh_channel_cache()  # miss on an otherwise-fresh cache -- try once more
+            cid = self._channel_cache.get(channel_name)
+        return cid
+
+    async def fetch_messages(self, channel: str, directory_refresh_seconds: int = 900) -> list[dict]:
+        """Newest 100 messages in the channel named `channel`, normalized
+        to packet_id/sender_name/text/ts. See class docstring points 1
+        and 3 for the id-resolution and millisecond-timestamp handling.
+        """
+        channel_id = await self._resolve_channel_id(channel, directory_refresh_seconds)
+        if channel_id is None:
+            # Clean, per-net error -- NOT a bug in this client -- see
+            # class docstring for why raising here (rather than
+            # swallowing to an empty list) is exactly what turns into a
+            # useful last_poll_error on the calling net.
+            raise RuntimeError(
+                "channel not found or key unknown on this Beacon instance: %r" % channel
+            )
+        data = await self._get(f"/api/v1/channels/{channel_id}/messages", {"limit": 100})
+        if not isinstance(data, dict):
+            return []
+        raw = data.get("items")
+        if not isinstance(raw, list):
+            return []
+        out: list[dict] = []
+        for m in raw:
+            if not isinstance(m, dict):
+                continue
+            packet_id = m.get("id")
+            if not isinstance(packet_id, int):
+                continue  # see the client-abstraction header comment above
+            sent_at = m.get("sentAt")
+            ts = int(sent_at // 1000) if isinstance(sent_at, (int, float)) else None
+            out.append({
+                "packet_id": str(packet_id),
+                "sender_name": m.get("senderName"),
+                "text": m.get("content"),
+                "ts": ts,
+            })
+        return out
+
+    async def fetch_directory(self, limit: int) -> list[dict]:
+        """Up to `limit` directory entries, normalized to {name,
+        public_key} -- the minimum the identity bridge needs (see
+        _build_directory_bridge). Unlike CoreScopeClient's directory,
+        Beacon's node objects carry no role/last_seen/lat/lon this
+        module currently reads, so there is nothing else to carry
+        through; a null `name` is skipped outright (the field is
+        nullable on this endpoint) rather than producing an entry
+        nothing could ever match by name.
+
+        Pagination is CURSOR-based, not a single capped page: follow
+        `nextCursor` while `hasMore` is true, up to a fixed page cap so
+        a huge or misbehaving instance can never spin this loop
+        forever -- 50 pages is far more than any real deployment needs
+        today, a safety rail rather than an expected ceiling.
+        """
+        out: list[dict] = []
+        cursor: str | None = None
+        for _ in range(50):
+            params: dict = {"limit": limit}
+            if cursor is not None:
+                params["cursor"] = cursor
+            data = await self._get("/api/v1/nodes", params)
+            if not isinstance(data, dict):
+                break
+            items = data.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get("name")
+                    pubkey = item.get("publicKey")
+                    if not isinstance(name, str) or not name:
+                        continue  # nullable on this endpoint -- see docstring
+                    if not isinstance(pubkey, str) or not pubkey:
+                        continue
+                    out.append({"name": name, "public_key": pubkey})
+            if len(out) >= limit or data.get("hasMore") is not True:
+                break
+            cursor = data.get("nextCursor")
+            if cursor is None:
+                break
+        return out[:limit]
 
 
 # ---- MeshCore: identity resolution -------------------------------------
@@ -1007,11 +1280,22 @@ class CheckinPoller:
     instance stays under its own rate limiter
     (settings.upstream_rate_per_sec) -- any OTHER Meshtastic
     connector_url an admin configures gets its own MeshviewClient,
-    built lazily and owned (and closed) by this poller. Every MeshCore
-    connector gets its own McLiveClient the same way; there is no
-    shared MeshCore client to inherit, since app/mc_ingest.py's
-    wardriving ingest is a completely separate feature from these
-    check-in feeds.
+    built lazily and owned (and closed) by this poller. Every MeshCore-
+    family connector (KIND_CORESCOPE or KIND_BEACON) gets its own
+    CoreScopeClient/BeaconClient the same way; there is no shared
+    MeshCore client to inherit, since app/mc_ingest.py's wardriving
+    ingest is a completely separate feature from these check-in feeds.
+
+    Dispatches on `kind`, not `protocol`, when deciding which client
+    class a connector_url gets (_mc_client_for) -- protocol only ever
+    tells you the SCORING BOARD (mc vs mt), which is no longer enough
+    to tell you which upstream API to actually call now that two kinds
+    (corescope, beacon) both drive protocol='mc'. Once a client exists
+    for a connector_url, every function downstream of it
+    (_process_mc_message, _resolve_mc_identities, the directory bridge)
+    talks to it purely through the normalized shape CoreScopeClient/
+    BeaconClient both produce -- see that section's header comment
+    above -- and never needs to know which kind it actually is.
     """
 
     def __init__(self, mt_client: MeshviewClient) -> None:
@@ -1022,7 +1306,14 @@ class CheckinPoller:
         self._shared_mt_url = settings.meshview_url
         self._shared_mt_client = mt_client
         self._mt_clients: dict[str, MeshviewClient] = {}
-        self._mc_clients: dict[str, McLiveClient] = {}
+        # One entry per connector_url regardless of which MeshCore-
+        # family kind it is -- a CoreScopeClient or a BeaconClient,
+        # whichever _mc_client_for built for it the first time this
+        # connector_url was seen (see that method: a connector_url is
+        # assumed to always mean the same upstream kind, same as this
+        # module already assumes it always means the same upstream
+        # instance).
+        self._mc_clients: dict[str, CoreScopeClient | BeaconClient] = {}
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         # MeshCore directory cache, one entry per connector_url -- see
@@ -1090,10 +1381,10 @@ class CheckinPoller:
 
     async def _poll_once(self) -> int:
         """One cycle: reload config+nets fresh (never cached -- see the
-        module docstring), poll every enabled net grouped by protocol,
-        and return the poll interval to sleep for next -- also read
-        fresh, so tightening or loosening it from the admin panel takes
-        effect on the very next sleep, not after a restart.
+        module docstring), poll every enabled net grouped by KIND
+        FAMILY, and return the poll interval to sleep for next -- also
+        read fresh, so tightening or loosening it from the admin panel
+        takes effect on the very next sleep, not after a restart.
         """
         conn = connect()
         try:
@@ -1107,8 +1398,18 @@ class CheckinPoller:
         if not config["enabled"]:
             return config["poll_interval_seconds"]
 
-        mc_nets = [n for n in nets if n["protocol"] == MC_PROTOCOL]
-        mt_nets = [n for n in nets if n["protocol"] == MT_PROTOCOL]
+        # Grouped by KIND FAMILY, not by protocol: corescope and beacon
+        # are two different kinds but share one polling/identity model
+        # (channel-scoped feed + public-key directory), so both land in
+        # mc_nets and are handled by _poll_mc below, which dispatches to
+        # the right client per net's own `kind` (see _mc_client_for).
+        # meshview is protocol='mt' AND the only kind that maps to it
+        # today, so this grouping is currently equivalent to the old
+        # protocol-based one for mt_nets -- but it is keyed on kind so
+        # that stays true by construction, not by coincidence, if a
+        # second Meshtastic-family kind is ever added.
+        mc_nets = [n for n in nets if n["kind"] in (KIND_CORESCOPE, KIND_BEACON)]
+        mt_nets = [n for n in nets if n["kind"] == KIND_MESHVIEW]
 
         # The two protocols are independent and one going down must
         # never block the other -- each gets its own try/except, same
@@ -1137,10 +1438,19 @@ class CheckinPoller:
 
     # ---- client pooling ----------------------------------------------
 
-    def _mc_client_for(self, connector_url: str) -> McLiveClient:
+    def _mc_client_for(self, kind: str, connector_url: str) -> CoreScopeClient | BeaconClient:
+        """One HTTP client per distinct connector_url, shared by every
+        net on that connector regardless of which of the two MeshCore-
+        family kinds it is. `kind` only matters the FIRST time a given
+        connector_url is seen -- it decides which class gets
+        constructed; after that, this is assumed to always mean the
+        same upstream kind for that URL, the same assumption the rest
+        of this module already makes about a connector_url always
+        meaning the same upstream instance.
+        """
         client = self._mc_clients.get(connector_url)
         if client is None:
-            client = McLiveClient(connector_url)
+            client = BeaconClient(connector_url) if kind == KIND_BEACON else CoreScopeClient(connector_url)
             self._mc_clients[connector_url] = client
         return client
 
@@ -1155,13 +1465,13 @@ class CheckinPoller:
 
     # ---- MeshCore directory cache --------------------------------------
 
-    async def _refresh_mc_directory_if_stale(self, connector_url: str, config: dict) -> None:
+    async def _refresh_mc_directory_if_stale(self, kind: str, connector_url: str, config: dict) -> None:
         now = time.monotonic()
         fetched_at = self._mc_directory_fetched_at.get(connector_url, 0.0)
         if connector_url in self._mc_directory and now - fetched_at < config["directory_refresh_seconds"]:
             return
-        client = self._mc_client_for(connector_url)
-        nodes = await client.nodes(config["directory_limit"])
+        client = self._mc_client_for(kind, connector_url)
+        nodes = await client.fetch_directory(config["directory_limit"])
         if nodes:
             self._mc_directory[connector_url] = nodes
             self._mc_directory_fetched_at[connector_url] = now
@@ -1179,16 +1489,18 @@ class CheckinPoller:
             )
 
     def directory_snapshot(self, connector_url: str | None = None) -> list[dict]:
-        """Read-only copy of a cached CoreScope directory, for
-        app/checkin_api.py's node-picker endpoint. With `connector_url`,
-        just that connector's cache; without one, the union across every
-        connector currently cached -- with today's common case of a
-        single configured connector these are the same list, so this is
-        a pure widening, never a narrowing, of what that endpoint used
-        to return. Reads the SAME cache _refresh_mc_directory_if_stale
-        maintains on its own per-connector interval -- that endpoint is
-        a person clicking around a form, not something to hit any
-        upstream for on every request.
+        """Read-only copy of a cached MeshCore-family directory (a
+        CoreScope connector's or a Beacon connector's -- both normalize
+        to the same shape, see the client-abstraction header comment
+        above), for app/checkin_api.py's node-picker endpoint. With
+        `connector_url`, just that connector's cache; without one, the
+        union across every connector currently cached -- with today's
+        common case of a single configured connector these are the same
+        list, so this is a pure widening, never a narrowing, of what
+        that endpoint used to return. Reads the SAME cache
+        _refresh_mc_directory_if_stale maintains on its own per-
+        connector interval -- that endpoint is a person clicking around
+        a form, not something to hit any upstream for on every request.
         """
         if connector_url is not None:
             return list(self._mc_directory.get(connector_url, []))
@@ -1201,8 +1513,13 @@ class CheckinPoller:
 
     async def _poll_mc(self, nets: list[dict], config: dict) -> None:
         connectors = sorted({n["connector_url"] for n in nets})
+        # kind_by_connector: a connector_url is assumed to always mean
+        # one upstream kind (see _mc_client_for) -- picking whichever
+        # net currently on it happens to be first is just how that
+        # kind gets discovered the first time this connector is touched.
+        kind_by_connector = {n["connector_url"]: n["kind"] for n in nets}
         for url in connectors:
-            await self._refresh_mc_directory_if_stale(url, config)
+            await self._refresh_mc_directory_if_stale(kind_by_connector[url], url, config)
 
         now = int(time.time())
         # Season bookkeeping, same call app/mc_ingest.py's batch worker
@@ -1231,8 +1548,16 @@ class CheckinPoller:
             feeds.setdefault((n["connector_url"], n["channel"]), []).append(n)
 
         for (connector_url, channel), feed_nets in feeds.items():
+            # Every net in one feed group shares (connector_url,
+            # channel) by construction, but not necessarily `kind` in
+            # some hand-edited/misconfigured database -- take the
+            # first's, same as kind_by_connector above; there is no
+            # meaningful way for two nets pointed at the identical
+            # connector+channel to disagree about which upstream API
+            # actually serves it.
+            kind = feed_nets[0]["kind"]
             try:
-                await self._poll_mc_feed(connector_url, channel, feed_nets, connectors, season_id, now, config)
+                await self._poll_mc_feed(kind, connector_url, channel, feed_nets, connectors, season_id, now, config)
             except Exception as e:
                 log.exception("checkin: mc feed %s#%s poll failed", connector_url, channel)
                 for n in feed_nets:
@@ -1242,11 +1567,11 @@ class CheckinPoller:
                     await self._record_net_ok(n["id"], now)
 
     async def _poll_mc_feed(
-        self, connector_url: str, channel: str, feed_nets: list[dict],
+        self, kind: str, connector_url: str, channel: str, feed_nets: list[dict],
         all_connectors: list[str], season_id: int, received_at: int, config: dict,
     ) -> None:
-        client = self._mc_client_for(connector_url)
-        messages = await client.messages(channel)
+        client = self._mc_client_for(kind, connector_url)
+        messages = await client.fetch_messages(channel, config["directory_refresh_seconds"])
         if not messages:
             return
 
@@ -1262,17 +1587,15 @@ class CheckinPoller:
         self, conn, connector_url: str, nets: list[dict], m: dict, season_id: int,
         resolved: dict, config: dict, received_at: int,
     ) -> None:
-        """Evaluate one fetched message against every net sharing this
-        EXACT (connector, channel) feed (usually just one). Settled
-        (marked seen) only once none of them is left wanting a retry --
-        see _mark_seen's docstring for what settled means and why a
-        message a shared feed's OTHER net might still need must not be
-        buried by this one's verdict.
+        """Evaluate one fetched, ALREADY-NORMALIZED message (see the
+        client-abstraction header comment above CoreScopeClient) against
+        every net sharing this EXACT (connector, channel) feed (usually
+        just one). Settled (marked seen) only once none of them is left
+        wanting a retry -- see _mark_seen's docstring for what settled
+        means and why a message a shared feed's OTHER net might still
+        need must not be buried by this one's verdict.
         """
-        packet_id = m.get("packetId")
-        if not isinstance(packet_id, int):
-            return
-        pid_str = str(packet_id)
+        pid_str = m["packet_id"]  # always present and a str -- the client dropped anything without one
 
         # Settled on an earlier poll -- READ first, rather than letting
         # an INSERT OR IGNORE claim the id up front. Marking a message
@@ -1287,12 +1610,12 @@ class CheckinPoller:
         if _seen(conn, connector_url, pid_str):
             return
 
-        ts = _parse_iso_ts(m.get("timestamp"))
+        ts = m.get("ts")
         if ts is None:
             _mark_seen(conn, connector_url, pid_str, received_at)
             return
 
-        normalized = normalize_sender_name(m.get("sender"))
+        normalized = normalize_sender_name(m.get("sender_name"))
         if normalized is None:
             _mark_seen(conn, connector_url, pid_str, received_at)
             return

@@ -534,6 +534,22 @@ let allNets = [];
 let editingNetId = null;   // null while the form is adding, a net id while editing
 const NET_WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
+// The three connector kinds an operator can pick (see app/checkin.py's
+// KIND_CORESCOPE/KIND_BEACON/KIND_MESHVIEW). `protocol` ('mc'/'mt') is
+// derived from this on the backend and is never sent by this form --
+// see _validate_net_fields in app/admin_ops.py. Labels match the
+// select options in admin.html exactly; the badge reuses the same
+// short label so a row and the form agree on what to call a kind.
+const NET_KIND_LABELS = {
+  corescope: 'MC: CoreScope',
+  beacon: 'MC: Beacon',
+  meshview: 'MT: Meshview',
+};
+// corescope and beacon are both channel-scoped connectors (a net picks
+// one channel on the connector); meshview is hashtag-scoped (found by
+// its hashtag on any channel) -- see app/checkin.py's module docstring.
+function netKindHasChannel(kind) { return kind !== 'meshview'; }
+
 function pad2(n) { return String(n).padStart(2, '0'); }
 
 // end_hour is inclusive through :59:59 (see app/db.py's checkin_net
@@ -586,9 +602,12 @@ function renderNetRow(n) {
   const wrap = el('div', { className: 'adm-net' });
   const row = el('div', { className: 'adm-row' });
   row.appendChild(el('strong', { text: n.label }));
-  row.appendChild(el('span', { className: 'adm-badge', text: n.protocol }));
+  // Shows the KIND, not the protocol -- corescope and beacon are both
+  // 'mc' and otherwise indistinguishable in this row, so a protocol
+  // badge would leave an operator unable to tell them apart.
+  row.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
   row.appendChild(el('span', { className: 'adm-mono', text: n.connector_url }));
-  row.appendChild(el('span', { text: n.protocol === 'mc' ? n.channel : n.hashtag }));
+  row.appendChild(el('span', { text: netKindHasChannel(n.kind) ? n.channel : n.hashtag }));
   row.appendChild(el('span', { text: netWindowText(n) }));
   row.appendChild(el('span', {
     className: 'adm-badge ' + (n.enabled ? 'adm-badge-ok' : 'adm-badge-bad'),
@@ -638,22 +657,34 @@ async function loadNets() {
   }
 }
 
-function updateNetFormProtocol() {
-  const proto = document.getElementById('nf-protocol').value;
-  document.getElementById('nf-channel-row').hidden = proto !== 'mc';
-  document.getElementById('nf-hashtag-row').hidden = proto !== 'mt';
+function updateNetFormKind() {
+  const kind = document.getElementById('nf-kind').value;
+  document.getElementById('nf-channel-row').hidden = !netKindHasChannel(kind);
+  document.getElementById('nf-hashtag-row').hidden = netKindHasChannel(kind);
 }
 
 async function loadNetChannels(b) {
   const connector = document.getElementById('nf-connector').value.trim();
+  const kind = document.getElementById('nf-kind').value;
   const out = document.getElementById('nf-result');
   out.replaceChildren();
   if (!connector) { out.textContent = 'Enter a connector URL first.'; return; }
   b.disabled = true;
   try {
-    const r = await api('/api/admin/checkin/channels?connector=' + encodeURIComponent(connector));
+    const r = await api('/api/admin/checkin/channels?connector=' + encodeURIComponent(connector) +
+      '&kind=' + encodeURIComponent(kind));
     const select = document.getElementById('nf-channel-select');
     select.replaceChildren();
+    // applicable is false only for a kind with no channel concept at
+    // all (meshview) -- see GET /api/admin/checkin/channels. The
+    // button that calls this is hidden for that kind, but this stays
+    // defensive rather than assuming the caller never changes.
+    if (!r.applicable) {
+      select.hidden = true;
+      out.textContent = 'This connector kind has no channel list -- type the channel name by hand.';
+      b.disabled = false;
+      return;
+    }
     (r.channels || []).forEach((c) => {
       // Tolerant of shape, same reasoning the backend proxy applies to
       // CoreScope's own response: a channel might be a bare string or
@@ -681,8 +712,8 @@ async function loadNetChannels(b) {
 
 function resetNetForm() {
   editingNetId = null;
-  document.getElementById('nf-protocol').value = 'mc';
-  updateNetFormProtocol();
+  document.getElementById('nf-kind').value = 'corescope';
+  updateNetFormKind();
   document.getElementById('nf-label').value = '';
   document.getElementById('nf-connector').value = '';
   document.getElementById('nf-channel').value = '';
@@ -707,8 +738,8 @@ function resetNetForm() {
 
 function startEditNet(n) {
   editingNetId = n.id;
-  document.getElementById('nf-protocol').value = n.protocol;
-  updateNetFormProtocol();
+  document.getElementById('nf-kind').value = n.kind;
+  updateNetFormKind();
   document.getElementById('nf-label').value = n.label;
   document.getElementById('nf-connector').value = n.connector_url;
   document.getElementById('nf-channel').value = n.channel || '';
@@ -734,7 +765,7 @@ async function saveNet(b) {
   out.replaceChildren();
   const payload = {
     label: document.getElementById('nf-label').value.trim(),
-    protocol: document.getElementById('nf-protocol').value,
+    kind: document.getElementById('nf-kind').value,
     connector_url: document.getElementById('nf-connector').value.trim(),
     channel: document.getElementById('nf-channel').value.trim(),
     hashtag: document.getElementById('nf-hashtag').value.trim(),
@@ -1009,7 +1040,7 @@ document.querySelectorAll('.adm-nav-item').forEach((b) => {
 document.getElementById('player-search').addEventListener('input', renderPlayers);
 document.getElementById('ci-award').addEventListener('click', function () { awardCheckin(this); });
 document.getElementById('nc-save').addEventListener('click', function () { saveConfig(this); });
-document.getElementById('nf-protocol').addEventListener('change', updateNetFormProtocol);
+document.getElementById('nf-kind').addEventListener('change', updateNetFormKind);
 document.getElementById('nf-load-channels').addEventListener('click', function () { loadNetChannels(this); });
 document.getElementById('nf-channel-select').addEventListener('change', function () {
   document.getElementById('nf-channel').value = this.value;
