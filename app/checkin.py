@@ -182,19 +182,38 @@ MT_PROTOCOL = "mt"
 # upstream API a net's connector_url actually speaks. `protocol` above
 # is the scoring-board discriminator every award/season/streak query
 # keys on and stays exactly {mc, mt} forever; `kind` is free to grow a
-# third option (as it just did, adding 'beacon') without either board
-# gaining a third identity. KIND_PROTOCOL is the ONE place that mapping
-# is expressed -- app/admin_ops.py's _validate_net_fields derives and
-# validates `protocol` through this same dict on every write, so the
-# two columns can never independently drift out of agreement.
+# fourth option (as it just did, adding 'mqtt' alongside 'beacon')
+# without either board gaining a third identity. KIND_PROTOCOL is the
+# ONE place that mapping is expressed -- app/admin_ops.py's
+# _validate_net_fields derives and validates `protocol` through this
+# same dict on every write, so the two columns can never independently
+# drift out of agreement.
+#
+# 'mqtt' is architecturally different from the other three: it is a
+# persistent broker SUBSCRIPTION (app/mqtt_subscriber.py's
+# MqttSubscriber), not a 30-second HTTP poll, so it has no client class
+# alongside CoreScopeClient/BeaconClient/MeshviewClient below -- the
+# subscriber writes decoded messages into mqtt_message_buffer
+# (app/db.py) as they arrive, and CheckinPoller reads that table for an
+# 'mqtt' net exactly the way it reads an HTTP response for the other
+# three (see _fetch_mqtt_messages/_process_mqtt_message below), which is
+# what keeps everything downstream of "a normalized message dict"
+# completely unaware this kind is push-driven rather than pulled.
+# Identity for 'mqtt' resolves the SAME way 'meshview' already does --
+# directly off the sender's Meshtastic node id via
+# _load_mt_registered_players, no directory, no name-ambiguity path --
+# since both are protocol='mt' and MQTT carries the real numeric sender
+# node id on every packet, unlike MeshCore's channel messages.
 KIND_CORESCOPE = "corescope"
 KIND_BEACON = "beacon"
 KIND_MESHVIEW = "meshview"
+KIND_MQTT = "mqtt"
 
 KIND_PROTOCOL = {
     KIND_CORESCOPE: MC_PROTOCOL,
     KIND_BEACON: MC_PROTOCOL,
     KIND_MESHVIEW: MT_PROTOCOL,
+    KIND_MQTT: MT_PROTOCOL,
 }
 
 
@@ -1403,13 +1422,14 @@ class CheckinPoller:
         # (channel-scoped feed + public-key directory), so both land in
         # mc_nets and are handled by _poll_mc below, which dispatches to
         # the right client per net's own `kind` (see _mc_client_for).
-        # meshview is protocol='mt' AND the only kind that maps to it
-        # today, so this grouping is currently equivalent to the old
-        # protocol-based one for mt_nets -- but it is keyed on kind so
-        # that stays true by construction, not by coincidence, if a
-        # second Meshtastic-family kind is ever added.
+        # meshview and mqtt are the two Meshtastic-family kinds -- both
+        # protocol='mt', both resolve identity directly off the sender
+        # node id via _load_mt_registered_players -- so both land in
+        # mt_nets and are handled by _poll_mt below, which dispatches
+        # per net's own `kind` to either MeshviewClient's HTTP fetch or
+        # mqtt_message_buffer's local read (see _poll_mt_connector).
         mc_nets = [n for n in nets if n["kind"] in (KIND_CORESCOPE, KIND_BEACON)]
-        mt_nets = [n for n in nets if n["kind"] == KIND_MESHVIEW]
+        mt_nets = [n for n in nets if n["kind"] in (KIND_MESHVIEW, KIND_MQTT)]
 
         # The two protocols are independent and one going down must
         # never block the other -- each gets its own try/except, same
@@ -1660,19 +1680,49 @@ class CheckinPoller:
             registered = _load_mt_registered_players(conn)
 
         # Grouped by connector, not by net: meshview's /api/packets feed
-        # is not channel- or hashtag-scoped the way CoreScope's is, so
-        # two nets on ONE connector with two different hashtags are a
-        # genuinely plausible setup (unlike mc's identical-channel
-        # edge case above), and fetching once per net here would risk a
-        # real one: whichever net's hashtag check ran first could settle
-        # a message before the other net's hashtag was ever checked
-        # against it. Fetching once per connector and evaluating every
-        # net sharing it in one pass (_process_mt_packet) avoids that.
+        # (and mqtt_message_buffer, read the same way -- see
+        # _poll_mt_connector/_poll_mqtt_connector below) is not channel-
+        # or hashtag-scoped the way CoreScope's is, so two nets on ONE
+        # connector with two different hashtags are a genuinely plausible
+        # setup (unlike mc's identical-channel edge case above), and
+        # fetching once per net here would risk a real one: whichever
+        # net's hashtag check ran first could settle a message before the
+        # other net's hashtag was ever checked against it. Fetching once
+        # per connector and evaluating every net sharing it in one pass
+        # (_process_mt_packet/_process_mqtt_message) avoids that.
         connector_nets: dict[str, list[dict]] = {}
         for n in nets:
             connector_nets.setdefault(n["connector_url"], []).append(n)
 
         for connector_url, group in connector_nets.items():
+            # A connector_url is assumed to always mean one upstream kind
+            # -- same assumption _mc_client_for/kind_by_connector already
+            # make for the mc family (see _poll_mc) -- take the first
+            # net's `kind`, since two nets sharing one connector_url have
+            # no meaningful way to disagree about which kind actually
+            # serves it.
+            kind = group[0]["kind"]
+            if kind == KIND_MQTT:
+                # mqtt_message_buffer is a local table written by
+                # app/mqtt_subscriber.py's MqttSubscriber, not an
+                # upstream HTTP API -- a failure reading it would be a
+                # real bug (a locked or corrupt db), not "upstream is
+                # down," so this deliberately does NOT call
+                # _record_net_ok/_record_net_error the way the HTTP kinds
+                # below do. last_poll_at/last_poll_error for an mqtt net
+                # belongs to MqttSubscriber -- it reflects BROKER
+                # connectivity, which this cycle's mere ability to read a
+                # local sqlite table says nothing about -- see that
+                # module's docstring. A genuine failure here is still
+                # logged and folds into _poll_once's whole-poller
+                # last_poll_error; it just never overwrites a specific
+                # net's own row the way the subscriber's connection-state
+                # writes do.
+                try:
+                    await self._poll_mqtt_connector(connector_url, group, season_id, registered, now, config)
+                except Exception:
+                    log.exception("checkin: mqtt buffer read failed for %s", connector_url)
+                continue
             try:
                 await self._poll_mt_connector(connector_url, group, season_id, registered, now, config)
             except Exception as e:
@@ -1694,6 +1744,126 @@ class CheckinPoller:
         async with WriteSession() as conn:
             for pkt in packets:
                 self._process_mt_packet(conn, connector_url, nets, pkt, season_id, registered, config, received_at)
+
+    # ---- mqtt buffer polling ---------------------------------------------
+    #
+    # See KIND_MQTT's own header comment above this class for the
+    # architecture: app/mqtt_subscriber.py's MqttSubscriber holds the
+    # actual broker connections and writes decoded messages into
+    # mqtt_message_buffer as they arrive; everything below reads that
+    # table exactly the way _poll_mt_connector/_process_mt_packet read an
+    # HTTP response, so it plugs into the exact same window/dedupe/
+    # identity/award machinery with no changes to any of it.
+
+    async def _poll_mqtt_connector(
+        self, connector_url: str, nets: list[dict], season_id: int,
+        registered: dict, received_at: int, config: dict,
+    ) -> None:
+        messages = await self._fetch_mqtt_messages(connector_url)
+        if not messages:
+            return
+        async with WriteSession() as conn:
+            for m in messages:
+                self._process_mqtt_message(conn, connector_url, nets, m, season_id, registered, config, received_at)
+
+    async def _fetch_mqtt_messages(self, connector_url: str) -> list[dict]:
+        """Every currently-buffered message for one mqtt connector.
+        Unlike CoreScopeClient/BeaconClient/MeshviewClient this is a
+        plain local sqlite read, not an HTTP call -- there is nothing to
+        retry or swallow here (see _poll_mt's kind dispatch above for why
+        a failure here is treated as a real bug, not "upstream down").
+
+        Reads the WHOLE current buffer for this connector, not just rows
+        newer than the last cycle -- cheap, since the buffer is pruned to
+        settings.mqtt_buffer_retention_hours (app/mqtt_subscriber.py) and
+        not an unbounded history, and correct: _process_mqtt_message's
+        _seen() check is what actually keeps re-reading an
+        already-settled row from doing anything, exactly the way
+        re-fetching the same 100 messages from CoreScope/Beacon on every
+        cycle already does.
+        """
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT packet_id, from_node, text, ts FROM mqtt_message_buffer "
+                " WHERE connector = ? ORDER BY ts",
+                (connector_url,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
+    def _process_mqtt_message(
+        self, conn, connector_url: str, nets: list[dict], m: dict, season_id: int,
+        registered: dict, config: dict, received_at: int,
+    ) -> None:
+        """Evaluate one buffered, already-decoded message against every
+        mqtt net sharing this connector -- the mqtt-buffer counterpart of
+        _process_mt_packet just below, with the same settled-once-
+        nobody-needs-a-retry rule (see _mark_seen) and the same
+        hashtag-substring matching meshview uses. The one real
+        difference: identity is read straight off `from_node` (the
+        Meshtastic sender node id app/mqtt_subscriber.py already decoded
+        off the packet -- from a JSON message's `from` field, or a
+        decrypted protobuf MeshPacket's `from` field) rather than parsed
+        out of an HTTP packet dict, since there is no HTTP packet here.
+        `registered` is the SAME node_ref -> player_id map _poll_mt loads
+        once per cycle for every mt-protocol net, meshview and mqtt
+        alike -- a node_ref means the same player under either kind.
+        """
+        pid_str = m["packet_id"]  # already a str -- mqtt_message_buffer.packet_id is TEXT
+
+        # READ first, not INSERT OR IGNORE -- same reasoning
+        # _process_mt_packet/_process_mc_message give (see _mark_seen):
+        # a message this poll cannot yet attribute to a player must stay
+        # eligible for a later retry, not be claimed as settled here.
+        if _seen(conn, connector_url, pid_str):
+            return
+
+        text = m.get("text")
+        if not isinstance(text, str):
+            _mark_seen(conn, connector_url, pid_str, received_at)
+            return
+        text_lower = text.lower()
+
+        matching_nets = [n for n in nets if n["hashtag"].lower() in text_lower]
+        if not matching_nets:
+            # No net sharing this connector cares about this message --
+            # settled the same way a hashtag-less meshview packet is.
+            _mark_seen(conn, connector_url, pid_str, received_at)
+            return
+
+        ts = m.get("ts")
+        if not isinstance(ts, int):
+            _mark_seen(conn, connector_url, pid_str, received_at)
+            return
+
+        from_node = m.get("from_node")
+        if not isinstance(from_node, int):
+            _mark_seen(conn, connector_url, pid_str, received_at)
+            return
+        # Local import: see _process_mt_packet's own comment below for
+        # why this has to be deferred rather than a top-level import
+        # (app/api.py -> app/checkin_api.py -> app/checkin.py ->
+        # app/ingest.py -> app/api.py would otherwise close a cycle).
+        from .ingest import _bare_node_ref
+
+        node_ref = _bare_node_ref(from_node)
+        player_id = registered.get(node_ref)  # same for every net -- protocol-wide, not net-specific
+
+        unresolved = False
+        for net in matching_nets:
+            net_date = net_date_for_net(net, ts)
+            if net_date is None:
+                continue  # outside THIS net's window -- its business with the message is over
+            if player_id is None:
+                unresolved = True  # not settled -- see _mark_seen
+                continue
+            _award_checkin(conn, config, season_id, player_id, net_date, MT_PROTOCOL,
+                           pid_str, received_at, ts)
+
+        if not unresolved:
+            _mark_seen(conn, connector_url, pid_str, received_at)
 
     def _process_mt_packet(
         self, conn, connector_url: str, nets: list[dict], pkt: dict, season_id: int,

@@ -621,11 +621,14 @@ CREATE TABLE IF NOT EXISTS checkin_net (
                                                 -- names, timestamp units, whether a channel is
                                                 -- addressed by name or by an instance-local
                                                 -- numeric id).
-    connector_url TEXT NOT NULL,              -- base URL, no trailing slash
+    connector_url TEXT NOT NULL,              -- base URL, no trailing slash. mqtt/mqtts:// for
+                                                -- kind='mqtt' (a broker), http(s):// for every
+                                                -- other kind (an HTTP API) -- see
+                                                -- app/admin_ops.py's _validate_net_fields.
     channel       TEXT NOT NULL DEFAULT '',   -- corescope/beacon: channel NAME (never a
                                                 -- Beacon instance-local numeric id -- see
-                                                -- BeaconClient).  meshview: unused, ''
-    hashtag       TEXT NOT NULL DEFAULT '',   -- meshview: '#freq51'.  corescope/beacon: unused, ''
+                                                -- BeaconClient).  meshview/mqtt: unused, ''
+    hashtag       TEXT NOT NULL DEFAULT '',   -- meshview/mqtt: '#freq51'.  corescope/beacon: unused, ''
     weekday       INTEGER NOT NULL,           -- python datetime.weekday(): 0=Mon .. 6=Sun
     start_hour    INTEGER NOT NULL,
     end_hour      INTEGER NOT NULL,           -- inclusive, so 23 means 23:59:59
@@ -634,9 +637,71 @@ CREATE TABLE IF NOT EXISTS checkin_net (
     enabled       INTEGER NOT NULL DEFAULT 1,
     created_at    INTEGER NOT NULL,
     last_poll_at  INTEGER,
-    last_poll_error TEXT
+    last_poll_error TEXT,
+    -- mqtt-only connector config (app/mqtt_subscriber.py). Blank/unused
+    -- for every other kind, the same convention channel/hashtag above
+    -- already use for the kind that doesn't need them. broker_username/
+    -- topic_root are plain config; broker_password/channel_key are
+    -- SECRETS -- GET /api/admin/checkin/nets NEVER returns these two
+    -- columns' values, only has_broker_password/has_channel_key booleans
+    -- (see app/admin_ops.py's _scrub_secrets) -- a config screen that
+    -- echoes a broker password back in plaintext is how credentials end
+    -- up in screenshots. broker_password: NOT NULL DEFAULT '' means "no
+    -- password" (many public/test brokers have none), not "unset".
+    -- channel_key: base64 PSK; '' means the Meshtastic default channel
+    -- key (index-1 shorthand, "AQ==") -- see mqtt_subscriber.py's
+    -- _expand_channel_key for the exact expansion this mirrors from
+    -- Meshtastic firmware's Channels::getKey(). topic_root: e.g.
+    -- 'msh/US'; '' means subscribe broadly ('#') rather than narrowing
+    -- to one region -- see MqttSubscriber's per-broker subscription.
+    broker_username TEXT NOT NULL DEFAULT '',
+    broker_password TEXT NOT NULL DEFAULT '',
+    channel_key     TEXT NOT NULL DEFAULT '',
+    topic_root      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_checkin_net_enabled ON checkin_net(enabled, protocol);
+
+-- Push-subscription buffer for the mqtt connector kind
+-- (app/mqtt_subscriber.py's MqttSubscriber). MQTT is a persistent
+-- broker connection, not a 30-second HTTP poll like every other
+-- connector kind -- a long-lived connection has no business living
+-- inside CheckinPoller's poll loop (it would either block the loop or
+-- have to be reopened every cycle, defeating "persistent"). Instead the
+-- subscriber writes every matching decoded text message here as it
+-- arrives, and CheckinPoller reads this table for a 'mqtt' net exactly
+-- the way it reads an HTTP response for every other kind -- see
+-- app/checkin.py's _fetch_mqtt_messages -- which is what keeps net
+-- rows, windows, the read-first dedupe, identity resolution, and
+-- awarding completely unchanged for this fourth kind, and is what lets
+-- a broker disconnect survive without losing anything: the buffer is
+-- still here on the next poll cycle no matter how long the subscriber
+-- took to reconnect.
+--
+-- connector is the net's connector_url (an mqtt(s):// broker URL, one
+-- row per distinct message per broker, shared by every net configured
+-- against that broker the same way an HTTP connector_url is already
+-- shared -- see app/checkin.py's module docstring). packet_id is the
+-- MeshPacket id, decimal string (both the JSON and encrypted-protobuf
+-- topics carry the same 32-bit packet id for the same message, so if a
+-- broker happens to publish both forms of one message, INSERT OR IGNORE
+-- on this primary key harmlessly keeps only the first one seen, rather
+-- than double-crediting it -- app/checkin.py's checkin_seen_message
+-- dedupe, keyed the same (connector, packet_id) way, is a second,
+-- independent reason it could only ever be credited once regardless).
+-- Pruned well past any net's window by app/mqtt_subscriber.py's own
+-- housekeeping (settings.mqtt_buffer_retention_hours) so this cannot
+-- grow without bound on a busy or long-unpolled connector.
+CREATE TABLE IF NOT EXISTS mqtt_message_buffer (
+    connector    TEXT NOT NULL,
+    packet_id    TEXT NOT NULL,
+    from_node    INTEGER NOT NULL,
+    channel_name TEXT NOT NULL DEFAULT '',
+    text         TEXT NOT NULL,
+    ts           INTEGER NOT NULL,
+    received_at  INTEGER NOT NULL,
+    PRIMARY KEY (connector, packet_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mqtt_buffer_conn_ts ON mqtt_message_buffer(connector, ts);
 
 -- Singleton, same upsert-by-fixed-id shape as `notice` above. Read
 -- FRESH by the poller on every cycle (never cached in the process --
@@ -1198,6 +1263,19 @@ MIGRATIONS = [
     # operator has since edited it through the admin API.
     "UPDATE checkin_net SET kind='corescope' WHERE kind='' AND protocol='mc'",
     "UPDATE checkin_net SET kind='meshview'  WHERE kind='' AND protocol='mt'",
+    # Fourth connector kind, 'mqtt' (app/mqtt_subscriber.py): any
+    # database that ran the checkin_net CREATE TABLE before these four
+    # columns existed needs them added by hand -- see that table's own
+    # comment in SCHEMA above for what each one means. All four default
+    # to '' for every existing row, which is exactly correct: no net
+    # created before this migration could have been kind='mqtt' (the
+    # option did not exist yet), so there is nothing real to backfill,
+    # the same reasoning the 'kind' column's own backfill above already
+    # relies on for corescope/meshview.
+    "ALTER TABLE checkin_net ADD COLUMN broker_username TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE checkin_net ADD COLUMN broker_password TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE checkin_net ADD COLUMN channel_key TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE checkin_net ADD COLUMN topic_root TEXT NOT NULL DEFAULT ''",
 ]
 
 PRAGMAS = [

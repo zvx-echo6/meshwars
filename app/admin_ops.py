@@ -20,6 +20,7 @@ each one says in its own docstring what it can break.
 """
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import sqlite3
@@ -35,7 +36,7 @@ from . import mc_api, results
 from .admin_api import _api_guard
 from .checkin import (
     checkin_streak, load_checkin_config, streak_points, MC_PROTOCOL as CHK_MC,
-    KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_PROTOCOL,
+    KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_PROTOCOL,
 )
 from .config import settings
 from .db import connect
@@ -53,7 +54,7 @@ _STALE_DAYS = 14
 # ('mc'/'mt') is derived FROM this on every write (see
 # _validate_net_fields and app/checkin.py's KIND_PROTOCOL), never
 # accepted as an independent choice, so the two can never disagree.
-_NET_KINDS = (KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW)
+_NET_KINDS = (KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT)
 
 
 # ---- needs attention ---------------------------------------------------
@@ -517,11 +518,17 @@ async def admin_checkin_binding(request: Request):
 # ---- check-in nets (app/checkin.py's CheckinPoller, app/db.py's checkin_net) --
 
 
-def _validate_net_fields(body) -> tuple[dict, JSONResponse | None]:
+def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONResponse | None]:
     """Validate and normalize a net's editable fields, shared by
     create and update below -- the same shape both routes need, so the
     rules can only ever say one thing about what a valid net looks
     like.
+
+    `current` is the existing checkin_net row being edited (a dict, as
+    admin_checkin_net_update fetches before calling this), or None when
+    creating -- it is consulted ONLY for the two mqtt secret fields
+    (broker_password/channel_key): see below for why those need the
+    existing row and every other field does not.
 
     Returns (fields, None) on success, where `fields` is ready to bind
     straight into an INSERT/UPDATE; on the first thing wrong, returns
@@ -559,7 +566,14 @@ def _validate_net_fields(body) -> tuple[dict, JSONResponse | None]:
             status_code=400)
 
     connector_url = (body.get("connector_url") or "").strip().rstrip("/")
-    if not (connector_url.startswith("http://") or connector_url.startswith("https://")):
+    if kind == KIND_MQTT:
+        # A broker, not an HTTP API -- see app/db.py's checkin_net
+        # comment on connector_url.
+        if not (connector_url.startswith("mqtt://") or connector_url.startswith("mqtts://")):
+            return {}, JSONResponse(
+                {"error": "connector_url must be an mqtt:// or mqtts:// URL for a mqtt net"},
+                status_code=400)
+    elif not (connector_url.startswith("http://") or connector_url.startswith("https://")):
         return {}, JSONResponse(
             {"error": "connector_url must be an http:// or https:// URL"}, status_code=400)
 
@@ -614,6 +628,50 @@ def _validate_net_fields(body) -> tuple[dict, JSONResponse | None]:
                 {"error": "hashtag is required for a Meshtastic net"}, status_code=400)
         channel = ""
 
+    # mqtt-only connector config -- blank/unused for every other kind,
+    # the same convention channel/hashtag above already use for the
+    # kind that doesn't need them. broker_username/topic_root are plain
+    # config, taken straight from the request every time. broker_password/
+    # channel_key are SECRETS (see app/db.py's checkin_net comment): an
+    # empty submitted value means KEEP THE EXISTING one, not "clear it"
+    # -- a config screen that always echoes '' back into these inputs
+    # (since GET /api/admin/checkin/nets never returns the real value,
+    # see _scrub_secrets below) would otherwise silently wipe a
+    # password/key on every unrelated edit to that net. `current` (the
+    # existing row, None on create) is what lets a blank submission mean
+    # "unchanged" -- on create there is nothing to keep, so blank stays
+    # blank there regardless. clear_broker_password/clear_channel_key
+    # are the explicit way to actually blank one out, since a plain
+    # empty string can no longer mean that.
+    broker_username = ""
+    topic_root = ""
+    broker_password = (current.get("broker_password", "") if current else "")
+    channel_key = (current.get("channel_key", "") if current else "")
+    if kind == KIND_MQTT:
+        broker_username = (body.get("broker_username") or "").strip()
+        topic_root = (body.get("topic_root") or "").strip().strip("/")
+
+        if body.get("clear_broker_password") is True:
+            broker_password = ""
+        else:
+            submitted = body.get("broker_password")
+            if isinstance(submitted, str) and submitted:
+                broker_password = submitted
+
+        if body.get("clear_channel_key") is True:
+            channel_key = ""
+        else:
+            submitted = body.get("channel_key")
+            if isinstance(submitted, str) and submitted:
+                channel_key = submitted.strip()
+
+        if channel_key:
+            try:
+                base64.b64decode(channel_key, validate=True)
+            except Exception:
+                return {}, JSONResponse(
+                    {"error": "channel_key must be valid base64"}, status_code=400)
+
     enabled = bool(body.get("enabled", True))
 
     return {
@@ -621,7 +679,26 @@ def _validate_net_fields(body) -> tuple[dict, JSONResponse | None]:
         "channel": channel, "hashtag": hashtag, "weekday": weekday,
         "start_hour": start_hour, "end_hour": end_hour, "timezone": timezone,
         "start_date": start_date, "enabled": int(enabled),
+        "broker_username": broker_username, "broker_password": broker_password,
+        "channel_key": channel_key, "topic_root": topic_root,
     }, None
+
+
+def _scrub_secrets(net: dict) -> dict:
+    """Never let a net's broker_password/channel_key leave this process
+    in a JSON response, in either direction -- not GET /api/admin/checkin/nets'
+    listing, and not a create/update route's own echo of what it just
+    wrote (that echo used to be `**fields`, which would otherwise leak
+    a password right back at the admin who just typed it, same problem,
+    same fix). Replaces each with a has_* boolean; every other field
+    passes through unchanged. See app/db.py's checkin_net comment and
+    _validate_net_fields' docstring above for why these two columns get
+    this treatment and no others do.
+    """
+    out = dict(net)
+    out["has_broker_password"] = bool(out.pop("broker_password", ""))
+    out["has_channel_key"] = bool(out.pop("channel_key", ""))
+    return out
 
 
 @router.get("/api/admin/checkin/nets")
@@ -647,6 +724,8 @@ async def admin_checkin_nets(request: Request):
             config["enabled"] = bool(config["enabled"])
     finally:
         conn.close()
+    # Never the raw broker_password/channel_key -- see _scrub_secrets.
+    nets = [_scrub_secrets(n) for n in nets]
     return JSONResponse({"nets": nets, "config": config})
 
 
@@ -675,9 +754,11 @@ async def admin_checkin_net_create(request: Request):
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "INSERT INTO checkin_net(label, kind, protocol, connector_url, channel, hashtag, "
-            " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at) "
+            " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at, "
+            " broker_username, broker_password, channel_key, topic_root) "
             "VALUES (:label, :kind, :protocol, :connector_url, :channel, :hashtag, :weekday, "
-            " :start_hour, :end_hour, :timezone, :start_date, :enabled, :created_at)",
+            " :start_hour, :end_hour, :timezone, :start_date, :enabled, :created_at, "
+            " :broker_username, :broker_password, :channel_key, :topic_root)",
             {**fields, "created_at": now},
         )
         net_id = cur.lastrowid
@@ -689,7 +770,7 @@ async def admin_checkin_net_create(request: Request):
         conn.close()
     log.info("admin: created checkin net %d (%s, %s, %s)",
               net_id, fields["label"], fields["kind"], fields["connector_url"])
-    return JSONResponse({"id": net_id, "created_at": now, **fields}, status_code=201)
+    return JSONResponse(_scrub_secrets({"id": net_id, "created_at": now, **fields}), status_code=201)
 
 
 @router.post("/api/admin/checkin/nets/update")
@@ -712,18 +793,31 @@ async def admin_checkin_net_update(request: Request):
     if not isinstance(net_id, int) or isinstance(net_id, bool):
         return JSONResponse({"error": "id is required"}, status_code=400)
 
-    fields, err = _validate_net_fields(body)
-    if err is not None:
-        return err
-
     conn = connect()
     try:
+        # Fetched BEFORE validation, not after: _validate_net_fields
+        # needs the net's EXISTING broker_password/channel_key to
+        # implement "blank submission means keep the existing secret"
+        # (see that function's docstring) -- there is nothing to keep
+        # if this net doesn't exist, but that's caught below the same
+        # way it always was, just slightly later than net_id's own type
+        # check.
+        existing = conn.execute("SELECT * FROM checkin_net WHERE id = ?", (net_id,)).fetchone()
+        if existing is None:
+            return JSONResponse({"error": "net not found"}, status_code=404)
+
+        fields, err = _validate_net_fields(body, current=dict(existing))
+        if err is not None:
+            return err
+
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "UPDATE checkin_net SET label=:label, kind=:kind, protocol=:protocol, "
             " connector_url=:connector_url, channel=:channel, hashtag=:hashtag, "
             " weekday=:weekday, start_hour=:start_hour, end_hour=:end_hour, "
-            " timezone=:timezone, start_date=:start_date, enabled=:enabled "
+            " timezone=:timezone, start_date=:start_date, enabled=:enabled, "
+            " broker_username=:broker_username, broker_password=:broker_password, "
+            " channel_key=:channel_key, topic_root=:topic_root "
             " WHERE id=:id",
             {**fields, "id": net_id},
         )
@@ -733,7 +827,7 @@ async def admin_checkin_net_update(request: Request):
     if not cur.rowcount:
         return JSONResponse({"error": "net not found"}, status_code=404)
     log.info("admin: updated checkin net %d", net_id)
-    return JSONResponse({"id": net_id, **fields})
+    return JSONResponse(_scrub_secrets({"id": net_id, **fields}))
 
 
 @router.post("/api/admin/checkin/nets/delete")
@@ -882,10 +976,11 @@ async def admin_checkin_channels(request: Request):
     invisible until the net silently never matches a message. Kind-
     aware: corescope and beacon each expose channels through a
     completely different endpoint and shape (see app/checkin.py's
-    CoreScopeClient/BeaconClient), and meshview has no channel concept
-    at all (it is hashtag-scoped -- see the module docstring), so this
-    always returns a clean, explicit response for that kind rather than
-    an error the admin panel would have to special-case.
+    CoreScopeClient/BeaconClient), and meshview/mqtt have no channel
+    concept at all (both are hashtag-scoped -- see the module
+    docstring), so this always returns a clean, explicit response for
+    that kind rather than an error the admin panel would have to
+    special-case.
 
     Read-only and short-timeout: this is a person filling out a form,
     not anything the poller depends on, so a slow or dead connector
@@ -896,21 +991,26 @@ async def admin_checkin_channels(request: Request):
     if guard is not None:
         return guard
 
-    connector = (request.query_params.get("connector") or "").strip().rstrip("/")
-    if not (connector.startswith("http://") or connector.startswith("https://")):
-        return JSONResponse(
-            {"error": "connector must be an http:// or https:// URL"}, status_code=400)
-
     kind = (request.query_params.get("kind") or "").strip()
     if kind not in _NET_KINDS:
         return JSONResponse(
             {"error": "kind must be one of: " + ", ".join(_NET_KINDS)}, status_code=400)
 
-    if kind == KIND_MESHVIEW:
-        # Not an error -- a Meshtastic net is hashtag-scoped, on every
-        # channel, so there is genuinely nothing to list here. See the
-        # docstring above.
+    if kind in (KIND_MESHVIEW, KIND_MQTT):
+        # Not an error -- both Meshtastic-family kinds are hashtag-
+        # scoped, on every channel, so there is genuinely nothing to
+        # list here. See the docstring above. Checked BEFORE the
+        # connector_url validation below (unlike the http(s)-only kinds)
+        # since an mqtt connector is an mqtt(s):// broker URL, not an
+        # http(s):// one, and there is no fetch to make for either kind
+        # anyway -- no reason to require a connector param at all just
+        # to learn that.
         return JSONResponse({"channels": [], "applicable": False})
+
+    connector = (request.query_params.get("connector") or "").strip().rstrip("/")
+    if not (connector.startswith("http://") or connector.startswith("https://")):
+        return JSONResponse(
+            {"error": "connector must be an http:// or https:// URL"}, status_code=400)
 
     try:
         async with httpx.AsyncClient(

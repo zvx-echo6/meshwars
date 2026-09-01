@@ -16,6 +16,7 @@ from .db import init_db
 from .ingest import Ingestor
 from .mc_ingest import McIngestor
 from .meshview_client import MeshviewClient
+from .mqtt_subscriber import MqttSubscriber
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,11 +55,24 @@ async def lifespan(app: FastAPI):
     checkin_poller = CheckinPoller(client)
     await checkin_poller.start()
 
+    # MQTT connector kind (app/mqtt_subscriber.py). Started unconditionally,
+    # same reasoning as checkin_poller just above: it reconciles which
+    # brokers to hold open against checkin_net's current enabled 'mqtt'
+    # rows on its own interval, so a fresh install with no mqtt nets
+    # configured yet still starts the task, but it simply holds no
+    # connections until an admin adds one. A wholly separate background
+    # task from checkin_poller, not folded into it -- see that module's
+    # docstring for why a persistent broker subscription has no business
+    # living inside a 30-second poll loop.
+    mqtt_subscriber = MqttSubscriber()
+    await mqtt_subscriber.start()
+
     app.state.client = client
     app.state.ingestor = ingestor
     app.state.ingest_task = task
     app.state.mc_ingestor = mc_ingestor
     app.state.checkin_poller = checkin_poller
+    app.state.mqtt_subscriber = mqtt_subscriber
 
     try:
         yield
@@ -73,6 +87,7 @@ async def lifespan(app: FastAPI):
         if settings.mc_ingest_enabled:
             await mc_ingestor.stop()
         await checkin_poller.stop()
+        await mqtt_subscriber.stop()
         await client.aclose()
 
 

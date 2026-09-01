@@ -10,7 +10,7 @@
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260901-5" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260901-6" />
 </head>
 <body>
 
@@ -93,7 +93,7 @@
 
         <section class="adm-section" data-section="nets" hidden>
           <h2 class="adm-h2">Nets</h2>
-          <p class="adm-hint">Every weekly net the poller watches, on either board, plus the settings that apply to all of them at once. Nets are found differently depending on their connector kind &mdash; a MeshCore net (CoreScope or Beacon) is scoped to one channel on its connector, a Meshtastic net (Meshview) is found by its hashtag appearing in a message on any channel &mdash; so the form below shows different fields per connector kind rather than one merged form.</p>
+          <p class="adm-hint">Every weekly net the poller watches, on either board, plus the settings that apply to all of them at once. Nets are found differently depending on their connector kind &mdash; a MeshCore net (CoreScope or Beacon) is scoped to one channel on its connector, a Meshtastic net (Meshview or MQTT) is found by its hashtag appearing in a message on any channel &mdash; so the form below shows different fields per connector kind rather than one merged form. MQTT is a live broker subscription rather than a poll, so a broker outage shows up here as a poll error just like any other connector.</p>
 
           <h3 class="adm-h3">Settings</h3>
           <p class="adm-hint">Applies to every net at once. Read fresh on the poller's next cycle &mdash; no restart.</p>
@@ -125,6 +125,7 @@
                 <option value="corescope">MC: CoreScope</option>
                 <option value="beacon">MC: Beacon</option>
                 <option value="meshview">MT: Meshview</option>
+                <option value="mqtt">MT: MQTT</option>
               </select>
             </label>
             <input type="text" id="nf-label" autocomplete="off" placeholder="label, e.g. Wednesday Net" />
@@ -139,6 +140,24 @@
           </div>
           <div class="adm-form" id="nf-hashtag-row" hidden>
             <input type="text" id="nf-hashtag" autocomplete="off" placeholder="hashtag, e.g. #freq51" />
+          </div>
+          <div class="adm-form" id="nf-mqtt-row-1" hidden>
+            <input type="text" id="nf-topic-root" autocomplete="off" placeholder="topic root, e.g. msh/US (blank = subscribe broadly)" />
+            <input type="text" id="nf-broker-username" autocomplete="off" placeholder="broker username (optional)" />
+          </div>
+          <div class="adm-form" id="nf-mqtt-row-2" hidden>
+            <label class="adm-field-label">Broker password
+              <input type="password" id="nf-broker-password" autocomplete="off" placeholder="leave blank to keep current" />
+            </label>
+            <label class="adm-check-label"><input type="checkbox" id="nf-clear-broker-password" class="adm-check" /> Clear</label>
+            <span class="adm-hint" id="nf-broker-password-hint"></span>
+          </div>
+          <div class="adm-form" id="nf-mqtt-row-3" hidden>
+            <label class="adm-field-label">Channel key
+              <input type="password" id="nf-channel-key" autocomplete="off" placeholder="base64 PSK, blank = Meshtastic default" />
+            </label>
+            <label class="adm-check-label"><input type="checkbox" id="nf-clear-channel-key" class="adm-check" /> Clear</label>
+            <span class="adm-hint" id="nf-channel-key-hint"></span>
           </div>
           <div class="adm-form">
             <label class="adm-field-label">Weekday
@@ -233,6 +252,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260901-5"></script>
+  <script src="/static/admin.js?v=20260901-6"></script>
 </body>
 </html>

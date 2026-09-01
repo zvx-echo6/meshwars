@@ -445,6 +445,22 @@ class Settings(BaseSettings):
     mc_checkin_directory_limit: int = 5000
     mc_checkin_directory_refresh_seconds: int = 900
 
+    # MQTT connector kind (app/mqtt_subscriber.py): a persistent broker
+    # subscription, not a poll -- see that module's docstring for why it
+    # runs as its own background task rather than inside CheckinPoller's
+    # 30-second cycle. mqtt_buffer_retention_hours bounds
+    # mqtt_message_buffer (app/db.py) the same way mc_ping_retention_hours
+    # bounds player_cell_ping above -- a decoded message only has to
+    # survive long enough for CheckinPoller's next cycle to read and
+    # settle it, so 48h is generous margin, not a real requirement.
+    # mqtt_reconcile_interval_seconds is how often the subscriber re-reads
+    # checkin_net for enabled mqtt nets and connects/disconnects/
+    # resubscribes to match -- independent of checkin_poll_interval_seconds,
+    # since broker connections are the subscriber's own concern, not the
+    # poller's.
+    mqtt_buffer_retention_hours: int = 48
+    mqtt_reconcile_interval_seconds: int = 30
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

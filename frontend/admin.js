@@ -534,21 +534,24 @@ let allNets = [];
 let editingNetId = null;   // null while the form is adding, a net id while editing
 const NET_WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
-// The three connector kinds an operator can pick (see app/checkin.py's
-// KIND_CORESCOPE/KIND_BEACON/KIND_MESHVIEW). `protocol` ('mc'/'mt') is
-// derived from this on the backend and is never sent by this form --
-// see _validate_net_fields in app/admin_ops.py. Labels match the
-// select options in admin.html exactly; the badge reuses the same
-// short label so a row and the form agree on what to call a kind.
+// The four connector kinds an operator can pick (see app/checkin.py's
+// KIND_CORESCOPE/KIND_BEACON/KIND_MESHVIEW/KIND_MQTT). `protocol`
+// ('mc'/'mt') is derived from this on the backend and is never sent by
+// this form -- see _validate_net_fields in app/admin_ops.py. Labels
+// match the select options in admin.html exactly; the badge reuses the
+// same short label so a row and the form agree on what to call a kind.
 const NET_KIND_LABELS = {
   corescope: 'MC: CoreScope',
   beacon: 'MC: Beacon',
   meshview: 'MT: Meshview',
+  mqtt: 'MT: MQTT',
 };
 // corescope and beacon are both channel-scoped connectors (a net picks
-// one channel on the connector); meshview is hashtag-scoped (found by
-// its hashtag on any channel) -- see app/checkin.py's module docstring.
-function netKindHasChannel(kind) { return kind !== 'meshview'; }
+// one channel on the connector); meshview and mqtt are both
+// hashtag-scoped (found by their hashtag on any channel) -- see
+// app/checkin.py's module docstring.
+function netKindHasChannel(kind) { return kind !== 'meshview' && kind !== 'mqtt'; }
+function netKindIsMqtt(kind) { return kind === 'mqtt'; }
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
@@ -671,6 +674,10 @@ function updateNetFormKind() {
   const kind = document.getElementById('nf-kind').value;
   document.getElementById('nf-channel-row').hidden = !netKindHasChannel(kind);
   document.getElementById('nf-hashtag-row').hidden = netKindHasChannel(kind);
+  const isMqtt = netKindIsMqtt(kind);
+  document.getElementById('nf-mqtt-row-1').hidden = !isMqtt;
+  document.getElementById('nf-mqtt-row-2').hidden = !isMqtt;
+  document.getElementById('nf-mqtt-row-3').hidden = !isMqtt;
 }
 
 async function loadNetChannels(b) {
@@ -734,6 +741,14 @@ function resetNetForm() {
   document.getElementById('nf-timezone').value = 'America/Boise';
   document.getElementById('nf-start-date').value = '';
   document.getElementById('nf-enabled').checked = true;
+  document.getElementById('nf-topic-root').value = '';
+  document.getElementById('nf-broker-username').value = '';
+  document.getElementById('nf-broker-password').value = '';
+  document.getElementById('nf-channel-key').value = '';
+  document.getElementById('nf-clear-broker-password').checked = false;
+  document.getElementById('nf-clear-channel-key').checked = false;
+  document.getElementById('nf-broker-password-hint').textContent = '';
+  document.getElementById('nf-channel-key-hint').textContent = '';
   const select = document.getElementById('nf-channel-select');
   select.hidden = true;
   select.replaceChildren();
@@ -760,6 +775,20 @@ function startEditNet(n) {
   document.getElementById('nf-timezone').value = n.timezone;
   document.getElementById('nf-start-date').value = n.start_date || '';
   document.getElementById('nf-enabled').checked = !!n.enabled;
+  document.getElementById('nf-topic-root').value = n.topic_root || '';
+  document.getElementById('nf-broker-username').value = n.broker_username || '';
+  // Secrets are NEVER echoed back (see app/admin_ops.py's
+  // _scrub_secrets) -- these inputs start blank every edit, and a blank
+  // submission means "keep the existing value," not "clear it"; the
+  // has_* booleans GET /api/admin/checkin/nets does return are shown as
+  // a hint next to the field instead, and "Clear" is the only way to
+  // actually blank one out.
+  document.getElementById('nf-broker-password').value = '';
+  document.getElementById('nf-channel-key').value = '';
+  document.getElementById('nf-clear-broker-password').checked = false;
+  document.getElementById('nf-clear-channel-key').checked = false;
+  document.getElementById('nf-broker-password-hint').textContent = n.has_broker_password ? 'currently set' : 'not set';
+  document.getElementById('nf-channel-key-hint').textContent = n.has_channel_key ? 'currently set (blank = Meshtastic default)' : 'not set -- using Meshtastic default key';
   const select = document.getElementById('nf-channel-select');
   select.hidden = true;
   select.replaceChildren();
@@ -785,6 +814,16 @@ async function saveNet(b) {
     timezone: document.getElementById('nf-timezone').value.trim(),
     start_date: document.getElementById('nf-start-date').value,
     enabled: document.getElementById('nf-enabled').checked,
+    topic_root: document.getElementById('nf-topic-root').value.trim(),
+    broker_username: document.getElementById('nf-broker-username').value.trim(),
+    // Blank means "keep the existing secret" on the backend (see
+    // app/admin_ops.py's _validate_net_fields) -- so these are only
+    // ever sent as a real new value, or left blank; clear_* is the
+    // explicit override for actually blanking one out.
+    broker_password: document.getElementById('nf-broker-password').value,
+    channel_key: document.getElementById('nf-channel-key').value.trim(),
+    clear_broker_password: document.getElementById('nf-clear-broker-password').checked,
+    clear_channel_key: document.getElementById('nf-clear-channel-key').checked,
   };
   b.disabled = true;
   try {
