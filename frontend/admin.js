@@ -600,21 +600,30 @@ async function saveConfig(b) {
 
 function renderNetRow(n) {
   const wrap = el('div', { className: 'adm-net' });
-  const row = el('div', { className: 'adm-row' });
-  row.appendChild(el('strong', { text: n.label }));
+  const row = el('div', { className: 'adm-net-row' });
+  // Descriptive text lives in its own group so it can wrap on its own
+  // line lengths without dragging the action buttons around -- see
+  // .adm-net-row / .adm-net-info / .adm-net-actions in admin.css.
+  const info = el('div', { className: 'adm-net-info' });
+  info.appendChild(el('strong', { text: n.label }));
   // Shows the KIND, not the protocol -- corescope and beacon are both
   // 'mc' and otherwise indistinguishable in this row, so a protocol
   // badge would leave an operator unable to tell them apart.
-  row.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
-  row.appendChild(el('span', { className: 'adm-mono', text: n.connector_url }));
-  row.appendChild(el('span', { text: netKindHasChannel(n.kind) ? n.channel : n.hashtag }));
-  row.appendChild(el('span', { text: netWindowText(n) }));
-  row.appendChild(el('span', {
+  info.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
+  info.appendChild(el('span', { className: 'adm-mono', text: n.connector_url }));
+  info.appendChild(el('span', { text: netKindHasChannel(n.kind) ? n.channel : n.hashtag }));
+  info.appendChild(el('span', { text: netWindowText(n) }));
+  info.appendChild(el('span', {
     className: 'adm-badge ' + (n.enabled ? 'adm-badge-ok' : 'adm-badge-bad'),
     text: n.enabled ? 'enabled' : 'disabled',
   }));
-  row.appendChild(btn('Edit', 'adm-btn-quiet', () => startEditNet(n)));
-  row.appendChild(btn('Delete', 'adm-btn-danger', async (b) => {
+  row.appendChild(info);
+  // Edit and Delete stay together as one unit pinned to the row's end,
+  // so they land in the same place regardless of how long the info
+  // group above happens to be.
+  const actions = el('div', { className: 'adm-net-actions' });
+  actions.appendChild(btn('Edit', 'adm-btn-quiet', () => startEditNet(n)));
+  actions.appendChild(btn('Delete', 'adm-btn-danger', async (b) => {
     const typed = window.prompt('Deleting removes this net.\n\nType ' + n.label + ' to confirm.');
     if (!typed) return;
     b.disabled = true;
@@ -625,6 +634,7 @@ function renderNetRow(n) {
       await loadNets();
     } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
   }));
+  row.appendChild(actions);
   wrap.appendChild(row);
   wrap.appendChild(el('p', {
     className: 'adm-net-health' + (n.last_poll_error ? ' adm-status-bad' : ''),

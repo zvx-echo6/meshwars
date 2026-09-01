@@ -506,6 +506,40 @@ body {
 }
 .adm-net:last-child { border-bottom: 0; }
 
+/* Edit/Delete used to sit inline in the same wrapping .adm-row as the
+   label, badges and connector URL, so they wrapped at a different
+   point in every row depending on how long that row's text happened
+   to be. Splitting the row into an info group (which wraps its own
+   text freely) and a fixed actions group (which never wraps
+   internally and is pinned to the row's end via margin-left: auto)
+   keeps the buttons in the same place down the whole list. */
+.adm-net-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.adm-net-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 0;
+  font-size: 0.8125rem;
+  color: var(--mw-text-4);
+}
+
+.adm-net-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+  padding: 5px 0;
+}
+
 .adm-net-health {
   margin: 2px 0 0;
   font-size: 0.75rem;
