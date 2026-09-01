@@ -490,6 +490,14 @@ body {
 .adm-field-label input,
 .adm-field-label select { width: 9rem; }
 
+/* Broker password and Channel key sit inside .adm-field-label too, but
+   their placeholder guidance ("leave blank to keep current", "base64
+   PSK, blank = Meshtastic default") is far longer than the hour/
+   weekday captions that width was sized for, and 9rem cut both mid-
+   word. This modifier widens just those two fields instead of loosening
+   .adm-field-label itself, which stays right everywhere else it's used. */
+.adm-field-label-wide input { width: 20rem; }
+
 /* Add-net's first row pairs a captioned .adm-field-label (Protocol)
    with a bare, uncaptioned label input -- .adm-form's default
    align-items: center then centers each on its own height, and since

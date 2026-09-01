@@ -553,6 +553,17 @@ const NET_KIND_LABELS = {
 function netKindHasChannel(kind) { return kind !== 'meshview' && kind !== 'mqtt'; }
 function netKindIsMqtt(kind) { return kind === 'mqtt'; }
 
+// mqtt's connector is a broker address, not an http(s) URL like the
+// other three -- an https example there reads as a typo instruction
+// rather than guidance. Keyed by kind so updateNetFormKind can swap
+// the connector field's placeholder to match whatever's selected.
+const NET_CONNECTOR_URL_EXAMPLES = {
+  corescope: 'https://live.mwmesh.com',
+  beacon: 'https://map.meshcore.coloradomesh.org',
+  meshview: 'https://meshview.freq51.net',
+  mqtt: 'mqtt://broker.example.org:1883',
+};
+
 function pad2(n) { return String(n).padStart(2, '0'); }
 
 // end_hour is inclusive through :59:59 (see app/db.py's checkin_net
@@ -678,6 +689,8 @@ function updateNetFormKind() {
   document.getElementById('nf-mqtt-row-1').hidden = !isMqtt;
   document.getElementById('nf-mqtt-row-2').hidden = !isMqtt;
   document.getElementById('nf-mqtt-row-3').hidden = !isMqtt;
+  const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
+  document.getElementById('nf-connector').placeholder = 'connector URL, e.g. ' + example;
 }
 
 async function loadNetChannels(b) {
