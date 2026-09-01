@@ -21,14 +21,26 @@ log = logging.getLogger("meshview_client")
 
 
 class MeshviewClient:
-    def __init__(self):
+    def __init__(self, base_url: str | None = None):
+        # base_url defaults to settings.meshview_url -- the single
+        # instance app/ingest.py's position poller talks to -- but can
+        # be overridden so app/checkin.py's CheckinPoller can build one
+        # of these per DISTINCT Meshtastic check-in net connector_url
+        # (see checkin_net in app/db.py) without hardcoding this
+        # deployment's one configured meshview host onto every instance.
+        # Every other behavior (rate limiting, retry/backoff, connection
+        # pool sizing) stays tied to settings.upstream_* regardless of
+        # which host base_url points at -- those are this PROCESS's own
+        # limits, not something that should multiply per extra connector.
+        base_url = base_url if base_url is not None else settings.meshview_url
+
         # Connection pool + global rate cap.
         self._limits = httpx.Limits(
             max_connections=settings.upstream_concurrency * 2,
             max_keepalive_connections=settings.upstream_concurrency,
         )
         self._client = httpx.AsyncClient(
-            base_url=settings.meshview_url,
+            base_url=base_url,
             timeout=httpx.Timeout(15.0, connect=5.0),
             limits=self._limits,
             headers={"Accept": "application/json", "User-Agent": "meshwars/1.0"},

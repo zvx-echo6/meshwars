@@ -466,6 +466,38 @@ body {
 }
 .adm-check { width: auto; margin: 0; }
 
+/* A labelled field narrower than the full-width text inputs elsewhere
+   in .adm-form -- a point value or an hour never needs 180px, and
+   letting it take that anyway just spreads a dense settings form
+   across more rows than it needs. Same uppercase small-caps language
+   as .adm-sub-title / .adm-login-label, not a new one. */
+.adm-field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+}
+.adm-field-label input,
+.adm-field-label select { width: 9rem; }
+
+/* ---- nets -------------------------------------------------------- */
+.adm-net {
+  border-bottom: 1px solid var(--mw-line);
+  padding: 8px 0;
+}
+.adm-net:last-child { border-bottom: 0; }
+
+.adm-net-health {
+  margin: 2px 0 0;
+  font-size: 0.75rem;
+  color: var(--mw-text-6);
+}
+.adm-net-health.adm-status-bad { color: var(--bad); }
+
 @media (max-width: 620px) {
   .adm-player-meta { margin-left: 0; width: 100%; }
 }

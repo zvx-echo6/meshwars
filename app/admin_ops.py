@@ -24,14 +24,16 @@ import logging
 import os
 import sqlite3
 import time
-from datetime import datetime
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from . import mc_api, results
 from .admin_api import _api_guard
-from .checkin import checkin_streak, streak_points, MC_PROTOCOL as CHK_MC
+from .checkin import checkin_streak, load_checkin_config, streak_points, MC_PROTOCOL as CHK_MC
 from .config import settings
 from .db import connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
@@ -44,6 +46,7 @@ router = APIRouter()
 
 MT_PROTOCOL = "mt"
 _STALE_DAYS = 14
+_NET_PROTOCOLS = ("mc", "mt")
 
 
 # ---- needs attention ---------------------------------------------------
@@ -204,7 +207,13 @@ def _health(conn) -> dict:
         # later poll can retry it. Between nets the channel is quiet and
         # this stands still while the poller runs perfectly. It is the
         # age of the newest decision, which is a different question.
-        "last_settled_checkin_at": count("SELECT max(seen_at) FROM mc_checkin_seen_message"),
+        # Reads checkin_seen_message, not the now-superseded
+        # mc_checkin_seen_message (see app/db.py) -- every protocol's
+        # settle-decisions land there since nets moved into the
+        # database, and mc_checkin_seen_message stops getting new rows
+        # entirely from that point on, which would freeze this figure
+        # at deploy time forever if it kept reading the old table.
+        "last_settled_checkin_at": count("SELECT max(seen_at) FROM checkin_seen_message"),
         "database_bytes": db_bytes,
         "disk_free_bytes": free_bytes,
         # The exploration awards skip themselves silently when this file
@@ -433,8 +442,9 @@ async def admin_checkin_award(request: Request):
         season = mc_api.active_season(conn, protocol)
         if not season:
             return JSONResponse({"error": "no active season for that board"}, status_code=400)
+        config = load_checkin_config(conn)
         streak = checkin_streak(conn, player_id, protocol, net_date)
-        points = streak_points(streak)
+        points = streak_points(config, streak)
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "INSERT OR IGNORE INTO mc_checkin_award"
@@ -495,6 +505,372 @@ async def admin_checkin_binding(request: Request):
         conn.close()
     log.info("admin: check-in fallback name %r -> player %d", normalized, player_id)
     return JSONResponse({"player_id": player_id, "sender_name": normalized})
+
+
+# ---- check-in nets (app/checkin.py's CheckinPoller, app/db.py's checkin_net) --
+
+
+def _validate_net_fields(body) -> tuple[dict, JSONResponse | None]:
+    """Validate and normalize a net's editable fields, shared by
+    create and update below -- the same shape both routes need, so the
+    rules can only ever say one thing about what a valid net looks
+    like.
+
+    Returns (fields, None) on success, where `fields` is ready to bind
+    straight into an INSERT/UPDATE; on the first thing wrong, returns
+    ({}, response) with the 400 to hand back as-is.
+    """
+    if not isinstance(body, dict):
+        return {}, JSONResponse({"error": "bad request"}, status_code=400)
+
+    label = (body.get("label") or "").strip()
+    if not label:
+        return {}, JSONResponse({"error": "label is required"}, status_code=400)
+
+    protocol = body.get("protocol")
+    if protocol not in _NET_PROTOCOLS:
+        return {}, JSONResponse(
+            {"error": "protocol must be one of: " + ", ".join(_NET_PROTOCOLS)},
+            status_code=400)
+
+    connector_url = (body.get("connector_url") or "").strip().rstrip("/")
+    if not (connector_url.startswith("http://") or connector_url.startswith("https://")):
+        return {}, JSONResponse(
+            {"error": "connector_url must be an http:// or https:// URL"}, status_code=400)
+
+    weekday = body.get("weekday")
+    if not isinstance(weekday, int) or isinstance(weekday, bool) or not (0 <= weekday <= 6):
+        return {}, JSONResponse(
+            {"error": "weekday must be 0 (Monday) through 6 (Sunday)"}, status_code=400)
+
+    start_hour = body.get("start_hour")
+    end_hour = body.get("end_hour")
+    for name, v in (("start_hour", start_hour), ("end_hour", end_hour)):
+        if not isinstance(v, int) or isinstance(v, bool) or not (0 <= v <= 23):
+            return {}, JSONResponse({"error": "%s must be 0 through 23" % name}, status_code=400)
+    if start_hour > end_hour:
+        return {}, JSONResponse({"error": "start_hour must be <= end_hour"}, status_code=400)
+
+    timezone = (body.get("timezone") or "").strip()
+    try:
+        ZoneInfo(timezone)
+    except Exception:
+        return {}, JSONResponse(
+            {"error": "timezone must be a valid IANA zone name, e.g. America/Boise"},
+            status_code=400)
+
+    start_date = (body.get("start_date") or "").strip()
+    if start_date:
+        try:
+            date.fromisoformat(start_date)
+        except ValueError:
+            return {}, JSONResponse(
+                {"error": "start_date must be YYYY-MM-DD or empty"}, status_code=400)
+
+    # channel/hashtag: required for the protocol that uses it, forced
+    # blank for the one that doesn't -- see app/db.py's checkin_net
+    # schema comment for why storage keeps the unused field '' rather
+    # than whatever a caller happened to send for it.
+    channel = (body.get("channel") or "").strip()
+    hashtag = (body.get("hashtag") or "").strip()
+    if protocol == "mc":
+        if not channel:
+            return {}, JSONResponse(
+                {"error": "channel is required for a MeshCore net"}, status_code=400)
+        hashtag = ""
+    else:
+        if not hashtag:
+            return {}, JSONResponse(
+                {"error": "hashtag is required for a Meshtastic net"}, status_code=400)
+        channel = ""
+
+    enabled = bool(body.get("enabled", True))
+
+    return {
+        "label": label, "protocol": protocol, "connector_url": connector_url,
+        "channel": channel, "hashtag": hashtag, "weekday": weekday,
+        "start_hour": start_hour, "end_hour": end_hour, "timezone": timezone,
+        "start_date": start_date, "enabled": int(enabled),
+    }, None
+
+
+@router.get("/api/admin/checkin/nets")
+async def admin_checkin_nets(request: Request):
+    """Every net (enabled or not) plus the global config singleton, for
+    the admin panel's check-in section. last_poll_at/last_poll_error
+    come straight off each checkin_net row -- see app/checkin.py's
+    CheckinPoller, which writes them after every cycle -- so a net
+    that's silently failing shows up here without anyone reading logs.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    conn = connect()
+    try:
+        nets = [dict(r) for r in conn.execute(
+            "SELECT * FROM checkin_net ORDER BY id").fetchall()]
+        for n in nets:
+            n["enabled"] = bool(n["enabled"])
+        row = conn.execute("SELECT * FROM checkin_config WHERE id = 1").fetchone()
+        config = dict(row) if row is not None else {}
+        if config:
+            config["enabled"] = bool(config["enabled"])
+    finally:
+        conn.close()
+    return JSONResponse({"nets": nets, "config": config})
+
+
+@router.post("/api/admin/checkin/nets/create")
+async def admin_checkin_net_create(request: Request):
+    """Add a net. See app/db.py's checkin_net table for the model: one
+    row carries a connector, a window, and a channel or hashtag
+    depending on protocol -- see that table's own comment for the mc/mt
+    asymmetry this deliberately preserves rather than unifies.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    fields, err = _validate_net_fields(body)
+    if err is not None:
+        return err
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "INSERT INTO checkin_net(label, protocol, connector_url, channel, hashtag, "
+            " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at) "
+            "VALUES (:label, :protocol, :connector_url, :channel, :hashtag, :weekday, "
+            " :start_hour, :end_hour, :timezone, :start_date, :enabled, :created_at)",
+            {**fields, "created_at": now},
+        )
+        net_id = cur.lastrowid
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    log.info("admin: created checkin net %d (%s, %s, %s)",
+              net_id, fields["label"], fields["protocol"], fields["connector_url"])
+    return JSONResponse({"id": net_id, "created_at": now, **fields}, status_code=201)
+
+
+@router.post("/api/admin/checkin/nets/update")
+async def admin_checkin_net_update(request: Request):
+    """Update every editable field of an existing net -- same validation
+    as create. Does not touch last_poll_at/last_poll_error (those are
+    CheckinPoller's to write, on its own next cycle against whatever
+    this update just changed).
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    net_id = body.get("id")
+    if not isinstance(net_id, int) or isinstance(net_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    fields, err = _validate_net_fields(body)
+    if err is not None:
+        return err
+
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE checkin_net SET label=:label, protocol=:protocol, "
+            " connector_url=:connector_url, channel=:channel, hashtag=:hashtag, "
+            " weekday=:weekday, start_hour=:start_hour, end_hour=:end_hour, "
+            " timezone=:timezone, start_date=:start_date, enabled=:enabled "
+            " WHERE id=:id",
+            {**fields, "id": net_id},
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    if not cur.rowcount:
+        return JSONResponse({"error": "net not found"}, status_code=404)
+    log.info("admin: updated checkin net %d", net_id)
+    return JSONResponse({"id": net_id, **fields})
+
+
+@router.post("/api/admin/checkin/nets/delete")
+async def admin_checkin_net_delete(request: Request):
+    """Remove a net. The caller must supply the net's exact `label` as
+    confirmation -- the same player_id + display_name guard
+    /api/admin/node/remove and /api/admin/player/delete already use,
+    for the same reason: a stale or mistyped id must not silently
+    delete the wrong net.
+
+    Deletes only the checkin_net row. mc_checkin_award has no net_id at
+    all (see app/db.py) -- a net's historical awards are keyed on
+    (season, player, net_date, protocol), not on which net row produced
+    them, so removing a net can never touch anyone's earned history.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    net_id = body.get("id") if isinstance(body, dict) else None
+    label = body.get("label") if isinstance(body, dict) else None
+    if not isinstance(net_id, int) or isinstance(net_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+    if not isinstance(label, str) or not label:
+        return JSONResponse({"error": "label is required"}, status_code=400)
+
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT label FROM checkin_net WHERE id = ?", (net_id,)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "net not found"}, status_code=404)
+        if row["label"] != label:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "label does not match"}, status_code=409)
+        conn.execute("DELETE FROM checkin_net WHERE id = ?", (net_id,))
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: deleted checkin net %d (%s)", net_id, label)
+    return JSONResponse({"id": net_id, "deleted": True})
+
+
+@router.post("/api/admin/checkin/config")
+async def admin_checkin_config_update(request: Request):
+    """Update the global check-in config singleton -- whether the
+    poller runs at all, points, streak bonus, and the poller's own
+    timing knobs. Takes effect on the very next poll cycle, no restart:
+    app/checkin.py's poller reads this table fresh every cycle, never
+    settings.py, by design (see load_checkin_config).
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    def _num(key, kind, min_v):
+        v = body.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        v = kind(v)
+        if v < min_v:
+            return None
+        return v
+
+    enabled = bool(body.get("enabled"))
+    points = _num("points", float, 0)
+    streak_bonus = _num("streak_bonus", float, 0)
+    streak_bonus_max = _num("streak_bonus_max", float, 0)
+    poll_interval_seconds = _num("poll_interval_seconds", int, 1)
+    directory_limit = _num("directory_limit", int, 1)
+    directory_refresh_seconds = _num("directory_refresh_seconds", int, 1)
+
+    if None in (points, streak_bonus, streak_bonus_max, poll_interval_seconds,
+                directory_limit, directory_refresh_seconds):
+        return JSONResponse(
+            {"error": "points, streak_bonus, streak_bonus_max, poll_interval_seconds, "
+                      "directory_limit, and directory_refresh_seconds are all required "
+                      "and must be non-negative numbers (poll_interval_seconds, "
+                      "directory_limit, and directory_refresh_seconds must be at least 1)"},
+            status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO checkin_config(id, enabled, points, streak_bonus, streak_bonus_max, "
+            " poll_interval_seconds, directory_limit, directory_refresh_seconds, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  enabled = excluded.enabled, points = excluded.points, "
+            "  streak_bonus = excluded.streak_bonus, "
+            "  streak_bonus_max = excluded.streak_bonus_max, "
+            "  poll_interval_seconds = excluded.poll_interval_seconds, "
+            "  directory_limit = excluded.directory_limit, "
+            "  directory_refresh_seconds = excluded.directory_refresh_seconds, "
+            "  updated_at = excluded.updated_at",
+            (int(enabled), points, streak_bonus, streak_bonus_max, poll_interval_seconds,
+             directory_limit, directory_refresh_seconds, now),
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: checkin config updated (enabled=%s points=%s)", enabled, points)
+    return JSONResponse({
+        "enabled": enabled, "points": points, "streak_bonus": streak_bonus,
+        "streak_bonus_max": streak_bonus_max, "poll_interval_seconds": poll_interval_seconds,
+        "directory_limit": directory_limit, "directory_refresh_seconds": directory_refresh_seconds,
+        "updated_at": now,
+    })
+
+
+@router.get("/api/admin/checkin/channels")
+async def admin_checkin_channels(request: Request):
+    """Proxy one CoreScope connector's channel list, so the admin panel
+    can offer a dropdown instead of a free-text channel name -- a typo
+    here is invisible until the net silently never matches a message.
+
+    Read-only and short-timeout: this is a person filling out a form,
+    not anything the poller depends on, so a slow or dead connector
+    must fail fast with a clean JSON error rather than hang the request
+    or bubble up a 500.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    connector = (request.query_params.get("connector") or "").strip().rstrip("/")
+    if not (connector.startswith("http://") or connector.startswith("https://")):
+        return JSONResponse(
+            {"error": "connector must be an http:// or https:// URL"}, status_code=400)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(5.0, connect=5.0),
+            headers={"Accept": "application/json", "User-Agent": "meshwars/1.0"},
+        ) as client:
+            r = await client.get("%s/api/channels" % connector)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        return JSONResponse({"error": "could not reach connector: %s" % e}, status_code=502)
+
+    # Tolerant of shape, same reasoning app/meshview_client.py's
+    # _unwrap_list applies to meshview's own envelopes -- CoreScope's
+    # exact /api/channels shape is not otherwise documented here, so
+    # this accepts a bare list or any of the common wrapper keys rather
+    # than assuming one and returning empty for the others.
+    channels: list = []
+    if isinstance(data, list):
+        channels = data
+    elif isinstance(data, dict):
+        for key in ("channels", "data", "results"):
+            v = data.get(key)
+            if isinstance(v, list):
+                channels = v
+                break
+    return JSONResponse({"channels": channels})
 
 
 @router.get("/api/admin/notice")

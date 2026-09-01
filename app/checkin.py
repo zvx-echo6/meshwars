@@ -1,32 +1,66 @@
 """Net check-ins: a second way to earn points, alongside squares held.
 
-A weekly net runs Wednesday evenings. Checking in during the net window
-earns a registered, non-disabled player's team settings.checkin_points,
-once per player per net -- on top of, never instead of, the squares
-their team holds (see app/mc_scoring.py's team_totals()). Theme only:
-square-holders are "Wardrivers," check-in earners are "NetOps," but
-these are two ACTIVITIES on the same player model, not two kinds of
-player -- the same person can do both and shows up in both rankings.
-There is no class or mode anywhere in this schema.
+Checking in during a net's window earns a registered, non-disabled
+player checkin_config.points, once per player per net -- on top of,
+never instead of, the squares their team holds (see
+app/mc_scoring.py's team_totals()). Theme only: square-holders are
+"Wardrivers," check-in earners are "NetOps," but these are two
+ACTIVITIES on the same player model, not two kinds of player -- the
+same person can do both and shows up in both rankings. There is no
+class or mode anywhere in this schema.
 
-Two independent feeds, polled the same way app/ingest.py polls meshview
+Nets are DB-backed (app/db.py's checkin_net/checkin_config), not the
+single settings.checkin_* pair this feature originally shipped with --
+an admin can add, edit, enable/disable, or delete a net at any time
+through app/admin_ops.py's /api/admin/checkin/* routes, and it takes
+effect on CheckinPoller's very next cycle, no restart, because that
+poller reads checkin_net/checkin_config fresh from the database EVERY
+cycle (see load_checkin_config and CheckinPoller._poll_once below) --
+never from settings, and never cached in the process. settings.py's
+original checkin_* fields still exist (app/config.py) purely as the
+one-time seed source for a fresh database (seed_nets_from_env below)
+and as the fallback net_date_for_net/load_checkin_config fall back to
+if their tables are somehow unreadable; nothing scoring-relevant reads
+them once a database has rows.
+
+A "net" is one checkin_net row carrying a connector, a window, and a
+channel-or-hashtag together -- see that table's own comment in
+app/db.py for why those three belong on one row rather than three
+tables. Multiple nets can share one connector instance (two nets, one
+CoreScope, different channels; two nets, one meshview, different
+hashtags) -- see CheckinPoller below for how client pooling and
+identity resolution both handle that without either duplicating
+upstream requests or letting one net's verdict on a shared message
+block a different net sharing that connector from ever seeing it.
+Points are GLOBAL, not per-net -- there is one player_id -> points
+relationship, same as before this table existed; a player who attends
+two different nets in the same protocol simply earns twice, keyed
+apart by their different net_dates (see mc_checkin_award's PRIMARY
+KEY). Two nets on the SAME weekday in the same protocol produce the
+SAME net_date and collide under that key -- a known, accepted limit of
+this design, not a bug: nets were never meant to double-pay the same
+day.
+
+The two protocols are polled the same way app/ingest.py polls meshview
 for position packets -- a background task, its own interval, tolerant
-of the upstream being down or slow, idempotent under repeated polling:
+of the upstream being down or slow, idempotent under repeated polling
+-- but are deliberately asymmetric in what identifies a net, and that
+asymmetry is intentional and correct, not something to unify:
 
-- MeshCore: GET {mc_checkin_base_url}/api/channels/{channel}/messages
-  on live.mwmesh.com returns the newest 100 messages in the weekly-net
-  channel, oldest first, no pagination. The only sender identifier ON A
-  MESSAGE is a free-text display name (`sender`) -- MeshCore channel
-  messages are encrypted to a shared channel key, not signed per
-  sender, so there is no public key to read off a message itself.
-  Identity resolution for a MeshCore check-in is therefore two paths,
-  KEY-BASED FIRST, in this priority order:
+- MeshCore: GET {connector_url}/api/channels/{channel}/messages on a
+  CoreScope instance (e.g. live.mwmesh.com) returns the newest 100
+  messages in the named channel, oldest first, no pagination. The only
+  sender identifier ON A MESSAGE is a free-text display name (`sender`)
+  -- MeshCore channel messages are encrypted to a shared channel key,
+  not signed per sender, so there is no public key to read off a
+  message itself. Identity resolution for a MeshCore check-in is
+  therefore two paths, KEY-BASED FIRST, in this priority order:
 
     1. The public-key directory bridge (_build_directory_bridge below,
        used by _resolve_mc_identities): resolves a player's ALREADY-
        BOUND MeshCore radio contact -- player_node, protocol='mc', the
-       first 8 hex characters of that radio's public key -- through
-       live.mwmesh.com's node directory (/api/nodes), which carries
+       first 8 hex characters of that radio's public key -- through a
+       CoreScope instance's node directory (/api/nodes), which carries
        both a display name and the full public key for every node it
        has seen. If that contact's 8-hex prefix matches exactly one
        directory entry, that entry's name is trusted as the player's
@@ -37,6 +71,18 @@ of the upstream being down or slow, idempotent under repeated polling:
        POST /api/nodes by hand (app/nodes_api.py) -- both write the
        exact same row shape, and this bridge reads player_node, not
        whichever path wrote it.
+
+       Which directory: THIS net's own connector's cached directory
+       first, and only if the contact is absent from it, the UNION of
+       every OTHER connector currently being polled (CheckinPoller's
+       _resolve_mc_identities below) -- a player's radio is most likely
+       to show up in the directory of the net they actually attend, but
+       a second connector having already seen the same public key
+       should still resolve them rather than force a duplicate
+       fallback-name registration. The fallback only WIDENS where this
+       looks; it applies the exact same ambiguity refusals described
+       below to whatever set it is consulting, so widening the search
+       can never turn an ambiguous match into a confident one.
 
        Why this is trusted automatically, when a bare name match would
        not be: the join is anchored on a public key MeshWars already
@@ -54,9 +100,10 @@ of the upstream being down or slow, idempotent under repeated polling:
 
     2. A last-resort, self-declared mc_checkin_binding row
        (app/checkin_api.py), used ONLY for a player the bridge above
-       found nothing for -- a public key that has never shown up in the
-       live.mwmesh.com directory at all (true for roughly 4 in 10 of
-       today's real bound contacts) has no way to be resolved key-first,
+       found nothing for -- a public key that has never shown up in any
+       connector's directory at all (true for roughly 4 in 10 of
+       today's real bound contacts on the original single connector)
+       has no way to be resolved key-first,
        so those players have to supply the name directly. Key-based
        resolution wins wherever it produces an answer: if a player's
        contact DOES resolve through the bridge, any fallback name they
@@ -73,13 +120,19 @@ of the upstream being down or slow, idempotent under repeated polling:
     for someone else) and why every one of them is a skip-and-log,
     never a pick-one.
 
-- Meshtastic: GET {meshview_base_url}/api/packets?portnum=1 -- the SAME
-  meshview instance app/ingest.py already polls for position packets
-  (portnum=3), just text messages instead. A check-in is any message
-  whose payload contains settings.mt_checkin_hashtag, case-insensitively.
-  Identity is `from_node_id`, resolved through player_node exactly the
-  way app/ingest.py's position poller already does -- see
-  _bare_node_ref (reused from there, not reimplemented) and
+- Meshtastic: GET {connector_url}/api/packets?portnum=1 on a meshview
+  instance -- app/ingest.py's shared client already polls the DEFAULT
+  one (settings.meshview_url) for position packets (portnum=3); this is
+  the same host, just text messages instead, for the default net's
+  connector, and a separately-pooled MeshviewClient for any OTHER
+  connector_url an admin has configured (see CheckinPoller._mt_client_for
+  below). A check-in is any message whose payload contains the net's
+  hashtag, case-insensitively, ON ANY CHANNEL -- unlike MeshCore's
+  channel-scoped feed, this is deliberately not narrowed by channel,
+  since meshview's packet feed has no per-channel query to narrow it
+  with in the first place. Identity is `from_node_id`, resolved through
+  player_node exactly the way app/ingest.py's position poller already
+  does -- see _bare_node_ref (reused from there, not reimplemented) and
   _load_mt_registered_players below.
 
 Dedup: the natural key for an award is (season, player, local net
@@ -88,12 +141,19 @@ posting several times in one net must still be credited once. That key
 is the table's PRIMARY KEY (see app/db.py's mc_checkin_award), so
 _award_checkin's INSERT OR IGNORE is what actually enforces "at most
 one per player per net," not any in-memory bookkeeping here. Separately,
-each message/packet's own id is deduplicated too (mc_checkin_seen_message
-for MeshCore; the existing processed_packet table, shared with
-app/ingest.py's position poller, for Meshtastic -- see
-_process_mt_packet's comment for why sharing that table is safe) so a
-message already looked at on an earlier poll is never re-examined at
-all, whether or not it ended up earning anything.
+each message/packet's own id is deduplicated too, against
+checkin_seen_message keyed on (connector_url, packet_id) -- see that
+table's comment in app/db.py for why the connector has to be part of
+the key now that more than one connector instance can exist per
+protocol -- so a message already looked at on an earlier poll is never
+re-examined at all, whether or not it ended up earning anything. When
+two nets share one connector (see CheckinPoller._poll_mc_feed and
+_process_mt_packet below), a message is deduped ONCE per connector, not
+once per net sharing it: both are evaluated against the SAME fetched
+message/packet in one pass, and it is marked seen only once every net
+that could possibly have wanted it has had its say -- see those
+functions' own comments for why settling it after only the first net
+looked would silently starve the second.
 """
 from __future__ import annotations
 
@@ -108,7 +168,7 @@ import httpx
 
 from . import mc_scoring, results
 from .config import settings
-from .db import WriteSession
+from .db import WriteSession, connect
 from .mc_api import active_season
 from .meshview_client import MeshviewClient
 from .node_ref import format_node_ref, normalize_sender_name
@@ -119,13 +179,14 @@ MC_PROTOCOL = "mc"
 MT_PROTOCOL = "mt"
 
 
-def net_date_for_ts(ts: int) -> str | None:
-    """Local net date (YYYY-MM-DD) for `ts` if it falls inside the net
-    window -- settings.checkin_net_weekday, from
-    settings.checkin_net_start_hour through
-    settings.checkin_net_end_hour:59:59, local to
-    settings.checkin_net_timezone -- and on or after
-    settings.checkin_net_start_date, otherwise None.
+def net_date_for_net(net, ts: int) -> str | None:
+    """Local net date (YYYY-MM-DD) for `ts` if it falls inside THIS net's
+    window -- net['weekday'], from net['start_hour'] through
+    net['end_hour']:59:59, local to net['timezone'] -- and on or after
+    net['start_date'], otherwise None. `net` is a checkin_net row (or any
+    mapping with those keys) -- this used to read settings.checkin_net_*
+    globals directly, back when there was exactly one net; now every net
+    carries its own window, so the caller supplies which one.
 
     A real IANA zone via zoneinfo, not a fixed UTC offset: America/Boise
     is UTC-7 in winter and UTC-6 in summer, and a message near either
@@ -140,23 +201,170 @@ def net_date_for_ts(ts: int) -> str | None:
     belongs to that Wednesday's net date, which is what a start date of
     that same Wednesday must include. Both are YYYY-MM-DD strings, so a
     plain string comparison sorts correctly with no extra parsing.
-    checkin_net_start_date empty means block every net, never "no lower
-    bound" -- see its comment in config.py for why. This runs on every
-    message on every poll forever (both feeds hand back history on
-    every request), so it has to stay a cheap comparison with no log
-    line -- a poll finding the same handful of too-old messages, week
-    after week, is the expected steady state, not something worth a log
-    line each time.
+    net['start_date'] empty means block every net, never "no lower
+    bound" -- the same contract settings.checkin_net_start_date always
+    used (see its comment in config.py for why), carried over unchanged
+    so a net seeded from settings with no start date configured stays
+    exactly as blocked as it always was. This runs on every message on
+    every poll forever (both feeds hand back history on every request),
+    so it has to stay a cheap comparison with no log line -- a poll
+    finding the same handful of too-old messages, week after week, is
+    the expected steady state, not something worth a log line each
+    time.
     """
-    local = datetime.fromtimestamp(ts, tz=ZoneInfo(settings.checkin_net_timezone))
-    if local.weekday() != settings.checkin_net_weekday:
+    local = datetime.fromtimestamp(ts, tz=ZoneInfo(net["timezone"]))
+    if local.weekday() != net["weekday"]:
         return None
-    if not (settings.checkin_net_start_hour <= local.hour <= settings.checkin_net_end_hour):
+    if not (net["start_hour"] <= local.hour <= net["end_hour"]):
         return None
     net_date = local.date().isoformat()
-    if not settings.checkin_net_start_date or net_date < settings.checkin_net_start_date:
+    start_date = net["start_date"]
+    if not start_date or net_date < start_date:
         return None
     return net_date
+
+
+def load_checkin_config(conn) -> dict:
+    """Fresh, uncached read of the checkin_config singleton -- points,
+    streak bonus, whether the poller runs at all, and the poller's own
+    timing knobs. Read on every poll cycle (CheckinPoller._poll_once)
+    and by every admin route that needs the current numbers
+    (app/admin_ops.py), never cached anywhere in the process, the same
+    pattern app/notice_api.py's GET /api/notice uses for its own
+    singleton row -- this table is smaller and read far less often than
+    a scoring query, so there is no performance case for caching it, and
+    caching it would silently reintroduce the "an admin edit needs a
+    restart to take effect" problem this table exists to remove.
+
+    Falls back to config.py's original settings if the row is somehow
+    missing (a database whose migrations have not run yet) rather than
+    raising -- defensive, since app/db.py's MIGRATIONS seeds this row
+    unconditionally and it should always be there in practice, but a
+    scoring path failing outright over a missing config row would be a
+    worse failure mode than briefly falling back to the settings this
+    row was itself seeded from.
+    """
+    row = conn.execute(
+        "SELECT enabled, points, streak_bonus, streak_bonus_max, "
+        "       poll_interval_seconds, directory_limit, directory_refresh_seconds "
+        "  FROM checkin_config WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return {
+            "enabled": settings.checkin_enabled,
+            "points": settings.checkin_points,
+            "streak_bonus": settings.checkin_streak_bonus,
+            "streak_bonus_max": settings.checkin_streak_bonus_max,
+            "poll_interval_seconds": settings.checkin_poll_interval_seconds,
+            "directory_limit": settings.mc_checkin_directory_limit,
+            "directory_refresh_seconds": settings.mc_checkin_directory_refresh_seconds,
+        }
+    return dict(row)
+
+
+def seed_nets_from_env(conn) -> None:
+    """One-time bootstrap, called from app/db.py's init_db() on every
+    startup: if checkin_net has never been populated, create rows that
+    reproduce exactly what settings.* already describes -- the single
+    MeshCore net and the single Meshtastic net this feature has run as
+    since before nets lived in the database. A no-op the moment a row
+    exists, whether it was seeded by an earlier boot or hand-created by
+    an operator through the admin API -- this only ever fires once per
+    database, by design: the whole point of moving nets into the
+    database is that an operator, not this function, owns them from
+    here on. (If an operator deletes every net, this fires again on the
+    next boot and reproduces the settings-derived defaults, same as a
+    truly fresh database -- there is no separate "already ran once"
+    flag, only "checkin_net is empty right now.")
+
+    Deliberately reads settings rather than anything already in the
+    database: those env vars are the only place today's production
+    values exist before this function ever runs, and after it runs once
+    they are never consulted again for net configuration -- see
+    CheckinPoller below, which reads checkin_net/checkin_config fresh
+    from the database on every cycle, never settings. The net effect is
+    that deploying this changes NO behavior: same feeds, same window,
+    same points, just moved from env-var-and-restart to database-and-
+    admin-API.
+
+    The MeshCore net is only created if settings.mc_checkin_base_url is
+    set -- empty means that half of check-ins was never configured (see
+    config.py's own comment on that field), and seeding a net anyway
+    would turn "never configured" into "configured against an empty
+    connector_url," which is not the same thing and would fail every
+    poll. The Meshtastic net is always created: settings.meshview_url
+    has no empty-means-off convention (app/ingest.py already requires
+    it to run at all), so there has always been a Meshtastic check-in
+    net in practice, gated only by checkin_enabled.
+    """
+    existing = conn.execute("SELECT count(*) FROM checkin_net").fetchone()[0]
+    if existing:
+        return
+
+    now = int(time.time())
+    if settings.mc_checkin_base_url:
+        conn.execute(
+            "INSERT INTO checkin_net(label, protocol, connector_url, channel, hashtag, "
+            " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at) "
+            "VALUES (?, 'mc', ?, ?, '', ?, ?, ?, ?, ?, 1, ?)",
+            (
+                "Weekly Net",
+                settings.mc_checkin_base_url.rstrip("/"),
+                settings.mc_checkin_channel,
+                settings.checkin_net_weekday,
+                settings.checkin_net_start_hour,
+                settings.checkin_net_end_hour,
+                settings.checkin_net_timezone,
+                settings.checkin_net_start_date,
+                now,
+            ),
+        )
+    conn.execute(
+        "INSERT INTO checkin_net(label, protocol, connector_url, channel, hashtag, "
+        " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at) "
+        "VALUES (?, 'mt', ?, '', ?, ?, ?, ?, ?, ?, 1, ?)",
+        (
+            "Weekly Net (Meshtastic)",
+            settings.meshview_url.rstrip("/"),
+            settings.mt_checkin_hashtag,
+            settings.checkin_net_weekday,
+            settings.checkin_net_start_hour,
+            settings.checkin_net_end_hour,
+            settings.checkin_net_timezone,
+            settings.checkin_net_start_date,
+            now,
+        ),
+    )
+
+    # checkin_config's row already exists (app/db.py's MIGRATIONS seeds
+    # it, unconditionally, with the bare column defaults) by the time
+    # this ever runs -- so this is an UPDATE, not an INSERT, and only
+    # fires while updated_at is still 0, i.e. nothing has touched this
+    # row since that migration created it. That guard is what stops an
+    # operator's already-saved config edit from being silently
+    # overwritten if, say, checkin_net were ever emptied and this
+    # function ran again on a later boot: updated_at != 0 the moment
+    # anyone (this function, or /api/admin/checkin/config) has ever
+    # written real values here.
+    row = conn.execute("SELECT updated_at FROM checkin_config WHERE id = 1").fetchone()
+    if row is not None and row["updated_at"] == 0:
+        conn.execute(
+            "UPDATE checkin_config SET enabled = ?, points = ?, streak_bonus = ?, "
+            " streak_bonus_max = ?, poll_interval_seconds = ?, directory_limit = ?, "
+            " directory_refresh_seconds = ?, updated_at = ? WHERE id = 1",
+            (
+                int(settings.checkin_enabled),
+                settings.checkin_points,
+                settings.checkin_streak_bonus,
+                settings.checkin_streak_bonus_max,
+                settings.checkin_poll_interval_seconds,
+                settings.mc_checkin_directory_limit,
+                settings.mc_checkin_directory_refresh_seconds,
+                now,
+            ),
+        )
+    log.info("checkin: seeded nets from settings (mc=%s, mt=%s)",
+              "on" if settings.mc_checkin_base_url else "off", settings.meshview_url)
 
 
 def checkin_streak(conn, player_id: int, protocol: str, net_date: str) -> int:
@@ -210,18 +418,25 @@ def checkin_streak(conn, player_id: int, protocol: str, net_date: str) -> int:
     return streak
 
 
-def streak_points(streak: int) -> float:
+def streak_points(config: dict, streak: int) -> float:
     """Total points a check-in is worth at this streak length -- the base
-    plus the bonus described in settings.checkin_streak_bonus."""
+    plus the bonus described in checkin_config.streak_bonus. `config` is
+    a load_checkin_config() dict (or app/admin_ops.py's
+    /api/admin/checkin/award, which loads one for the same reason) --
+    read once per caller, not re-queried per streak point, since a
+    single admin action or poll cycle must score every check-in it
+    touches against the SAME numbers, not whatever the config happens to
+    say by the time the last one in a batch is computed.
+    """
     bonus = min(
-        settings.checkin_streak_bonus * max(streak - 1, 0),
-        settings.checkin_streak_bonus_max,
+        config["streak_bonus"] * max(streak - 1, 0),
+        config["streak_bonus_max"],
     )
-    return settings.checkin_points + bonus
+    return config["points"] + bonus
 
 
 def _award_checkin(
-    conn, season_id: int, player_id: int, net_date: str, protocol: str,
+    conn, config: dict, season_id: int, player_id: int, net_date: str, protocol: str,
     message_id: str, awarded_at: int, message_ts: int | None = None,
 ) -> None:
     """Credit one check-in, if this (season, player, net_date) hasn't
@@ -246,7 +461,7 @@ def _award_checkin(
     that when something does, there is history to read.
     """
     streak = checkin_streak(conn, player_id, protocol, net_date)
-    points = streak_points(streak)
+    points = streak_points(config, streak)
     cur = conn.execute(
         "INSERT OR IGNORE INTO mc_checkin_award"
         "(season_id, player_id, net_date, points, protocol, message_id, awarded_at, "
@@ -263,44 +478,52 @@ def _award_checkin(
         )
 
 
-def _mark_mc_seen(conn, packet_id: int, seen_at: int) -> None:
-    """Record that this MeshCore message has been SETTLED -- a decision
-    was reached, so no later poll needs to look at it again.
+def _seen(conn, connector: str, packet_id: str) -> bool:
+    """True if this connector has already SETTLED this message/packet id
+    on an earlier poll -- see _mark_seen for what settled means. Shared
+    by both protocols against checkin_seen_message (app/db.py), keyed on
+    (connector, packet_id) rather than packet_id alone specifically so
+    two different connector instances -- of either protocol -- numbering
+    their own ids from their own sequences can never collide and hide a
+    real check-in from the poller that fetched it. See app/db.py's
+    checkin_seen_message comment for the production incident this
+    replaces mc_checkin_seen_message/processed_packet reuse to avoid.
+    """
+    return conn.execute(
+        "SELECT 1 FROM checkin_seen_message WHERE connector = ? AND packet_id = ?",
+        (connector, packet_id),
+    ).fetchone() is not None
+
+
+def _mark_seen(conn, connector: str, packet_id: str, seen_at: int) -> None:
+    """Record that this connector's message/packet id has been SETTLED
+    -- a decision was reached, so no later poll needs to look at it
+    again.
 
     Settled is not the same as "looked at," and the difference is the
-    whole point of this function existing separately from the read that
-    guards _process_mc_message. A message is settled when it was
-    awarded, or when nothing about it could ever make it awardable: an
-    unparseable timestamp, a timestamp outside the net window
-    (net_date_for_ts is a pure function of that timestamp, so its answer
-    cannot change), or a sender string that normalizes to nothing.
+    whole point of this function existing separately from the _seen()
+    read that guards _process_mc_message/_process_mt_packet. A message
+    is settled once EVERY net sharing this connector that could plausibly
+    have wanted it has had its say -- awarded, or found to be outside
+    that net's window, or (MeshCore) carrying no channel hashtag/no net
+    at all whose window it could fall in, or (Meshtastic) carrying none
+    of those nets' hashtags. An unparseable timestamp or an unresolvable
+    sender STRING (MeshCore's `sender` normalizing to nothing, or a
+    Meshtastic packet with no from_node_id) can never become awardable
+    for any net on this connector either, so those are settled too.
 
-    A message whose sender simply did not resolve to a player is NOT
-    settled and is not passed here -- that outcome depends on the
-    live.mwmesh.com directory and on mc_checkin_binding, both of which
-    change independently of the message, so it is retried instead.
+    A message whose sender simply did not resolve to a REGISTERED PLAYER
+    is the one outcome that is NOT settled and must not be passed here
+    -- that depends on the directory bridge, mc_checkin_binding, or
+    player_node, all of which change independently of the message
+    itself, so it is left for a later poll to retry instead. See
+    _process_mc_message and _process_mt_packet for exactly where each of
+    these branches lands.
     """
     conn.execute(
-        "INSERT OR IGNORE INTO mc_checkin_seen_message(packet_id, seen_at) VALUES (?, ?)",
-        (packet_id, seen_at),
-    )
-
-
-def _mark_mt_seen(conn, packet_id: int, seen_at: int) -> None:
-    """The Meshtastic counterpart of _mark_mc_seen, against the
-    processed_packet table app/ingest.py's position poller already
-    shares (see _process_mt_packet for why sharing it is safe).
-
-    Same settled-vs-looked-at rule: a text packet carrying no check-in
-    hashtag, no usable import timestamp, a timestamp outside the net
-    window, or no sender node id can never become awardable, so it is
-    settled here. A packet from a node that is simply not registered to
-    a player yet is left unsettled and retried, since registering a
-    radio is exactly the thing that changes that answer.
-    """
-    conn.execute(
-        "INSERT OR IGNORE INTO processed_packet(packet_id, processed_at) VALUES (?, ?)",
-        (packet_id, seen_at),
+        "INSERT OR IGNORE INTO checkin_seen_message(connector, packet_id, seen_at) "
+        "VALUES (?, ?, ?)",
+        (connector, packet_id, seen_at),
     )
 
 
@@ -308,9 +531,9 @@ def _mark_mt_seen(conn, packet_id: int, seen_at: int) -> None:
 
 
 class McLiveClient:
-    """HTTP client for live.mwmesh.com's two check-in feeds: the
-    weekly-net channel messages, and the public-key node directory used
-    by the identity bridge (see the module docstring). Not
+    """HTTP client for one CoreScope instance's two check-in feeds: a
+    channel's messages, and the public-key node directory used by the
+    identity bridge (see the module docstring). Not
     app/meshview_client.py's MeshviewClient -- that is built around a
     different host's /api/nodes, /api/packets, /api/packets_seen
     shapes -- but it follows the same conventions that client does: a
@@ -321,11 +544,20 @@ class McLiveClient:
     since the poll loop already retries on its own short interval --
     unlike MeshviewClient's own in-request retry/backoff, a second retry
     layer here would just be redundant.
+
+    One instance per DISTINCT connector_url, not per net -- see
+    CheckinPoller._mc_client_for below, which caches these by URL so two
+    nets on the same CoreScope instance (different channels) share one
+    connection pool instead of opening a second one to the same host.
+    `base_url` is always net-supplied now (there is no longer a single
+    settings.mc_checkin_base_url a bare McLiveClient() could default
+    to -- that setting is only ever read once, by seed_nets_from_env,
+    to create the FIRST such net).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, base_url: str) -> None:
         self._client = httpx.AsyncClient(
-            base_url=settings.mc_checkin_base_url.rstrip("/"),
+            base_url=base_url,
             timeout=httpx.Timeout(15.0, connect=5.0),
             headers={"Accept": "application/json", "User-Agent": "meshwars/1.0"},
         )
@@ -470,7 +702,9 @@ def _build_directory_bridge(conn, directory_nodes: list[dict]) -> dict[str, int]
     return bridge
 
 
-def _resolve_mc_identities(conn, directory_nodes: list[dict]) -> dict[str, int]:
+def _resolve_mc_identities(
+    conn, primary_directory: list[dict], other_directories: list[list[dict]],
+) -> dict[str, int]:
     """normalized sender name -> player_id, the single map
     _process_mc_message actually looks a check-in sender up in --
     combines the key-based directory bridge (_build_directory_bridge)
@@ -478,8 +712,23 @@ def _resolve_mc_identities(conn, directory_nodes: list[dict]) -> dict[str, int]:
     the priority the module docstring describes: key-based resolution
     wins wherever it produces an answer.
 
-    Two things follow from that, both enforced here rather than left to
-    caller discipline:
+    `primary_directory` is the feed's OWN connector's cached directory
+    (see CheckinPoller._poll_mc_feed); `other_directories` is every
+    OTHER connector's cached directory currently being polled this
+    cycle, consulted only as a fallback -- see the module docstring's
+    "which directory" note under the MeshCore identity section. Both
+    passes run through the exact same _build_directory_bridge, so both
+    apply its ambiguity refusals identically; the only difference
+    between them is which directory entries are on the table, and the
+    primary pass's answers win over the fallback pass's on any
+    remaining overlap (a player whose contact resolves on their own
+    net's connector is never second-guessed by a match found elsewhere).
+    A single connector (the common case today) makes other_directories
+    empty and this collapses to exactly the original one-directory
+    behavior.
+
+    Three things follow from the priority order, all enforced here
+    rather than left to caller discipline:
 
     - A fallback row for a player the bridge already resolved is
       dropped outright, never merely low-priority -- that player's
@@ -492,6 +741,12 @@ def _resolve_mc_identities(conn, directory_nodes: list[dict]) -> dict[str, int]:
       than guess" rule _build_directory_bridge applies to directory-wide
       duplicates, extended to cover a self-declared name colliding with
       a key-anchored one).
+    - The primary connector's bridge always wins over the OTHER
+      connectors' fallback bridge on any remaining name collision
+      between the two, for the same reason: the primary pass is more
+      specific to the net actually being polled, so it is treated as
+      the more trustworthy of the two key-based answers rather than an
+      arbitrary tiebreak.
 
     A directory-wide ambiguous name (_build_directory_bridge already
     refuses to put those in the bridge at all) is not separately
@@ -505,7 +760,26 @@ def _resolve_mc_identities(conn, directory_nodes: list[dict]) -> dict[str, int]:
     mc_checkin_binding's own PRIMARY KEY already prevents two players
     from registering the identical fallback string.
     """
-    bridge = _build_directory_bridge(conn, directory_nodes)
+    primary_bridge = _build_directory_bridge(conn, primary_directory)
+    if other_directories:
+        fallback_nodes = [node for nodes in other_directories for node in nodes]
+        fallback_bridge = _build_directory_bridge(conn, fallback_nodes)
+    else:
+        fallback_bridge = {}
+    # Primary wins any remaining overlap -- see the docstring's third
+    # bullet above.
+    for name, fallback_player_id in fallback_bridge.items():
+        primary_player_id = primary_bridge.get(name)
+        if primary_player_id is not None and primary_player_id != fallback_player_id:
+            log.warning(
+                "checkin: mc name %r resolves to player %d on the primary "
+                "connector's bridge and player %d on the fallback bridge -- "
+                "keeping the primary connector's player %d, discarding the "
+                "fallback's player %d", name, primary_player_id,
+                fallback_player_id, primary_player_id, fallback_player_id,
+            )
+    bridge = dict(fallback_bridge)
+    bridge.update(primary_bridge)
     manual = _load_mc_manual_bindings(conn)
     bridge_player_ids = set(bridge.values())
 
@@ -528,7 +802,9 @@ def _resolve_mc_identities(conn, directory_nodes: list[dict]) -> dict[str, int]:
 
 
 def companion_directory_entries(directory_nodes: list[dict]) -> list[dict]:
-    """Shape the cached live.mwmesh.com directory into the "people only"
+    """Shape a cached CoreScope directory snapshot (possibly a union
+    across every configured MeshCore connector -- see
+    CheckinPoller.directory_snapshot below) into the "people only"
     picker list app/checkin_api.py's MeshCore node-picker endpoint
     serves -- filters to role == "companion" (repeaters and room
     servers are infrastructure and must never be offered as a person to
@@ -704,44 +980,78 @@ def _load_mt_registered_players(conn) -> dict[str, int]:
 
 
 class CheckinPoller:
-    """Background task: polls both check-in feeds on
-    settings.checkin_poll_interval_seconds and awards points for
-    qualifying, in-window, registered senders. Follows the same shape
-    app/ingest.py's Ingestor and app/mc_ingest.py's McIngestor already
-    use -- a loop task started from app/main.py's lifespan, its own
-    interval, exceptions caught and logged per cycle so one bad poll
-    never kills the loop.
+    """Background task: reloads checkin_net/checkin_config fresh from
+    the database every cycle (never cached, never read from settings --
+    see load_checkin_config and the module docstring for why) and awards
+    points for qualifying, in-window, registered senders on every
+    enabled net. Follows the same shape app/ingest.py's Ingestor and
+    app/mc_ingest.py's McIngestor already use -- a loop task started
+    from app/main.py's lifespan, exceptions caught and logged per cycle
+    so one bad poll never kills the loop.
 
-    Shares the passed-in MeshviewClient (the same one app/ingest.py's
-    Ingestor already holds) for the Meshtastic feed rather than opening
-    a second connection pool to the same host -- this keeps all
-    meshview traffic under that client's own rate limiter
-    (settings.upstream_rate_per_sec). The MeshCore feed is a different
-    host entirely, so it gets its own small client (McLiveClient above).
+    ALWAYS started and stopped unconditionally by app/main.py, unlike
+    before this table existed (that gated construction AND the loop
+    itself on settings.checkin_enabled at process startup). The loop
+    now has to always be running for checkin_config.enabled to be a
+    true runtime toggle -- see run_forever/_poll_once below, which
+    check the database's `enabled` flag on every cycle and simply do
+    nothing when it is off, rather than the flag deciding whether the
+    task exists at all.
+
+    HTTP clients are pooled by connector_url, not held one-per-protocol
+    like the original single-feed version -- see _mc_client_for and
+    _mt_client_for. The Meshtastic client for settings.meshview_url
+    specifically is the SAME MeshviewClient app/ingest.py's Ingestor
+    already holds (passed in as `mt_client`), reused rather than a
+    second connection pool to the same host, so all traffic to that
+    instance stays under its own rate limiter
+    (settings.upstream_rate_per_sec) -- any OTHER Meshtastic
+    connector_url an admin configures gets its own MeshviewClient,
+    built lazily and owned (and closed) by this poller. Every MeshCore
+    connector gets its own McLiveClient the same way; there is no
+    shared MeshCore client to inherit, since app/mc_ingest.py's
+    wardriving ingest is a completely separate feature from these
+    check-in feeds.
     """
 
     def __init__(self, mt_client: MeshviewClient) -> None:
-        self._mt_client = mt_client
-        self._mc_client = McLiveClient() if settings.mc_checkin_base_url else None
+        # The one Meshtastic client this poller does not own -- see the
+        # class docstring. Kept separate from _mt_clients (which this
+        # poller DOES own and must close) so stop() can never accidentally
+        # close a connection pool app/main.py's own shutdown still needs.
+        self._shared_mt_url = settings.meshview_url
+        self._shared_mt_client = mt_client
+        self._mt_clients: dict[str, MeshviewClient] = {}
+        self._mc_clients: dict[str, McLiveClient] = {}
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
-        self._directory: list[dict] = []
-        self._directory_fetched_at: float = 0.0
+        # MeshCore directory cache, one entry per connector_url -- see
+        # _refresh_mc_directory_if_stale. A single connector (today's
+        # common case) makes this a dict of one, behaviorally identical
+        # to the single `self._directory` list this used to be.
+        self._mc_directory: dict[str, list[dict]] = {}
+        self._mc_directory_fetched_at: dict[str, float] = {}
         # Wall-clock of the last completed cycle, for the admin health
-        # panel. In memory rather than a table because it is a liveness
-        # signal, and a liveness signal that survives the process dying
-        # is not one. Zero until the first cycle finishes.
+        # panel (app/admin_ops.py's _poller_health) -- a whole-poller
+        # heartbeat, distinct from checkin_net.last_poll_at/
+        # last_poll_error (app/db.py), which is the PER-NET counterpart
+        # an admin nets list reads to see which specific net is failing.
+        # In memory rather than a table because it is a liveness signal,
+        # and a liveness signal that survives the process dying is not
+        # one. Zero until the first cycle finishes.
         self.last_poll_at: int = 0
         self.last_poll_error: str | None = None
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self.run_forever(), name="checkin-poller")
-        log.info(
-            "checkin poller started; poll=%ds mc=%s mt_hashtag=%s",
-            settings.checkin_poll_interval_seconds,
-            "on" if self._mc_client else "off (mc_checkin_base_url not set)",
-            settings.mt_checkin_hashtag,
-        )
+        conn = connect()
+        try:
+            net_count = conn.execute(
+                "SELECT count(*) FROM checkin_net WHERE enabled = 1"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        log.info("checkin poller started; %d net(s) enabled", net_count)
 
     async def stop(self) -> None:
         self._stop.set()
@@ -752,154 +1062,273 @@ class CheckinPoller:
             except (asyncio.CancelledError, Exception):
                 pass
             self._task = None
-        if self._mc_client is not None:
-            await self._mc_client.aclose()
+        # Only clients THIS poller opened -- the shared Meshtastic
+        # client at self._shared_mt_url belongs to app/main.py, which
+        # closes it itself after this stop() returns.
+        for client in self._mc_clients.values():
+            await client.aclose()
+        for client in self._mt_clients.values():
+            await client.aclose()
         log.info("checkin poller stopped")
 
     async def run_forever(self) -> None:
         try:
             while not self._stop.is_set():
+                interval = settings.checkin_poll_interval_seconds
                 try:
-                    await self._poll_once()
+                    interval = await self._poll_once()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     log.exception("checkin: poll cycle failed")
                 try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=settings.checkin_poll_interval_seconds
-                    )
+                    await asyncio.wait_for(self._stop.wait(), timeout=max(interval, 1))
                 except asyncio.TimeoutError:
                     pass
         except asyncio.CancelledError:
             raise
 
-    async def _poll_once(self) -> None:
-        # The two feeds are independent and one going down must never
-        # block the other -- each gets its own try/except, mirroring how
-        # app/ingest.py's poll cycle already isolates its own failures
-        # from the caller (main loop keeps going either way).
-        if self._mc_client is not None:
+    async def _poll_once(self) -> int:
+        """One cycle: reload config+nets fresh (never cached -- see the
+        module docstring), poll every enabled net grouped by protocol,
+        and return the poll interval to sleep for next -- also read
+        fresh, so tightening or loosening it from the admin panel takes
+        effect on the very next sleep, not after a restart.
+        """
+        conn = connect()
+        try:
+            config = load_checkin_config(conn)
+            nets = [dict(r) for r in conn.execute(
+                "SELECT * FROM checkin_net WHERE enabled = 1 ORDER BY id"
+            ).fetchall()]
+        finally:
+            conn.close()
+
+        if not config["enabled"]:
+            return config["poll_interval_seconds"]
+
+        mc_nets = [n for n in nets if n["protocol"] == MC_PROTOCOL]
+        mt_nets = [n for n in nets if n["protocol"] == MT_PROTOCOL]
+
+        # The two protocols are independent and one going down must
+        # never block the other -- each gets its own try/except, same
+        # as before nets moved into the database. Failure WITHIN one
+        # protocol's nets is isolated further still, per net -- see
+        # _poll_mc/_poll_mt, which record a failing net's error onto its
+        # own checkin_net row rather than letting it take out every net
+        # sharing that protocol.
+        errors = []
+        if mc_nets:
             try:
-                await self._poll_mc()
+                await self._poll_mc(mc_nets, config)
             except Exception as e:
                 log.exception("checkin: mc poll failed")
-                self.last_poll_error = "mc: %s" % e
-        try:
-            await self._poll_mt()
-        except Exception as e:
-            log.exception("checkin: mt poll failed")
-            self.last_poll_error = "mt: %s" % e
-        else:
-            if self._mc_client is None or self.last_poll_error is None \
-                    or not self.last_poll_error.startswith("mc:"):
-                self.last_poll_error = None
+                errors.append("mc: %s" % e)
+        if mt_nets:
+            try:
+                await self._poll_mt(mt_nets, config)
+            except Exception as e:
+                log.exception("checkin: mt poll failed")
+                errors.append("mt: %s" % e)
+
         self.last_poll_at = int(time.time())
+        self.last_poll_error = "; ".join(errors) if errors else None
+        return config["poll_interval_seconds"]
 
-    async def _refresh_directory_if_stale(self) -> None:
+    # ---- client pooling ----------------------------------------------
+
+    def _mc_client_for(self, connector_url: str) -> McLiveClient:
+        client = self._mc_clients.get(connector_url)
+        if client is None:
+            client = McLiveClient(connector_url)
+            self._mc_clients[connector_url] = client
+        return client
+
+    def _mt_client_for(self, connector_url: str) -> MeshviewClient:
+        if connector_url == self._shared_mt_url:
+            return self._shared_mt_client
+        client = self._mt_clients.get(connector_url)
+        if client is None:
+            client = MeshviewClient(base_url=connector_url)
+            self._mt_clients[connector_url] = client
+        return client
+
+    # ---- MeshCore directory cache --------------------------------------
+
+    async def _refresh_mc_directory_if_stale(self, connector_url: str, config: dict) -> None:
         now = time.monotonic()
-        if self._directory and now - self._directory_fetched_at < settings.mc_checkin_directory_refresh_seconds:
+        fetched_at = self._mc_directory_fetched_at.get(connector_url, 0.0)
+        if connector_url in self._mc_directory and now - fetched_at < config["directory_refresh_seconds"]:
             return
-        nodes = await self._mc_client.nodes(settings.mc_checkin_directory_limit)
+        client = self._mc_client_for(connector_url)
+        nodes = await client.nodes(config["directory_limit"])
         if nodes:
-            self._directory = nodes
-            self._directory_fetched_at = now
-        elif not self._directory:
-            # No cache to fall back on yet -- the directory bridge is
-            # simply unavailable this cycle. An explicit
-            # mc_checkin_binding registration still works regardless;
-            # this only affects the auto-resolved path.
-            log.warning("checkin: mc directory fetch failed and no cached copy yet")
+            self._mc_directory[connector_url] = nodes
+            self._mc_directory_fetched_at[connector_url] = now
+        elif connector_url not in self._mc_directory:
+            # No cache to fall back on yet for THIS connector -- its
+            # directory bridge is simply unavailable this cycle. An
+            # explicit mc_checkin_binding registration still works
+            # regardless; this only affects the auto-resolved path, and
+            # only for nets on this one connector (see
+            # _resolve_mc_identities' fallback for how other connectors'
+            # caches can still cover a player this one can't).
+            log.warning(
+                "checkin: mc directory fetch failed for %s and no cached copy yet",
+                connector_url,
+            )
 
-    def directory_snapshot(self) -> list[dict]:
-        """Read-only copy of the cached live.mwmesh.com directory, for
-        app/checkin_api.py's node-picker endpoint. Reads the SAME cache
-        _refresh_directory_if_stale maintains on its own
-        settings.mc_checkin_directory_refresh_seconds interval -- that
-        endpoint is a person clicking around a form, not something to
-        hit the upstream for on every request.
+    def directory_snapshot(self, connector_url: str | None = None) -> list[dict]:
+        """Read-only copy of a cached CoreScope directory, for
+        app/checkin_api.py's node-picker endpoint. With `connector_url`,
+        just that connector's cache; without one, the union across every
+        connector currently cached -- with today's common case of a
+        single configured connector these are the same list, so this is
+        a pure widening, never a narrowing, of what that endpoint used
+        to return. Reads the SAME cache _refresh_mc_directory_if_stale
+        maintains on its own per-connector interval -- that endpoint is
+        a person clicking around a form, not something to hit any
+        upstream for on every request.
         """
-        return list(self._directory)
+        if connector_url is not None:
+            return list(self._mc_directory.get(connector_url, []))
+        out: list[dict] = []
+        for nodes in self._mc_directory.values():
+            out.extend(nodes)
+        return out
 
-    async def _poll_mc(self) -> None:
-        messages = await self._mc_client.messages(settings.mc_checkin_channel)
-        if not messages:
-            return
-        await self._refresh_directory_if_stale()
+    # ---- MeshCore polling ------------------------------------------------
+
+    async def _poll_mc(self, nets: list[dict], config: dict) -> None:
+        connectors = sorted({n["connector_url"] for n in nets})
+        for url in connectors:
+            await self._refresh_mc_directory_if_stale(url, config)
 
         now = int(time.time())
+        # Season bookkeeping, same call app/mc_ingest.py's batch worker
+        # makes -- check-ins must be able to roll the MeshCore season
+        # forward on their own; a quiet week of wardriving traffic must
+        # never be the only thing keeping mc_season current. Protocol-
+        # wide, not per-net, so it runs once per cycle regardless of how
+        # many mc nets are configured.
         async with WriteSession() as conn:
-            # Season bookkeeping, same call app/mc_ingest.py's batch
-            # worker makes -- check-ins must be able to roll the MeshCore
-            # season forward on their own; a quiet week of wardriving
-            # traffic must never be the only thing keeping mc_season
-            # current.
             mc_scoring.maybe_roll_season(conn, now, MC_PROTOCOL)
             season_id = mc_scoring.ensure_active_season(conn, now, MC_PROTOCOL)
             results.maybe_roll_months(conn, now, MC_PROTOCOL)
-            resolved = _resolve_mc_identities(conn, self._directory)
 
+        # Grouped by the EXACT feed a request would fetch (connector,
+        # channel), not just connector -- CoreScope's messages endpoint
+        # is channel-scoped, so two nets on different channels already
+        # trigger two separate requests no matter how they're grouped;
+        # this grouping only matters for the (rare, but not impossible)
+        # case of two nets sharing one exact channel on one connector,
+        # so that pair is evaluated against one fetched message list in
+        # a single pass -- see _process_mc_message for why that matters
+        # for dedup, same reasoning _poll_mt applies to a shared
+        # Meshtastic connector below.
+        feeds: dict[tuple[str, str], list[dict]] = {}
+        for n in nets:
+            feeds.setdefault((n["connector_url"], n["channel"]), []).append(n)
+
+        for (connector_url, channel), feed_nets in feeds.items():
+            try:
+                await self._poll_mc_feed(connector_url, channel, feed_nets, connectors, season_id, now, config)
+            except Exception as e:
+                log.exception("checkin: mc feed %s#%s poll failed", connector_url, channel)
+                for n in feed_nets:
+                    await self._record_net_error(n["id"], str(e))
+            else:
+                for n in feed_nets:
+                    await self._record_net_ok(n["id"], now)
+
+    async def _poll_mc_feed(
+        self, connector_url: str, channel: str, feed_nets: list[dict],
+        all_connectors: list[str], season_id: int, received_at: int, config: dict,
+    ) -> None:
+        client = self._mc_client_for(connector_url)
+        messages = await client.messages(channel)
+        if not messages:
+            return
+
+        primary_dir = self._mc_directory.get(connector_url, [])
+        other_dirs = [self._mc_directory.get(u, []) for u in all_connectors if u != connector_url]
+
+        async with WriteSession() as conn:
+            resolved = _resolve_mc_identities(conn, primary_dir, other_dirs)
             for m in messages:
-                self._process_mc_message(conn, m, season_id, resolved, now)
+                self._process_mc_message(conn, connector_url, feed_nets, m, season_id, resolved, config, received_at)
 
-    def _process_mc_message(self, conn, m: dict, season_id: int, resolved: dict, received_at: int) -> None:
+    def _process_mc_message(
+        self, conn, connector_url: str, nets: list[dict], m: dict, season_id: int,
+        resolved: dict, config: dict, received_at: int,
+    ) -> None:
+        """Evaluate one fetched message against every net sharing this
+        EXACT (connector, channel) feed (usually just one). Settled
+        (marked seen) only once none of them is left wanting a retry --
+        see _mark_seen's docstring for what settled means and why a
+        message a shared feed's OTHER net might still need must not be
+        buried by this one's verdict.
+        """
         packet_id = m.get("packetId")
         if not isinstance(packet_id, int):
             return
+        pid_str = str(packet_id)
 
         # Settled on an earlier poll -- READ first, rather than letting
         # an INSERT OR IGNORE claim the id up front. Marking a message
         # seen before trying to attribute it is what silently cost two
         # players their 2026-08-19 award: their radios were bound
-        # correctly, but live.mwmesh.com's directory had not yet seen
-        # those public keys when the first poll swallowed the whole
-        # 100-message backlog, so the bridge resolved them to nobody --
-        # and the message was already marked seen, so no later poll ever
-        # looked at it again. See _mark_mc_seen for what now counts as
-        # settled and what is deliberately left for a retry.
-        if conn.execute(
-            "SELECT 1 FROM mc_checkin_seen_message WHERE packet_id = ?", (packet_id,)
-        ).fetchone():
+        # correctly, but the directory had not yet seen those public
+        # keys when the first poll swallowed the whole 100-message
+        # backlog, so the bridge resolved them to nobody -- and the
+        # message was already marked seen, so no later poll ever looked
+        # at it again. See _mark_seen for what now counts as settled and
+        # what is deliberately left for a retry.
+        if _seen(conn, connector_url, pid_str):
             return
 
         ts = _parse_iso_ts(m.get("timestamp"))
         if ts is None:
-            _mark_mc_seen(conn, packet_id, received_at)
-            return
-        net_date = net_date_for_ts(ts)
-        if net_date is None:
-            _mark_mc_seen(conn, packet_id, received_at)
+            _mark_seen(conn, connector_url, pid_str, received_at)
             return
 
         normalized = normalize_sender_name(m.get("sender"))
         if normalized is None:
-            _mark_mc_seen(conn, packet_id, received_at)
+            _mark_seen(conn, connector_url, pid_str, received_at)
             return
 
         player_id = resolved.get(normalized)
-        if player_id is None:
-            # Deliberately NOT marked seen: unlike every branch above,
-            # this one can change without the message changing. The
-            # sender may be someone who simply is not playing -- or a
-            # real player whose bound contact has not reached the
-            # directory yet, or who has not registered their fallback
-            # name yet. Leaving it unsettled costs one dict lookup per
-            # poll against a feed that only ever returns its newest 100
-            # messages, and buys back the award the moment they resolve.
-            return
 
-        _award_checkin(conn, season_id, player_id, net_date, MC_PROTOCOL, str(packet_id),
-                       received_at, ts)
-        # Only now: an awarded message must never be re-examined, or a
-        # season roll would let the same message earn again under the
-        # new season_id (mc_checkin_award's key is per season).
-        _mark_mc_seen(conn, packet_id, received_at)
+        # net_date_for_net is net-specific (each net carries its own
+        # weekday/hours/timezone/start_date), so this is checked per net
+        # even though every net here shares one connector and channel.
+        unresolved = False
+        for net in nets:
+            net_date = net_date_for_net(net, ts)
+            if net_date is None:
+                continue  # outside THIS net's window -- its business with the message is over
+            if player_id is None:
+                # Deliberately NOT settled: unlike the branches above,
+                # this one can change without the message changing. The
+                # sender may be someone who simply is not playing -- or
+                # a real player whose bound contact has not reached the
+                # directory yet, or who has not registered their
+                # fallback name yet.
+                unresolved = True
+                continue
+            _award_checkin(conn, config, season_id, player_id, net_date, MC_PROTOCOL,
+                           pid_str, received_at, ts)
 
-    async def _poll_mt(self) -> None:
-        packets = await self._mt_client.packets(portnum=1, limit=100)
-        if not packets:
-            return
+        if not unresolved:
+            # Only now: an awarded (or window-rejected-by-every-net)
+            # message must never be re-examined, or a season roll would
+            # let the same message earn again under the new season_id
+            # (mc_checkin_award's key is per season).
+            _mark_seen(conn, connector_url, pid_str, received_at)
 
+    # ---- Meshtastic polling -----------------------------------------------
+
+    async def _poll_mt(self, nets: list[dict], config: dict) -> None:
         now = int(time.time())
         async with WriteSession() as conn:
             mc_scoring.maybe_roll_season(conn, now, MT_PROTOCOL)
@@ -907,50 +1336,95 @@ class CheckinPoller:
             results.maybe_roll_months(conn, now, MT_PROTOCOL)
             registered = _load_mt_registered_players(conn)
 
-            for pkt in packets:
-                self._process_mt_packet(conn, pkt, season_id, registered, now)
+        # Grouped by connector, not by net: meshview's /api/packets feed
+        # is not channel- or hashtag-scoped the way CoreScope's is, so
+        # two nets on ONE connector with two different hashtags are a
+        # genuinely plausible setup (unlike mc's identical-channel
+        # edge case above), and fetching once per net here would risk a
+        # real one: whichever net's hashtag check ran first could settle
+        # a message before the other net's hashtag was ever checked
+        # against it. Fetching once per connector and evaluating every
+        # net sharing it in one pass (_process_mt_packet) avoids that.
+        connector_nets: dict[str, list[dict]] = {}
+        for n in nets:
+            connector_nets.setdefault(n["connector_url"], []).append(n)
 
-    def _process_mt_packet(self, conn, pkt: dict, season_id: int, registered: dict, received_at: int) -> None:
+        for connector_url, group in connector_nets.items():
+            try:
+                await self._poll_mt_connector(connector_url, group, season_id, registered, now, config)
+            except Exception as e:
+                log.exception("checkin: mt connector %s poll failed", connector_url)
+                for n in group:
+                    await self._record_net_error(n["id"], str(e))
+            else:
+                for n in group:
+                    await self._record_net_ok(n["id"], now)
+
+    async def _poll_mt_connector(
+        self, connector_url: str, nets: list[dict], season_id: int,
+        registered: dict, received_at: int, config: dict,
+    ) -> None:
+        client = self._mt_client_for(connector_url)
+        packets = await client.packets(portnum=1, limit=100)
+        if not packets:
+            return
+        async with WriteSession() as conn:
+            for pkt in packets:
+                self._process_mt_packet(conn, connector_url, nets, pkt, season_id, registered, config, received_at)
+
+    def _process_mt_packet(
+        self, conn, connector_url: str, nets: list[dict], pkt: dict, season_id: int,
+        registered: dict, config: dict, received_at: int,
+    ) -> None:
+        """Evaluate one fetched packet against every net sharing this
+        connector. Same settled-once-nobody-needs-a-retry rule
+        _process_mc_message applies, adapted for the one genuine
+        per-net variable here being the hashtag match (sender
+        registration is protocol-wide, not net-specific -- a node_ref
+        means the same player under every mt net) and the window.
+        """
         pid = pkt.get("id")
         if not isinstance(pid, int):
             return
+        pid_str = str(pid)
 
-        # Dedup via the SAME processed_packet table app/ingest.py's
-        # position poller already writes to, not a second table.
-        # Meshview assigns a single globally unique "id" per packet
-        # regardless of portnum, so a portnum=1 (text) id can never
-        # collide with a portnum=3 (position) id -- reusing the table is
-        # safe, and simpler than a parallel table that would only ever
-        # differ by which portnum wrote each row.
+        # Dedup against checkin_seen_message, not the old shared
+        # processed_packet table -- see app/db.py's checkin_seen_message
+        # comment for why a Meshtastic id now has to be scoped by
+        # connector too, the same reasoning that already applied to
+        # MeshCore: a SECOND meshview connector numbering its own
+        # packet ids from its own sequence could otherwise collide with
+        # the first one's ids and hide a real check-in.
         #
         # READ first rather than claiming the id with an INSERT OR
         # IGNORE, for the same reason _process_mc_message does -- see
-        # _mark_mt_seen. Leaving an unattributable text packet unsettled
-        # is invisible to the position poller either way: that path only
-        # ever fetches portnum=3, so it never sees this id at all.
-        if conn.execute(
-            "SELECT 1 FROM processed_packet WHERE packet_id = ?", (pid,)
-        ).fetchone():
+        # _mark_seen.
+        if _seen(conn, connector_url, pid_str):
             return
 
         payload = pkt.get("payload")
-        if not isinstance(payload, str) or settings.mt_checkin_hashtag.lower() not in payload.lower():
-            _mark_mt_seen(conn, pid, received_at)
+        if not isinstance(payload, str):
+            _mark_seen(conn, connector_url, pid_str, received_at)
+            return
+        payload_lower = payload.lower()
+
+        matching_nets = [n for n in nets if n["hashtag"].lower() in payload_lower]
+        if not matching_nets:
+            # No net sharing this connector cares about this message at
+            # all -- settled the same way a hashtag-less message always
+            # was, before more than one net could ever share a connector.
+            _mark_seen(conn, connector_url, pid_str, received_at)
             return
 
         import_us = pkt.get("import_time_us")
         if not isinstance(import_us, (int, float)):
-            _mark_mt_seen(conn, pid, received_at)
+            _mark_seen(conn, connector_url, pid_str, received_at)
             return
         message_ts = int(import_us / 1_000_000)
-        net_date = net_date_for_ts(message_ts)
-        if net_date is None:
-            _mark_mt_seen(conn, pid, received_at)
-            return
 
         sender_id = pkt.get("from_node_id")
         if not isinstance(sender_id, int):
-            _mark_mt_seen(conn, pid, received_at)
+            _mark_seen(conn, connector_url, pid_str, received_at)
             return
         # Local import: see app/ingest.py's _bare_node_ref docstring for
         # the exact form (bare lowercase 8-hex, matching
@@ -963,13 +1437,38 @@ class CheckinPoller:
         from .ingest import _bare_node_ref
 
         node_ref = _bare_node_ref(sender_id)
-        player_id = registered.get(node_ref)
-        if player_id is None:
-            # Not settled -- see _mark_mt_seen. A radio that isn't bound
-            # to a player today may be bound tomorrow, and that is the
-            # one outcome here that changes without the packet changing.
-            return
+        player_id = registered.get(node_ref)  # same for every net -- see the docstring above
 
-        _award_checkin(conn, season_id, player_id, net_date, MT_PROTOCOL, str(pid),
-                       received_at, message_ts)
-        _mark_mt_seen(conn, pid, received_at)
+        unresolved = False
+        for net in matching_nets:
+            net_date = net_date_for_net(net, message_ts)
+            if net_date is None:
+                continue  # outside THIS net's window -- its business with the message is over
+            if player_id is None:
+                unresolved = True  # not settled -- see _mark_seen
+                continue
+            _award_checkin(conn, config, season_id, player_id, net_date, MT_PROTOCOL,
+                           pid_str, received_at, message_ts)
+
+        if not unresolved:
+            _mark_seen(conn, connector_url, pid_str, received_at)
+
+    # ---- per-net status (app/admin_ops.py's nets list) ------------------
+
+    async def _record_net_ok(self, net_id: int, at: int) -> None:
+        async with WriteSession() as conn:
+            conn.execute(
+                "UPDATE checkin_net SET last_poll_at = ?, last_poll_error = NULL WHERE id = ?",
+                (at, net_id),
+            )
+
+    async def _record_net_error(self, net_id: int, error: str) -> None:
+        # Truncated: an upstream client library's exception text can run
+        # arbitrarily long (a full URL, a stack of chained causes), and
+        # this only has to be enough for an operator to recognize what
+        # broke, not a full traceback -- that already went to the log.
+        async with WriteSession() as conn:
+            conn.execute(
+                "UPDATE checkin_net SET last_poll_at = ?, last_poll_error = ? WHERE id = ?",
+                (int(time.time()), error[:500], net_id),
+            )

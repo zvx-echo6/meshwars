@@ -10,7 +10,7 @@
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260825-1" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260901-1" />
 </head>
 <body>
 
@@ -51,6 +51,7 @@
           Players <span class="adm-nav-badge" id="nav-players"></span>
         </button>
         <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
+        <button type="button" class="adm-nav-item" data-section="nets">Nets</button>
         <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
         <button type="button" class="adm-nav-item" data-section="months">Months</button>
         <button type="button" class="adm-nav-item" data-section="places">Places</button>
@@ -88,6 +89,82 @@
             <button type="button" id="ci-award" class="adm-btn">Credit check-in</button>
           </div>
           <div id="ci-result" class="adm-result"></div>
+        </section>
+
+        <section class="adm-section" data-section="nets" hidden>
+          <h2 class="adm-h2">Nets</h2>
+          <p class="adm-hint">Every weekly net the poller watches, on either board, plus the settings that apply to all of them at once. MeshCore and Meshtastic nets are found differently &mdash; a MeshCore net is scoped to one channel on its connector, a Meshtastic net is found by its hashtag appearing in a message on any channel &mdash; so the two protocols keep their own fields below rather than sharing one merged form.</p>
+
+          <h3 class="adm-h3">Settings</h3>
+          <p class="adm-hint">Applies to every net at once. Read fresh on the poller's next cycle &mdash; no restart.</p>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="nc-enabled" class="adm-check" /> Enabled &mdash; poller runs</label>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Points<input type="number" id="nc-points" step="0.1" min="0" /></label>
+            <label class="adm-field-label">Streak bonus<input type="number" id="nc-streak-bonus" step="0.1" min="0" /></label>
+            <label class="adm-field-label">Streak bonus max<input type="number" id="nc-streak-bonus-max" step="0.1" min="0" /></label>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Poll interval (s)<input type="number" id="nc-poll-interval" step="1" min="1" /></label>
+            <label class="adm-field-label">Directory limit<input type="number" id="nc-directory-limit" step="1" min="1" /></label>
+            <label class="adm-field-label">Directory refresh (s)<input type="number" id="nc-directory-refresh" step="1" min="1" /></label>
+          </div>
+          <div class="adm-form">
+            <button type="button" id="nc-save" class="adm-btn">Save settings</button>
+          </div>
+          <div id="nc-result" class="adm-result"></div>
+
+          <h3 class="adm-h3">Configured nets <span class="adm-count" id="nets-count"></span></h3>
+          <div id="nets"></div>
+
+          <h3 class="adm-h3" id="net-form-title">Add a net</h3>
+          <div class="adm-form">
+            <label class="adm-field-label">Protocol
+              <select id="nf-protocol">
+                <option value="mc">MeshCore</option>
+                <option value="mt">Meshtastic</option>
+              </select>
+            </label>
+            <input type="text" id="nf-label" autocomplete="off" placeholder="label, e.g. Wednesday Net" />
+          </div>
+          <div class="adm-form">
+            <input type="text" id="nf-connector" autocomplete="off" placeholder="connector URL, e.g. https://live.mwmesh.com" />
+          </div>
+          <div class="adm-form" id="nf-channel-row">
+            <input type="text" id="nf-channel" autocomplete="off" placeholder="channel" />
+            <button type="button" id="nf-load-channels" class="adm-btn adm-btn-quiet">Load channels</button>
+            <select id="nf-channel-select" hidden></select>
+          </div>
+          <div class="adm-form" id="nf-hashtag-row" hidden>
+            <input type="text" id="nf-hashtag" autocomplete="off" placeholder="hashtag, e.g. #freq51" />
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Weekday
+              <select id="nf-weekday">
+                <option value="0">Monday</option>
+                <option value="1">Tuesday</option>
+                <option value="2" selected>Wednesday</option>
+                <option value="3">Thursday</option>
+                <option value="4">Friday</option>
+                <option value="5">Saturday</option>
+                <option value="6">Sunday</option>
+              </select>
+            </label>
+            <label class="adm-field-label">Start hour<input type="number" id="nf-start-hour" min="0" max="23" value="17" /></label>
+            <label class="adm-field-label">End hour<input type="number" id="nf-end-hour" min="0" max="23" value="23" /></label>
+            <label class="adm-field-label">Timezone<input type="text" id="nf-timezone" autocomplete="off" value="America/Boise" /></label>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Start date<input type="date" id="nf-start-date" /></label>
+            <label class="adm-check-label"><input type="checkbox" id="nf-enabled" class="adm-check" checked /> Enabled</label>
+          </div>
+          <p class="adm-hint">An empty start date blocks every award for this net. Adding a brand-new connector: set this to today, or the poller can retroactively award the roughly 100 messages already sitting in that connector's backlog.</p>
+          <div class="adm-form">
+            <button type="button" id="nf-save" class="adm-btn">Add net</button>
+            <button type="button" id="nf-cancel" class="adm-btn adm-btn-quiet" hidden>Cancel edit</button>
+          </div>
+          <div id="nf-result" class="adm-result"></div>
         </section>
 
         <section class="adm-section" data-section="seasons" hidden>
@@ -155,6 +232,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260825-1"></script>
+  <script src="/static/admin.js?v=20260901-1"></script>
 </body>
 </html>

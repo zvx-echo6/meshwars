@@ -522,6 +522,246 @@ async function freezeMonth(b) {
   b.disabled = false;
 }
 
+// ---- nets ---------------------------------------------------------------
+//
+// Two independent pieces on one screen: the config singleton (points,
+// streak bonus, the poller's own timing knobs -- applies to every net
+// at once) and the nets list itself (each net's own connector, window,
+// and channel-or-hashtag). GET /api/admin/checkin/nets hands back both
+// in one call, so one load feeds both halves of the section.
+
+let allNets = [];
+let editingNetId = null;   // null while the form is adding, a net id while editing
+const NET_WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+// end_hour is inclusive through :59:59 (see app/db.py's checkin_net
+// comment), so displaying it as HH:59 rather than HH:00 is what
+// actually matches the window a message gets judged against.
+function netWindowText(n) {
+  return NET_WEEKDAY_ABBR[n.weekday] + ' ' + pad2(n.start_hour) + ':00-' +
+    pad2(n.end_hour) + ':59 ' + n.timezone;
+}
+
+function netHealthText(n) {
+  if (n.last_poll_error) return 'poll error: ' + n.last_poll_error;
+  return n.last_poll_at ? ('last polled ' + ago(n.last_poll_at)) : 'never polled yet';
+}
+
+function renderConfigForm(c) {
+  document.getElementById('nc-enabled').checked = !!c.enabled;
+  document.getElementById('nc-points').value = c.points;
+  document.getElementById('nc-streak-bonus').value = c.streak_bonus;
+  document.getElementById('nc-streak-bonus-max').value = c.streak_bonus_max;
+  document.getElementById('nc-poll-interval').value = c.poll_interval_seconds;
+  document.getElementById('nc-directory-limit').value = c.directory_limit;
+  document.getElementById('nc-directory-refresh').value = c.directory_refresh_seconds;
+}
+
+async function saveConfig(b) {
+  const out = document.getElementById('nc-result');
+  out.replaceChildren();
+  const payload = {
+    enabled: document.getElementById('nc-enabled').checked,
+    points: parseFloat(document.getElementById('nc-points').value),
+    streak_bonus: parseFloat(document.getElementById('nc-streak-bonus').value),
+    streak_bonus_max: parseFloat(document.getElementById('nc-streak-bonus-max').value),
+    poll_interval_seconds: parseInt(document.getElementById('nc-poll-interval').value, 10),
+    directory_limit: parseInt(document.getElementById('nc-directory-limit').value, 10),
+    directory_refresh_seconds: parseInt(document.getElementById('nc-directory-refresh').value, 10),
+  };
+  b.disabled = true;
+  try {
+    const c = await post('/api/admin/checkin/config', payload);
+    renderConfigForm(c);
+    out.textContent = 'Settings saved.';
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+function renderNetRow(n) {
+  const wrap = el('div', { className: 'adm-net' });
+  const row = el('div', { className: 'adm-row' });
+  row.appendChild(el('strong', { text: n.label }));
+  row.appendChild(el('span', { className: 'adm-badge', text: n.protocol }));
+  row.appendChild(el('span', { className: 'adm-mono', text: n.connector_url }));
+  row.appendChild(el('span', { text: n.protocol === 'mc' ? n.channel : n.hashtag }));
+  row.appendChild(el('span', { text: netWindowText(n) }));
+  row.appendChild(el('span', {
+    className: 'adm-badge ' + (n.enabled ? 'adm-badge-ok' : 'adm-badge-bad'),
+    text: n.enabled ? 'enabled' : 'disabled',
+  }));
+  row.appendChild(btn('Edit', 'adm-btn-quiet', () => startEditNet(n)));
+  row.appendChild(btn('Delete', 'adm-btn-danger', async (b) => {
+    const typed = window.prompt('Deleting removes this net.\n\nType ' + n.label + ' to confirm.');
+    if (!typed) return;
+    b.disabled = true;
+    try {
+      await post('/api/admin/checkin/nets/delete', { id: n.id, label: typed });
+      setStatus('Deleted net ' + n.label, false);
+      if (editingNetId === n.id) resetNetForm();
+      await loadNets();
+    } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+  }));
+  wrap.appendChild(row);
+  wrap.appendChild(el('p', {
+    className: 'adm-net-health' + (n.last_poll_error ? ' adm-status-bad' : ''),
+    text: netHealthText(n),
+  }));
+  return wrap;
+}
+
+function renderNets() {
+  const host = document.getElementById('nets');
+  const count = document.getElementById('nets-count');
+  host.replaceChildren();
+  count.textContent = allNets.length
+    ? (allNets.length + (allNets.length === 1 ? ' net' : ' nets')) : '';
+  if (!allNets.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No nets configured yet -- add one below.' }));
+    return;
+  }
+  allNets.forEach((n) => host.appendChild(renderNetRow(n)));
+}
+
+async function loadNets() {
+  try {
+    const d = await api('/api/admin/checkin/nets');
+    allNets = d.nets || [];
+    renderNets();
+    if (d.config) renderConfigForm(d.config);
+  } catch (e) {
+    setStatus('Nets load failed: ' + e.message, true);
+  }
+}
+
+function updateNetFormProtocol() {
+  const proto = document.getElementById('nf-protocol').value;
+  document.getElementById('nf-channel-row').hidden = proto !== 'mc';
+  document.getElementById('nf-hashtag-row').hidden = proto !== 'mt';
+}
+
+async function loadNetChannels(b) {
+  const connector = document.getElementById('nf-connector').value.trim();
+  const out = document.getElementById('nf-result');
+  out.replaceChildren();
+  if (!connector) { out.textContent = 'Enter a connector URL first.'; return; }
+  b.disabled = true;
+  try {
+    const r = await api('/api/admin/checkin/channels?connector=' + encodeURIComponent(connector));
+    const select = document.getElementById('nf-channel-select');
+    select.replaceChildren();
+    (r.channels || []).forEach((c) => {
+      // Tolerant of shape, same reasoning the backend proxy applies to
+      // CoreScope's own response: a channel might be a bare string or
+      // an object carrying a name under one of a few likely keys.
+      const name = typeof c === 'string' ? c : (c.name || c.channel || c.label || '');
+      if (!name) return;
+      select.appendChild(el('option', { value: name, text: name }));
+    });
+    if (select.children.length) {
+      select.hidden = false;
+      select.value = select.children[0].value;
+      document.getElementById('nf-channel').value = select.value;
+      out.textContent = 'Loaded ' + select.children.length + ' channels.';
+    } else {
+      select.hidden = true;
+      out.textContent = 'Connector returned no channels -- type the channel name by hand.';
+    }
+  } catch (e) {
+    // Never blocks the form -- a slow or unreachable connector still
+    // leaves the plain text field usable.
+    out.textContent = 'Could not load channels: ' + e.message + ' -- type the channel name by hand.';
+  }
+  b.disabled = false;
+}
+
+function resetNetForm() {
+  editingNetId = null;
+  document.getElementById('nf-protocol').value = 'mc';
+  updateNetFormProtocol();
+  document.getElementById('nf-label').value = '';
+  document.getElementById('nf-connector').value = '';
+  document.getElementById('nf-channel').value = '';
+  document.getElementById('nf-hashtag').value = '';
+  document.getElementById('nf-weekday').value = '2';
+  document.getElementById('nf-start-hour').value = '17';
+  document.getElementById('nf-end-hour').value = '23';
+  document.getElementById('nf-timezone').value = 'America/Boise';
+  document.getElementById('nf-start-date').value = '';
+  document.getElementById('nf-enabled').checked = true;
+  const select = document.getElementById('nf-channel-select');
+  select.hidden = true;
+  select.replaceChildren();
+  document.getElementById('net-form-title').textContent = 'Add a net';
+  document.getElementById('nf-save').textContent = 'Add net';
+  document.getElementById('nf-cancel').hidden = true;
+  // Deliberately does not touch nf-result -- saveNet() calls this right
+  // after a successful save specifically to clear the form back to a
+  // blank "add" state, and clearing the result here would erase the
+  // "Net added"/"Net updated" message in the same breath it appears.
+}
+
+function startEditNet(n) {
+  editingNetId = n.id;
+  document.getElementById('nf-protocol').value = n.protocol;
+  updateNetFormProtocol();
+  document.getElementById('nf-label').value = n.label;
+  document.getElementById('nf-connector').value = n.connector_url;
+  document.getElementById('nf-channel').value = n.channel || '';
+  document.getElementById('nf-hashtag').value = n.hashtag || '';
+  document.getElementById('nf-weekday').value = String(n.weekday);
+  document.getElementById('nf-start-hour').value = String(n.start_hour);
+  document.getElementById('nf-end-hour').value = String(n.end_hour);
+  document.getElementById('nf-timezone').value = n.timezone;
+  document.getElementById('nf-start-date').value = n.start_date || '';
+  document.getElementById('nf-enabled').checked = !!n.enabled;
+  const select = document.getElementById('nf-channel-select');
+  select.hidden = true;
+  select.replaceChildren();
+  document.getElementById('net-form-title').textContent = 'Edit net';
+  document.getElementById('nf-save').textContent = 'Save net';
+  document.getElementById('nf-cancel').hidden = false;
+  document.getElementById('nf-result').replaceChildren();
+  document.getElementById('net-form-title').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function saveNet(b) {
+  const out = document.getElementById('nf-result');
+  out.replaceChildren();
+  const payload = {
+    label: document.getElementById('nf-label').value.trim(),
+    protocol: document.getElementById('nf-protocol').value,
+    connector_url: document.getElementById('nf-connector').value.trim(),
+    channel: document.getElementById('nf-channel').value.trim(),
+    hashtag: document.getElementById('nf-hashtag').value.trim(),
+    weekday: parseInt(document.getElementById('nf-weekday').value, 10),
+    start_hour: parseInt(document.getElementById('nf-start-hour').value, 10),
+    end_hour: parseInt(document.getElementById('nf-end-hour').value, 10),
+    timezone: document.getElementById('nf-timezone').value.trim(),
+    start_date: document.getElementById('nf-start-date').value,
+    enabled: document.getElementById('nf-enabled').checked,
+  };
+  b.disabled = true;
+  try {
+    if (editingNetId === null) {
+      await post('/api/admin/checkin/nets/create', payload);
+      out.textContent = 'Net added.';
+    } else {
+      await post('/api/admin/checkin/nets/update', Object.assign({ id: editingNetId }, payload));
+      out.textContent = 'Net updated.';
+    }
+    resetNetForm();
+    await loadNets();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 // ---- places rotation preview -------------------------------------------
 
 async function previewPlaces(b) {
@@ -709,7 +949,7 @@ function badge(id, value, bad) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadPlayers(), loadOverview(), loadApiClients(), loadNotice()]);
+  await Promise.all([loadPlayers(), loadOverview(), loadApiClients(), loadNotice(), loadNets()]);
   badge('nav-players', allPlayers.length, false);
 }
 
@@ -768,6 +1008,17 @@ document.querySelectorAll('.adm-nav-item').forEach((b) => {
 });
 document.getElementById('player-search').addEventListener('input', renderPlayers);
 document.getElementById('ci-award').addEventListener('click', function () { awardCheckin(this); });
+document.getElementById('nc-save').addEventListener('click', function () { saveConfig(this); });
+document.getElementById('nf-protocol').addEventListener('change', updateNetFormProtocol);
+document.getElementById('nf-load-channels').addEventListener('click', function () { loadNetChannels(this); });
+document.getElementById('nf-channel-select').addEventListener('change', function () {
+  document.getElementById('nf-channel').value = this.value;
+});
+document.getElementById('nf-save').addEventListener('click', function () { saveNet(this); });
+document.getElementById('nf-cancel').addEventListener('click', function () {
+  resetNetForm();
+  document.getElementById('nf-result').replaceChildren();
+});
 document.getElementById('mo-freeze').addEventListener('click', function () { freezeMonth(this); });
 document.getElementById('pl-preview').addEventListener('click', function () { previewPlaces(this); });
 document.getElementById('apikey-create').addEventListener('click', function () { createApiClient(this); });

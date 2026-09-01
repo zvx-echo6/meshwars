@@ -570,6 +570,87 @@ CREATE TABLE IF NOT EXISTS mc_checkin_seen_message (
 );
 
 -- ---------------------------------------------------------------------
+-- Net check-ins, take two: DB-backed nets, admin-editable at runtime
+-- with no restart, supporting MULTIPLE nets across MULTIPLE connector
+-- instances -- see app/checkin.py's module docstring for the full
+-- design. mc_checkin_binding/mc_checkin_award above are unchanged and
+-- still the identity-registration and award tables; only "what nets
+-- exist, on what schedule, against what upstream" and "what settled
+-- message ids has the poller already looked at" move into the
+-- database here.
+--
+-- One row per net. Connector + window + channel-or-hashtag together,
+-- deliberately: a net without a connector cannot be polled, and a
+-- connector without a window cannot ever close, so splitting those
+-- into separate tables would only invite one existing without the
+-- other. protocol drives which of channel/hashtag actually means
+-- anything -- see app/checkin.py's module docstring for why MeshCore
+-- (channel-scoped feed) and Meshtastic (hashtag-in-any-channel) are
+-- deliberately asymmetric here, not unified into one shared field.
+-- last_poll_at/last_poll_error are the per-net counterpart of
+-- CheckinPoller's own in-memory last_poll_at/last_poll_error (see that
+-- class's docstring) -- those stay in memory as a whole-poller
+-- heartbeat; these persist so the admin nets list can show which
+-- SPECIFIC net is failing, surviving a process restart.
+CREATE TABLE IF NOT EXISTS checkin_net (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    label         TEXT NOT NULL,
+    protocol      TEXT NOT NULL,              -- 'mc' | 'mt'
+    connector_url TEXT NOT NULL,              -- base URL, no trailing slash
+    channel       TEXT NOT NULL DEFAULT '',   -- mc: channel name.  mt: unused, ''
+    hashtag       TEXT NOT NULL DEFAULT '',   -- mt: '#freq51'.     mc: unused, ''
+    weekday       INTEGER NOT NULL,           -- python datetime.weekday(): 0=Mon .. 6=Sun
+    start_hour    INTEGER NOT NULL,
+    end_hour      INTEGER NOT NULL,           -- inclusive, so 23 means 23:59:59
+    timezone      TEXT NOT NULL,              -- IANA, e.g. America/Boise
+    start_date    TEXT NOT NULL DEFAULT '',   -- '' means BLOCK ALL (same convention as today)
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    INTEGER NOT NULL,
+    last_poll_at  INTEGER,
+    last_poll_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_checkin_net_enabled ON checkin_net(enabled, protocol);
+
+-- Singleton, same upsert-by-fixed-id shape as `notice` above. Read
+-- FRESH by the poller on every cycle (never cached in the process --
+-- see app/checkin.py), which is the whole point: an admin edit here
+-- takes effect on the next poll, no restart. points/streak_bonus/
+-- streak_bonus_max are baked onto each mc_checkin_award row at award
+-- time (unchanged from before this table existed), so editing this
+-- row never rewrites a check-in someone already earned.
+CREATE TABLE IF NOT EXISTS checkin_config (
+    id                    INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled               INTEGER NOT NULL DEFAULT 0,
+    points                REAL NOT NULL DEFAULT 25.0,
+    streak_bonus          REAL NOT NULL DEFAULT 5.0,
+    streak_bonus_max      REAL NOT NULL DEFAULT 25.0,
+    poll_interval_seconds INTEGER NOT NULL DEFAULT 30,
+    directory_limit       INTEGER NOT NULL DEFAULT 5000,
+    directory_refresh_seconds INTEGER NOT NULL DEFAULT 900,
+    updated_at            INTEGER NOT NULL DEFAULT 0
+);
+
+-- Replaces mc_checkin_seen_message (still above, left in place unused
+-- per this codebase's no-drop convention) AND the Meshtastic check-in
+-- poller's old reuse of processed_packet, for the same reason: both of
+-- those key on the UPSTREAM'S OWN packet/message id alone, so two
+-- connector instances numbering from their own independent sequences
+-- can produce the identical id and collide -- one connector's real
+-- check-in silently looking "already seen" because a DIFFERENT
+-- connector happened to hand back that same number first. Keying on
+-- (connector, packet_id) instead makes every id's namespace exactly as
+-- wide as the feed it actually came from. packet_id is TEXT (not
+-- INTEGER, unlike mc_checkin_seen_message) so the same table and the
+-- same helper in app/checkin.py can dedupe both protocols' ids without
+-- a cast either way.
+CREATE TABLE IF NOT EXISTS checkin_seen_message (
+    connector  TEXT NOT NULL,
+    packet_id  TEXT NOT NULL,
+    seen_at    INTEGER NOT NULL,
+    PRIMARY KEY (connector, packet_id)
+);
+
+-- ---------------------------------------------------------------------
 -- Monthly results (app/results.py). A six-month season leaves five
 -- months with nothing to show, so each calendar month closes with its
 -- own standings and honors on the /results page.
@@ -1034,6 +1115,37 @@ MIGRATIONS = [
     "ALTER TABLE player_cell_ping ADD COLUMN precision_bits INTEGER",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_low_precision INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_implausible_speed INTEGER NOT NULL DEFAULT 0",
+    # Net check-ins move to checkin_seen_message (connector, packet_id),
+    # keyed wide enough to cover multiple connector instances -- see
+    # that table's own comment in SCHEMA above for why. Every id
+    # mc_checkin_seen_message already holds was seen on exactly one
+    # connector in practice (production has only ever run one
+    # MeshCore feed, live.mwmesh.com), so backfilling all of it under
+    # that literal URL is not a guess, it is simply naming the
+    # connector that was implicit before this table existed.
+    # INSERT OR IGNORE, not INSERT: a database that has already run
+    # this backfill (or that somehow already has a matching row from
+    # elsewhere) leaves that row alone rather than erroring on the
+    # PRIMARY KEY. CAST(packet_id AS TEXT) because
+    # mc_checkin_seen_message.packet_id is INTEGER and
+    # checkin_seen_message.packet_id is TEXT (so it can hold either
+    # protocol's id -- see that table's comment).
+    "INSERT OR IGNORE INTO checkin_seen_message(connector, packet_id, seen_at) "
+    "SELECT 'https://live.mwmesh.com', CAST(packet_id AS TEXT), seen_at "
+    "  FROM mc_checkin_seen_message",
+    # Seed the checkin_config singleton with the defaults every fresh
+    # column above already carries, so the row exists unconditionally
+    # from the first boot after this migration runs -- app/checkin.py's
+    # poller and app/admin_ops.py's admin routes both assume it is
+    # always there, never optionally-absent, the same way `notice`'s
+    # singleton is assumed always-present by its own reader. INSERT OR
+    # IGNORE: app/checkin.py's seed_nets_from_env() is what actually
+    # populates this row from settings on a truly fresh install (it
+    # only overwrites while updated_at is still 0, so it can tell the
+    # difference between "still this migration's bare defaults" and
+    # "an operator already edited it") -- this migration only has to
+    # guarantee the row EXISTS, not what it holds.
+    "INSERT OR IGNORE INTO checkin_config(id) VALUES (1)",
 ]
 
 PRAGMAS = [
@@ -1107,6 +1219,26 @@ def init_db() -> None:
             load_places_seed(conn)
         except Exception:
             log.exception("places_seed: load failed -- places feature will have no/stale data")
+
+        # Net check-ins (app/checkin.py): one-time bootstrap of
+        # checkin_net/checkin_config from settings.py, so a database that
+        # has never had a net row gets exactly today's production
+        # behavior reproduced as DB rows, and every later boot is a
+        # no-op. Local import, same reason and same pattern as
+        # places_seed just above (checkin.py imports WriteSession from
+        # this module, so importing it back at module load time here
+        # would close a cycle; importing it inside this already-running
+        # function does not, since by the time init_db() is called this
+        # module has finished executing). Non-fatal for the same reason
+        # places_seed's failure is non-fatal: a check-in feature with no
+        # nets configured is a quiet, recoverable state (an operator can
+        # always add nets through the admin API), not a reason to refuse
+        # to serve the rest of the site.
+        try:
+            from .checkin import seed_nets_from_env
+            seed_nets_from_env(conn)
+        except Exception:
+            log.exception("checkin: seed_nets_from_env failed -- check-in nets may be empty")
     finally:
         conn.close()
 

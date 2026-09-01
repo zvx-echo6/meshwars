@@ -39,18 +39,20 @@ async def lifespan(app: FastAPI):
 
     # Net check-ins (app/checkin.py). Shares `client` (the same
     # MeshviewClient the position-packet Ingestor above already holds)
-    # for its Meshtastic feed, rather than opening a second connection
-    # pool to the same meshview host -- see CheckinPoller's docstring.
-    # Constructed unconditionally, same as McIngestor above, so
-    # app.state.checkin_poller always exists for app/checkin_api.py's
-    # node-picker endpoint to read a (possibly still-empty) directory
-    # cache from even when checkin_enabled is false; only its background
-    # poll loop is gated by the flag -- a fresh install must not start
-    # polling live.mwmesh.com/meshview for a feature it was never
-    # configured for.
+    # for its default Meshtastic connector, rather than opening a second
+    # connection pool to the same meshview host -- see CheckinPoller's
+    # docstring. Started UNCONDITIONALLY, unlike before checkin_net/
+    # checkin_config existed (this used to be gated on
+    # settings.checkin_enabled at process startup) -- the whole point of
+    # moving that flag into checkin_config is that an admin can toggle
+    # it at runtime with no restart, which only works if the loop is
+    # always running to notice the toggle. The loop itself checks
+    # checkin_config.enabled on every cycle and does nothing when it is
+    # off (see CheckinPoller._poll_once) -- a fresh install with no nets
+    # configured yet still starts a background task, but that task polls
+    # nothing until an admin adds a net and turns it on.
     checkin_poller = CheckinPoller(client)
-    if settings.checkin_enabled:
-        await checkin_poller.start()
+    await checkin_poller.start()
 
     app.state.client = client
     app.state.ingestor = ingestor
@@ -70,8 +72,7 @@ async def lifespan(app: FastAPI):
             pass
         if settings.mc_ingest_enabled:
             await mc_ingestor.stop()
-        if settings.checkin_enabled:
-            await checkin_poller.stop()
+        await checkin_poller.stop()
         await client.aclose()
 
 

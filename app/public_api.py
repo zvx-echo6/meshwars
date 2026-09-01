@@ -46,6 +46,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from . import mc_api, results
+from .checkin import load_checkin_config
 from .config import settings
 from .db import connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL, hash_secret
@@ -222,39 +223,85 @@ def _guard(request: Request, board: str | None = None, require_key: bool = True)
 
 
 def _net_window(now_ts: int) -> dict:
-    """When the net is, whether it is open, and when the next one opens.
+    """When the next net opens and whether one is open right now, across
+    every ENABLED row in checkin_net -- not a single settings-based
+    window, which is all there was back when a site could only ever run
+    one net. See app/db.py's checkin_net table and app/checkin.py's
+    net_date_for_net, which decides the same open/closed question for
+    an incoming message, one net at a time.
 
-    Computed rather than stored: the net is a rule (a weekday and an
-    hour range in a timezone), not a scheduled row, so there is nothing
-    to look up. See app/checkin.py's net_date_for_ts, which decides the
-    same thing for an incoming message.
+    Display only, same as before this read multiple nets: this never
+    decides who gets an award. The award gate lives in app/checkin.py,
+    reading checkin_net independently, and stays there -- a caller of
+    /api/v1/net must never be able to reason "the API says it's open,
+    so my check-in counted."
+
+    The response keeps the single-net field names (weekday,
+    opens_hour_local, ...) for backward compatibility with the
+    published /api/v1 contract, which promises those names keep their
+    meaning. With more than one enabled net they describe whichever
+    net is open right now, or -- if none is -- whichever opens
+    soonest: one net has to speak for those fields, so it is always
+    the one a caller most wants to know about.
     """
-    tz = ZoneInfo(settings.checkin_net_timezone)
-    local = datetime.fromtimestamp(now_ts, tz=tz)
+    conn = connect()
+    try:
+        nets = [dict(r) for r in conn.execute(
+            "SELECT * FROM checkin_net WHERE enabled = 1 ORDER BY id").fetchall()]
+        config = load_checkin_config(conn)
+    finally:
+        conn.close()
 
-    open_now = (local.weekday() == settings.checkin_net_weekday
-                and settings.checkin_net_start_hour <= local.hour <= settings.checkin_net_end_hour)
-
-    # The next start, which is today's if it has not happened yet.
-    days_ahead = (settings.checkin_net_weekday - local.weekday()) % 7
-    start = local.replace(hour=settings.checkin_net_start_hour, minute=0, second=0, microsecond=0) \
-        + timedelta(days=days_ahead)
-    if start <= local:
-        start += timedelta(days=7)
-
-    today = local.date().isoformat() if local.weekday() == settings.checkin_net_weekday else None
-    return {
-        "open": open_now,
-        "weekday": settings.checkin_net_weekday,
-        "opens_hour_local": settings.checkin_net_start_hour,
-        "closes_hour_local": settings.checkin_net_end_hour,
-        "timezone": settings.checkin_net_timezone,
-        "current_net_date": today if open_now else None,
-        "next_opens_at": int(start.timestamp()),
-        "base_points": settings.checkin_points,
-        "streak_bonus_per_net": settings.checkin_streak_bonus,
-        "streak_bonus_max": settings.checkin_streak_bonus_max,
+    # points/streak figures now live in checkin_config (admin-editable,
+    # read fresh every time -- see load_checkin_config), not settings,
+    # which only seeded that table's first row and is never consulted
+    # again once it has.
+    base = {
+        "base_points": config["points"],
+        "streak_bonus_per_net": config["streak_bonus"],
+        "streak_bonus_max": config["streak_bonus_max"],
     }
+
+    if not nets:
+        return dict(base, open=False, weekday=None, opens_hour_local=None,
+                    closes_hour_local=None, timezone=None,
+                    current_net_date=None, next_opens_at=None)
+
+    open_net = None    # first (lowest id) enabled net that is open right now, if any
+    soonest = None      # (next_start_ts, net) for whichever net opens soonest
+    for n in nets:
+        tz = ZoneInfo(n["timezone"])
+        local = datetime.fromtimestamp(now_ts, tz=tz)
+
+        is_open = (local.weekday() == n["weekday"]
+                   and n["start_hour"] <= local.hour <= n["end_hour"])
+        if is_open and open_net is None:
+            open_net = n
+
+        # The next start for THIS net, which is today's if it has not
+        # happened yet -- same arithmetic the single-net version used,
+        # just run once per net instead of once for the whole site.
+        days_ahead = (n["weekday"] - local.weekday()) % 7
+        start = local.replace(hour=n["start_hour"], minute=0, second=0, microsecond=0) \
+            + timedelta(days=days_ahead)
+        if start <= local:
+            start += timedelta(days=7)
+        start_ts = int(start.timestamp())
+        if soonest is None or start_ts < soonest[0]:
+            soonest = (start_ts, n)
+
+    chosen = open_net or soonest[1]
+    today_local = datetime.fromtimestamp(now_ts, tz=ZoneInfo(chosen["timezone"])).date().isoformat()
+
+    return dict(base,
+        open=open_net is not None,
+        weekday=chosen["weekday"],
+        opens_hour_local=chosen["start_hour"],
+        closes_hour_local=chosen["end_hour"],
+        timezone=chosen["timezone"],
+        current_net_date=today_local if open_net is not None else None,
+        next_opens_at=soonest[0],
+    )
 
 
 # ---- shaping -----------------------------------------------------------
