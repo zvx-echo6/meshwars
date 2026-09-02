@@ -43,7 +43,7 @@ from .config import settings
 from .db import connect
 from .grid import cell_bounds
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
-from .mc_scoring import team_checkin_points, team_tile_counts
+from .mc_scoring import team_checkin_points, team_place_points, team_tile_counts
 from .places_api import _stable_tiebreak
 from . import results
 
@@ -504,9 +504,19 @@ async def mc_board() -> Response:
 
 
 def scores_for(protocol: str) -> dict:
-    """Active season id/window plus every team's current tile count for
+    """Active season id/window plus every team's current standing for
     `protocol`. Always returns all seven teams (zero-filled) so the
     scoreboard doesn't jump around as teams appear on the board.
+
+    Each team's "total" here matches team_totals() in mc_scoring.py --
+    squares held plus check-in points plus Places Worth Going points --
+    so the number the board displays is the same number that decides
+    the season and month standings. The three components are also
+    returned separately (tiles, checkin_points, explorer_points) so the
+    frontend can show a breakdown, not just the sum. "explorer_points"
+    matches the field name find_for() already uses above for the same
+    Places Worth Going figure on a single player, rather than inventing
+    a second name ("place_points") for the identical concept.
 
     Factored out of mc_scores() below so app/api.py's Meshtastic /scores
     route returns the exact same shape for its own board instead of a
@@ -520,14 +530,16 @@ def scores_for(protocol: str) -> dict:
         # Live counts, not the season-close tally: mc_season_team_tally is
         # only populated by maybe_roll_season() when a season CLOSES, so it
         # stays empty/stale for the entire span of an active season. Count
-        # current ownership straight from mc_tile, and current check-in
-        # points straight from mc_checkin_award, via the same helpers
+        # current ownership straight from mc_tile, current check-in points
+        # straight from mc_checkin_award, and current Places Worth Going
+        # points straight from place_activation, via the same helpers
         # season rollover itself uses, so this always matches the live
         # board. mc_season_team_tally is still the correct source for
         # historical (closed) season standings -- leave it alone, don't
         # wire it back in here.
         tile_counts = team_tile_counts(conn, season["id"])
         checkin_points = team_checkin_points(conn, season["id"])
+        explorer_points = team_place_points(conn, season["id"])
         return {
             "season_id": season["id"],
             "started_at": season["started_at"],
@@ -537,7 +549,12 @@ def scores_for(protocol: str) -> dict:
                     "team": t,
                     "tiles": tile_counts.get(t, 0),
                     "checkin_points": checkin_points.get(t, 0.0),
-                    "total": tile_counts.get(t, 0) + checkin_points.get(t, 0.0),
+                    "explorer_points": explorer_points.get(t, 0.0),
+                    "total": (
+                        tile_counts.get(t, 0)
+                        + checkin_points.get(t, 0.0)
+                        + explorer_points.get(t, 0.0)
+                    ),
                 }
                 for t in team_list()
             ],
@@ -550,7 +567,10 @@ def scores_for(protocol: str) -> dict:
         "season_id": None,
         "started_at": None,
         "ends_at": None,
-        "teams": [{"team": t, "tiles": 0, "checkin_points": 0.0, "total": 0.0} for t in team_list()],
+        "teams": [
+            {"team": t, "tiles": 0, "checkin_points": 0.0, "explorer_points": 0.0, "total": 0.0}
+            for t in team_list()
+        ],
     }
 
 
