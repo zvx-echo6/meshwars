@@ -221,6 +221,10 @@
             <label class="adm-field-label">Poll interval (s)<input type="number" id="pt-poll-interval" step="1" min="1" /></label>
             <label class="adm-field-label">Page limit<input type="number" id="pt-page-limit" step="1" min="1" max="1000" /></label>
           </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Paint from<input type="date" id="pt-paint-from" /></label>
+          </div>
+          <p class="adm-hint">Blank blocks every FreqMapper event &mdash; FreqMapper's feed hands back history on every request, so a blank date is what stops a freshly enabled connector from repainting the board with everything the feed can still reach in one pass. Setting this to today starts painting forward from now; it does not backfill the feed's history.</p>
 
           <h3 class="adm-h3">Scoring</h3>
           <p class="adm-hint">FreqMapper reports no per-event station count, which is why this is a flat award per event rather than a per-station one.</p>

@@ -743,6 +743,7 @@ function renderPaintForm(cfg) {
   document.getElementById('pt-api-key-hint').textContent = cfg.has_api_key ? 'currently set' : 'not set';
   document.getElementById('pt-poll-interval').value = cfg.poll_interval_seconds;
   document.getElementById('pt-page-limit').value = cfg.page_limit;
+  document.getElementById('pt-paint-from').value = cfg.paint_from || '';
   document.getElementById('pt-points-per-event').value = cfg.points_per_event;
   document.getElementById('pt-unique-painter-bonus').value = cfg.unique_painter_bonus;
   loadedPaintSource = cfg.mt_paint_source;
@@ -822,6 +823,7 @@ async function savePaint(b) {
     base_url: document.getElementById('pt-base-url').value.trim(),
     poll_interval_seconds: parseInt(document.getElementById('pt-poll-interval').value, 10),
     page_limit: parseInt(document.getElementById('pt-page-limit').value, 10),
+    paint_from: document.getElementById('pt-paint-from').value,
     points_per_event: parseFloat(document.getElementById('pt-points-per-event').value),
     unique_painter_bonus: parseFloat(document.getElementById('pt-unique-painter-bonus').value),
   };

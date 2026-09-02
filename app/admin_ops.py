@@ -1276,6 +1276,18 @@ async def admin_paint_update(request: Request):
                       "required and must be within range"},
             status_code=400)
 
+    # paint_from: same shape as checkin_net's own start_date validation
+    # above (empty, or a real YYYY-MM-DD) -- see freqmapper_config's
+    # comment in app/db.py for why empty means block every event rather
+    # than no lower bound.
+    paint_from = (body.get("paint_from") or "").strip()
+    if paint_from:
+        try:
+            date.fromisoformat(paint_from)
+        except ValueError:
+            return JSONResponse(
+                {"error": "paint_from must be YYYY-MM-DD or empty"}, status_code=400)
+
     now = int(time.time())
     conn = connect()
     try:
@@ -1298,17 +1310,18 @@ async def admin_paint_update(request: Request):
         conn.execute(
             "INSERT INTO freqmapper_config(id, mt_paint_source, enabled, base_url, api_key, "
             " poll_interval_seconds, page_limit, points_per_event, unique_painter_bonus, "
-            " updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " paint_from, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "  mt_paint_source = excluded.mt_paint_source, enabled = excluded.enabled, "
             "  base_url = excluded.base_url, api_key = excluded.api_key, "
             "  poll_interval_seconds = excluded.poll_interval_seconds, "
             "  page_limit = excluded.page_limit, points_per_event = excluded.points_per_event, "
             "  unique_painter_bonus = excluded.unique_painter_bonus, "
+            "  paint_from = excluded.paint_from, "
             "  updated_at = excluded.updated_at",
             (mt_paint_source, int(enabled), base_url, api_key, poll_interval_seconds,
-             page_limit, points_per_event, unique_painter_bonus, now),
+             page_limit, points_per_event, unique_painter_bonus, paint_from, now),
         )
         conn.execute("COMMIT")
         cfg = load_freqmapper_config(conn)
