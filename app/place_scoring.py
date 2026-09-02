@@ -98,7 +98,7 @@ def credit_places(
     player_id: int,
     cell_id: str,
     ts: int,
-    repeater_ids: list,
+    paint_outcome: str,
     by_air: bool = False,
     protocol: str = "",
 ) -> list[tuple[int, int]]:
@@ -108,24 +108,47 @@ def credit_places(
     what was actually credited, or [] if nothing was; the list shape is
     kept for the callers, but it now never holds more than one entry.
 
-    Gating on `repeater_ids` non-empty directly, not on
-    mc_scoring.apply_paint()'s PaintResult.outcome: "a scoring ping" is
-    the same test apply_paint() itself uses to decide "no_signal" (did
-    this ping name at least one repeater/feeder) -- apply_paint's other
-    outcomes (cooldown, reinforced, captured, attacked, flipped) are
-    about SQUARE ownership dynamics that place-crediting does not share.
-    A "cooldown" ping (this player's square score is throttled because
-    these exact repeaters were already credited to them on this cell
-    recently) still represents a real, current visit to this cell with a
-    working radio -- and place credit is gated weekly, not per-visit, so
-    there is nothing to protect against by also blocking it here. Only a
-    ping that named zero repeaters (no_signal) reached no one and must
-    not credit anything, on a square or on a place.
+    Gates on `paint_outcome` -- the `outcome` field of the PaintResult
+    mc_scoring.apply_paint() just returned for this same ping -- rather
+    than on the caller's repeater/feeder list. "a scoring ping" is
+    apply_paint()'s own "no_signal" outcome, negated: apply_paint's
+    other outcomes (cooldown, reinforced, captured, attacked, flipped)
+    are about SQUARE ownership dynamics that place-crediting does not
+    share. A "cooldown" ping (this player's square score is throttled
+    because these exact repeaters were already credited to them on this
+    cell recently) still represents a real, current visit to this cell
+    with a working radio -- and place credit is gated weekly, not
+    per-visit, so there is nothing to protect against by also blocking
+    it here. Only "no_signal" reached no one and must not credit
+    anything, on a square or on a place.
+
+    Until 2026-09, this gated on the caller's `repeater_ids` list being
+    non-empty instead -- a proxy for "no_signal" that happened to be
+    exact for MeshCore and meshview, because both name the repeaters
+    they reject on: apply_paint() returns "no_signal" precisely when
+    that list is empty, so testing the list directly and testing the
+    outcome it produces were the same question asked two different
+    ways. FreqMapper (app/freqmapper_ingest.py) broke the equivalence:
+    it calls apply_paint() in `flat_points` mode, where the repeater
+    list is always empty by construction (there is no repeater/feeder
+    concept to report) and the "named zero repeaters" check that
+    produces "no_signal" is skipped entirely -- flat-scored mode simply
+    cannot return "no_signal". So an empty list meant two different
+    things depending on the source: for MeshCore/meshview, "this ping
+    reached nobody"; for FreqMapper, "this source doesn't report that
+    dimension" on an event that is independently-verified coverage and
+    always scores. Gating on the list literally could not tell those
+    apart, and silently read every FreqMapper event as the former --
+    crediting nothing, for an entire board, with no error anywhere.
+    Gating on the outcome instead asks the question apply_paint() itself
+    already answered, so it is exact for every source by construction:
+    identical to the old test wherever the proxy held (MeshCore,
+    meshview), and correct where it didn't (FreqMapper).
 
     Caller must already hold app.db's write lock and have an open write
     transaction on `conn` -- same contract as apply_paint().
     """
-    if by_air or not repeater_ids:
+    if by_air or paint_outcome == "no_signal":
         return []
 
     place_ids = [

@@ -932,8 +932,9 @@ class Ingestor:
             # uses. A scoring failure must not lose the stat counters
             # already recorded above or abort the rest of this packet's
             # bookkeeping -- log it and keep going.
+            paint_result = None
             try:
-                mc_scoring.apply_paint(
+                paint_result = mc_scoring.apply_paint(
                     conn, mt_season_id, player_id, team, cell, ts, feeder_ids,
                     settings.mt_points_per_feeder, settings.mt_max_points_per_ping,
                     PROTOCOL, int(time.time()),
@@ -949,14 +950,18 @@ class Ingestor:
             # this board (apply_paint above is never passed one either,
             # for the same reason -- see its call above), so it is
             # always False here; nothing on the Meshtastic path detects
-            # aircraft speed today.
-            try:
-                credit_places(conn, player_id, cell, ts, feeder_ids, False, PROTOCOL)
-            except Exception:
-                log.exception(
-                    "place scoring: credit_places failed for player %d cell %s",
-                    player_id, cell,
-                )
+            # aircraft speed today. Gated on apply_paint()'s outcome
+            # (paint_result.outcome), not on feeder_ids directly -- see
+            # credit_places()'s docstring. If apply_paint itself raised
+            # above, paint_result is still None and this is skipped.
+            if paint_result is not None:
+                try:
+                    credit_places(conn, player_id, cell, ts, paint_result.outcome, False, PROTOCOL)
+                except Exception:
+                    log.exception(
+                        "place scoring: credit_places failed for player %d cell %s",
+                        player_id, cell,
+                    )
 
             conn.execute(
                 "INSERT OR IGNORE INTO processed_packet(packet_id, processed_at) VALUES (?, ?)",
