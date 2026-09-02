@@ -21,11 +21,11 @@
  * string written in this file.
  *
  * The status-check API key never leaves this file except in the
- * X-API-Key header of a request itself (/api/mc/status, and now
- * /api/nodes for the radio list/add/remove calls below) -- it is never
- * put in a URL or request body, never persisted (no
- * localStorage/sessionStorage/cookie), and never logged. The radio
- * add/remove calls read it fresh from #f-status-key on every call
+ * X-API-Key header of a request itself (/api/mc/status, /api/nodes for
+ * the radio list/add/remove calls, and /api/team for the switch-team
+ * control, all below) -- it is never put in a URL or request body,
+ * never persisted (no localStorage/sessionStorage/cookie), and never
+ * logged. Every one of those calls reads it fresh from #f-status-key
  * rather than caching it in a variable, same reasoning: there is
  * already exactly one place this key lives on the page, and it should
  * stay that way.
@@ -773,6 +773,27 @@ function relativeTimeFromEpoch(ts) {
   return `${days} day${days !== 1 ? 's' : ''} ago`;
 }
 
+// Server-provided next_switch_at (a real unix timestamp, always the
+// end of the current month window in settings.checkin_net_timezone --
+// see GET /api/team's docstring in app/join_api.py, which returns it
+// in both the available and locked states now, so this file never has
+// to guess at it). Rendered with an explicit timeZone: 'America/Boise'
+// rather than the viewer's local zone -- ts is midnight in that zone,
+// so a viewer west of Mountain time (Pacific, Alaska, Hawaii) would
+// otherwise see that instant fall on the previous day and be told they
+// can switch a day sooner than they actually can. Pinning the zone
+// here is fine precisely because this is display-only: it renders a
+// timestamp the server already computed, it does not recompute when a
+// month begins the way the deleted estimateNextSwitchLabel() used to.
+function formatSwitchDate(ts) {
+  if (!ts) return 'unknown';
+  try {
+    return new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Boise' });
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
 function buildCountersTable(today, week, labels) {
   const table = document.createElement('table');
   table.className = 'status-table';
@@ -1288,10 +1309,244 @@ async function handleAddRadioSubmit(e) {
   }
 }
 
+// ---- Switch team (GET/POST /api/team) -------------------------------------
+//
+// Lives in the same setup-check box as the radios list above, shown at
+// the same point (once the key above has checked out) but rendered and
+// reset independently of renderStatusResult()/applyRadiosUpdate() --
+// those rebuild #status-result and the radios list from scratch on
+// every check and every radio add/remove, and an in-progress team pick
+// must not vanish just because the player edited a radio at the same
+// time. Every call here reads the key fresh from #f-status-key, same
+// reasoning as the radio management functions above.
+//
+// The player's own switch is capped at once per calendar month
+// (app/join_api.py's switch_team()); an operator's override from the
+// admin panel is unlimited and not exposed here. Ground the player is
+// currently holding is never affected by a switch -- only points and
+// streak travel -- and this control's confirmation copy says so
+// in full before anything is submitted.
+
+// The last GET /api/team response for the currently checked-out key --
+// {team, switch_available, next_switch_at}. Read by
+// renderTeamSwitchControl() and by the picker/confirm below to know
+// which team is "current" (so it can't be picked again) without a
+// second round trip.
+let teamStatusData = null;
+
+// The team picked in the switch-team picker, awaiting confirmation --
+// null whenever the confirm box isn't showing.
+let pendingSwitchTeam = null;
+
+function showTeamError(message) {
+  const el = document.getElementById('status-team-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearTeamError() {
+  const el = document.getElementById('status-team-error');
+  el.textContent = '';
+  el.hidden = true;
+}
+
+// Back to "just the Switch team button" -- used on Cancel, after a
+// successful switch, and before opening the picker fresh each time.
+function closeTeamSwitchPicker() {
+  pendingSwitchTeam = null;
+  document.getElementById('status-team-picker-wrap').hidden = true;
+  document.getElementById('status-team-confirm').hidden = true;
+}
+
+// Reflects teamStatusData.switch_available in the control itself: an
+// enabled Switch team button, or a disabled one plus the date the
+// player can next switch -- shown, never hidden outright, per the
+// same "state the constraint rather than hide the control" rule the
+// rest of this page's disabled states already follow.
+function renderTeamSwitchControl() {
+  const switchBtn = document.getElementById('status-team-switch-btn');
+  const lockedHint = document.getElementById('status-team-locked-hint');
+  if (!teamStatusData) return;
+
+  if (teamStatusData.switch_available) {
+    switchBtn.disabled = false;
+    lockedHint.hidden = true;
+  } else {
+    switchBtn.disabled = true;
+    lockedHint.textContent = `You already switched teams this month. You can switch again on ${formatSwitchDate(teamStatusData.next_switch_at)}.`;
+    lockedHint.hidden = false;
+  }
+}
+
+// Confirmation copy shown before a switch is submitted -- states, in
+// order, the two things a player gives up and keeps by switching (the
+// owner's explicit requirement): points and streak travel with them,
+// the ground they currently hold does not, and when their next switch
+// would be available if they go through with this one.
+function showTeamSwitchConfirm(fromTeam, toTeam) {
+  pendingSwitchTeam = toTeam;
+  const box = document.getElementById('status-team-confirm');
+  const title = document.getElementById('status-team-confirm-title');
+  const body = document.getElementById('status-team-confirm-body');
+  title.textContent = `Confirm switch to ${toTeam}?`;
+  body.textContent = `You keep every point you have earned and your check-in streak. The ground you currently hold stays with ${fromTeam} -- it does not come with you. You will not be able to switch teams again until ${formatSwitchDate(teamStatusData.next_switch_at)}.`;
+  box.hidden = false;
+}
+
+// Same seven swatches buildTeamPicker() draws for the join flow above,
+// with the player's current team rendered disabled (still shown, per
+// the "seven teams, always" rule the rest of the picker follows --
+// never quietly dropped to six) rather than omitted, since picking it
+// again is a 400 from the server, not a real choice.
+function buildTeamSwitchPicker(currentTeam) {
+  const wrap = document.getElementById('status-team-picker');
+  wrap.replaceChildren();
+  TEAM_ORDER.forEach((team) => {
+    const swatch = document.createElement('button');
+    swatch.type = 'button';
+    swatch.className = 'team-swatch';
+    swatch.style.setProperty('--swatch-color', TEAM_COLORS[team]);
+    swatch.textContent = team;
+    if (team === currentTeam) {
+      swatch.disabled = true;
+      swatch.title = 'Your current team';
+    }
+    swatch.addEventListener('click', () => {
+      wrap.querySelectorAll('.team-swatch').forEach((b) => b.classList.remove('active'));
+      swatch.classList.add('active');
+      showTeamSwitchConfirm(currentTeam, team);
+    });
+    wrap.appendChild(swatch);
+  });
+}
+
+function handleTeamSwitchBtnClick() {
+  if (!teamStatusData || !teamStatusData.switch_available) return;
+  clearTeamError();
+  buildTeamSwitchPicker(teamStatusData.team);
+  document.getElementById('status-team-confirm').hidden = true;
+  document.getElementById('status-team-picker-wrap').hidden = false;
+}
+
+// Shared response handling for POST /api/team -- same status-code
+// meanings as handleRadiosApiError() above, since /api/team sits
+// behind the same X-API-Key authentication contract app/nodes_api.py's
+// routes do. 400 (invalid team / already on that team) and 409
+// (already switched this month) both carry a real, specific message
+// from switch_team() itself, always shown verbatim rather than folded
+// into a generic failure -- a 409 also carries a fresh next_switch_at,
+// which updates the control into its locked state immediately instead
+// of leaving a Switch team button up that can only fail again. Returns
+// true if the caller should stop (an error was shown already).
+function handleTeamApiError(res, data) {
+  if (res.status === 401) {
+    showTeamError('That key was not recognized. Double-check you copied it correctly.');
+    return true;
+  }
+  if (res.status === 403) {
+    showTeamError('This account has been disabled.');
+    return true;
+  }
+  if (res.status === 429) {
+    showTeamError('Too many changes, too fast. Wait a moment and try again.');
+    return true;
+  }
+  if (!res.ok) {
+    const message = (data && typeof data.error === 'string')
+      ? data.error
+      : 'Something went wrong. Try again in a moment.';
+    showTeamError(message);
+    if (res.status === 409 && data && typeof data.next_switch_at === 'number') {
+      teamStatusData = Object.assign({}, teamStatusData, { switch_available: false, next_switch_at: data.next_switch_at });
+      renderTeamSwitchControl();
+    }
+    return true;
+  }
+  return false;
+}
+
+async function handleTeamSwitchConfirm() {
+  clearTeamError();
+  if (!pendingSwitchTeam) return;
+
+  const key = statusKeyValue();
+  if (!key) {
+    showTeamError('Enter your API key above first.');
+    return;
+  }
+
+  const toTeam = pendingSwitchTeam;
+  const confirmBtn = document.getElementById('status-team-confirm-btn');
+  confirmBtn.disabled = true;
+  try {
+    const res = await fetch('/api/team', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+      body: JSON.stringify({ team: toTeam }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (handleTeamApiError(res, data)) {
+      closeTeamSwitchPicker();
+      return;
+    }
+
+    // Success -- reflect the new team everywhere this page already
+    // shows it (name colour, the "Team:" line) by re-running
+    // renderStatusResult() against the cached status response with
+    // only .team swapped, the same pattern applyRadiosUpdate() above
+    // uses for a fresher .radios array.
+    if (lastStatusData) {
+      renderStatusResult(Object.assign({}, lastStatusData, { team: data.team }));
+    }
+    teamStatusData = { team: data.team, switch_available: false, next_switch_at: data.next_switch_at };
+    closeTeamSwitchPicker();
+    renderTeamSwitchControl();
+  } catch (err) {
+    showTeamError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    confirmBtn.disabled = false;
+  }
+}
+
+// Runs once, right after a successful status check reveals #status-team
+// -- every registered player has a team, so unlike the check-in-name
+// section this is never gated behind hasMc/hasMt. Quiet-ish on
+// failure: the section stays hidden rather than showing a broken
+// control for a background fetch nobody asked for directly (the same
+// key already just proved itself against /api/mc/status, so a failure
+// here would be unexpected, not a normal error path worth its own
+// message).
+async function loadTeamStatus() {
+  const section = document.getElementById('status-team');
+  clearTeamError();
+  closeTeamSwitchPicker();
+
+  const key = statusKeyValue();
+  if (!key) {
+    section.hidden = true;
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/team', { headers: { 'X-API-Key': key } });
+    if (!res.ok) {
+      section.hidden = true;
+      return;
+    }
+    teamStatusData = await res.json();
+    section.hidden = false;
+    renderTeamSwitchControl();
+  } catch (err) {
+    section.hidden = true;
+  }
+}
+
 async function handleStatusSubmit(e) {
   e.preventDefault();
   clearStatusError();
   document.getElementById('status-result').hidden = true;
+  document.getElementById('status-team').hidden = true;
   document.getElementById('status-radios').hidden = true;
 
   const key = document.getElementById('f-status-key').value;
@@ -1327,6 +1582,7 @@ async function handleStatusSubmit(e) {
 
     const data = await res.json();
     renderStatusResult(data);
+    loadTeamStatus();
   } catch (err) {
     showStatusError('Could not reach the server. Check your connection and try again.');
   } finally {
@@ -1367,6 +1623,9 @@ function boot() {
   document.getElementById('add-radio-form').addEventListener('submit', handleAddRadioSubmit);
   document.getElementById('checkin-name-form').addEventListener('submit', handleCheckinNameSubmit);
   document.getElementById('checkin-name-remove').addEventListener('click', handleCheckinNameRemove);
+  document.getElementById('status-team-switch-btn').addEventListener('click', handleTeamSwitchBtnClick);
+  document.getElementById('status-team-confirm-btn').addEventListener('click', handleTeamSwitchConfirm);
+  document.getElementById('status-team-cancel-btn').addEventListener('click', closeTeamSwitchPicker);
 }
 
 boot();

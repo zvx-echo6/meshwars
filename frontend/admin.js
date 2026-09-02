@@ -17,6 +17,15 @@ let adminToken = '';
 let allPlayers = [];
 let expanded = new Set();   // player ids left open across a refresh
 
+// Same seven teams settings.teams_list serves and the join page's own
+// team-picker offers (frontend/join.js's TEAM_ORDER) -- duplicated
+// rather than imported, same reasoning as everywhere else on this site
+// two frontend pages don't share a module: this page has to keep
+// loading on its own. No colour mapping here (unlike join.js/mc.js) --
+// the admin panel has never colour-coded teams, just the plain
+// .adm-badge text already shown on each player row.
+const TEAM_LIST = ['RED', 'GREEN', 'BLUE', 'PURPLE', 'YELLOW', 'ORANGE', 'PINK'];
+
 // ---- tiny DOM helpers -------------------------------------------------
 
 function el(tag, opts) {
@@ -328,6 +337,41 @@ function revealKey(host, label, key) {
 
 function renderPlayerDetail(p) {
   const d = el('div', { className: 'adm-player-detail', });
+
+  // Team change (POST /api/admin/player/team) -- an operator override,
+  // unlimited unlike the player's own once-a-month self-switch (that
+  // one lives on the Join page's setup-check panel, not here). Sits
+  // with the ordinary player-management controls, right at the top
+  // next to where the row above already shows this player's team
+  // badge -- not in .adm-danger-zone below, and not behind a
+  // window.prompt typed-name gate: a team change is fully reversible
+  // by switching back, so a plain window.confirm() is enough, the same
+  // light-guard weight "Add radio" below carries.
+  d.appendChild(el('div', { className: 'adm-sub-title', text: 'Team' }));
+  const teamRow = el('div', { className: 'adm-form' });
+  const teamSelect = el('select');
+  TEAM_LIST.forEach((t) => {
+    const opt = el('option', { text: t, value: t });
+    if (t === p.team) opt.selected = true;
+    teamSelect.appendChild(opt);
+  });
+  teamRow.appendChild(teamSelect);
+  teamRow.appendChild(btn('Change team', 'adm-btn-quiet', async (b) => {
+    const newTeam = teamSelect.value;
+    if (newTeam === p.team) { setStatus(p.display_name + ' is already on ' + newTeam, true); return; }
+    const ok = window.confirm(
+      'Move ' + p.display_name + ' from ' + p.team + ' to ' + newTeam + '?\n\n' +
+      'Ground they currently hold stays with ' + p.team + '. Their points and check-in streak move with them.'
+    );
+    if (!ok) return;
+    b.disabled = true;
+    try {
+      await post('/api/admin/player/team', { player_id: p.player_id, team: newTeam });
+      setStatus('Moved ' + p.display_name + ' from ' + p.team + ' to ' + newTeam, false);
+      await refreshAll();
+    } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+  }));
+  d.appendChild(teamRow);
 
   d.appendChild(el('div', { className: 'adm-sub-title', text: 'Radios' }));
   if (!p.radios || !p.radios.length) {

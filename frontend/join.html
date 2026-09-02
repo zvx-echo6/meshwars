@@ -71,7 +71,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/join.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/join.css?v=20260902-1" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -419,6 +419,42 @@
 
       <div id="status-result" class="status-result" hidden></div>
 
+      <!-- Switch team: GET/POST /api/team (app/join_api.py), shown only
+           once the key above has checked out -- the same point
+           #status-radios below already waits for. Independent of
+           #status-result's own rebuild (renderStatusResult() in
+           join.js replaces that panel's children on every check AND
+           on every radio add/remove) so opening the team picker never
+           gets reset out from under a player mid-radio-edit, and vice
+           versa. Light-guard confirm inline (pick a team, confirm,
+           done) rather than a typed-name gate -- a team switch is
+           fully reversible by switching back, unlike the account
+           actions on the admin side. -->
+      <div id="status-team" class="status-team" hidden>
+        <div class="join-panel-subtitle">Switch team</div>
+
+        <div id="status-team-error" class="join-error" role="alert" hidden></div>
+
+        <button type="button" id="status-team-switch-btn">Switch team</button>
+        <p id="status-team-locked-hint" class="hint" hidden></p>
+
+        <div id="status-team-picker-wrap" class="status-team-picker-wrap" hidden>
+          <p class="hint">Pick a different team.</p>
+          <div id="status-team-picker" class="team-picker"></div>
+
+          <div id="status-team-confirm" class="status-team-confirm" hidden>
+            <div class="join-warning-box">
+              <strong id="status-team-confirm-title"></strong>
+              <span id="status-team-confirm-body"></span>
+            </div>
+            <div class="status-team-confirm-actions">
+              <button type="button" id="status-team-confirm-btn">Confirm switch</button>
+              <button type="button" id="status-team-cancel-btn" class="link-btn">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Radio management: shown only once the key above has checked
            out (see renderStatusResult() in join.js), which is also the
            only point this page ever has both a live key and a player
@@ -554,7 +590,7 @@
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
   <script src="/static/play-area-map.js?v=20260827-1"></script>
-  <script src="/static/join.js?v=20260831-1" type="module"></script>
+  <script src="/static/join.js?v=20260902-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
 </body>
 </html>

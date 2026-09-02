@@ -46,6 +46,20 @@ _MIN_PREFIX_LEN = 4
 _VALID_PROTOCOLS = ("mt", "mc")
 
 
+def _validate_team(raw: object) -> tuple[str | None, str | None]:
+    """Same rule app/join_api.py applies at registration (strip,
+    uppercase, must be in settings.teams_list) and reuses for its own
+    player-facing switch_team() -- duplicated here rather than
+    imported, same reasoning as _VALID_PROTOCOLS above: that one is a
+    private helper in a different module, not meant for cross-module
+    reuse. Returns (team, error); team is None if invalid.
+    """
+    team = raw.strip().upper() if isinstance(raw, str) else ""
+    if team not in settings.teams_list:
+        return None, "invalid team"
+    return team, None
+
+
 def _api_guard(request: Request) -> JSONResponse | None:
     """Returns a response to short-circuit an /api/admin/* route with,
     or None to let the route continue. 404 when the admin door is off
@@ -944,3 +958,82 @@ async def admin_api_client_revoke(request: Request):
         return JSONResponse({"error": "no active key with that prefix"}, status_code=404)
     log.info("admin: revoked read-API key %s", prefix)
     return JSONResponse({"revoked": cur.rowcount, "revoked_at": now})
+
+
+@router.post("/api/admin/player/team")
+async def admin_set_team(request: Request):
+    """Set any player's team, unlimited -- the operator counterpart to
+    app/join_api.py's switch_team(), which caps a player to one
+    self-service change per calendar month. No such limit applies here.
+
+    Ground stays with whichever team held it at paint time
+    (mc_tile.owner_team is frozen and never re-derived from
+    player.team); check-in points, exploration points, and streaks all
+    travel to the new team for free, because they're already computed
+    live off player.team (app/checkin.py's
+    team_checkin_points()/team_place_points()). This route changes
+    nothing about scoring -- only player.team itself and the audit
+    trail in player_team_change.
+
+    Light guard (player_id only, like /api/admin/node/add above), not
+    the typed-name confirmation the destructive routes below require --
+    a team change is fully reversible by switching back.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    player_id = body.get("player_id")
+    if not isinstance(player_id, int) or isinstance(player_id, bool):
+        return JSONResponse({"error": "player_id is required"}, status_code=400)
+
+    team, terr = _validate_team(body.get("team"))
+    if terr:
+        return JSONResponse({"error": terr}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        player = conn.execute(
+            "SELECT team FROM player WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        if player is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "player not found"}, status_code=404)
+
+        if team == player["team"]:
+            # Already on that team -- not an error, same reasoning as
+            # admin_node_add()'s "already bound to this same player"
+            # case: a retried request should just succeed.
+            conn.execute("ROLLBACK")
+            return JSONResponse({"player_id": player_id, "team": team, "changed": False}, status_code=200)
+
+        conn.execute(
+            "UPDATE player SET team = ? WHERE player_id = ?",
+            (team, player_id),
+        )
+        conn.execute(
+            "INSERT INTO player_team_change"
+            "(player_id, from_team, to_team, changed_at, actor) "
+            "VALUES (?, ?, ?, ?, 'operator')",
+            (player_id, player["team"], team, now),
+        )
+
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    log.info("admin: set player %d team to %s", player_id, team)
+    return JSONResponse({"player_id": player_id, "team": team, "changed": True}, status_code=200)
