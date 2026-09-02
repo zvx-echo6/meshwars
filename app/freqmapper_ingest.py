@@ -32,28 +32,46 @@ is the one thing meshview can actually tell us. FreqMapper deliberately
 does not report how many independent watchers verified a given
 transmission -- "coverage_rule": "independent_watcher_verified" is as
 specific as the API gets -- so there is no count to score on. Instead
-every verified event is worth a flat settings.freqmapper_points_per_event,
-plus settings.freqmapper_unique_painter_bonus the first time a given
-player paints a given cell for their team (exactly the mc_tile_unique_painter
-mechanic MeshCore/meshview already use). See apply_paint()'s flat_points
-parameter in app/mc_scoring.py for how this reuses that shared machinery
-(ownership, the capture/defense window, decay, and the capture log) while
-skipping only the repeater-cooldown/cap logic that has no FreqMapper
-analogue.
+every verified event is worth a flat points_per_event, plus
+unique_painter_bonus the first time a given player paints a given cell
+for their team (exactly the mc_tile_unique_painter mechanic MeshCore/
+meshview already use). See apply_paint()'s flat_points parameter in
+app/mc_scoring.py for how this reuses that shared machinery (ownership,
+the capture/defense window, decay, and the capture log) while skipping
+only the repeater-cooldown/cap logic that has no FreqMapper analogue.
 
-settings.mt_paint_source is the single switch that decides whether
-meshview or FreqMapper is currently allowed to paint the Meshtastic
-board -- see that setting's own comment in app/config.py, and
-app/ingest.py, whose position-packet poll and backfill read the same
-setting to gate themselves off when it is "freqmapper". This module's
-poll loop keeps running (and keeps deduping on verification_id) whenever
-settings.freqmapper_enabled is true REGARDLESS of mt_paint_source -- only
+Config is DB-backed (app/db.py's freqmapper_config singleton), not
+settings.py -- see load_freqmapper_config below, read FRESH on every
+poll cycle so an admin edit through app/admin_ops.py's /api/admin/paint
+takes effect on the very next cycle, no restart. settings.py's
+freqmapper_*/mt_paint_source fields still exist (app/config.py) and are
+never deleted: they are the seed source seed_freqmapper_config_from_env
+uses to populate this table's row on first boot, and the fallback
+load_freqmapper_config returns if that row is somehow missing.
+
+mt_paint_source is the single switch that decides whether meshview or
+FreqMapper is currently allowed to paint the Meshtastic board -- see
+that column's own comment in app/db.py, and app/ingest.py, whose
+position-packet poll and backfill read the same DB value (via
+load_freqmapper_config, not settings.mt_paint_source) to gate
+themselves off when it is "freqmapper". This module's poll loop keeps
+running (and keeps deduping on verification_id) whenever
+freqmapper_config.enabled is true REGARDLESS of mt_paint_source -- only
 the final score/write (mc_scoring.apply_paint + the player_cell_ping
 insert) is gated on it being "freqmapper" specifically. That means an
 operator can watch FreqMapper's own poll-cycle log lines (painted vs.
 skipped_inactive_source) before ever flipping the switch, and flipping it
 later never replays history: every event this loop has already seen is
 already recorded in freqmapper_verification by then.
+
+Unlike before this table existed, run_forever() is started
+UNCONDITIONALLY by app/main.py and never exits early just because
+enabled is currently off -- the loop itself checks
+freqmapper_config.enabled fresh on every cycle and simply does nothing
+when it is off, the same shape app/checkin.py's CheckinPoller already
+uses for checkin_config.enabled. The loop has to always be running for
+`enabled` to be a true runtime toggle: a task that already returned at
+startup would never notice an admin flipping it back on later.
 """
 from __future__ import annotations
 
@@ -122,8 +140,99 @@ def _parse_verified_at(raw: object) -> int | None:
     return int(dt.timestamp())
 
 
-def _clamped_limit() -> int:
-    return max(_MIN_LIMIT, min(int(settings.freqmapper_page_limit), _MAX_LIMIT))
+def _clamped_limit(page_limit: int) -> int:
+    return max(_MIN_LIMIT, min(int(page_limit), _MAX_LIMIT))
+
+
+def load_freqmapper_config(conn) -> dict:
+    """Fresh, uncached read of the freqmapper_config singleton --
+    connector settings, scoring knobs, mt_paint_source, and the poller's
+    own last-poll status. Read on every poll cycle (FreqMapperIngestor's
+    run_forever/_poll_once) and by app/ingest.py's meshview position/
+    backfill gate (which only needs mt_paint_source out of this), and by
+    every admin route that needs the current numbers (app/admin_ops.py)
+    -- never cached anywhere in the process. Exactly the pattern
+    app/checkin.py's load_checkin_config uses for checkin_config, for
+    the same reason: an admin edit through /api/admin/paint must take
+    effect on the very next poll, not after a restart.
+
+    Falls back to config.py's original settings if the row is somehow
+    missing (a database whose migrations have not run yet) rather than
+    raising -- defensive, since app/db.py's MIGRATIONS seeds this row
+    unconditionally and it should always be there in practice, but a
+    poll cycle failing outright over a missing config row would be a
+    worse failure mode than briefly falling back to the settings this
+    row was itself seeded from.
+    """
+    row = conn.execute(
+        "SELECT mt_paint_source, enabled, base_url, api_key, poll_interval_seconds, "
+        "       page_limit, points_per_event, unique_painter_bonus, last_poll_at, "
+        "       last_poll_error, updated_at "
+        "  FROM freqmapper_config WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return {
+            "mt_paint_source": settings.mt_paint_source,
+            "enabled": settings.freqmapper_enabled,
+            "base_url": settings.freqmapper_base_url,
+            "api_key": settings.freqmapper_api_key,
+            "poll_interval_seconds": settings.freqmapper_poll_interval_seconds,
+            "page_limit": settings.freqmapper_page_limit,
+            "points_per_event": settings.freqmapper_points_per_event,
+            "unique_painter_bonus": settings.freqmapper_unique_painter_bonus,
+            "last_poll_at": None,
+            "last_poll_error": None,
+            "updated_at": 0,
+        }
+    d = dict(row)
+    d["enabled"] = bool(d["enabled"])
+    return d
+
+
+def seed_freqmapper_config_from_env(conn) -> None:
+    """One-time bootstrap, called from app/db.py's init_db() on every
+    startup: populates the freqmapper_config singleton with exactly what
+    settings.py already describes, the same guarded-by-updated_at
+    pattern app/checkin.py's seed_nets_from_env uses for checkin_config
+    (see that function's docstring for the full reasoning). Only fires
+    while updated_at is still 0 -- app/db.py's MIGRATIONS already
+    guarantees the row exists (bare column defaults) by the time this
+    ever runs, so this is an UPDATE, not an INSERT, and an operator's
+    later edit through /api/admin/paint (which always sets updated_at to
+    the current time) can never be silently overwritten by a later boot.
+
+    Deliberately reads settings rather than anything already in the
+    database: those env vars are the only place today's production
+    values exist before this function ever runs, and after it runs once
+    they are never consulted again for FreqMapper configuration -- see
+    load_freqmapper_config above, which reads the database fresh on
+    every cycle, never settings. The net effect is that deploying this
+    changes NO behavior: same source, same connector, same scoring, just
+    moved from env-var-and-restart to database-and-admin-API.
+    """
+    row = conn.execute("SELECT updated_at FROM freqmapper_config WHERE id = 1").fetchone()
+    if row is None or row["updated_at"] != 0:
+        return
+    conn.execute(
+        "UPDATE freqmapper_config SET mt_paint_source = ?, enabled = ?, base_url = ?, "
+        " api_key = ?, poll_interval_seconds = ?, page_limit = ?, points_per_event = ?, "
+        " unique_painter_bonus = ?, updated_at = ? WHERE id = 1",
+        (
+            settings.mt_paint_source,
+            int(settings.freqmapper_enabled),
+            settings.freqmapper_base_url,
+            settings.freqmapper_api_key,
+            settings.freqmapper_poll_interval_seconds,
+            settings.freqmapper_page_limit,
+            settings.freqmapper_points_per_event,
+            settings.freqmapper_unique_painter_bonus,
+            int(time.time()),
+        ),
+    )
+    log.info(
+        "freqmapper: seeded config from settings (enabled=%s, paint_source=%s)",
+        settings.freqmapper_enabled, settings.mt_paint_source,
+    )
 
 
 def _load_registered_players(conn) -> dict[str, tuple[int, str]]:
@@ -150,78 +259,135 @@ class FreqMapperIngestor:
     def __init__(self) -> None:
         self._stop = asyncio.Event()
         self._client: httpx.AsyncClient | None = None
+        # The base_url/api_key the current self._client was actually
+        # built with -- compared against the freshly loaded config on
+        # every cycle so an admin editing the connector rebuilds the
+        # client instead of quietly continuing to talk to the old host
+        # or key. See _ensure_client below.
+        self._client_base_url: str | None = None
+        self._client_api_key: str | None = None
         # 403 backoff state: a monotonic deadline before which _poll_once
         # skips fetching entirely, and a flag so the warning is logged
         # once per throttling episode rather than once per skipped cycle.
         self._retry_after = 0.0
         self._throttle_warned = False
         self._last_housekeeping = 0.0
-        self._logged_inactive_once = False
+        # Logged only the first time, and again only when the value
+        # actually flips -- an admin toggling FreqMapper on/off or
+        # switching mt_paint_source is worth a log line every cycle
+        # finding the same value again is not. None until the first
+        # cycle ever looks, so the initial state is always logged once.
+        self._last_logged_enabled: bool | None = None
+        self._last_logged_paint_source: str | None = None
 
     def stop(self) -> None:
         self._stop.set()
 
     async def run_forever(self) -> None:
-        # Empty means off, same contract every other secret setting in
-        # this app uses (admin_token, mc_checkin_base_url) -- a blank key
-        # must never be read as "authenticate with nothing."
-        if not settings.freqmapper_enabled or not settings.freqmapper_api_key:
-            log.info(
-                "freqmapper ingest disabled (enabled=%s, key configured=%s)",
-                settings.freqmapper_enabled, bool(settings.freqmapper_api_key),
-            )
-            return
-
-        log.info(
-            "freqmapper ingest loop starting; poll=%ds limit=%d paint_source=%s (%s)",
-            settings.freqmapper_poll_interval_seconds, _clamped_limit(),
-            settings.mt_paint_source,
-            "FreqMapper is painting" if settings.mt_paint_source == "freqmapper"
-            else "FreqMapper is NOT painting -- events are still processed and deduped",
-        )
-
-        self._client = httpx.AsyncClient(
-            base_url=settings.freqmapper_base_url.rstrip("/"),
-            timeout=httpx.Timeout(15.0, connect=5.0),
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "meshwars/1.0",
-                "Authorization": f"Bearer {settings.freqmapper_api_key}",
-            },
-        )
+        # Started UNCONDITIONALLY by app/main.py and never exits early
+        # just because config is currently off -- see this module's
+        # docstring. `enabled` now lives in freqmapper_config and has to
+        # be a true runtime toggle, which only works if this loop stays
+        # alive to notice a later flip; _poll_once reloads the config
+        # fresh every cycle and simply does nothing while enabled is
+        # off.
+        log.info("freqmapper ingest loop starting (config is DB-backed, read fresh every cycle)")
         try:
             while not self._stop.is_set():
+                # Fallback only for the pathological case _poll_once
+                # can't even reach a config read (e.g. the database
+                # itself is unavailable) -- ordinarily replaced by the
+                # freshly loaded poll_interval_seconds it returns.
+                interval = settings.freqmapper_poll_interval_seconds
                 try:
-                    await self._poll_once()
+                    interval = await self._poll_once()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     log.exception("freqmapper ingest cycle failed")
                 try:
-                    await asyncio.wait_for(
-                        self._stop.wait(), timeout=settings.freqmapper_poll_interval_seconds
-                    )
+                    await asyncio.wait_for(self._stop.wait(), timeout=max(interval, 1))
                 except asyncio.TimeoutError:
                     pass
         finally:
-            await self._client.aclose()
-            self._client = None
+            if self._client is not None:
+                await self._client.aclose()
+                self._client = None
         log.info("freqmapper ingest loop stopped")
 
-    async def _poll_once(self) -> None:
-        now_mono = time.monotonic()
-        if now_mono < self._retry_after:
-            # Still cooling down from a recent 403 -- see the throttling
-            # handling below. Nothing to fetch this cycle.
+    async def _ensure_client(self, cfg: dict) -> None:
+        """(Re)build the pooled httpx client when the connector settings
+        it was built with have drifted from the freshly loaded config --
+        an admin editing base_url or api_key through /api/admin/paint
+        must reach the very NEXT poll, not require a restart, the same
+        no-restart contract every other DB-backed setting here gets. A
+        no-op the overwhelmingly common case where nothing has changed
+        since the last cycle (config is read every cycle regardless of
+        whether anyone actually touched it).
+        """
+        if (self._client is not None
+                and self._client_base_url == cfg["base_url"]
+                and self._client_api_key == cfg["api_key"]):
             return
+        if self._client is not None:
+            await self._client.aclose()
+        self._client = httpx.AsyncClient(
+            base_url=cfg["base_url"].rstrip("/"),
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "meshwars/1.0",
+                "Authorization": f"Bearer {cfg['api_key']}",
+            },
+        )
+        self._client_base_url = cfg["base_url"]
+        self._client_api_key = cfg["api_key"]
 
+    async def _poll_once(self) -> int:
+        """One ingest cycle. Returns the poll interval (seconds) to
+        sleep before the next one -- read fresh from the config every
+        time (app/checkin.py's CheckinPoller._poll_once follows the same
+        shape for the same reason), so tightening or loosening it from
+        the admin panel takes effect on the very next sleep, not after a
+        restart.
+        """
         conn = connect()
         try:
+            cfg = load_freqmapper_config(conn)
             cursor = get_cursor(conn, CURSOR_KEY, "") or None
         finally:
             conn.close()
 
-        params: dict = {"limit": _clamped_limit()}
+        if cfg["enabled"] != self._last_logged_enabled:
+            log.info(
+                "freqmapper: enabled=%s (key configured=%s)",
+                cfg["enabled"], bool(cfg["api_key"]),
+            )
+            self._last_logged_enabled = cfg["enabled"]
+        if cfg["mt_paint_source"] != self._last_logged_paint_source:
+            log.info(
+                "freqmapper: mt_paint_source=%s (%s)",
+                cfg["mt_paint_source"],
+                "FreqMapper is painting" if cfg["mt_paint_source"] == "freqmapper"
+                else "FreqMapper is NOT painting -- events are still processed and deduped",
+            )
+            self._last_logged_paint_source = cfg["mt_paint_source"]
+
+        # Empty means off, same contract every other secret setting in
+        # this app uses (admin_token, mc_checkin_base_url) -- a blank key
+        # must never be read as "authenticate with nothing."
+        if not cfg["enabled"] or not cfg["api_key"]:
+            return cfg["poll_interval_seconds"]
+
+        await self._ensure_client(cfg)
+
+        now_mono = time.monotonic()
+        if now_mono < self._retry_after:
+            # Still cooling down from a recent 403 -- see the throttling
+            # handling below. Nothing to fetch this cycle.
+            return cfg["poll_interval_seconds"]
+
+        params: dict = {"limit": _clamped_limit(cfg["page_limit"])}
         if cursor:
             params["cursor"] = cursor
 
@@ -231,38 +397,40 @@ class FreqMapperIngestor:
             )
         except (httpx.HTTPError, httpx.TimeoutException) as e:
             log.warning("freqmapper: request failed: %s", e)
-            return
+            await self._record_error(str(e))
+            return cfg["poll_interval_seconds"]
 
         if r.status_code == 403:
             # Undocumented throttling (see this module's docstring):
             # sustained fast paging trips it and it recovers on its own
             # after a pause. Expected under normal polling, not a real
             # error -- logged once per episode (not on every cycle spent
-            # cooling down) and treated as "try again later," never as a
-            # reason to let the poll loop itself die.
+            # cooling down), treated as "try again later" rather than a
+            # reason to let the poll loop itself die, and deliberately
+            # NOT recorded as last_poll_error: an operator reading the
+            # admin status panel should not see this as something
+            # broken.
+            backoff = cfg["poll_interval_seconds"] * _THROTTLE_BACKOFF_MULTIPLE
             if not self._throttle_warned:
-                log.warning(
-                    "freqmapper: throttled (403) -- backing off for %ds",
-                    settings.freqmapper_poll_interval_seconds * _THROTTLE_BACKOFF_MULTIPLE,
-                )
+                log.warning("freqmapper: throttled (403) -- backing off for %ds", backoff)
                 self._throttle_warned = True
-            self._retry_after = now_mono + (
-                settings.freqmapper_poll_interval_seconds * _THROTTLE_BACKOFF_MULTIPLE
-            )
-            return
+            self._retry_after = now_mono + backoff
+            return cfg["poll_interval_seconds"]
         self._throttle_warned = False
 
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
             log.warning("freqmapper: upstream error: %s", e)
-            return
+            await self._record_error(str(e))
+            return cfg["poll_interval_seconds"]
 
         try:
             data = r.json()
         except ValueError:
             log.warning("freqmapper: response was not valid JSON")
-            return
+            await self._record_error("response was not valid JSON")
+            return cfg["poll_interval_seconds"]
 
         events = data.get("events") if isinstance(data, dict) else None
         if not isinstance(events, list):
@@ -279,7 +447,8 @@ class FreqMapperIngestor:
                 async with WriteSession() as wconn:
                     set_cursor(wconn, CURSOR_KEY, next_cursor)
             await self._maybe_housekeeping()
-            return
+            await self._record_ok()
+            return cfg["poll_interval_seconds"]
 
         now_ts = int(time.time())
         counts = {
@@ -301,7 +470,10 @@ class FreqMapperIngestor:
             registered = _load_registered_players(wconn)
 
             for event in events:
-                outcome = self._process_one_event(wconn, event, season_id, registered, now_ts)
+                outcome = self._process_one_event(
+                    wconn, event, season_id, registered, now_ts,
+                    cfg["mt_paint_source"], cfg["points_per_event"], cfg["unique_painter_bonus"],
+                )
                 counts[outcome] = counts.get(outcome, 0) + 1
 
             if next_cursor:
@@ -317,10 +489,13 @@ class FreqMapperIngestor:
         )
 
         await self._maybe_housekeeping()
+        await self._record_ok()
+        return cfg["poll_interval_seconds"]
 
     def _process_one_event(
         self, conn, event: object, season_id: int,
         registered: dict[str, tuple[int, str]], now_ts: int,
+        mt_paint_source: str, points_per_event: float, unique_painter_bonus: float,
     ) -> str:
         """Process one verified-coverage event inside the caller's
         already-open write transaction. Returns an outcome key matching
@@ -385,18 +560,15 @@ class FreqMapperIngestor:
         # id -- same rule every other ingest path in this app follows.
         cell = cell_id(lat, lon)
 
-        if settings.mt_paint_source != "freqmapper":
+        if mt_paint_source != "freqmapper":
             # Fully processed and deduped above (this exact event will
             # never be reprocessed, even after a later switch), but
             # nothing is scored or written to the board while meshview is
-            # the active paint source. See settings.mt_paint_source.
-            if not self._logged_inactive_once:
-                log.info(
-                    "freqmapper: mt_paint_source=%s -- events are being "
-                    "processed and deduped but NOT painted",
-                    settings.mt_paint_source,
-                )
-                self._logged_inactive_once = True
+            # the active paint source. See the freqmapper_config.mt_paint_source
+            # comment in app/db.py. The transition itself is logged once
+            # per change in _poll_once above, not here -- this runs once
+            # per event, and would otherwise spam the log on a page full
+            # of events while gated off.
             return "skipped_inactive_source"
 
         seen_at = int(time.time())
@@ -419,8 +591,8 @@ class FreqMapperIngestor:
             mc_scoring.apply_paint(
                 conn, season_id, player_id, team, cell, ts,
                 [], 0.0, 0.0, PROTOCOL, seen_at,
-                flat_points=settings.freqmapper_points_per_event,
-                unique_player_bonus=settings.freqmapper_unique_painter_bonus,
+                flat_points=points_per_event,
+                unique_player_bonus=unique_painter_bonus,
             )
         except Exception:
             log.exception(
@@ -437,6 +609,38 @@ class FreqMapperIngestor:
         # it to credit from, so calling it would only ever be a no-op.
 
         return "painted"
+
+    # ---- poll status (app/admin_ops.py's GET /api/admin/paint) ----------
+    #
+    # Mirrors app/checkin.py's CheckinPoller._record_net_ok/
+    # _record_net_error exactly, one level up: those write per-NET
+    # status onto checkin_net, these write this connector's one status
+    # onto the freqmapper_config singleton (there being only one
+    # FreqMapper connector, not many). last_poll_at advances on every
+    # completed request, success or failure, the same way checkin's
+    # does -- it answers "is this connector still being reached at all,"
+    # which a failed request still demonstrates. last_poll_error is
+    # cleared on the next success so a transient failure doesn't sit in
+    # the admin panel forever looking current.
+
+    async def _record_ok(self) -> None:
+        async with WriteSession() as conn:
+            conn.execute(
+                "UPDATE freqmapper_config SET last_poll_at = ?, last_poll_error = NULL WHERE id = 1",
+                (int(time.time()),),
+            )
+
+    async def _record_error(self, error: str) -> None:
+        # Truncated to the same 500 chars app/checkin.py's
+        # _record_net_error keeps: an upstream client library's
+        # exception text can run arbitrarily long, and this only has to
+        # be enough for an operator to recognize what broke -- the full
+        # traceback already went to the log above.
+        async with WriteSession() as conn:
+            conn.execute(
+                "UPDATE freqmapper_config SET last_poll_at = ?, last_poll_error = ? WHERE id = 1",
+                (int(time.time()), error[:500]),
+            )
 
     # ---- housekeeping ---------------------------------------------------
 

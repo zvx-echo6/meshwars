@@ -380,6 +380,46 @@ CREATE TABLE IF NOT EXISTS freqmapper_verification (
 );
 CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verification(seen_at);
 
+-- Singleton, same upsert-by-fixed-id shape as `checkin_config` above --
+-- read FRESH by app/freqmapper_ingest.py's poller on every cycle (see
+-- that module's load_freqmapper_config, never cached in the process),
+-- which is the whole point: an admin edit through
+-- app/admin_ops.py's /api/admin/paint takes effect on the very next
+-- poll, no restart. mt_paint_source moves here too, off settings.py --
+-- it is the same single switch app/ingest.py's meshview poll/backfill
+-- and this table's own poller both read, so the two can never disagree
+-- about which one is currently allowed to paint the Meshtastic board
+-- (exactly one at a time -- see that column's own comment in
+-- config.py, kept as this table's authoritative copy now).
+-- seed_freqmapper_config_from_env (app/freqmapper_ingest.py, called
+-- from init_db() below) bootstraps this row from settings.py's
+-- freqmapper_*/mt_paint_source values the first time it is ever
+-- touched, the same guarded-by-updated_at pattern
+-- app/checkin.py's seed_nets_from_env uses for checkin_config, so
+-- deploying this table changes NO behavior on its own.
+-- api_key is a SECRET (see app/db.py's checkin_net comment on
+-- broker_password/channel_key for the general rule this follows):
+-- never returned by any route, only a has_api_key boolean
+-- (app/admin_ops.py's _scrub_freqmapper_secrets). last_poll_at/
+-- last_poll_error mirror checkin_net's own per-net poll-status
+-- columns, written by FreqMapperIngestor after every completed cycle
+-- (cleared on the next success), so a silently-failing connector shows
+-- up here without anyone reading logs.
+CREATE TABLE IF NOT EXISTS freqmapper_config (
+    id                     INTEGER PRIMARY KEY CHECK (id = 1),
+    mt_paint_source        TEXT NOT NULL DEFAULT 'meshview',
+    enabled                INTEGER NOT NULL DEFAULT 0,
+    base_url               TEXT NOT NULL DEFAULT '',
+    api_key                TEXT NOT NULL DEFAULT '',
+    poll_interval_seconds  INTEGER NOT NULL DEFAULT 60,
+    page_limit             INTEGER NOT NULL DEFAULT 200,
+    points_per_event       REAL NOT NULL DEFAULT 0.5,
+    unique_painter_bonus   REAL NOT NULL DEFAULT 0.5,
+    last_poll_at           INTEGER,
+    last_poll_error        TEXT,
+    updated_at             INTEGER NOT NULL DEFAULT 0
+);
+
 -- ---------------------------------------------------------------------
 -- MeshCore-model scoring tables. Both boards run on this model now,
 -- flat grid cells and players instead of the retired geohash tile/
@@ -1411,6 +1451,17 @@ MIGRATIONS = [
     # DROP IF EXISTS is a no-op for it); this line only matters for a
     # database that ran the earlier schema.
     "DROP TABLE IF EXISTS checkin_player_name",
+    # Seed the freqmapper_config singleton with the defaults every fresh
+    # column above already carries, so the row exists unconditionally
+    # from the first boot after this migration runs -- same reasoning as
+    # checkin_config's own "INSERT OR IGNORE...VALUES (1)" migration
+    # above: app/freqmapper_ingest.py's poller and app/admin_ops.py's
+    # paint routes both assume it is always there. INSERT OR IGNORE:
+    # seed_freqmapper_config_from_env() (called from init_db() below) is
+    # what actually populates this row from settings.py on a truly fresh
+    # install; this migration only has to guarantee the row EXISTS, not
+    # what it holds.
+    "INSERT OR IGNORE INTO freqmapper_config(id) VALUES (1)",
 ]
 
 PRAGMAS = [
@@ -1504,6 +1555,20 @@ def init_db() -> None:
             seed_nets_from_env(conn)
         except Exception:
             log.exception("checkin: seed_nets_from_env failed -- check-in nets may be empty")
+
+        # FreqMapper connector config (app/freqmapper_ingest.py): the
+        # same one-time bootstrap shape as seed_nets_from_env just
+        # above, migrating settings.py's freqmapper_*/mt_paint_source
+        # values onto the freqmapper_config singleton so an operator can
+        # edit them through app/admin_ops.py's /api/admin/paint without
+        # a restart. Local import, same circular-import reason as
+        # checkin.py's own import just above (freqmapper_ingest.py
+        # imports WriteSession from this module).
+        try:
+            from .freqmapper_ingest import seed_freqmapper_config_from_env
+            seed_freqmapper_config_from_env(conn)
+        except Exception:
+            log.exception("freqmapper: seed_freqmapper_config_from_env failed -- config may be unseeded")
     finally:
         conn.close()
 

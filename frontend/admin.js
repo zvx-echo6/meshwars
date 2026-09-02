@@ -759,6 +759,162 @@ async function loadNets() {
   }
 }
 
+// ---- paint source: meshview vs FreqMapper ------------------------------
+//
+// One combined form (source + connector + scoring), one Save button --
+// same "whole singleton, one POST" shape the Nets settings form above
+// uses for checkin_config. The paint-source SELECT is the one field
+// that gets its own confirmation before that POST goes out (see
+// savePaint below): switching it changes where live Meshtastic
+// territory comes from, the same kind of consequence the delete
+// buttons elsewhere in this file already guard with a typed prompt.
+
+// The mt_paint_source the form was last loaded/saved WITH -- compared
+// against the select's current value at save time so the confirmation
+// only fires on an actual switch, not on saving connector/scoring
+// changes while leaving the source alone.
+let loadedPaintSource = null;
+
+function renderPaintForm(cfg) {
+  document.getElementById('pt-source').value = cfg.mt_paint_source;
+  document.getElementById('pt-enabled').checked = !!cfg.enabled;
+  document.getElementById('pt-base-url').value = cfg.base_url || '';
+  // Never pre-filled with the real key -- GET /api/admin/paint never
+  // returns it (see app/admin_ops.py's _scrub_freqmapper_secrets); the
+  // hint span is the only signal of whether one is set.
+  document.getElementById('pt-api-key').value = '';
+  document.getElementById('pt-clear-api-key').checked = false;
+  document.getElementById('pt-api-key-hint').textContent = cfg.has_api_key ? 'currently set' : 'not set';
+  document.getElementById('pt-poll-interval').value = cfg.poll_interval_seconds;
+  document.getElementById('pt-page-limit').value = cfg.page_limit;
+  document.getElementById('pt-points-per-event').value = cfg.points_per_event;
+  document.getElementById('pt-unique-painter-bonus').value = cfg.unique_painter_bonus;
+  loadedPaintSource = cfg.mt_paint_source;
+}
+
+function renderPaintStatus(cfg, cursor, verificationCount) {
+  const host = document.getElementById('pt-status');
+  host.replaceChildren();
+
+  const pollP = el('p', {
+    className: 'adm-net-health' + (cfg.last_poll_error ? ' adm-status-bad' : ''),
+  });
+  pollP.appendChild(el('span', {
+    text: cfg.last_poll_error ? ('poll error: ' + cfg.last_poll_error)
+      : (cfg.last_poll_at ? ('last polled ' + ago(cfg.last_poll_at)) : 'never polled yet'),
+  }));
+  host.appendChild(pollP);
+
+  const countP = el('p', { className: 'adm-net-health' });
+  countP.appendChild(el('span', {
+    text: verificationCount + (verificationCount === 1 ? ' event consumed' : ' events consumed'),
+  }));
+  host.appendChild(countP);
+
+  const cursorP = el('p', { className: 'adm-net-health' });
+  cursorP.appendChild(el('span', { text: 'cursor:' }));
+  host.appendChild(cursorP);
+
+  // The cursor is an opaque base64 blob with no whitespace of its own,
+  // so unlike the other .adm-mono values in this panel (a hash prefix,
+  // a connector URL) it can't just sit inline -- there is nowhere for
+  // it to wrap, and left alone it pushes the line out to whatever width
+  // it needs, ignoring the section around it. Boxing it as its own
+  // block with overflow-x scoped to that block keeps the value intact
+  // and copyable (drag-select still grabs the whole string) without
+  // ever letting it set the panel's width.
+  host.appendChild(el('div', {
+    className: 'adm-mono adm-mono-block',
+    text: cursor || '(none yet)',
+  }));
+}
+
+async function loadPaint() {
+  try {
+    const d = await api('/api/admin/paint');
+    renderPaintForm(d.config);
+    renderPaintStatus(d.config, d.cursor, d.verification_count);
+  } catch (e) {
+    setStatus('Paint config load failed: ' + e.message, true);
+  }
+}
+
+async function savePaint(b) {
+  const out = document.getElementById('pt-result');
+  out.replaceChildren();
+
+  const source = document.getElementById('pt-source').value;
+  if (source !== loadedPaintSource) {
+    // Switching which source paints the Meshtastic board -- named
+    // confirmation, same "type it to confirm" shape every destructive
+    // action in this file already uses, not a bare OK/Cancel a tired
+    // operator could click through without reading.
+    const label = source === 'freqmapper' ? 'FreqMapper' : 'Meshview';
+    const typed = window.prompt(
+      'This switches which source paints live Meshtastic territory.\n\n' +
+      'Type ' + label + ' to confirm switching to it.'
+    );
+    if (typed !== label) {
+      out.textContent = typed === null ? '' : 'Not confirmed -- no change made.';
+      return;
+    }
+  }
+
+  const payload = {
+    mt_paint_source: source,
+    enabled: document.getElementById('pt-enabled').checked,
+    base_url: document.getElementById('pt-base-url').value.trim(),
+    poll_interval_seconds: parseInt(document.getElementById('pt-poll-interval').value, 10),
+    page_limit: parseInt(document.getElementById('pt-page-limit').value, 10),
+    points_per_event: parseFloat(document.getElementById('pt-points-per-event').value),
+    unique_painter_bonus: parseFloat(document.getElementById('pt-unique-painter-bonus').value),
+  };
+  // Blank means keep the existing key -- see app/admin_ops.py's
+  // admin_paint_update, the same convention checkin_net's
+  // broker_password/channel_key already use. clear_api_key is the
+  // explicit way to actually blank it.
+  if (document.getElementById('pt-clear-api-key').checked) {
+    payload.clear_api_key = true;
+  } else {
+    const apiKey = document.getElementById('pt-api-key').value;
+    if (apiKey) payload.api_key = apiKey;
+  }
+
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/paint', payload);
+    renderPaintForm(r.config);
+    out.textContent = 'Saved.';
+    setStatus('Paint config saved', false);
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function clearPaintCursor(b) {
+  const out = document.getElementById('pt-clear-result');
+  out.replaceChildren();
+  const typed = window.prompt(
+    'This makes the next FreqMapper poll re-walk its feed from the beginning.\n\n' +
+    'Already-seen events are skipped (deduped by their own id), never double-scored.\n\n' +
+    'Type CLEAR to confirm.'
+  );
+  if (typed !== 'CLEAR') {
+    out.textContent = typed === null ? '' : 'Not confirmed -- cursor left alone.';
+    return;
+  }
+  b.disabled = true;
+  try {
+    await post('/api/admin/paint/clear-cursor', {});
+    out.textContent = 'Cursor cleared.';
+    await loadPaint();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 function updateNetFormKind() {
   const kind = document.getElementById('nf-kind').value;
   document.getElementById('nf-channel-row').hidden = !netKindHasChannel(kind);
@@ -1120,7 +1276,9 @@ function badge(id, value, bad) {
 }
 
 async function refreshAll() {
-  await Promise.all([loadPlayers(), loadOverview(), loadApiClients(), loadNotice(), loadNets()]);
+  await Promise.all([
+    loadPlayers(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
+  ]);
   badge('nav-players', allPlayers.length, false);
 }
 
@@ -1180,6 +1338,8 @@ document.querySelectorAll('.adm-nav-item').forEach((b) => {
 document.getElementById('player-search').addEventListener('input', renderPlayers);
 document.getElementById('ci-award').addEventListener('click', function () { awardCheckin(this); });
 document.getElementById('nc-save').addEventListener('click', function () { saveConfig(this); });
+document.getElementById('pt-save').addEventListener('click', function () { savePaint(this); });
+document.getElementById('pt-clear-cursor').addEventListener('click', function () { clearPaintCursor(this); });
 document.getElementById('nf-kind').addEventListener('change', updateNetFormKind);
 document.getElementById('nf-load-channels').addEventListener('click', function () { loadNetChannels(this); });
 document.getElementById('nf-channel-select').addEventListener('change', function () {
