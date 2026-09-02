@@ -96,6 +96,13 @@ _key_rate_limiter = new_rate_limit_bucket()
 require_principal = require_api_key_principal(
     pre_auth_limiter=_addr_rate_limiter,
     post_auth_limiter=_key_rate_limiter,
+    # A logged-in browser session is just as good a credential as this
+    # player's own key for radio management -- this is a person
+    # clicking a button, not a machine posting a batch. See
+    # app/auth.py's module docstring ("opt-in") for why this is one of
+    # the four sites that ask for it and app/api.py's POST
+    # /api/mc/ingest is the one that doesn't.
+    allow_session_fallback=True,
 )
 
 

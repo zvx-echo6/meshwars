@@ -109,6 +109,13 @@ def _addr_rate_limited(ip: str) -> bool:
 require_checkin_principal = require_api_key_principal(
     pre_auth_limiter=_addr_rate_limiter,
     post_auth_limiter=_key_rate_limiter,
+    # A logged-in browser session is just as good a credential as this
+    # player's own key for managing their own fallback check-in name --
+    # a person acting through the site, not a machine posting a batch.
+    # See app/auth.py's module docstring ("opt-in") for why this is one
+    # of the four sites that ask for it and app/api.py's POST
+    # /api/mc/ingest is the one that doesn't.
+    allow_session_fallback=True,
 )
 
 

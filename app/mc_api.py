@@ -77,6 +77,13 @@ _status_addr_rate_limiter = new_rate_limit_bucket()
 require_status_principal = require_api_key_principal(
     pre_auth_limiter=_status_addr_rate_limiter,
     pre_auth_rate_limit_detail="too many attempts, try again later",
+    # A logged-in browser session is just as good a credential as this
+    # player's own key for checking their own status -- a person
+    # loading a page, not a machine posting a batch. See app/auth.py's
+    # module docstring ("opt-in") for why this is one of the four sites
+    # that ask for it and app/api.py's POST /api/mc/ingest is the one
+    # that doesn't.
+    allow_session_fallback=True,
 )
 
 # Fallback roster used only if `settings` does not (yet) expose a

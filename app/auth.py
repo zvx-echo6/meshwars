@@ -60,29 +60,45 @@ _BoundedHits instance into both places -- this module doesn't change
 that, it just gives checkin_api.py a reusable class to do it with
 instead of a hand-rolled dict.
 
-This is also the seam a session-cookie login plugs into, and now does:
-Principal.source is "api_key" (default, and the ONLY value every
-existing call site has ever seen) or "session" -- account_id is set
-for the latter, always None for the former. require_api_key_principal()'s
-built dependency below now falls back to a session cookie (see
-_try_session_principal) whenever a request carries no X-API-Key header
-at all -- but ONLY then: a request that DOES carry a key is
-authenticated exactly as it always has been, on the exact same code
-path, with the session fallback never even consulted. This is
-deliberately additive, not a replacement: the five existing call sites
-(app/join_api.py, app/nodes_api.py, app/checkin_api.py, app/api.py's
-POST /api/mc/ingest, app/mc_api.py's POST /api/mc/status) needed zero
-code changes to gain this -- they all resolve their Principal through
-this one function, so a session-authenticated caller is now ACCEPTED
-wherever a key-authenticated one already was, with no per-site wiring.
-tests/test_auth.py locks in that a key-bearing request's behavior is
-unchanged byte-for-byte by this addition. A session that resolves to
-an account with no linked player (see app/db.py's player.account_id)
-cannot satisfy this dependency -- every one of these five routes
-operates on a specific player's data (their radios, their team, their
-key), so a session with nothing to point at falls through to the same
-401 a missing credential always produced, never a 500 from a None
-player_id reaching a query that assumes an int.
+This is also the seam a session-cookie login plugs into -- OPT-IN per
+call site, via the allow_session_fallback parameter below, not a
+blanket behavior every one of the five picked up for free. It was
+briefly wired as unconditional (whenever a request carried no
+X-API-Key header at all, on all five), which was wrong for exactly one
+of them: POST /api/mc/ingest (app/api.py) is the machine ingest path
+MeshMapper's own app posts wardriving batches to -- a human's browser
+session cookie has no business authenticating a device credential
+there, and letting it would mean a stolen/shared session cookie could
+push fabricated ping batches onto someone else's key-scoped ingest
+history. The other four (app/join_api.py's team routes,
+app/nodes_api.py, app/checkin_api.py's fallback-name routes,
+app/mc_api.py's POST /api/mc/status) are person-driven, occasional,
+browser-reachable actions where "you're logged in" is exactly as good
+a credential as "you have the key" -- those four pass
+allow_session_fallback=True explicitly when they build their
+dependency; app/api.py's ingest dependency passes nothing and gets the
+default (False), so it stays API-key-only with no code path to a
+session at all. tests/test_auth.py's session-cookie section proves
+both halves: the four accept a session-only request, and a dependency
+built the exact way ingest builds its own (zero arguments) rejects
+one.
+
+Principal.source is "api_key" (default, and the ONLY value the api_key
+path ever produces) or "session" -- account_id is set for the latter,
+always None for the former. When allow_session_fallback is True, a
+request carrying no X-API-Key header falls back to a session cookie
+(see _try_session_principal below) -- but ONLY then: a request that
+DOES carry a key is authenticated exactly as it always has been, on
+the exact same code path, with the session fallback never even
+consulted, key-bearing or not. tests/test_auth.py locks in that a
+key-bearing request's behavior is unchanged byte-for-byte by any of
+this. A session that resolves to an account with no linked player (see
+app/db.py's player.account_id) cannot satisfy this dependency at any of
+the four opted-in sites -- every one of them operates on a specific
+player's data (their radios, their team, their key), so a session with
+nothing to point at falls through to the same 401 a missing credential
+always produced, never a 500 from a None player_id reaching a query
+that assumes an int.
 """
 from __future__ import annotations
 
@@ -205,14 +221,18 @@ class _BoundedHits:
 
 async def _try_session_principal(request: Request) -> Principal | None:
     """Session-cookie fallback consulted only when a request carries no
-    X-API-Key at all (see the call site in require_api_key_principal's
-    dependency below) -- a request that DOES carry a key never reaches
-    this function, so its existence has zero effect on key-bearing
-    requests. Returns None (never raises) on any failure: no cookie, an
-    invalid/expired/revoked session, or a session whose account has no
-    linked player -- the caller treats None exactly like "no key was
-    presented," falling through to the same 401 unauthorized it always
-    raised for that case.
+    X-API-Key at all AND the call site opted in via
+    allow_session_fallback=True (see the call site in
+    require_api_key_principal's dependency below) -- a request that
+    DOES carry a key never reaches this function, so its existence has
+    zero effect on key-bearing requests, and a call site that left
+    allow_session_fallback at its default (False) -- app/api.py's POST
+    /api/mc/ingest, the only one -- never calls this function at all,
+    key or no key. Returns None (never raises) on any failure: no
+    cookie, an invalid/expired/revoked session, or a session whose
+    account has no linked player -- the caller treats None exactly like
+    "no key was presented," falling through to the same 401
+    unauthorized it always raised for that case.
     """
     raw_token = request.cookies.get(SESSION_COOKIE_NAME)
     if not raw_token:
@@ -247,6 +267,7 @@ def require_api_key_principal(
     pre_auth_limiter: _BoundedHits | None = None,
     pre_auth_rate_limit_detail: str = "rate limited",
     post_auth_limiter: _BoundedHits | None = None,
+    allow_session_fallback: bool = False,
 ) -> Callable[[Request], Awaitable[Principal]]:
     """Build a FastAPI dependency that resolves the caller's X-API-Key
     header to a Principal, raising the right HTTPException otherwise.
@@ -261,20 +282,26 @@ def require_api_key_principal(
 
     - app/join_api.py, app/nodes_api.py, app/checkin_api.py (the three
       byte-for-byte-identical originals): both rate limiters on,
-      default "rate limited" message on both. Each module still passes
-      its OWN pre_auth_limiter/post_auth_limiter instances (see
-      new_rate_limit_bucket()) rather than sharing one across modules.
+      default "rate limited" message on both, allow_session_fallback=True.
+      Each module still passes its OWN pre_auth_limiter/post_auth_limiter
+      instances (see new_rate_limit_bucket()) rather than sharing one
+      across modules.
     - app/mc_api.py's POST /api/mc/status: pre_auth_limiter set (its
       own instance, replacing the old _status_attempts dict),
       pre_auth_rate_limit_detail="too many attempts, try again later"
       (that endpoint's original, different message),
-      post_auth_limiter=None -- it never had a post-auth per-key limit.
+      post_auth_limiter=None -- it never had a post-auth per-key limit --
+      allow_session_fallback=True.
     - app/api.py's POST /api/mc/ingest: pre_auth_limiter=None and
       post_auth_limiter=None -- it never had either of these dict-based
       limiters; its own McIngestor.rate_limit_ok() stays where it is,
       called separately after this dependency resolves, since that is
       ingest-specific rate limiting on a different budget entirely
-      (see the module docstring).
+      (see the module docstring) -- and allow_session_fallback left at
+      its default, False: this is the one call site of the five that
+      must NEVER accept a session cookie in place of the device key
+      MeshMapper posts with (see the module docstring's "opt-in" section
+      for why).
 
     Pre-auth limiting always uses settings.mc_status_rate_limit_attempts/
     window_seconds, and post-auth limiting always uses
@@ -282,6 +309,14 @@ def require_api_key_principal(
     exactly the settings every original copy of this already reused
     rather than inventing new ones, per app/nodes_api.py's own
     docstring on why.
+
+    allow_session_fallback defaults to False -- a call site gets NO
+    session-cookie acceptance unless it asks for it, opposite of an
+    earlier version of this function where the fallback was
+    unconditional for all five. See the module docstring for the full
+    reasoning (ingest is a machine credential, not a browser one) and
+    _try_session_principal's own docstring for what happens once a call
+    site does opt in.
     """
 
     async def _dependency(request: Request) -> Principal:
@@ -296,14 +331,18 @@ def require_api_key_principal(
 
         raw_key = request.headers.get("X-API-Key", "")
         if not raw_key:
-            # No key at all -- try a session cookie before giving up.
-            # See _try_session_principal's own docstring and this
-            # module's docstring for the full reasoning; this branch is
-            # the ENTIRE session-fallback addition; everything below it
-            # in this function is the original, untouched key path.
-            session_principal = await _try_session_principal(request)
-            if session_principal is not None:
-                return session_principal
+            # No key at all -- try a session cookie before giving up,
+            # but ONLY for a call site that opted in. A call site that
+            # left allow_session_fallback at its default (False) never
+            # even calls _try_session_principal -- a session cookie is
+            # indistinguishable here from no credential at all, which is
+            # exactly the point for app/api.py's POST /api/mc/ingest
+            # (see this function's own docstring and the module
+            # docstring's "opt-in" section).
+            if allow_session_fallback:
+                session_principal = await _try_session_principal(request)
+                if session_principal is not None:
+                    return session_principal
             raise HTTPException(status_code=401, detail="unauthorized")
 
         ingestor = request.app.state.mc_ingestor

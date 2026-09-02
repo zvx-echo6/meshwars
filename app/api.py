@@ -579,6 +579,16 @@ def _node_hex(node_id: int | None) -> str:
 # docstring for the full rundown of what differs at each of the five
 # key-authenticated call sites and why.
 #
+# allow_session_fallback is ALSO left at its default (False) here, and
+# must stay that way: this is the machine ingest path MeshMapper's own
+# app posts wardriving batches to over X-API-Key, never a browser --
+# accepting a session cookie in its place would let a stolen or shared
+# session authenticate a device-only credential's endpoint. The other
+# four key-authenticated call sites all pass allow_session_fallback=True
+# explicitly; this is the one that doesn't. See app/auth.py's module
+# docstring's "opt-in" section and tests/test_auth.py's session-cookie
+# tests, which prove both halves of that split.
+#
 # Called directly below (awaited, not wired up as a FastAPI
 # Depends(...)) rather than added as a route parameter: it has to run
 # AFTER the settings.mc_ingest_enabled check, so a caller reaches "mc

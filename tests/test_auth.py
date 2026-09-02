@@ -477,6 +477,85 @@ def test_join_api_team_switch_rate_limit_is_independent_of_nodes_api(monkeypatch
     assert r_join.status_code == 401
 
 
+# ---- HTTP-level: session-cookie-only requests over the real routers -----
+#
+# Three of the four opted-in call sites are importable in this
+# environment (app/nodes_api.py, app/join_api.py, app/mc_api.py -- see
+# this file's module docstring for why app/checkin_api.py is not; that
+# one's exact configuration is instead proven at the unit level by
+# test_checkin_api_shaped_dependency_accepts_session_only above). These
+# drive each REAL router with nothing but a session cookie -- no
+# X-API-Key header at all -- against a real file-backed database
+# (db_path), proving the Depends(...) wiring on the actual endpoints,
+# not just the dependency in isolation, accepts a session-only caller.
+
+@pytest.mark.parametrize(
+    "router_module,path,method,limiter_attr",
+    [
+        (nodes_api_module, "/api/nodes", "GET", "_addr_rate_limiter"),
+        (join_api_module, "/api/team", "GET", "_team_addr_rate_limiter"),
+        (mc_api_module, "/api/mc/status", "POST", "_status_addr_rate_limiter"),
+    ],
+)
+def test_session_cookie_alone_authenticates_over_http(router_module, path, method, limiter_attr, db_path):
+    _reset(getattr(router_module, limiter_attr))
+
+    account_id = _make_account(db_path)
+    _make_player(db_path, account_id=account_id)
+    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+
+    ingestor = FakeIngestor()
+    client = _client_for(router_module.router, ingestor)
+    client.cookies.set("mw_session", raw_token)
+
+    resp = client.request(method, path)
+    # Never the two ways a missing/rejected credential shows up
+    # (401 unauthorized, or a raised server error) -- authentication via
+    # the session cookie succeeded and the route's own database-backed
+    # body ran to completion.
+    assert resp.status_code == 200, resp.text
+    # The key path was never touched -- this request carried no
+    # X-API-Key header at all.
+    assert ingestor.calls == []
+
+
+def test_ingest_shaped_dependency_rejects_session_cookie_alone_over_http(db_path):
+    """Same session-only request as the parametrized test above, but
+    against a bare dependency built exactly the way app/api.py's
+    `_ingest_principal = require_api_key_principal()` builds its own
+    (zero arguments -- app/api.py itself can't be imported here, see
+    this file's module docstring, so this reconstructs its exact
+    configuration rather than importing its router). Where the
+    parametrized test above gets 200 for all three importable opted-in
+    sites, this must get 401 -- proving over real HTTP request/response
+    plumbing, not just the unit-level dependency call in
+    test_default_allow_session_fallback_is_false_valid_session_alone_is_401
+    above, that the ingest path rejects a session cookie with no key
+    present.
+    """
+    account_id = _make_account(db_path)
+    _make_player(db_path, account_id=account_id)
+    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+
+    from fastapi import APIRouter, Depends
+
+    ingest_shaped_router = APIRouter()
+    ingest_shaped_principal = require_api_key_principal()  # matches app/api.py exactly
+
+    @ingest_shaped_router.post("/api/mc/ingest")
+    async def _fake_ingest(principal: Principal = Depends(ingest_shaped_principal)):
+        return {"ok": True}
+
+    ingestor = FakeIngestor()
+    client = _client_for(ingest_shaped_router, ingestor)
+    client.cookies.set("mw_session", raw_token)
+
+    resp = client.post("/api/mc/ingest")
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+    assert ingestor.calls == []
+
+
 # ---- regression: the app-wide handler must not touch router-level 404/405 -
 #
 # app/main.py registers http_exception_as_error_body on
@@ -547,14 +626,20 @@ def test_handler_still_translates_a_directly_raised_http_exception():
 
 # ---- session-cookie fallback (app/sessions.py) ---------------------------
 #
-# require_api_key_principal()'s built dependency now also accepts a
-# session cookie in place of an X-API-Key header (see app/auth.py's own
-# module docstring for the full contract). Every test above this
-# section is completely unmodified by that change -- they still pass
-# exactly as written, which is itself the proof that a KEY-bearing
-# request's behavior is byte-for-byte unchanged. The tests below add
-# coverage for the new branch specifically: a request carrying NO key
-# at all, with and without a usable session.
+# require_api_key_principal()'s built dependency can also accept a
+# session cookie in place of an X-API-Key header, but only for a call
+# site that opts in via allow_session_fallback=True (see app/auth.py's
+# own module docstring for the full contract -- this is OPT-IN per call
+# site, not a blanket behavior; app/api.py's POST /api/mc/ingest is the
+# one call site of the five that must never opt in). Every test above
+# this section is completely unmodified by that change -- they still
+# pass exactly as written, which is itself the proof that a KEY-bearing
+# request's behavior is byte-for-byte unchanged regardless of
+# allow_session_fallback. The tests below add coverage for the new
+# branch specifically: a request carrying NO key at all, with and
+# without a usable session, both with allow_session_fallback=True (the
+# four opted-in call sites' shape) and at the default False (ingest's
+# own shape, which must reject a session-only request outright).
 #
 # These need a real file-backed database (app/sessions.py's
 # create_session/verify_session go through app/db.py's connect()/
@@ -614,10 +699,13 @@ def test_key_present_authenticates_via_key_even_with_a_session_cookie_also_prese
     the session branch is never even consulted when a key is present.
     Uses a deliberately BOGUS session cookie precisely so that if the
     session path were consulted, this would fail loudly rather than
-    coincidentally passing.
+    coincidentally passing. allow_session_fallback=True here (one of
+    the four opted-in call sites' shape) so a failure of this test could
+    only mean the key branch itself started consulting the session, not
+    that the session feature is merely turned off.
     """
     ingestor = FakeIngestor()
-    dep = require_api_key_principal()
+    dep = require_api_key_principal(allow_session_fallback=True)
 
     principal = _run(dep(_request(ingestor, api_key=GOOD_KEY, session_token="not-a-real-session-token")))
 
@@ -626,12 +714,17 @@ def test_key_present_authenticates_via_key_even_with_a_session_cookie_also_prese
 
 
 def test_no_key_valid_session_with_linked_player_authenticates_via_session(db_path):
+    """allow_session_fallback=True -- the shape every one of
+    app/join_api.py, app/nodes_api.py, app/checkin_api.py, and
+    app/mc_api.py's POST /api/mc/status actually builds their dependency
+    with.
+    """
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id)
     raw_token = _run(create_session(account_id, user_agent=None, ip=None))
 
     ingestor = FakeIngestor()
-    dep = require_api_key_principal()
+    dep = require_api_key_principal(allow_session_fallback=True)
 
     principal = _run(dep(_request(ingestor, session_token=raw_token)))
 
@@ -650,7 +743,7 @@ def test_no_key_valid_session_without_linked_player_is_401(db_path):
     raw_token = _run(create_session(account_id, user_agent=None, ip=None))
 
     ingestor = FakeIngestor()
-    dep = require_api_key_principal()
+    dep = require_api_key_principal(allow_session_fallback=True)
 
     with pytest.raises(HTTPException) as exc_info:
         _run(dep(_request(ingestor, session_token=raw_token)))
@@ -660,7 +753,7 @@ def test_no_key_valid_session_without_linked_player_is_401(db_path):
 
 def test_no_key_invalid_session_cookie_is_401(db_path):
     ingestor = FakeIngestor()
-    dep = require_api_key_principal()
+    dep = require_api_key_principal(allow_session_fallback=True)
 
     with pytest.raises(HTTPException) as exc_info:
         _run(dep(_request(ingestor, session_token="garbage-never-issued")))
@@ -672,10 +765,11 @@ def test_no_key_no_session_cookie_is_401_same_as_before(db_path):
     """No credential of either kind -- identical to the pre-existing
     test_missing_header_is_401_unauthorized_without_calling_the_ingestor
     above, just re-asserted here alongside the new session tests for
-    contrast.
+    contrast. allow_session_fallback=True changes nothing here since
+    there is no cookie to fall back to either way.
     """
     ingestor = FakeIngestor()
-    dep = require_api_key_principal()
+    dep = require_api_key_principal(allow_session_fallback=True)
 
     with pytest.raises(HTTPException) as exc_info:
         _run(dep(_request(ingestor)))
@@ -694,8 +788,81 @@ def test_revoked_session_is_401_not_accepted(db_path):
     _run(revoke_session(token_hash))
 
     ingestor = FakeIngestor()
-    dep = require_api_key_principal()
+    dep = require_api_key_principal(allow_session_fallback=True)
 
     with pytest.raises(HTTPException) as exc_info:
         _run(dep(_request(ingestor, session_token=raw_token)))
     assert exc_info.value.status_code == 401
+
+
+# ---- allow_session_fallback is opt-in: the ingest/default shape ---------
+#
+# Everything above this point builds its dependency with
+# allow_session_fallback=True -- the four call sites (app/join_api.py,
+# app/nodes_api.py, app/checkin_api.py, app/mc_api.py's POST
+# /api/mc/status) that actually ask for session-cookie acceptance. The
+# tests below cover the other half of Step 0's correction: a dependency
+# built with NO allow_session_fallback argument at all -- exactly how
+# app/api.py's `_ingest_principal = require_api_key_principal()` builds
+# its own (see that call site's comment) -- must reject a session-only
+# request the same way it always rejected a missing key, never falling
+# back to the cookie at all. This is the direct proof that
+# POST /api/mc/ingest, MeshMapper's machine ingest path, stays
+# API-key-only even though the exact same session machinery is now live
+# for the other four.
+
+def test_default_allow_session_fallback_is_false_valid_session_alone_is_401(db_path):
+    """A dependency built the exact way ingest builds its own -- zero
+    arguments -- must reject a request carrying nothing but a valid
+    session cookie for an account with a linked player. Contrast this
+    with test_no_key_valid_session_with_linked_player_authenticates_via_session
+    above, which is the identical setup except allow_session_fallback=True
+    -- the only difference between a 401 here and a Principal there is
+    that one flag, which is exactly the point of making it opt-in.
+    """
+    account_id = _make_account(db_path)
+    _make_player(db_path, account_id=account_id)
+    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+
+    ingestor = FakeIngestor()
+    dep = require_api_key_principal()  # matches app/api.py's _ingest_principal exactly
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run(dep(_request(ingestor, session_token=raw_token)))
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "unauthorized"
+    # The session cookie was never even looked up -- confirmed indirectly
+    # by the ingestor also never having been called (no key was present
+    # either), i.e. this 401 came from the "no credential at all" branch,
+    # not from a rejected session.
+    assert ingestor.calls == []
+
+
+def test_checkin_api_shaped_dependency_accepts_session_only(db_path):
+    """app/checkin_api.py cannot be imported in this test environment
+    (aiolimiter is not installed here -- see this file's module
+    docstring and the comment above the HTTP-level tests below), so its
+    real router's session behavior can't be exercised via TestClient.
+    This rebuilds its exact dependency configuration by hand (two
+    independent _BoundedHits instances, both limiters on,
+    allow_session_fallback=True -- see require_checkin_principal's own
+    wiring in app/checkin_api.py) and proves that configuration accepts
+    a session-only request, completing "the other four accept either"
+    for the one of the four that has no importable HTTP test alongside
+    it (nodes_api, join_api, and mc_api's status route all get real
+    TestClient coverage below).
+    """
+    account_id = _make_account(db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+
+    ingestor = FakeIngestor()
+    dep = require_api_key_principal(
+        pre_auth_limiter=new_rate_limit_bucket(),
+        post_auth_limiter=new_rate_limit_bucket(),
+        allow_session_fallback=True,
+    )
+
+    principal = _run(dep(_request(ingestor, session_token=raw_token)))
+    assert principal == Principal(player_id=player_id, account_id=account_id, source="session")
+    assert ingestor.calls == []
