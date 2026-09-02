@@ -1601,6 +1601,13 @@ function showBoardChoiceModal(map) {
     document.removeEventListener('keydown', onBoardChoiceKeydown);
     wrap.remove();
     boardChoiceModalEl = null;
+    // main() held loadNotice() back specifically because this modal was
+    // still up -- see its own comment on needsBoardChoice. Now that the
+    // question is answered and this modal is gone, the notice is free
+    // to run exactly the check it always runs (dismissed-version and
+    // hasAwardParams) and show itself if it's still due; nothing here
+    // pre-empts or forces that decision.
+    loadNotice();
   };
 
   wrap.querySelector('#mw-board-choice-meshtastic').addEventListener('click', () => choose('meshtastic'));
@@ -3185,19 +3192,43 @@ function setupLayersCollapse() {
 setupLayersCollapse();
 
 async function main() {
-  // Not awaited: a single small GET against a one-row table, kicked off
-  // in parallel with the map's own boot rather than gating first paint
-  // on it -- see loadNotice()'s own comment for why a failure here is
-  // silent.
-  loadNotice();
-
-  const { playAreaBounds, defaultMode, cartoKey } = await fetchBootConfig();
   // ?board= wins over the configured default. Without this an award link
   // from the Meshtastic results page opened the map on whichever board
   // the config preferred, and drew a Meshtastic highlight over MeshCore
   // territory -- the square the link exists to show was simply not
   // there.
+  //
+  // Read up here, ahead of fetchBootConfig, purely so loadNotice() below
+  // can see needsBoardChoice before it decides whether to fire -- the
+  // priority order these feed into (?board= over a remembered choice
+  // over /config's default) is unchanged and still resolved into `mode`
+  // below, once defaultMode is in hand.
   const linked = boardParam();
+  const storedMode = getStoredBoardMode();
+  // Whether this load still owes the visitor the first-visit board
+  // question below (see showBoardChoiceModal's own comment on why it
+  // exists and has no dismiss-without-choosing path). Used twice: once
+  // here, to decide whether loadNotice() can run now or has to wait,
+  // and again at the showBoardChoiceModal call site itself.
+  const needsBoardChoice = !linked && !storedMode;
+
+  // Not awaited: a single small GET against a one-row table, kicked off
+  // in parallel with the map's own boot rather than gating first paint
+  // on it -- see loadNotice()'s own comment for why a failure here is
+  // silent. Held back when needsBoardChoice, though: the board question
+  // is the first thing an undecided visitor has to answer -- it is
+  // required and has no way to dismiss it -- so the notice, which is
+  // neither, cannot be allowed to race that fetch onto the screen. Left
+  // to run here, both modals could end up open at once, stacked, with
+  // the notice also sitting underneath and stealing clicks meant for
+  // the board modal on top of it. showBoardChoiceModal's choose() fires
+  // loadNotice() itself once the question is answered, so the notice
+  // still appears this same visit, just after, never instead.
+  if (!needsBoardChoice) {
+    loadNotice();
+  }
+
+  const { playAreaBounds, defaultMode, cartoKey } = await fetchBootConfig();
   // Read before anything paints (see BOARD_MODE_KEY's own comment) so a
   // returning visitor's remembered board is baked into `mode` before the
   // scoreboard panel or map.on('load')'s setBoardMode call ever run --
@@ -3205,7 +3236,6 @@ async function main() {
   // built and then swapped. Below ?board= (a linked award/view should
   // never be overridden by a stale preference) but above /config's
   // default (a remembered choice always beats the operator's fallback).
-  const storedMode = getStoredBoardMode();
   mode = linked || storedMode || defaultMode;
   if (!playAreaBounds) {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
@@ -3478,14 +3508,14 @@ async function main() {
   buildScoreboardControl(map);
   renderScoreboard(null); // seed all-zero rows immediately, before the first fetch
 
-  // First-visit board choice: only when neither an explicit ?board=
-  // link nor a remembered preference already answered the question
-  // above -- see showBoardChoiceModal's own comment for why this one
-  // has no dismiss-without-choosing path. Built here rather than inside
-  // map.on('load') below for the same reason the panel above is: no
-  // dependency on the map style, so no reason to make a first-time
-  // visitor wait for tiles before being asked.
-  if (!linked && !storedMode) {
+  // First-visit board choice: only when needsBoardChoice (computed
+  // above, before loadNotice()'s own call) -- see showBoardChoiceModal's
+  // own comment for why this one has no dismiss-without-choosing path.
+  // Built here rather than inside map.on('load') below for the same
+  // reason the panel above is: no dependency on the map style, so no
+  // reason to make a first-time visitor wait for tiles before being
+  // asked.
+  if (needsBoardChoice) {
     showBoardChoiceModal(map);
   }
 
