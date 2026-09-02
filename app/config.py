@@ -612,6 +612,67 @@ class Settings(BaseSettings):
     account_link_key_rate_limit_attempts: int = 5
     account_link_key_rate_limit_window_seconds: int = 60
 
+    # ---- OAuth sign-in (app/oauth.py, app/oauth_api.py) -------------------
+    # Provider login on top of the account layer above -- GET
+    # /auth/{provider}/start and /auth/{provider}/callback exchange a
+    # provider's authorization code for an account_identity row and a
+    # session, the same session app/sessions.py already knows how to
+    # mint. See app/oauth.py's module docstring for the full provider
+    # table and the callback decision tree.
+    #
+    # Every provider follows the same "empty means off" contract as
+    # join_invite_code/admin_token above: BOTH client_id and
+    # client_secret must be set for a provider to be reachable at all
+    # (app/oauth.py's provider_enabled()) -- a half-configured provider
+    # (one set, one blank) is treated as fully off, never as "trust an
+    # empty secret." app/oauth_api.py returns 404 for a disabled
+    # provider's routes, the same "indistinguishable from not existing"
+    # contract app/admin_api.py's _api_guard already uses for the admin
+    # door.
+    oauth_github_client_id: str = ""
+    oauth_github_client_secret: str = ""
+
+    # Base URL (scheme + host, no trailing slash, e.g.
+    # "https://meshwars.com") this deployment is publicly reachable at,
+    # used to build the exact redirect_uri
+    # ({oauth_public_base_url}/auth/{provider}/callback) every enabled
+    # provider is sent on the authorize request and must match, to the
+    # byte, whatever redirect URI is registered in that provider's own
+    # OAuth app settings -- provider consoles reject a mismatch outright,
+    # so this has to be the real public URL, not settings.public_host
+    # (which is bare hostname, no scheme, meant only for the
+    # meshmapper:// custom-URL-scheme link app/join_api.py builds, a
+    # different consumer with a different format). Left empty here for
+    # the same reason trusted_proxies is: it names this deployment's own
+    # public address, which is private-deployment information that does
+    # not belong in a public repository's default. Empty means no
+    # provider can be started at all, regardless of client id/secret --
+    # app/oauth_api.py's start route treats a blank base URL as "not
+    # configured," the same as a disabled provider.
+    oauth_public_base_url: str = ""
+
+    # How long the state/PKCE-verifier cookies app/oauth_api.py sets on
+    # /auth/{provider}/start survive before the browser drops them --
+    # just long enough to cover a real login through a provider's
+    # consent screen (a person choosing an account, maybe entering 2FA)
+    # without leaving a long-lived cookie sitting around doing nothing
+    # once the flow either completes or is abandoned. Shorter than
+    # account_pending_identity's own 15-minute TTL below, since this
+    # only has to survive the redirect round-trip, not a person deciding
+    # whether to create an account afterward.
+    oauth_state_cookie_lifetime_seconds: int = 600  # 10 minutes
+
+    # How long a pending identity (app/db.py's account_pending_identity
+    # -- a brand-new provider identity with no matching account yet,
+    # case 4 of app/oauth_api.py's callback decision tree) stays
+    # redeemable via POST /api/account/pending/create or a follow-up
+    # login. Long enough for a person to read the choice screen and
+    # decide, short enough that an abandoned pending row is not a
+    # meaningful standing liability -- the same reasoning join_token's
+    # 15-minute TTL already applies to a different kind of single-use
+    # ticket.
+    account_pending_identity_lifetime_seconds: int = 900  # 15 minutes
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

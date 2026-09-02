@@ -62,6 +62,14 @@ services:
       CHECKIN_NET_START_DATE: "${CHECKIN_NET_START_DATE:-}"
       MC_CHECKIN_BASE_URL: "${MC_CHECKIN_BASE_URL:-}"
       CARTO_API_KEY: "${CARTO_API_KEY:-}"
+      # OAuth sign-in (app/oauth.py, app/oauth_api.py). Empty
+      # OAUTH_PUBLIC_BASE_URL or either GitHub credential means the
+      # provider stays off -- see .env.example for the full contract
+      # and where to register the callback URL. Never set real values
+      # in this file; it is a public repository.
+      OAUTH_PUBLIC_BASE_URL: "${OAUTH_PUBLIC_BASE_URL:-}"
+      OAUTH_GITHUB_CLIENT_ID: "${OAUTH_GITHUB_CLIENT_ID:-}"
+      OAUTH_GITHUB_CLIENT_SECRET: "${OAUTH_GITHUB_CLIENT_SECRET:-}"
       # FreqMapper (app/freqmapper_ingest.py): alternative Meshtastic
       # paint source to meshview's own position-packet feed above. See
       # MT_PAINT_SOURCE below for which one actually paints the board.

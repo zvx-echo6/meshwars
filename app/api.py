@@ -51,6 +51,7 @@ from .mc_scoring import team_checkin_points, team_tile_counts
 from .node_ref import normalize_node_ref
 from .nodes_api import router as nodes_router
 from .notice_api import router as notice_router
+from .oauth_api import router as oauth_router
 from .places_api import router as places_router
 from .public_api import router as public_router
 
@@ -943,6 +944,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(mc_router)
     app.include_router(join_router)
     app.include_router(account_router)
+    app.include_router(oauth_router)
     app.include_router(admin_router)
     app.include_router(admin_ops_router)
     app.include_router(nodes_router)

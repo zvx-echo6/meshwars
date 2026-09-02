@@ -1365,6 +1365,49 @@ CREATE TABLE IF NOT EXISTS account_link_event (
     created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_account_link_event_account ON account_link_event(account_id, created_at);
+
+-- OAuth provider sign-in (app/oauth.py, app/oauth_api.py): a brand-new
+-- provider identity that does not yet belong to any account, waiting
+-- for a person to choose what happens to it. This is case 4 of
+-- app/oauth_api.py's callback decision tree -- reached only when the
+-- identity is not already linked (case 1), the caller is not already
+-- logged in (case 2), and there is no unambiguous verified-email match
+-- to an existing account to auto-link onto (case 3). Rather than
+-- create an account speculatively and hope nobody minds, the callback
+-- parks the identity here and hands the caller a token to redeem
+-- EITHER through POST /api/account/pending/create (make a new account)
+-- OR by signing in through an existing method first and returning with
+-- this same token (app/oauth_api.py's callback then takes case 2:
+-- link onto whichever account that sign-in resolves to).
+--
+-- Same hashed-single-use-ticket shape as join_token above (read that
+-- table's own comment for the reasoning this mirrors deliberately):
+-- token_hash is the only thing ever stored, the raw token exists only
+-- in the single redirect response that hands it to the browser,
+-- consumed_at makes redemption idempotently single-use rather than
+-- deleting the row (an audit trail of "this identity was offered,
+-- and was/wasn't ever claimed" survives either way), and expires_at
+-- (settings.account_pending_identity_lifetime_seconds, 15 minutes by
+-- default) bounds how long an abandoned choice screen leaves a
+-- redeemable ticket lying around.
+--
+-- provider/subject/email/email_verified are exactly the
+-- ProviderIdentity app/oauth.py's fetch_identity() produced for this
+-- callback -- copied here verbatim (not re-fetched from the provider
+-- at redemption time) so that redeeming the token later never has to
+-- re-authenticate against the provider or trust a second round of
+-- provider claims; whatever was verified at callback time is what gets
+-- written to account_identity at redemption time, unchanged.
+CREATE TABLE IF NOT EXISTS account_pending_identity (
+    token_hash      TEXT PRIMARY KEY,
+    provider        TEXT NOT NULL,
+    subject         TEXT NOT NULL,
+    email           TEXT,
+    email_verified  INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    expires_at      INTEGER NOT NULL,
+    consumed_at     INTEGER
+);
 """
 
 
