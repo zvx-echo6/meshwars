@@ -961,23 +961,30 @@ def _load_mc_manual_bindings(conn) -> dict[str, int]:
     return {r["sender_name"]: r["player_id"] for r in rows}
 
 
-def _record_player_name(conn, connector: str, player_id: int, name: str, now: int) -> None:
-    """Persist that `player_id`'s MeshCore contact currently resolves to
-    `name` on `connector` (checkin_player_name, app/db.py), and log the
-    moment it changes.
+def _record_node_name(conn, connector: str, node_ref: str, player_id: int, name: str, now: int) -> None:
+    """Persist that MeshCore contact `node_ref` (bound to `player_id`)
+    currently resolves to `name` on `connector` (checkin_node_name,
+    app/db.py), and log the moment THAT NODE's name changes.
 
     Why this matters more than an ordinary bookkeeping table: a rename
-    is the EXACT moment a player's check-ins would start silently going
-    uncredited (see the module docstring -- resolution is name-matched
-    against the directory, so the old binding stops matching the instant
-    the display name changes), and nothing else in this schema records
-    what a resolved name used to be. Making that moment a log line (and
-    a row app/admin_ops.py's _attention can surface) is what turns an
-    invisible failure into a visible one, without changing resolution or
-    awarding behavior at all -- this function only ever observes and
-    records; it plays no part in deciding who gets credited.
+    is the EXACT moment check-ins matched against the old name would
+    start silently going uncredited (see the module docstring --
+    resolution is name-matched against the directory, so the old
+    binding stops matching the instant the display name changes), and
+    nothing else in this schema records what a resolved name used to
+    be. Making that moment a log line (and a row app/admin_ops.py's
+    _attention can surface) is what turns an invisible failure into a
+    visible one, without changing resolution or awarding behavior at
+    all -- this function only ever observes and records; it plays no
+    part in deciding who gets credited.
 
-    First sighting of a (connector, player) pair is an INSERT, not a
+    Keyed on (connector, node_ref), NOT (connector, player_id) -- see
+    checkin_node_name's own comment in app/db.py for why: a player can
+    hold more than one bound MeshCore contact, each with its own
+    display name, and that is normal, not a rename. player_id is
+    carried through only so a row is self-describing to a reader.
+
+    First sighting of a (connector, node_ref) pair is an INSERT, not a
     "change" -- there is no previous name to have drifted from, so
     changed_at/previous_name are left at their column defaults (NULL,
     '') rather than manufactured. Only a genuinely DIFFERENT name on a
@@ -987,24 +994,24 @@ def _record_player_name(conn, connector: str, player_id: int, name: str, now: in
     clause below already makes that the cheap path.
     """
     cur = conn.execute(
-        "UPDATE checkin_player_name SET previous_name = name, name = ?, changed_at = ? "
-        " WHERE connector = ? AND player_id = ? AND name != ?",
-        (name, now, connector, player_id, name),
+        "UPDATE checkin_node_name SET previous_name = name, name = ?, changed_at = ? "
+        " WHERE connector = ? AND node_ref = ? AND name != ?",
+        (name, now, connector, node_ref, name),
     )
     if cur.rowcount:
         row = conn.execute(
-            "SELECT previous_name FROM checkin_player_name WHERE connector = ? AND player_id = ?",
-            (connector, player_id),
+            "SELECT previous_name FROM checkin_node_name WHERE connector = ? AND node_ref = ?",
+            (connector, node_ref),
         ).fetchone()
         log.info(
-            "checkin: player %d's MeshCore name on %s changed from %r to %r",
-            player_id, connector, row["previous_name"] if row else None, name,
+            "checkin: player %d's MeshCore node %s on %s changed name from %r to %r",
+            player_id, node_ref, connector, row["previous_name"] if row else None, name,
         )
         return
     conn.execute(
-        "INSERT OR IGNORE INTO checkin_player_name(connector, player_id, name, first_seen) "
-        "VALUES (?, ?, ?, ?)",
-        (connector, player_id, name, now),
+        "INSERT OR IGNORE INTO checkin_node_name(connector, node_ref, player_id, name, first_seen) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (connector, node_ref, player_id, name, now),
     )
 
 
@@ -1040,18 +1047,18 @@ def _build_directory_bridge(
     mc_checkin_binding registration, or a later unambiguous directory
     state, still works), never a best-effort pick.
 
-    `connector`/`now`: when given, every player this bridge resolves is
-    also passed to _record_player_name against `connector` -- see that
+    `connector`/`now`: when given, every contact this bridge resolves is
+    also passed to _record_node_name against `connector` -- see that
     function for why. Only _resolve_mc_identities' PRIMARY pass (this
     net's own connector, see CheckinPoller._poll_mc_feed) supplies
     these; the cross-connector fallback pass below leaves them None,
     since `directory_nodes` there is already a union across every OTHER
     connector currently polled and no single connector identity applies
     to a name resolved from it. Recording nothing for that pass is not a
-    gap: the SAME player's contact, if it resolves at all, resolves
-    through their own net's primary pass on some cycle too (that is the
-    common case this whole bridge is built around), which is what
-    actually gets recorded.
+    gap: the SAME contact, if it resolves at all, resolves through its
+    own net's primary pass on some cycle too (that is the common case
+    this whole bridge is built around), which is what actually gets
+    recorded.
     """
     by_name: dict[str, set[str]] = {}
     by_prefix: dict[str, list[dict]] = {}
@@ -1097,7 +1104,7 @@ def _build_directory_bridge(
         if connector is not None:
             # See this function's own docstring for why only the
             # PRIMARY pass (connector supplied) records here.
-            _record_player_name(conn, connector, r["player_id"], name, now)
+            _record_node_name(conn, connector, contact, r["player_id"], name, now)
     return bridge
 
 
@@ -1162,8 +1169,8 @@ def _resolve_mc_identities(
 
     `primary_connector`, when given, is passed through to
     _build_directory_bridge's PRIMARY-pass call only (never the fallback
-    pass) so it can record each resolved player's current directory name
-    (checkin_player_name, app/db.py) against a single, unambiguous
+    pass) so it can record each resolved contact's current directory name
+    (checkin_node_name, app/db.py) against a single, unambiguous
     connector -- see that function's own docstring for why the fallback
     pass, built from a union across other connectors, never does this.
     """

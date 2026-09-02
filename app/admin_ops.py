@@ -172,22 +172,27 @@ def _attention(conn, directory: list[dict]) -> list[dict]:
 
     # ---- check-in name drift, MeshCore only ---------------------------
     # A player's check-in identity is a NAME match against the directory
-    # (app/checkin.py's module docstring), so the moment their node's
-    # display name changes, their contact's binding no longer matches
-    # anything and their check-ins go quiet with no error anywhere --
-    # the same invisible-failure shape as checkin_unreachable above, just
-    # triggered by a rename instead of a radio the directory never saw.
-    # checkin_player_name (app/db.py) is written by app/checkin.py's
-    # _build_directory_bridge every cycle it resolves a player; a recent
-    # changed_at means the rename JUST happened, which is exactly when an
-    # operator can still catch it before a whole net's worth of check-ins
-    # is missed. Independent of `directory` (unlike checkin_unreachable
-    # above) -- this reads history already on disk, not the poller's
-    # in-memory cache, so it still surfaces a rename even if the poller
-    # or its directory cache is briefly down when overview is loaded.
+    # (app/checkin.py's module docstring), so the moment one of their
+    # nodes' display name changes, that contact's binding no longer
+    # matches anything and check-ins from it go quiet with no error
+    # anywhere -- the same invisible-failure shape as checkin_unreachable
+    # above, just triggered by a rename instead of a radio the directory
+    # never saw. checkin_node_name (app/db.py) is written by
+    # app/checkin.py's _build_directory_bridge every cycle it resolves a
+    # contact, one row per (connector, node_ref) -- a player with more
+    # than one bound MeshCore radio has more than one row, which is why
+    # this is keyed on the radio rather than the player (see that
+    # table's own comment for the false-positive an earlier player-keyed
+    # version produced). A recent changed_at means the rename JUST
+    # happened, which is exactly when an operator can still catch it
+    # before a whole net's worth of check-ins is missed. Independent of
+    # `directory` (unlike checkin_unreachable above) -- this reads
+    # history already on disk, not the poller's in-memory cache, so it
+    # still surfaces a rename even if the poller or its directory cache
+    # is briefly down when overview is loaded.
     name_change_cutoff = now - _STALE_DAYS * 86400
     for r in conn.execute(
-        "SELECT player_id, name, previous_name, changed_at FROM checkin_player_name "
+        "SELECT player_id, node_ref, name, previous_name, changed_at FROM checkin_node_name "
         " WHERE changed_at IS NOT NULL AND changed_at > ? ORDER BY changed_at DESC",
         (name_change_cutoff,),
     ):
@@ -198,13 +203,14 @@ def _attention(conn, directory: list[dict]) -> list[dict]:
         when = "earlier today" if days_ago < 1 else (
             "1 day ago" if days_ago == 1 else "%d days ago" % days_ago)
         add(p, "checkin_name_changed",
-            "MeshCore display name changed from %r to %r %s" % (
-                r["previous_name"], r["name"], when,
+            "MeshCore radio %s's display name changed from %r to %r %s" % (
+                r["node_ref"], r["previous_name"], r["name"], when,
             ),
-            "Check-ins are matched by name, so this player's old binding stopped "
-            "matching the moment their name changed. Nothing to do once their new "
-            "name starts resolving again on its own -- confirm it has, or have "
-            "them register a fallback name if it hasn't.", "warn")
+            "Check-ins are matched by name, so that radio's old binding stopped "
+            "matching the moment its name changed -- any other bound radio this "
+            "player has is unaffected. Nothing to do once its new name starts "
+            "resolving again on its own -- confirm it has, or have them register "
+            "a fallback name if it hasn't.", "warn")
 
     order = {"bad": 0, "warn": 1, "info": 2}
     out.sort(key=lambda e: (order.get(e["severity"], 3), e["player"].lower()))

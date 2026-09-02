@@ -784,28 +784,42 @@ CREATE TABLE IF NOT EXISTS checkin_unresolved_sender (
 );
 CREATE INDEX IF NOT EXISTS idx_unresolved_net_date ON checkin_unresolved_sender(net_date);
 
--- Last-known MeshCore directory display name per (connector, player) --
+-- Last-known MeshCore directory display name per (connector, node) --
 -- see app/checkin.py's _build_directory_bridge, the only writer. A
 -- check-in is credited by resolving a player's bound radio contact to
 -- whatever display name its public key currently resolves to in a
 -- connector's node directory (see app/checkin.py's module docstring);
--- if a player renames their node, that resolved name changes and their
--- check-ins silently stop being credited under the name this table
--- remembers -- nothing else in this schema records what a player's
--- resolved name USED to be, so there is otherwise no way to notice a
--- rename ever happened. previous_name/changed_at exist so that moment
--- is visible (app/admin_ops.py's _attention surfaces a recent change)
--- rather than only inferrable after check-ins have already gone quiet.
+-- if a player renames a node, that resolved name changes and any
+-- check-in matched against the old name silently stops being credited
+-- -- nothing else in this schema records what a node's resolved name
+-- USED to be, so there is otherwise no way to notice a rename ever
+-- happened. previous_name/changed_at exist so that moment is visible
+-- (app/admin_ops.py's _attention surfaces a recent change) rather than
+-- only inferrable after check-ins have already gone quiet.
 -- changed_at is NULL until the first change is observed -- the initial
 -- insert is not itself a "change."
-CREATE TABLE IF NOT EXISTS checkin_player_name (
+--
+-- Keyed on (connector, node_ref), NOT (connector, player_id): a display
+-- name belongs to a specific radio, not to the person holding it. A
+-- player with two bound MeshCore contacts has the directory resolving
+-- two different names at once -- both correct, one per contact -- and
+-- that is normal, not a rename. Keying this table on player_id instead
+-- (an earlier version did, table name checkin_player_name) made every
+-- poll a race between whichever contact's row got processed last, so
+-- the table flip-flopped and _attention logged a false "name changed"
+-- roughly every poll for any multi-radio player -- 15 of them on
+-- preview alone. player_id is still stored (not derivable from
+-- node_ref without the join _attention already needs anyway) so a
+-- reader can go straight from a row to whose radio it is.
+CREATE TABLE IF NOT EXISTS checkin_node_name (
     connector     TEXT NOT NULL,
+    node_ref      TEXT NOT NULL,
     player_id     INTEGER NOT NULL,
     name          TEXT NOT NULL,
     first_seen    INTEGER NOT NULL,
     changed_at    INTEGER,
     previous_name TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (connector, player_id)
+    PRIMARY KEY (connector, node_ref)
 );
 
 -- ---------------------------------------------------------------------
@@ -1342,6 +1356,20 @@ MIGRATIONS = [
     "ALTER TABLE checkin_net ADD COLUMN broker_password TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE checkin_net ADD COLUMN channel_key TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE checkin_net ADD COLUMN topic_root TEXT NOT NULL DEFAULT ''",
+    # checkin_player_name (player_id-keyed) replaced by checkin_node_name
+    # (node_ref-keyed) above -- see that table's own comment for why a
+    # player_id key made every multi-radio player's rows flip-flop and
+    # false-alarm as a "name changed" on nearly every poll. A DROP
+    # rather than an ALTER because SQLite cannot change a table's
+    # PRIMARY KEY in place, and there is nothing here worth an in-place
+    # migration for: this table is pure observability, holds no
+    # historical value check-in resolution or awarding ever reads, and
+    # on every database it has existed on so far it is minutes old.
+    # CREATE TABLE IF NOT EXISTS above already handles a database that
+    # never had checkin_player_name at all (never sees this table name,
+    # DROP IF EXISTS is a no-op for it); this line only matters for a
+    # database that ran the earlier schema.
+    "DROP TABLE IF EXISTS checkin_player_name",
 ]
 
 PRAGMAS = [
