@@ -72,6 +72,16 @@ when it is off, the same shape app/checkin.py's CheckinPoller already
 uses for checkin_config.enabled. The loop has to always be running for
 `enabled` to be a true runtime toggle: a task that already returned at
 startup would never notice an admin flipping it back on later.
+
+paint_from is checkin_net.start_date's exact contract, one level up:
+a local YYYY-MM-DD lower bound on an event's verified_at, blank meaning
+BLOCK EVERY EVENT rather than "no lower bound" -- see that column's
+comment in app/db.py and _process_one_event's date-gate below for the
+full reasoning. Unlike every other skip reason this loop tracks, a
+date-skipped event is deliberately left OUT of freqmapper_verification,
+so moving the date earlier and clearing the cursor can still recover
+it; the cursor itself still advances past it regardless, or the poller
+would never get past its own too-early backlog.
 """
 from __future__ import annotations
 
@@ -79,6 +89,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -145,6 +156,22 @@ def _clamped_limit(page_limit: int) -> int:
     return max(_MIN_LIMIT, min(int(page_limit), _MAX_LIMIT))
 
 
+def _local_date(ts: int) -> str:
+    """Local calendar date (YYYY-MM-DD) for an epoch-seconds timestamp,
+    for comparing against freqmapper_config.paint_from -- see that
+    column's comment in app/db.py and _process_one_event below for the
+    gate this feeds. Uses settings.checkin_net_timezone, the same
+    app-wide local zone app/results.py's month rolls (_tz()) and
+    app/place_rotation.py's day rollover already reuse rather than
+    anything checkin-specific: FreqMapper is one connector, not many
+    nets, so there is no more specific zone to key off, and reusing this
+    one keeps "today" meaning the same calendar day everywhere in the
+    app rather than drifting between UTC and local depending on which
+    module you're reading.
+    """
+    return datetime.fromtimestamp(ts, tz=ZoneInfo(settings.checkin_net_timezone)).date().isoformat()
+
+
 def load_freqmapper_config(conn) -> dict:
     """Fresh, uncached read of the freqmapper_config singleton --
     connector settings, scoring knobs, mt_paint_source, and the poller's
@@ -167,8 +194,8 @@ def load_freqmapper_config(conn) -> dict:
     """
     row = conn.execute(
         "SELECT mt_paint_source, enabled, base_url, api_key, poll_interval_seconds, "
-        "       page_limit, points_per_event, unique_painter_bonus, last_poll_at, "
-        "       last_poll_error, updated_at "
+        "       page_limit, points_per_event, unique_painter_bonus, paint_from, "
+        "       last_poll_at, last_poll_error, updated_at "
         "  FROM freqmapper_config WHERE id = 1"
     ).fetchone()
     if row is None:
@@ -181,6 +208,7 @@ def load_freqmapper_config(conn) -> dict:
             "page_limit": settings.freqmapper_page_limit,
             "points_per_event": settings.freqmapper_points_per_event,
             "unique_painter_bonus": settings.freqmapper_unique_painter_bonus,
+            "paint_from": settings.freqmapper_paint_from,
             "last_poll_at": None,
             "last_poll_error": None,
             "updated_at": 0,
@@ -217,7 +245,7 @@ def seed_freqmapper_config_from_env(conn) -> None:
     conn.execute(
         "UPDATE freqmapper_config SET mt_paint_source = ?, enabled = ?, base_url = ?, "
         " api_key = ?, poll_interval_seconds = ?, page_limit = ?, points_per_event = ?, "
-        " unique_painter_bonus = ?, updated_at = ? WHERE id = 1",
+        " unique_painter_bonus = ?, paint_from = ?, updated_at = ? WHERE id = 1",
         (
             settings.mt_paint_source,
             int(settings.freqmapper_enabled),
@@ -227,6 +255,7 @@ def seed_freqmapper_config_from_env(conn) -> None:
             settings.freqmapper_page_limit,
             settings.freqmapper_points_per_event,
             settings.freqmapper_unique_painter_bonus,
+            settings.freqmapper_paint_from,
             int(time.time()),
         ),
     )
@@ -455,7 +484,8 @@ class FreqMapperIngestor:
         counts = {
             "painted": 0, "skipped_duplicate": 0, "skipped_unregistered": 0,
             "skipped_bad_coord": 0, "skipped_out_of_area": 0,
-            "skipped_malformed": 0, "skipped_inactive_source": 0, "error": 0,
+            "skipped_malformed": 0, "skipped_inactive_source": 0,
+            "skipped_before_paint_from": 0, "error": 0,
         }
 
         async with WriteSession() as wconn:
@@ -474,19 +504,30 @@ class FreqMapperIngestor:
                 outcome = self._process_one_event(
                     wconn, event, season_id, registered, now_ts,
                     cfg["mt_paint_source"], cfg["points_per_event"], cfg["unique_painter_bonus"],
+                    cfg["paint_from"],
                 )
                 counts[outcome] = counts.get(outcome, 0) + 1
 
+            # The cursor advances regardless of any per-event outcome
+            # above, paint_from skips included -- otherwise a connector
+            # gated entirely behind a not-yet-reached paint_from would
+            # never progress past its own backlog, re-fetching the same
+            # too-early page forever. paint_from only decides whether an
+            # event SCORES and is recorded in freqmapper_verification
+            # (see _process_one_event), never whether the poller moves
+            # forward.
             if next_cursor:
                 set_cursor(wconn, CURSOR_KEY, next_cursor)
 
         log.info(
             "freqmapper poll: events=%d painted=%d duplicate=%d unregistered=%d "
-            "bad_coord=%d out_of_area=%d malformed=%d inactive_source=%d error=%d has_more=%s",
+            "bad_coord=%d out_of_area=%d malformed=%d inactive_source=%d "
+            "before_paint_from=%d error=%d has_more=%s",
             len(events), counts["painted"], counts["skipped_duplicate"],
             counts["skipped_unregistered"], counts["skipped_bad_coord"],
             counts["skipped_out_of_area"], counts["skipped_malformed"],
-            counts["skipped_inactive_source"], counts["error"], has_more,
+            counts["skipped_inactive_source"], counts["skipped_before_paint_from"],
+            counts["error"], has_more,
         )
 
         await self._maybe_housekeeping()
@@ -497,6 +538,7 @@ class FreqMapperIngestor:
         self, conn, event: object, season_id: int,
         registered: dict[str, tuple[int, str]], now_ts: int,
         mt_paint_source: str, points_per_event: float, unique_painter_bonus: float,
+        paint_from: str,
     ) -> str:
         """Process one verified-coverage event inside the caller's
         already-open write transaction. Returns an outcome key matching
@@ -508,6 +550,44 @@ class FreqMapperIngestor:
         verification_id = event.get("verification_id")
         if not isinstance(verification_id, str) or not verification_id:
             return "skipped_malformed"
+
+        # ----- Paint-from date gate -----
+        # Deliberately runs BEFORE the freqmapper_verification dedup
+        # insert just below, unlike every other skip reason in this
+        # function, which is recorded there regardless of outcome (see
+        # that table's own comment in app/db.py). A date-skipped event
+        # must NOT be recorded -- it needs to stay retrievable, the same
+        # read-first-not-claim-first discipline app/checkin.py's
+        # _seen()/_mark_seen() split enforces (see
+        # checkin._record_unresolved_sender's docstring for the
+        # production incident this mirrors: two players' real
+        # 2026-08-19 award was lost because a message got marked seen
+        # before its outcome was actually settled, so no later poll
+        # ever looked at it again). Recording a date-skip here would be
+        # exactly that mistake: an admin who moves paint_from earlier
+        # and clears the cursor (POST /api/admin/paint/clear-cursor)
+        # needs FreqMapper to hand this same event back and needs it to
+        # reach this function with a clean slate -- the dedup INSERT OR
+        # IGNORE below would otherwise silently treat it as already
+        # handled forever.
+        #
+        # Blank paint_from means BLOCK EVERY EVENT, never "no lower
+        # bound" -- the same contract app/checkin.py's net_date_for_net
+        # enforces for checkin_net.start_date (see that function's own
+        # comment): a freshly enabled connector must never silently
+        # backfill an entire feed just because nobody has set a date
+        # yet. This is the safe default, and deliberate.
+        #
+        # An unparseable verified_at does NOT trigger this gate -- it
+        # falls through unchanged to the ordinary malformed handling
+        # further down (still recorded in freqmapper_verification
+        # exactly as every other malformed event already is): "we can't
+        # tell when this happened" is a data problem, not a date-window
+        # decision, and must not silently dodge the dedup table the way
+        # a genuine date-skip does.
+        ts = _parse_verified_at(event.get("verified_at"))
+        if ts is not None and (not paint_from or _local_date(ts) < paint_from):
+            return "skipped_before_paint_from"
 
         # Dedup on verification_id FIRST, before anything else touches
         # this event -- see freqmapper_verification's comment in
@@ -552,7 +632,10 @@ class FreqMapperIngestor:
         ):
             return "skipped_out_of_area"
 
-        ts = _parse_verified_at(event.get("verified_at"))
+        # ts was already parsed above (for the paint_from gate) -- a
+        # None here means it was unparseable and the gate above
+        # deliberately let it fall through to here instead of skipping
+        # it for-date.
         if ts is None:
             return "skipped_malformed"
 

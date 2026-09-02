@@ -405,6 +405,15 @@ CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verifi
 -- columns, written by FreqMapperIngestor after every completed cycle
 -- (cleared on the next success), so a silently-failing connector shows
 -- up here without anyone reading logs.
+-- paint_from is checkin_net.start_date's exact contract, one level up:
+-- a local YYYY-MM-DD lower bound on an event's verified_at, empty
+-- meaning BLOCK EVERY EVENT rather than "no lower bound" -- see that
+-- column's own comment and settings.freqmapper_paint_from in
+-- app/config.py for the full reasoning, and app/freqmapper_ingest.py's
+-- _process_one_event for where it's enforced. A date-skipped event is
+-- deliberately left OUT of freqmapper_verification below (unlike every
+-- other skip reason, which IS recorded there) so that moving this date
+-- earlier and clearing the cursor can still pick the event back up.
 CREATE TABLE IF NOT EXISTS freqmapper_config (
     id                     INTEGER PRIMARY KEY CHECK (id = 1),
     mt_paint_source        TEXT NOT NULL DEFAULT 'meshview',
@@ -415,6 +424,7 @@ CREATE TABLE IF NOT EXISTS freqmapper_config (
     page_limit             INTEGER NOT NULL DEFAULT 200,
     points_per_event       REAL NOT NULL DEFAULT 0.5,
     unique_painter_bonus   REAL NOT NULL DEFAULT 0.5,
+    paint_from             TEXT NOT NULL DEFAULT '',
     last_poll_at           INTEGER,
     last_poll_error        TEXT,
     updated_at             INTEGER NOT NULL DEFAULT 0
@@ -1462,6 +1472,13 @@ MIGRATIONS = [
     # install; this migration only has to guarantee the row EXISTS, not
     # what it holds.
     "INSERT OR IGNORE INTO freqmapper_config(id) VALUES (1)",
+    # paint_from added after freqmapper_config already shipped -- see
+    # that column's own comment on the CREATE TABLE above. Defaults to
+    # '' (block every event), the same safe-by-default value a fresh
+    # install's CREATE TABLE already gives the column, so an existing
+    # deployment upgrading into this migration keeps painting exactly
+    # nothing extra until an operator explicitly sets a date.
+    "ALTER TABLE freqmapper_config ADD COLUMN paint_from TEXT NOT NULL DEFAULT ''",
 ]
 
 PRAGMAS = [

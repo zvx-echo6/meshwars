@@ -186,6 +186,21 @@ class Settings(BaseSettings):
     # mc_score_per_unique_player, so the two can be tuned independently.
     freqmapper_unique_painter_bonus: float = 0.5
 
+    # Lower bound on which verified-coverage event can paint, as a local
+    # YYYY-MM-DD date -- compared against the event's verified_at,
+    # reduced to a local calendar date, never the raw timestamp. Exactly
+    # the same contract checkin_net_start_date above already uses (see
+    # its comment for the full reasoning): FreqMapper's own feed hands
+    # back history on every request, so a freshly enabled connector
+    # would otherwise repaint the board with everything the feed can
+    # still reach in one pass, on behalf of whichever players happen to
+    # be registered today. Empty is deliberately treated as "block every
+    # event," not "no lower bound," the same contract mc_checkin_base_url,
+    # join_invite_code, and checkin_net_start_date all use for "empty
+    # means off, never open." Set this to the date FreqMapper should
+    # actually start counting from before relying on it.
+    freqmapper_paint_from: str = ""
+
     # Which upstream source paints the Meshtastic board: "meshview"
     # (default -- today's behaviour, unchanged: app/ingest.py's
     # position-packet poll and backfill score exactly as they always
