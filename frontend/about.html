@@ -86,6 +86,7 @@
       <a href="/">Map</a>
       <a href="/results">Results</a>
       <a href="/rules">Rules</a>
+      <a href="/docs">Docs</a>
       <a href="/about" class="active">About</a>
       <a href="/join">Join</a>
       <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
@@ -142,7 +143,7 @@
     <section class="landing-panel">
       <div class="landing-panel-title">How scoring works</div>
       <p>You claim a square by reaching the mesh from inside it. Each mesh node your ping reaches is worth a tenth of a point, up to one point per ping &mdash; and a ping that reaches nobody claims nothing, because being somewhere is not enough.</p>
-      <p>Squares change hands when a team out-scores whoever is holding one, scores fade over time so held ground has to be revisited, and a square that just changed hands is protected for fifteen minutes.</p>
+      <p>Squares change hands when a team matches or out-scores whoever is holding one, scores fade over time so held ground has to be revisited, and a square that just changed hands is protected for fifteen minutes.</p>
       <p>The exact numbers, the cooldowns and every other mechanic are in the <a href="/rules">rules</a>.</p>
     </section>
 
@@ -158,14 +159,14 @@
     <section class="landing-panel">
       <div class="landing-panel-title">Places worth going</div>
       <p>Summits, parks and landmarks are real destinations, not squares picked at random &mdash; summits from Summits On The Air, parks from Parks On The Air, landmarks from OpenStreetMap. Reach one with a scoring ping and it earns your team Explorer points on top of the square itself.</p>
-      <p>What a place is worth depends on how far it made you go, not what kind of place it is. Somewhere inside a town's own limits is worth a nickel whether it's a park or a peak &mdash; step outside and a summit is worth a lot more than a landmark down the street.</p>
+      <p>What a place is worth depends on how far it made you go, not what kind of place it is. Somewhere inside a town's own limits is worth a nickel whether it's a park or a landmark &mdash; step outside and it's worth more. A summit is scored on its elevation instead, wherever it stands, because the climb to the top doesn't change depending on where a town line was drawn around its base.</p>
       <p>There's a weekly cap per person, so a town's worth of easy visits can't out-earn one real trip. Landmarks and small parks also rotate week to week, so what's worth chasing near you can change &mdash; summits and the bigger parks are always live. The <a href="/rules">rules</a> have the full point table and how the rotation works.</p>
       <p>Points go to your own Explorer Score as well as your team's total, the same shape check-in points already have &mdash; and each month hands out three honors for whoever visits the most: Tourist for landmarks, Park Hopper for parks, Peak Tagger for summits.</p>
     </section>
 
     <section class="landing-panel">
       <div class="landing-panel-title">Every month has a winner</div>
-      <p>A six-month season is a long time to wait to find out how you did, so each calendar month closes with its own <a href="/results">result</a>. A month is judged on that month alone &mdash; ground taken and points earned between its own dates &mdash; not on the season standings, so falling behind early never puts the next month out of reach.</p>
+      <p>A six-month season is a long time to wait to find out how you did, so each calendar month closes with its own <a href="/results">result</a>. A month is judged on that month alone &mdash; ground held and points earned between its own dates &mdash; not on the season standings, so falling behind early never puts the next month out of reach.</p>
       <p>Alongside the team standings, each month hands out honors &mdash; for taking the most ground off other teams, winning the most back, touring the most landmarks, hopping the most parks, tagging the most peaks, and claiming the most ground out past the towns. Every one of them is defined in the <a href="/rules">rules</a>.</p>
     </section>
 
@@ -178,7 +179,7 @@
         </div>
         <div class="protocol-card protocol-card-live">
           <div class="protocol-card-title">Meshtastic <span class="protocol-live-badge">Live</span></div>
-          <p>Playable now, on the same seven-team, registered-player, grid-square game as MeshCore. Register your node ID on the join page, then squares are claimed wherever your node's broadcast position is heard by an MQTT feeder.</p>
+          <p>The same seven-team, registered-player, grid-square game as MeshCore. Register your node ID on the join page to play; squares are then claimed wherever your node's broadcast position is heard by an MQTT feeder.</p>
         </div>
       </div>
     </section>

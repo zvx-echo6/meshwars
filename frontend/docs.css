@@ -1,0 +1,235 @@
+/* /docs -- the player how-to reference. Rides on rules.css, which
+   already has the contents rail, the reading column and the tables
+   (same pattern api.css already follows for /api) -- only the things a
+   how-to page needs that a rulebook does not live here: the search box,
+   screenshot figures, the troubleshooting list and the changelog. */
+
+/* ---- search -----------------------------------------------------------
+   Sits between the header and the two-column layout, full width at
+   every viewport -- unlike the contents rail, search has to work before
+   a reader has scrolled or even knows the section names exist. */
+.docs-search-wrap {
+  position: relative;
+  max-width: 640px;
+  margin: 0 0 32px;
+}
+
+.docs-search-label {
+  display: block;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+  margin: 0 0 8px;
+}
+
+.docs-search-box {
+  position: relative;
+}
+
+.docs-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--mw-raised);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 6px;
+  color: var(--mw-text-1);
+  font-size: 0.9375rem;
+  padding: 10px 40px 10px 14px;
+}
+
+.docs-search-input::placeholder { color: var(--mw-text-6); }
+
+.docs-search-input:focus {
+  outline: none;
+  border-color: var(--mw-gold);
+}
+
+/* Decorative "/" hint, the same idea as a keyboard-shortcut badge --
+   purely visual, aria-hidden in the markup, never read as content. */
+.docs-search-hint {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--mw-text-6);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.8125rem;
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 3px;
+  padding: 1px 6px;
+  pointer-events: none;
+}
+
+.docs-search-input:focus ~ .docs-search-hint { display: none; }
+
+.docs-search-results {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--mw-panel);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.docs-search-result {
+  border-radius: 5px;
+  margin: 0 0 2px;
+}
+.docs-search-result:last-child { margin-bottom: 0; }
+
+.docs-search-result a {
+  display: block;
+  padding: 8px 10px;
+  text-decoration: none;
+  color: inherit;
+  border-radius: 5px;
+}
+
+.docs-search-result-title {
+  display: block;
+  color: var(--mw-gold-light);
+  font-weight: 700;
+  font-size: 0.875rem;
+  margin-bottom: 2px;
+}
+
+.docs-search-result-snippet {
+  display: block;
+  color: var(--mw-text-4);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.docs-search-result mark {
+  background: var(--mw-accent-active);
+  color: var(--mw-gold-light);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* Hover and the keyboard-selected row read identically -- a mouse and
+   arrow keys are two ways to reach the same state, not two states. */
+.docs-search-result:hover,
+.docs-search-result.docs-search-active {
+  background: var(--mw-accent-wash);
+}
+
+.docs-search-empty {
+  padding: 10px;
+  color: var(--mw-text-5);
+  font-size: 0.8125rem;
+}
+
+/* ---- section/sub-section anchors --------------------------------------
+   rules.css already puts scroll-margin-top on a whole <section> so a
+   TOC jump clears the fixed nav; a search result can land on an <h3>
+   inside one instead, which needs the same clearance on the heading
+   itself. */
+.docs-body h2[id],
+.docs-body h3[id] {
+  scroll-margin-top: calc(var(--mw-nav-h) + 20px);
+}
+
+/* Brief highlight on whatever heading a search result (or a direct
+   #anchor link) just landed on, so a reader who jumped straight to the
+   middle of a long page has one visual cue confirming they arrived
+   somewhere real. Toggled by docs.js; fades on its own via the
+   transition rather than being removed on a timer racing the eye. */
+.docs-search-landed {
+  transition: background-color 1.6s ease;
+  background-color: var(--mw-accent-active);
+  border-radius: 4px;
+}
+
+/* ---- figures ------------------------------------------------------- */
+.docs-figure {
+  margin: 4px 0 20px;
+  max-width: 560px;
+}
+
+.docs-figure-wide { max-width: 100%; }
+
+.docs-figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--mw-line);
+  border-radius: 6px;
+  background: var(--mw-page);
+}
+
+.docs-figure figcaption {
+  margin-top: 6px;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+  font-style: italic;
+}
+
+/* ---- troubleshooting ---------------------------------------------------
+   A symptom (dt) the reader recognizes from their own screen, followed
+   by what to do about it (dd) -- deliberately organized by what you
+   SEE, per the page copy, so this reads as an index of screens rather
+   than a chain of causes. */
+.docs-trouble { margin: 0; }
+
+.docs-trouble dt {
+  color: var(--mw-gold-light);
+  font-weight: 800;
+  font-size: 1.0625rem;
+  margin: 28px 0 8px;
+  padding-top: 20px;
+  border-top: 1px solid var(--mw-line);
+}
+.docs-trouble dt:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.docs-trouble dd {
+  margin: 0;
+  color: var(--mw-text-2);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  max-width: 68ch;
+}
+.docs-trouble dd p { margin: 0 0 10px; }
+.docs-trouble dd p:last-child { margin-bottom: 0; }
+.docs-trouble dd .rules-list { margin: 8px 0 0; }
+
+/* ---- changelog ------------------------------------------------------ */
+.docs-changelog {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  color: var(--mw-text-2);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  max-width: 68ch;
+}
+
+.docs-changelog li {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--mw-line);
+}
+.docs-changelog li:last-child { border-bottom: 0; }
+
+.docs-changelog-date {
+  display: block;
+  color: var(--mw-text-6);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}

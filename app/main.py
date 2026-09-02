@@ -133,7 +133,16 @@ async def lifespan(app: FastAPI):
         await client.aclose()
 
 
-app = FastAPI(title="meshwars", lifespan=lifespan)
+# docs_url=None: FastAPI registers its own interactive Swagger UI at
+# /docs by default, at construction time -- Starlette's router matches
+# routes in the order they were added, so that built-in route would
+# always win over app/api.py's own /docs page (mounted later, in
+# mount() below) and silently swallow every request to it. Nothing here
+# relies on the auto-generated Swagger UI: the public API is documented
+# by hand at /api (frontend/api.html), the OpenAPI schema itself stays
+# reachable at /openapi.json, and most routes already opt out of that
+# schema individually via include_in_schema=False.
+app = FastAPI(title="meshwars", lifespan=lifespan, docs_url=None)
 
 # The board routes return highly repetitive JSON -- thousands of cell
 # records sharing the same handful of keys and team names -- and every
