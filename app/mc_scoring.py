@@ -492,10 +492,11 @@ def team_tile_counts(conn: sqlite3.Connection, season_id: int) -> dict[str, int]
 def team_checkin_points(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
     """Net check-in points (app/checkin.py) earned per team for a
     season, summed by each awarded player's CURRENT team -- player.team
-    is a permanent attribute (see app/join_api.py), not season-scoped,
-    so this always reflects who a player plays for now, the same choice
-    team_tile_counts() makes by reading mc_tile.owner_team live rather
-    than a frozen roster.
+    is not season-scoped and can change (self-service once per calendar
+    month via app/join_api.py, or by an operator via app/admin_api.py),
+    which is exactly why this reads live: a player's points follow them
+    to their new team, the same choice team_tile_counts() makes by
+    reading mc_tile.owner_team live rather than a frozen roster.
 
     Never "the" team score on its own -- see team_totals() below, which
     is what every caller that needs "how is this team doing" should
