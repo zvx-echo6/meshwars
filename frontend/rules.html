@@ -82,6 +82,7 @@
       <a href="/">Map</a>
       <a href="/results">Results</a>
       <a href="/rules" class="active">Rules</a>
+      <a href="/docs">Docs</a>
       <a href="/about">About</a>
       <a href="/join">Join</a>
       <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
@@ -156,15 +157,15 @@
           <ul class="rules-list">
             <li><strong>Unclaimed ground</strong> goes to the first team to paint it.</li>
             <li><strong>A square that just changed hands cannot be taken for fifteen minutes</strong>, whatever anyone scores. A capture you have to defend from the second it lands is not a capture.</li>
-            <li><strong>After that it falls to whoever out-scores the team currently holding it.</strong> Only the holder's score matters &mdash; not the highest score among the other six. With seven teams there is no single rival, so each attacker is measured against whoever actually has the ground.</li>
+            <li><strong>After that it falls to whoever matches or out-scores the team currently holding it.</strong> Only the holder's score matters &mdash; not the highest score among the other six. With seven teams there is no single rival, so each attacker is measured against whoever actually has the ground.</li>
             <li><strong>The first time a new person paints a square for their team it is worth an extra half point.</strong> Three people who each visit once beat one person who visits three times.</li>
-            <li><strong>The same person cannot repaint the same square inside five minutes.</strong> Parking in one spot and transmitting does not run up a score.</li>
+            <li><strong>A repeater you've already been credited for on a square stops paying out again for five minutes.</strong> A repeater you haven't been credited for yet still scores the moment it's heard, even seconds later &mdash; so parking in one spot and transmitting on repeat does not run up a score, but hearing a genuinely new repeater on the same visit does still count. The per-visit point cap still applies across the whole window either way.</li>
             <li><strong>Scores fade by a quarter point a day, toward zero.</strong> This is why a six-month season does not calcify: ground painted once and never revisited is worth nothing within weeks, so what you hold always means what you have reached recently.</li>
           </ul>
           <table class="rules-table">
             <tbody>
               <tr><th>Protection after a capture</th><td>15 minutes</td></tr>
-              <tr><th>Same player, same square</th><td>once per 5 minutes</td></tr>
+              <tr><th>Same repeater, same player, same square</th><td>once per 5 minutes</td></tr>
               <tr><th>New painter bonus</th><td>+0.5 points, once per player per square</td></tr>
               <tr><th>Decay</th><td>0.25 points per day, floor of zero</td></tr>
             </tbody>
@@ -218,17 +219,17 @@
           <p>Some squares aren't just squares. A summit, a park or a landmark inside one makes that square worth more than the ground around it. None of it is invented for the game: summits come from Summits On The Air, parks from Parks On The Air and the national protected-areas database PAD-US, and landmarks from OpenStreetMap.</p>
 
           <h3>Scored by effort, not by category</h3>
-          <p>What a place is worth depends on how far it made you go, not what kind of place it is. Anywhere inside a town's own limits &mdash; summit, park or landmark alike &mdash; is worth five points, the same nickel whether you drove up a peak or walked to the courthouse. Step outside a town and the category starts to matter.</p>
+          <p>What a place is worth depends on how far it made you go, not what kind of place it is. Anywhere inside a town's own limits, a park or a landmark is worth five points, the same nickel whether you drove up to it or walked to the courthouse. Step outside a town and the category starts to matter. A summit is scored differently from both &mdash; see below.</p>
           <table class="rules-table rules-table-compare">
             <thead><tr><th></th><th>Inside a town</th><th>Outside a town</th></tr></thead>
             <tbody>
               <tr><th>Landmark</th><td>5</td><td>10</td></tr>
               <tr><th>Park</th><td>5</td><td>25</td></tr>
-              <tr><th>Summit</th><td>5</td><td>50 to 100, by height</td></tr>
+              <tr><th>Summit</th><td>50 to 100, by height</td><td>50 to 100, by height</td></tr>
             </tbody>
           </table>
-          <p>A summit outside a town is the one value that is not flat. It slides with elevation: 50 points at 6,000 feet and below, climbing evenly to 100 points at 9,000 feet and above &mdash; a peak at 7,500 feet is worth 75. Being inside a town still overrules it outright. A summit you can park at in the middle of town is worth five points however tall it is.</p>
-          <p>That is on purpose. A summit you can park a car next to and a hot spring at the end of an hour of dirt road are both "a summit" and "a landmark" by category, but they are not the same errand. Scoring by effort instead of by category means the game rewards the drive, not the label, while a town's own places are worth showing up for but not worth grinding.</p>
+          <p>A summit is the one place whose value is never flat and never falls back to the in-town nickel: it scores by elevation everywhere, inside a town or out. It slides evenly from 50 points at 6,000 feet and below to 100 points at 9,000 feet and above &mdash; a peak at 7,500 feet is worth 75. A peak is a peak whether or not you can park a car next to it: unlike a park or a landmark, being inside a town's limits does not flatten a summit's value, because the climb it took to reach the top doesn't change depending on where the town line was drawn around its base.</p>
+          <p>That is on purpose. A summit you can park a car next to and a hot spring at the end of an hour of dirt road are both "a summit" and "a landmark" by category, but they are not the same errand. Scoring by effort instead of by category means the game rewards the drive, not the label, while a town's own parks and landmarks are worth showing up for but not worth grinding.</p>
 
           <h3>The weekly cap</h3>
           <table class="rules-table">
@@ -245,7 +246,7 @@
           <p><strong>Explorer is not a monthly honor.</strong> It is the name of an activity and of a ranking &mdash; the Explorer tab under Top Operators, alongside Wardrivers and NetOps. Your Explorer Score runs the length of the season and counts toward your total score, so it is never reset or scored month by month the way the honors below are. The monthly honors built on places count visits instead of points: Tourist, Park Hopper and Peak Tagger.</p>
 
           <h3>Which square scores</h3>
-          <p>A landmark or a summit scores the single square its point falls in. A park with a mapped boundary at least the size of a grid square scores every square more than half inside that boundary &mdash; skirt its edge and only the squares mostly inside it count. A park smaller than a square, or without a boundary on file at all, scores the square containing its point instead, the same as a landmark. About one park in twenty has no boundary data on file; those still score, just by that simpler rule.</p>
+          <p>A landmark or a summit scores the single square its point falls in. A park with a mapped boundary at least the size of a grid square scores every square more than half inside that boundary &mdash; skirt its edge and only the squares mostly inside it count. A park smaller than a square, or without a boundary on file at all, scores the square containing its point instead, the same as a landmark. Close to two in five parks have no boundary data on file; those still score, just by that simpler rule.</p>
           <p>One square can carry more than one place &mdash; a landmark standing inside a large park, say. <strong>Only the most valuable one scores.</strong> Places do not stack: the lesser place is dropped rather than paid alongside the better one, because one trip to one square is one errand and it pays once. That holds even if the more valuable place gets capped by what's left of your week &mdash; the cheaper place on the square still doesn't step in. If you already collected that square's place this week, it simply pays nothing on a repeat visit. Two places of exactly equal value on one square always resolve to the same winner, every week and for every player.</p>
 
           <h3>What makes the list</h3>
@@ -261,7 +262,7 @@
           <h2>Monthly results</h2>
           <p>Each calendar month, Boise time, gets its own result on the <a href="/results">results page</a>.</p>
           <p><strong>A month is judged when it ends, not as it goes.</strong> Nothing is shown for the month in progress except when it closes. An award you can watch changing hands daily is not an award.</p>
-          <p><strong>A month is scored on the month.</strong> Ground taken and points earned between its own dates &mdash; never a snapshot of the season standings. If it were a snapshot, whoever led in the first month would lead in all of them and none of it would mean anything. Falling behind early never puts the next month out of reach.</p>
+          <p><strong>A month is scored on the month.</strong> The standings are the ground each team holds the instant the month closes, not captures made during it. Check-in points and Places Worth Going points earned that month sit alongside squares held as their own columns &mdash; the three are never added into one figure. None of it is a snapshot of the season standings: if it were, whoever led in the first month would lead in all of them, and falling behind early would put every later month out of reach.</p>
           <p>Ties are refused rather than split. If two people share the lead for an award, nobody gets it that month.</p>
         </section>
 
@@ -269,15 +270,17 @@
           <h2>The honors</h2>
           <p>Each month hands out the following, alongside the team standings.</p>
           <dl class="rules-honors">
-            <dt>Month Winner</dt><dd>The team that gained the most points that month &mdash; squares captured plus check-in points earned.</dd>
+            <dt>Largest Territory</dt><dd>The team holding the most ground when the month closes. (Called Month Winner, and scored on points gained instead of ground held, until 2026-08-31.)</dd>
+            <dt>Longest Road</dt><dd>The team holding the longest unbroken chain of squares, linked on sides or corners, provided the chain reaches 200 squares. A single rival square landing in the middle of a long chain splits it in two, so this is the one honor another team can take off you without out-scoring you anywhere.</dd>
+            <dt>Empire Builder</dt><dd>The player holding the most ground they painted themselves.</dd>
             <dt>Top Attacker</dt><dd>Took the most squares off other teams. Claiming empty ground does not count here.</dd>
             <dt>Top Defender</dt><dd>Won back the most squares their team had lost. A capture counts as a defence when the previous capture of that same square took it from the team now taking it back.</dd>
-            <dt>Team Attacker &amp; Team Defender</dt><dd>The same two awards, given within each team, so a strong team does not sweep everything.</dd>
+            <dt>Team Builder, Team Attacker &amp; Team Defender</dt><dd>The same three awards, given within each team, so a strong team does not sweep everything.</dd>
             <dt>Tourist</dt><dd>Visited the most <a href="#places">landmarks</a> that month. Every visit counts the same regardless of how many points it earned.</dd>
             <dt>Park Hopper</dt><dd>Visited the most <a href="#places">parks</a> that month, the same way Tourist counts landmarks.</dd>
             <dt>Peak Tagger</dt><dd>Visited the most <a href="#places">summits</a> that month, the same way Tourist counts landmarks.</dd>
             <dt>Frontier</dt><dd>Claimed the most squares more than twenty miles beyond the edge of any town. Any capture out there counts, attack or retake or first claim alike, but twenty miles out is where coverage runs out, so expect months where nobody earns it.</dd>
-            <dt>Quick Fingers</dt><dd>Checked in fastest after the net opened, averaged across the month. Needs at least two check-ins &mdash; one lucky night does not win it.</dd>
+            <dt>Quick Fingers</dt><dd>Checked in fastest after the net opened, averaged across the month.</dd>
           </dl>
         </section>
 

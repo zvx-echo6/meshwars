@@ -133,7 +133,27 @@ async def lifespan(app: FastAPI):
         await client.aclose()
 
 
-app = FastAPI(title="meshwars", lifespan=lifespan)
+# docs_url=None: FastAPI registers its own interactive Swagger UI at
+# /docs by default, at construction time -- Starlette's router matches
+# routes in the order they were added, so that built-in route would
+# always win over app/api.py's own /docs page (mounted later, in
+# mount() below) and silently swallow every request to it. Nothing here
+# relies on the auto-generated Swagger UI: the public API is documented
+# by hand at /api (frontend/api.html).
+# redoc_url=None and openapi_url=None: the auto-generated OpenAPI
+# document enumerates every route in the app -- including the ingest,
+# join, and admin surfaces (player/delete, player/disable, node/remove,
+# issue_key, revoke, and the rest) -- none of which are public API, even
+# though they're token-guarded. Closing openapi_url is what actually
+# matters: with it left set, the JSON stayed reachable at /openapi.json
+# even with both UI routes (/docs, /redoc) disabled.
+app = FastAPI(
+    title="meshwars",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 # The board routes return highly repetitive JSON -- thousands of cell
 # records sharing the same handful of keys and team names -- and every

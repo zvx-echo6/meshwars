@@ -976,6 +976,17 @@ def mount(app: FastAPI) -> None:
         async def rules_page(request: Request):
             return _templated_html_page(request, frontend_dir / "rules.html", "rules page not bundled")
 
+        # Player-facing how-to reference: setup, account management,
+        # troubleshooting, reading the interface. Deliberately NOT where
+        # the mechanics live -- those stay on /rules and this page links
+        # to them rather than restating them, same separation of concerns
+        # /rules and /about already keep (rules = the numbers, about =
+        # the pitch, docs = the how-to). Admin/operator procedures are
+        # not documented here; they stay in the repo's own docs/ tree.
+        @app.get("/docs", response_class=HTMLResponse, include_in_schema=False)
+        async def docs_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "docs.html", "docs page not bundled")
+
         # Alias for / (frontend/map2.html, same handler target as index()
         # above) -- kept working for anyone who already has this URL
         # open or bookmarked from before the MapLibre map became the

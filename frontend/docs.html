@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <!-- Applied before any stylesheet paints, so a reader who chose the
+       neon skin never sees a frame of gold first. Deliberately inline
+       and tiny: a fetched script here would block first paint, which is
+       the thing this exists to avoid. Mirrors theme-toggle.js, which
+       owns everything after load. -->
+  <script>
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
+  </script>
+  <title>MeshWars — Docs</title>
+  <meta name="description" content="How to set up MeshCore or Meshtastic for MeshWars, manage your account, read the board and the results page, and fix the most common problems. Searchable.">
+  <link rel="canonical" href="https://meshwars.com/docs">
+
+  <!-- See index.html's matching comment: Google reads a site's
+       search-results favicon from the home page specifically, but these
+       declarations are kept identical across all three pages so the
+       <head> stays consistent site-wide. -->
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="MeshWars — Docs">
+  <meta property="og:description" content="Setup, account management, reading the board and results, and troubleshooting -- the MeshWars how-to reference.">
+  <meta property="og:url" content="https://meshwars.com/docs">
+  <meta property="og:image" content="https://meshwars.com/static/assets/social/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="MeshWars — Docs">
+  <meta name="twitter:description" content="Setup, account management, reading the board and results, and troubleshooting -- the MeshWars how-to reference.">
+  <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
+
+  <!-- See index.html's matching comment for what this describes and why
+       it's minimal. Same content, this page's own "url". -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Game",
+    "name": "MeshWars",
+    "alternateName": "Mesh Wars",
+    "url": "https://meshwars.com/docs",
+    "publisher": { "@id": "https://meshwars.com/#org" },
+    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+    "genre": ["Location-based game", "Capture the flag"],
+    "isBasedOn": {
+      "@type": "SoftwareSourceCode",
+      "name": "MeshWars",
+      "codeRepository": "https://github.com/zvx-echo6/meshwars",
+      "programmingLanguage": "Python",
+      "license": "https://opensource.org/licenses/MIT"
+    }
+  }
+  </script>
+
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260902-1 on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change -- do not touch the pinned external Leaflet CDN links. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260824-1" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/docs.css?v=20260902-1" />
+</head>
+<body>
+
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/">Map</a>
+      <a href="/results">Results</a>
+      <a href="/rules">Rules</a>
+      <a href="/docs" class="active">Docs</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+      </button>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main class="rules-wrap">
+
+    <header class="rules-header">
+      <h1 class="rules-title">Docs</h1>
+      <p class="rules-sub">How to set up a radio, manage your account, read the board and the results page, and fix the common problems. This is the how-to reference, not the rulebook -- for how scoring, capture and the honors actually work, see <a href="/rules">Rules</a>.</p>
+    </header>
+
+    <!-- Client-side search (docs.js). Built from this page's own DOM at
+         load, so it can never fall out of sync with the content -- see
+         docs.js's module comment for how the index is built and why. -->
+    <div class="docs-search-wrap">
+      <label class="docs-search-label" for="docs-search-input">Search this page</label>
+      <div class="docs-search-box">
+        <input type="text" id="docs-search-input" class="docs-search-input"
+               placeholder="Try &ldquo;switch teams&rdquo; or &ldquo;no repeaters heard&rdquo;"
+               autocomplete="off" role="combobox" aria-expanded="false"
+               aria-controls="docs-search-results" aria-autocomplete="list" />
+        <span class="docs-search-hint" id="docs-search-hint" aria-hidden="true">/</span>
+      </div>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox" hidden></ul>
+    </div>
+
+    <div class="rules-layout">
+      <nav class="rules-toc" aria-label="Sections">
+        <p class="rules-toc-title">Contents</p>
+        <ul>
+        <li><a href="#start">Getting started</a></li>
+        <li><a href="#setup-meshcore">Setting up MeshCore</a></li>
+        <li><a href="#setup-meshtastic">Setting up Meshtastic</a></li>
+        <li><a href="#account">Your account</a></li>
+        <li><a href="#board">Reading the board</a></li>
+        <li><a href="#results">Reading the results page</a></li>
+        <li><a href="#troubleshooting">Troubleshooting</a></li>
+        <li><a href="#changelog">What changed recently</a></li>
+        </ul>
+      </nav>
+
+      <div class="rules-body docs-body">
+
+        <section id="start">
+          <h2>Getting started</h2>
+          <p>MeshWars is a real-world team game played over mesh radio. Seven teams claim roughly 300-meter map squares by physically carrying a radio into one and reaching the mesh from inside it, and the map keeps shifting as players spread out, defend what they hold, and lose ground to rivals. A season runs six months, but every calendar month inside it closes with its own separate result, so there is always something close to play for.</p>
+          <p>The fastest way to get playing:</p>
+          <ol class="rules-list">
+            <li>Go to <a href="/join">the join page</a> and enter your invite code, a display name, and pick one of the seven teams.</li>
+            <li>Choose which radio's setup steps to see first -- MeshCore or Meshtastic. You can register both eventually; this only picks which instructions show first.</li>
+            <li>Follow the numbered steps for your protocol (below) to point your radio at MeshWars.</li>
+            <li>Copy your API key before you leave the page. It is shown exactly once.</li>
+            <li>Get outside somewhere with mesh coverage and transmit. The first ping that reaches a repeater or a feeder claims your first square.</li>
+          </ol>
+          <p>Once you're set up, the same join page's setup-check panel is where you come back to check your status, add or remove radios, or switch teams -- see <a href="#account">Your account</a>.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/join-registration-form.png" alt="The first three steps on the join page: entering an invite code, a display name, and picking a team from seven colored swatches." loading="lazy" />
+            <figcaption>The first three steps on the join page.</figcaption>
+          </figure>
+        </section>
+
+        <section id="setup-meshcore">
+          <h2>Setting up MeshCore</h2>
+          <p>MeshCore players don't send anything to MeshWars directly. Instead, <a href="https://meshmapper.net" target="_blank" rel="noopener noreferrer">MeshMapper</a> -- the wardriving app MeshCore players already use to map repeater coverage -- forwards a copy of what it collects to MeshWars. This does not replace MeshMapper or change what it does for you; your coverage data, points and leaderboard standing there are unaffected.</p>
+          <p>On the join page, with MeshCore selected, you can optionally search for your node up front so it's bound to your account from the moment you register:</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/meshcore-find-node.png" alt="The optional 'Find your node' search box on the MeshCore setup block, matched against the mwmesh.com directory." loading="lazy" />
+            <figcaption>Optional: search for your node before you even join.</figcaption>
+          </figure>
+          <p>This step is genuinely optional. If you skip it, your first wardriving session binds your radio to your account automatically -- see below.</p>
+          <p>After you join, the numbered steps walk you through pointing MeshMapper at MeshWars:</p>
+          <ol class="rules-list">
+            <li>Open MeshMapper, then Settings, then scroll to API Endpoints.</li>
+            <li>Toggle Custom API Endpoint on.</li>
+            <li>Paste <code>https://meshwars.com/api/mc/ingest</code> as the URL. Do not paste the <code>meshmapper://</code> link here -- that one is only for Import from Clipboard, not a web address.</li>
+            <li>Paste your API key into the API Key field, then save.</li>
+            <li><strong>In the same API section, make sure Include Contact Key is on.</strong> This is the single most common reason a MeshCore player sees nothing happen: without it, MeshWars never learns which radio the batch came from, so nothing can be credited to you.</li>
+            <li>Start a wardriving session. Nothing is sent to MeshWars between sessions.</li>
+          </ol>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/meshcore-api-steps.png" alt="Join page steps 7 through 13: toggling Custom API Endpoint on, pasting the ingest URL, and the bolded instruction to make sure Include Contact Key is on before starting a wardriving session." loading="lazy" />
+            <figcaption>The steps that matter most -- especially Include Contact Key.</figcaption>
+          </figure>
+          <p>If you skipped picking a node at registration, your radio binds itself the first time a wardriving batch reaches MeshWars with your contact key attached -- no extra step needed. A radio only ever belongs to one player: if a contact already registered to somebody else turns up under your key, that ping is dropped rather than credited to either of you.</p>
+          <p>MeshMapper sends a batch roughly every fifteen to thirty seconds while a session is running. Squares are only claimed where your radio actually hears a repeater -- driving somewhere with no coverage logs your position and claims nothing, which is normal, not a fault. For the scoring itself, see <a href="/rules#claiming">Claiming a square</a>.</p>
+        </section>
+
+        <section id="setup-meshtastic">
+          <h2>Setting up Meshtastic</h2>
+          <p>Meshtastic works the other way around from MeshCore: nothing is ever pushed to MeshWars. Instead MeshWars polls a public meshview instance and picks up your node whenever it broadcasts a position that a gateway feeder hears. There is no session to start and no batch to send -- your radio just needs to be configured correctly and left broadcasting.</p>
+          <p>On the join page, with Meshtastic selected, register your node ID (found by searching, or entered by hand) and optionally its public key -- the key is what lets MeshWars keep following your radio if its node ID ever changes. Then, on the radio itself:</p>
+          <ol class="rules-list">
+            <li>Under Radio Configuration &rarr; LoRa, turn on <strong>OK to MQTT</strong>. Without it, no gateway will forward your packets and MeshWars will never see you.</li>
+            <li>Under Radio Configuration &rarr; Position, make sure GPS is enabled and your node is broadcasting its position.</li>
+            <li>Under Channels, on your primary channel, set position precision to full. If it's reduced, your position gets rounded off and you'll paint the wrong square, or none at all -- see <a href="#trouble-wrong-square">Troubleshooting</a>.</li>
+            <li>Make sure you're on FREQ51, so a gateway that feeds meshview can actually hear you.</li>
+          </ol>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/meshtastic-setup-steps.png" alt="The Meshtastic node picker on the join page: find your node search, manual node-ID entry, and the optional public-key field." loading="lazy" />
+            <figcaption>Registering a Meshtastic node on the join page.</figcaption>
+          </figure>
+          <p>A Meshtastic node cannot self-bind the way a MeshCore contact can -- the packets MeshWars reads carry nothing that points back to you, so registering it here is the only way it ever gets attached to your account.</p>
+        </section>
+
+        <section id="account">
+          <h2>Your account</h2>
+          <p>Everything below lives in one place: the setup-check panel near the bottom of <a href="/join">the join page</a>. Paste your API key and press Check to unlock it -- the same panel handles checking your status, reading your diagnostics, adding or removing radios, switching teams, and (MeshCore only) setting a check-in fallback name.</p>
+
+          <h3 id="account-check">Checking your setup</h3>
+          <p>Once your key checks out, you'll see your name and team, and -- for each protocol you have a radio registered on -- when MeshWars last heard from you and a plain-language diagnosis of what, if anything, is wrong.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/account-switch-available.png" alt="The authenticated setup-check panel: player name and team, last-heard-from timestamp, a diagnosis message, and the diagnostics counters table underneath." loading="lazy" />
+            <figcaption>Name, team, last-heard time, diagnosis, and the counters table.</figcaption>
+          </figure>
+
+          <h3 id="account-diagnostics">Reading the diagnostics counters</h3>
+          <p>Below the diagnosis is a table counting every batch or ping MeshWars has seen from you today and over the last 7 days, broken out by what happened to it. On MeshCore:</p>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>Batches received</th><td>every batch MeshMapper sent, whatever happened to it</td></tr>
+              <tr><th>Accepted</th><td>scored and counted toward a square</td></tr>
+              <tr><th>No contact key</th><td>Include Contact Key was off, so the batch couldn't be attributed to any radio</td></tr>
+              <tr><th>Wrong owner</th><td>the contact key belongs to a different player's registered radio</td></tr>
+              <tr><th>Duplicate</th><td>already scored -- the same repeater within the per-repeater cooldown, see <a href="#trouble-pings-discarded">Troubleshooting</a></td></tr>
+              <tr><th>Bad coordinates</th><td>no usable position in the batch</td></tr>
+              <tr><th>Outside play area</th><td>the position fell outside the bounded play area</td></tr>
+              <tr><th>No repeaters heard</th><td>a real position, but the radio didn't hear any repeater from there</td></tr>
+            </tbody>
+          </table>
+          <p>Meshtastic's table is shorter -- Accepted, Duplicate, Bad position, Outside play area, and No feeder heard -- because a Meshtastic ping has no batch concept and no contact key to get wrong.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/account-diagnostics-table.png" alt="The MeshCore diagnostics counters table, columns for today and the last 7 days, rows for batches received, accepted, no contact key, wrong owner, duplicate, bad coordinates, outside play area, and no repeaters heard." loading="lazy" />
+            <figcaption>The diagnostics counters table.</figcaption>
+          </figure>
+
+          <h3 id="account-radios">Adding and removing radios</h3>
+          <p>Your radios list shows every radio registered to you, on either protocol, each with a Remove button. Underneath it, pick a protocol, search for your node (or enter its ID by hand), and press Add radio. This works any time, not just at signup -- it's how you register a second radio, or a Meshtastic node you didn't have handy when you first joined.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/account-add-radio.png" alt="The add-radio form: a protocol dropdown, a find-your-node search box, and an Add radio button." loading="lazy" />
+            <figcaption>Adding a radio from the setup-check panel.</figcaption>
+          </figure>
+
+          <h3 id="switch-teams">Switching teams</h3>
+          <p>You can switch to a different team yourself, once per calendar month, from this same panel. Only you move -- any squares you're currently holding stay with the team you're leaving, exactly as if a teammate had painted them, while every point you've earned and your check-in streak come with you. The confirmation step spells out both halves of that, plus the exact date you'll be able to switch again, before anything is submitted.</p>
+          <p>Press Switch team to open a picker of the other six teams (your current one is shown but disabled):</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/account-switch-picker.png" alt="The team picker open below the Switch team button: seven team swatches, the player's current team shown and disabled." loading="lazy" />
+            <figcaption>Picking a new team. Your current team is shown but can't be picked again.</figcaption>
+          </figure>
+          <p>Pick a team and a confirmation box appears, naming exactly what you keep and what stays behind:</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/account-switch-confirm.png" alt="The confirmation box: 'Confirm switch to RED? You keep every point you have earned and your check-in streak. The ground you currently hold stays with BLUE -- it does not come with you. You will not be able to switch teams again until October 1, 2026.'" loading="lazy" />
+            <figcaption>Nothing is switched until you press Confirm switch.</figcaption>
+          </figure>
+          <p>Once you've switched, the control locks until the first of next month, and says so plainly rather than just disappearing:</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/account-switch-locked.png" alt="The Switch team button greyed out, with the text 'You already switched teams this month. You can switch again on October 1, 2026.'" loading="lazy" />
+            <figcaption>Locked after a switch, with the exact date it reopens.</figcaption>
+          </figure>
+
+          <h3 id="account-checkin-name">The check-in name fallback</h3>
+          <p>Net check-ins are matched to a player automatically: on Meshtastic by your registered node ID, on MeshCore by your registered contact, which the <a href="https://mwmesh.com/" target="_blank" rel="noopener noreferrer">mwmesh.com</a> directory resolves to whatever name your radio currently posts under. Most players never need to touch anything here.</p>
+          <p>If your MeshCore contact isn't in that directory yet, your check-ins can't be matched that way, and there's a last-resort fallback under "Advanced: MeshCore check-in name isn't matching?" in the setup-check panel: type the exact name your radio posts under in the weekly-net channel (matching ignores case, nothing else), and MeshWars will match check-ins against that name instead. Setting a name here does nothing if your contact already resolves through the directory.</p>
+
+          <h3 id="account-lost-key">A lost key</h3>
+          <p>Your API key is shown exactly once, at registration -- MeshWars stores only a one-way hash of it, so nobody, including an operator, can ever look the raw value back up.</p>
+          <ul class="rules-list">
+            <li><strong>MeshCore:</strong> your key is still sitting in MeshMapper. Open Settings, then API Endpoints, and read it back out of the API Key field.</li>
+            <li><strong>Meshtastic:</strong> nothing on the radio or in the app ever stores your key. Ask an operator for a new one in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a>.</li>
+          </ul>
+          <p>A brand new key doesn't disturb your account, your points, your team, or any radio you already have registered -- it's only a new way in.</p>
+        </section>
+
+        <section id="board">
+          <h2>Reading the board</h2>
+          <p>The map at <a href="/">meshwars.com</a> is the live board. The first time you load it you'll be asked which board to look at -- MeshCore or Meshtastic -- and you can switch between them any time from the two buttons at the top of the score panel.</p>
+          <figure class="docs-figure docs-figure-wide">
+            <img src="/static/assets/docs/board-overview.png" alt="The full board page: a hillshaded terrain map with colored squares held by each team, the score panel in the top right, and the layers panel in the bottom left." loading="lazy" />
+            <figcaption>The board, score panel, and layers panel together.</figcaption>
+          </figure>
+
+          <h3 id="board-score-panel">The score panel</h3>
+          <p>The panel in the top-right corner is the hub for almost everything on this page. Each team's number is its full standing -- squares held, plus check-in points, plus exploration points, all added together and simply labeled Score. Click any team's number to toggle it to the compact breakdown (squares+check-in+exploration) and back; the countdown underneath shows how much of the current season is left.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/board-score-panel.png" alt="The score panel: seven teams with color dots and totals, a season countdown, a player-search box, History/Roster/Breakdown links, and Refresh map, Top Operators and Places buttons." loading="lazy" />
+            <figcaption>The score panel. Tap a team's number to see its breakdown.</figcaption>
+          </figure>
+          <p>On a narrow screen the panel starts collapsed to its title bar; tap the bar to expand or collapse it.</p>
+
+          <h3 id="modal-history">History</h3>
+          <p>Opens a list of past, fully-completed seasons -- not months. A season is six months long, so this can genuinely read "No completed seasons yet" even while the <a href="#results">results page</a> already shows several closed months; those are two different things. See <a href="#results">Reading the results page</a> for monthly results.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/board-modal-history.png" alt="The History modal, currently reading 'No completed seasons yet.'" loading="lazy" />
+            <figcaption>History lists completed seasons, not months.</figcaption>
+          </figure>
+
+          <h3 id="modal-roster">Roster</h3>
+          <p>The full player list, grouped by team.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/board-modal-roster.png" alt="The Player Roster modal, with players listed under each of the seven team headings." loading="lazy" />
+            <figcaption>Every registered player, by team.</figcaption>
+          </figure>
+
+          <h3 id="modal-breakdown">Breakdown</h3>
+          <p>The same three figures behind each team's score, laid out as a table: squares, check-in points, exploration points, and the total.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/board-modal-breakdown.png" alt="The Score Breakdown modal: a table with columns for squares, check-in, exploration, and total, one row per team." loading="lazy" />
+            <figcaption>Every team's three components, side by side.</figcaption>
+          </figure>
+
+          <h3 id="modal-top-operators">Top Operators</h3>
+          <p>Season-long player rankings across three tabs: Wardrivers (ranked by captures), NetOps (check-in points) and Explorer (Places Worth Going points). These are player rankings, not a monthly honor -- see <a href="/rules#places">Places Worth Going</a> for what Explorer actually measures.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/board-modal-top-operators.png" alt="The Season Rankings modal, Wardrivers tab active, a numbered list of players with their team and capture count." loading="lazy" />
+            <figcaption>Season Rankings -- Wardrivers, NetOps and Explorer tabs.</figcaption>
+          </figure>
+
+          <h3 id="panel-places">Places</h3>
+          <p>Unlike the four above, Places isn't a modal -- it expands in place underneath the other buttons. It lists live places near wherever the map is currently centered, nearest first, each with its point value and distance. For what makes a place worth going and how the weekly rotation works, see <a href="/rules#places">Places Worth Going</a> in the rules.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/board-places-panel.png" alt="The expanded Places section in the score panel: a list of nearby places with point values and distances in miles." loading="lazy" />
+            <figcaption>Nearby places, nearest first.</figcaption>
+          </figure>
+
+          <h3 id="board-layers">The layers panel</h3>
+          <p>The panel in the bottom-left corner controls what's drawn on the map underneath the squares: hillshade, public lands, USFS roads, USFS trails, and place markers. USFS roads and trails only draw in from zoom level 6 -- greyed out at a wider view is expected, not broken. On the map itself, a tab on the panel's right edge slides the whole thing off-screen and back; your choice is remembered on that device.</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/board-layers-panel.png" alt="The layers panel: checkboxes for Hillshade (checked), Public lands, USFS roads, USFS trails (both greyed out), and Places (checked)." loading="lazy" />
+            <figcaption>The layers panel.</figcaption>
+          </figure>
+
+          <h3 id="board-find">Finding a player</h3>
+          <p>Type a name into the player-search box and press Find. If they hold any squares, the map jumps to fit around their ground; either way you'll see their team, how many squares they currently hold, and their point total (tap it for the same breakdown the team totals use).</p>
+          <figure class="docs-figure">
+            <img src="/static/assets/docs/board-find-player.png" alt="The player-search result: 'Mitch (BLUE) holds no cells right now. Points: 0'." loading="lazy" />
+            <figcaption>A search result for a player holding no ground right now.</figcaption>
+          </figure>
+
+          <h3 id="board-popup">A square's popup</h3>
+          <p>Click any painted square to see: which team owns it and when it was captured; every team's current score there; the most recent captures (who, for which team, and when); and, if the radio side of it has anything recorded, which repeaters or feeders were heard there and when each was last heard. A square sitting inside a named park or landmark also shows that place and its point value.</p>
+
+        </section>
+
+        <section id="results">
+          <h2>Reading the results page</h2>
+          <p>The <a href="/results">results page</a> lists every calendar month that has actually closed, newest first, one board at a time via the same Meshtastic/MeshCore toggle the board page uses.</p>
+
+          <h3 id="results-frozen">Frozen and in-progress months</h3>
+          <p>The month you're currently in never gets its own card -- only a one-line note saying how many days remain before it closes. A month you can watch changing hands daily isn't a result. The instant a month ends it gets a full card -- standings, honors, and a by-team breakdown -- and that card is frozen: it renders exactly the same every time afterward, it never quietly reshuffles.</p>
+
+          <h3 id="results-columns">The three columns</h3>
+          <p>Each team's standing shows three separate numbers: Squares (what the team held the instant the month closed), Check-ins (check-in points earned that month), and Exploration (Places Worth Going points earned that month). <strong>These are never added into one figure on this page</strong> -- they're three different kinds of contribution, shown side by side rather than summed. (The board's own score panel, unlike this page, does add all three into one total -- see <a href="#board-score-panel">The score panel</a>.)</p>
+
+          <h3 id="results-honors">The honors</h3>
+          <p>Every honor is listed every month, whether or not anyone won it -- an honor nobody earned reads "not awarded" rather than vanishing, so it doesn't look like a missing feature. For what each honor actually measures, see <a href="/rules#honors">The honors</a> in the rules.</p>
+          <p>Five of the eleven honors -- Longest Road, Frontier, Tourist, Park Hopper and Peak Tagger -- are clickable links. Following one opens the board with that month's shape drawn on the map: Longest Road draws the winning chain, Frontier draws every qualifying square with the furthest one ringed, and the three exploration honors drop a point on every place that counted. The rest (Largest Territory, Empire Builder, and the attack/defense honors) aren't linked, because there's no single shape to draw for "held the most ground" across thousands of scattered squares.</p>
+          <figure class="docs-figure docs-figure-wide">
+            <img src="/static/assets/docs/results-overview.png" alt="The results page: board toggle, an in-progress-month banner, and a closed month's card with standings, honors and a by-team breakdown." loading="lazy" />
+            <figcaption>A closed month's card: standings, honors, and the by-team breakdown.</figcaption>
+          </figure>
+        </section>
+
+        <section id="troubleshooting">
+          <h2>Troubleshooting</h2>
+          <p>Organized by what you're seeing, not by what's causing it -- start with the line that matches your screen.</p>
+
+          <dl class="docs-trouble">
+            <dt id="trouble-nothing">Nothing is happening</dt>
+            <dd>
+              <p>Start with the setup check: paste your key into the panel at the bottom of <a href="/join">the join page</a> and press Check. It tells you when MeshWars last heard from you and, if something's wrong, what.</p>
+              <p><strong>MeshCore:</strong> confirm a wardriving session is actually running in MeshMapper -- nothing is sent between sessions -- and that Custom API Endpoint is toggled on with the right URL and your key saved.</p>
+              <p><strong>Meshtastic:</strong> there's no session to start here. Confirm OK to MQTT is on (Radio Configuration &rarr; LoRa) and your node is actually broadcasting a position (Radio Configuration &rarr; Position). If either is off, nothing ever leaves your radio for a gateway to pick up.</p>
+            </dd>
+
+            <dt id="trouble-no-repeaters">It says no repeaters heard</dt>
+            <dd>
+              <p>Your position is real and was recorded, but your radio didn't hear a single repeater from where you were standing -- this is normal, not a bug. Reaching the mesh is the whole point: a ping from a dead zone is logged and claims nothing. Try a spot with better line of sight, or check <a href="/">the board</a> for where other players are already painting nearby.</p>
+            </dd>
+
+            <dt id="trouble-pings-discarded">My pings are being discarded</dt>
+            <dd>
+              <p>Check which counter is climbing in your diagnostics table (see <a href="#account-diagnostics">Reading the diagnostics counters</a>) -- it tells you exactly why:</p>
+              <ul class="rules-list">
+                <li><strong>Duplicate</strong> usually just means the cooldown: <strong>the same repeater won't pay out again for five minutes, but that cooldown is per repeater, not per square</strong> -- a genuinely new repeater heard on the same visit, even seconds later, still scores. Standing still and repeatedly transmitting to the same repeater is what this catches.</li>
+                <li><strong>No contact key</strong> (MeshCore) means Include Contact Key is off in MeshMapper's API settings -- turn it on.</li>
+                <li><strong>Wrong owner</strong> means that contact or node is already registered to a different player. A radio only ever belongs to one account.</li>
+                <li><strong>Bad coordinates</strong> or <strong>Bad position</strong> means there was nothing usable to place you anywhere at all.</li>
+                <li><strong>Outside play area</strong> means the position fell outside MeshWars' bounded play area (the western US and Texas) -- see the outline on <a href="/about">About</a>.</li>
+              </ul>
+            </dd>
+
+            <dt id="trouble-lost-key">I lost my key</dt>
+            <dd>
+              <p>See <a href="#account-lost-key">A lost key</a> under Your account -- MeshCore players can read it back out of MeshMapper; Meshtastic players need a new one from an operator.</p>
+            </dd>
+
+            <dt id="trouble-checkin-not-counted">My check-in did not count</dt>
+            <dd>
+              <p>A check-in only counts if it resolves to a registered player. On Meshtastic that means your registered node ID; on MeshCore it means your registered contact resolves through the mwmesh.com directory, or you've set a check-in fallback name that matches exactly what your radio posts under (see <a href="#account-checkin-name">The check-in name fallback</a>). It also has to land inside the net window -- Wednesdays, 17:00 to 23:59 Boise time -- posting before or after that window doesn't count, and posting more than once in one net only ever credits the first.</p>
+            </dd>
+
+            <dt id="trouble-wrong-square">I am painting the wrong square</dt>
+            <dd>
+              <p>This is almost always a Meshtastic position-precision setting, not a MeshWars bug -- MeshCore has no equivalent setting to get wrong. Squares are about 300 meters across; if your channel's position precision is set to anything less than full (or the step that says "within 182 meters"), your reported position can land in the wrong square, or be too imprecise to count at all. Open Channels on your primary channel and set position precision to full.</p>
+            </dd>
+          </dl>
+        </section>
+
+        <section id="changelog">
+          <h2>What changed recently</h2>
+          <p>Player-visible changes, newest first. The full history lives in the repository's <code>CHANGELOG.md</code>.</p>
+          <ul class="docs-changelog">
+            <li>
+              <span class="docs-changelog-date">2026-09-02</span>
+              <strong>The board's score figure now includes exploration points, and is labeled Score rather than Territory.</strong> Each team's number in the score panel is squares held plus check-in points plus exploration points, added together -- click it to see the breakdown. Players can also now switch teams once a month from the setup-check panel; see <a href="#switch-teams">Switching teams</a>.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-08-27</span>
+              The layers panel can now be put away. A tab on its right edge slides it off-screen and back; your choice is remembered on that device.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-08-27</span>
+              A square carrying more than one place now pays out for the single most valuable one only, not every place stacked on it. The weekly point cap pays out the remainder rather than refusing you outright once you're close to it.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-08-25</span>
+              Places Worth Going launched: summits, parks and landmarks now earn Explorer points on top of the usual square-claiming game. See <a href="/rules#places">Places Worth Going</a> in the rules.
+            </li>
+          </ul>
+        </section>
+
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/docs.js?v=20260902-1" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
+</body>
+</html>
