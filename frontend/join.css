@@ -509,6 +509,11 @@ body {
   line-height: 1.4;
   margin: 0 0 8px;
 }
+.join-flow-label a {
+  color: var(--mw-accent);
+  text-decoration: none;
+}
+.join-flow-label a:hover { text-decoration: underline; }
 
 /* The one step people actually miss (switching Custom API Endpoint on)
    -- everything else can be set up perfectly and nothing is sent while
