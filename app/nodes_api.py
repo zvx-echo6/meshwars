@@ -22,22 +22,32 @@ including GET and DELETE -- never in the URL and never in a request
 body. A key in a URL ends up in server access logs, browser history,
 and any Referer header a browser sends onward; a header does not.
 
-Authentication reuses request.app.state.mc_ingestor.authenticate(),
-the exact same short-TTL-cached key lookup /api/mc/ingest and
-/api/mc/status already use (app/mc_ingest.py: McIngestor.authenticate /
+Authentication goes through app/auth.py's require_api_key_principal(),
+which reuses request.app.state.mc_ingestor.authenticate(), the exact
+same short-TTL-cached key lookup /api/mc/ingest and /api/mc/status
+already use (app/mc_ingest.py: McIngestor.authenticate /
 _lookup_key_sync). That object is constructed unconditionally in
 app/main.py's lifespan regardless of settings.mc_ingest_enabled --
 only its background worker is gated by that flag -- so authenticate()
 is always available here even on a deployment that has MeshCore
-ingest turned off entirely.
+ingest turned off entirely. This module used to hand-roll that whole
+flow itself (in a private _authenticate()); it's now the canonical
+example of the default configuration app/auth.py's dependency
+supports -- see that module's docstring for the two sites (POST
+/api/mc/ingest, POST /api/mc/status) that configure it differently on
+purpose.
 
 Two independent rate limiters guard these routes, same as the two
 different limiters already in this codebase answer two different
-questions:
+questions -- each its own app/auth.py new_rate_limit_bucket() instance,
+private to this module (never shared with app/join_api.py's or
+app/checkin_api.py's own copies of this same shape: see app/auth.py's
+module docstring for why merging those pools would be an observable
+behavior change):
 
 - An address-keyed limiter runs FIRST, before the X-API-Key header is
   even read -- mirroring exactly how /api/mc/status (app/mc_api.py)
-  puts _status_rate_limited(ip) as the first thing in its handler. A
+  puts its own pre-auth limiter as the first thing in its handler. A
   caller with no key, or the wrong one, still costs us a request: once
   McIngestor's short-TTL key cache misses (which a flood of DISTINCT
   bad keys does on every single request), _lookup_key_sync opens a
@@ -58,13 +68,11 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from .client_ip import get_client_ip
-from .config import settings
+from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
 from .db import connect
-from .mc_ingest import hash_secret
 from .node_ref import normalize_node_ref, normalize_public_key
 
 router = APIRouter()
@@ -72,143 +80,23 @@ router = APIRouter()
 _VALID_PROTOCOLS = ("mt", "mc")
 _DEFAULT_PROTOCOL = "mt"
 
-# ---- rate limiting: per API key (post-auth) ------------------------------
+# ---- authentication ---------------------------------------------------
 #
-# Same bounded-dictionary pattern as _attempts in app/join_api.py and
-# _status_attempts in app/mc_api.py, keyed here on the API key hash
-# rather than the caller's address -- this one only ever runs once
-# authentication has already succeeded (see _authenticate below), so
-# limiting by key is both simpler and more accurate than limiting by
-# address for THIS check, the same choice McIngestor.rate_limit_ok
-# makes for /api/mc/ingest. A distinct dict from that one, though:
-# ingest batches and a person clicking "add radio" a few times are
-# different usage shapes with different budgets, and
-# settings.node_api_rate_limit_* is a separate, much smaller ceiling
-# from settings.mc_ingest_rate_limit_*.
-#
-# This is NOT the only limiter in this module -- see _addr_rate_limited
-# below, which runs first, before a key is even read, and exists
-# precisely because this one can't do that job (an invalid or missing
-# key never reaches here).
-_RATE_LIMIT_MAX_TRACKED = 10000
+# app/auth.py's require_api_key_principal() -- see that module's
+# docstring for the full contract (status-code mapping, generic 401 for
+# both "not_found" and "revoked", etc.) and for why the two rate
+# limiters below are each this module's OWN new_rate_limit_bucket()
+# instance rather than shared with app/join_api.py's or
+# app/checkin_api.py's identically-configured copies of this same
+# dependency: those were independent budgets before this module existed,
+# and merging them would be an observable behavior change.
+_addr_rate_limiter = new_rate_limit_bucket()
+_key_rate_limiter = new_rate_limit_bucket()
 
-_rate_limit_hits: dict[str, list[float]] = {}
-
-
-def _rate_limited(key_hash: str) -> bool:
-    now = time.monotonic()
-    window = settings.node_api_rate_limit_window_seconds
-    limit = settings.node_api_rate_limit_attempts
-
-    if len(_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-        stale = [
-            k for k, hits in _rate_limit_hits.items()
-            if not hits or now - hits[-1] >= window
-        ]
-        for k in stale:
-            del _rate_limit_hits[k]
-        if len(_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-            _rate_limit_hits.clear()
-
-    hits = [t for t in _rate_limit_hits.get(key_hash, []) if now - t < window]
-    if len(hits) >= limit:
-        _rate_limit_hits[key_hash] = hits
-        return True
-    hits.append(now)
-    _rate_limit_hits[key_hash] = hits
-    return False
-
-
-# ---- rate limiting: per address (pre-auth) --------------------------------
-#
-# Runs BEFORE the X-API-Key header is read, mirroring exactly how
-# /api/mc/status (app/mc_api.py) puts _status_rate_limited(ip) as the
-# very first thing in its handler, before it even reads the header --
-# see the module docstring above for why an unauthenticated caller
-# still has to be bounded, and why that can't be the per-key limiter
-# above. Reuses settings.mc_status_rate_limit_attempts/window_seconds
-# rather than adding a third pair of settings, since the usage shape
-# these routes see (an occasional, human-driven check or edit) is the
-# same one /api/mc/status was sized for -- a genuinely different
-# shape would earn its own setting, this one doesn't.
-#
-# A separate bounded dict from _status_attempts in app/mc_api.py, not
-# a shared one -- that name is private to that module, and this one is
-# an independent budget of the same size, not a shared budget split
-# across two endpoints.
-_ADDR_RATE_LIMIT_MAX_TRACKED = 10000
-
-_addr_rate_limit_hits: dict[str, list[float]] = {}
-
-
-def _client_ip(request: Request) -> str:
-    # See app/client_ip.py's module docstring: this used to be
-    # request.client.host directly, which is always the Caddy reverse
-    # proxy's own address in every deployment, not the real caller's.
-    return get_client_ip(request)
-
-
-def _addr_rate_limited(ip: str) -> bool:
-    now = time.monotonic()
-    window = settings.mc_status_rate_limit_window_seconds
-    limit = settings.mc_status_rate_limit_attempts
-
-    if len(_addr_rate_limit_hits) >= _ADDR_RATE_LIMIT_MAX_TRACKED:
-        stale = [
-            k for k, hits in _addr_rate_limit_hits.items()
-            if not hits or now - hits[-1] >= window
-        ]
-        for k in stale:
-            del _addr_rate_limit_hits[k]
-        if len(_addr_rate_limit_hits) >= _ADDR_RATE_LIMIT_MAX_TRACKED:
-            _addr_rate_limit_hits.clear()
-
-    hits = [t for t in _addr_rate_limit_hits.get(ip, []) if now - t < window]
-    if len(hits) >= limit:
-        _addr_rate_limit_hits[ip] = hits
-        return True
-    hits.append(now)
-    _addr_rate_limit_hits[ip] = hits
-    return False
-
-
-# ---- shared auth + response helpers --------------------------------------
-
-async def _authenticate(request: Request):
-    """Resolve the caller's X-API-Key header to a player_id.
-
-    Returns (player_id, None) on success, or (None, JSONResponse) with
-    the response to return as-is. Mirrors the exact status codes and
-    generic messages /api/mc/ingest and /api/mc/status already use --
-    "not_found" and "revoked" collapse to the same 401 "unauthorized"
-    so a caller can never learn from the response alone whether a key
-    ever existed.
-
-    The address-keyed limiter runs FIRST, before the header is even
-    read -- see _addr_rate_limited above for why: a caller with no key
-    or the wrong one has to be bounded too, and can never reach the
-    per-key limiter further down since that one needs a key to key on.
-    """
-    ip = _client_ip(request)
-    if _addr_rate_limited(ip):
-        return None, JSONResponse({"error": "rate limited"}, status_code=429)
-
-    raw_key = request.headers.get("X-API-Key", "")
-    if not raw_key:
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    ingestor = request.app.state.mc_ingestor
-    auth = await ingestor.authenticate(raw_key)
-    if auth.status in ("not_found", "revoked"):
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    if auth.status == "disabled":
-        return None, JSONResponse({"error": "forbidden"}, status_code=403)
-
-    key_hash = hash_secret(raw_key)
-    if _rate_limited(key_hash):
-        return None, JSONResponse({"error": "rate limited"}, status_code=429)
-
-    return auth.player_id, None
+require_principal = require_api_key_principal(
+    pre_auth_limiter=_addr_rate_limiter,
+    post_auth_limiter=_key_rate_limiter,
+)
 
 
 def _radios_out(conn, player_id: int) -> list[dict]:
@@ -276,10 +164,8 @@ def _parse_protocol(raw: object) -> str:
 # ---- routes ---------------------------------------------------------------
 
 @router.get("/api/nodes")
-async def list_nodes(request: Request) -> JSONResponse:
-    player_id, err = await _authenticate(request)
-    if err is not None:
-        return err
+async def list_nodes(request: Request, principal: Principal = Depends(require_principal)) -> JSONResponse:
+    player_id = principal.player_id
 
     conn = connect()
     try:
@@ -291,10 +177,8 @@ async def list_nodes(request: Request) -> JSONResponse:
 
 
 @router.post("/api/nodes")
-async def add_node(request: Request) -> JSONResponse:
-    player_id, err = await _authenticate(request)
-    if err is not None:
-        return err
+async def add_node(request: Request, principal: Principal = Depends(require_principal)) -> JSONResponse:
+    player_id = principal.player_id
 
     try:
         body = await request.json()
@@ -373,10 +257,10 @@ async def add_node(request: Request) -> JSONResponse:
 
 
 @router.delete("/api/nodes/{node_ref}")
-async def remove_node(node_ref: str, request: Request) -> JSONResponse:
-    player_id, err = await _authenticate(request)
-    if err is not None:
-        return err
+async def remove_node(
+    node_ref: str, request: Request, principal: Principal = Depends(require_principal)
+) -> JSONResponse:
+    player_id = principal.player_id
 
     protocol = _parse_protocol(request.query_params.get("protocol"))
     if not protocol:

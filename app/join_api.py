@@ -27,9 +27,10 @@ import secrets
 import time
 import unicodedata
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
 from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
@@ -386,82 +387,20 @@ async def join_redeem(request: Request) -> JSONResponse:
 # Same two-tier (address, then key) rate limiting app/nodes_api.py and
 # app/checkin_api.py's key-authenticated routes already use, and the
 # same settings app/checkin_api.py's own copy reuses rather than
-# inventing a third rate-limit mechanism for -- see that module's
-# _addr_rate_limited docstring. Independent bounded dicts, same pattern
-# as _attempts above.
+# inventing a third rate-limit mechanism for -- see app/auth.py's
+# require_api_key_principal() docstring. Independent
+# new_rate_limit_bucket() instances, same pattern as _attempts above --
+# never shared with app/nodes_api.py's or app/checkin_api.py's own
+# copies of this same dependency (see app/auth.py's module docstring
+# for why merging those pools would be an observable behavior change).
 
-_team_addr_rate_limit_hits: dict[str, list[float]] = {}
-_team_rate_limit_hits: dict[str, list[float]] = {}
+_team_addr_rate_limiter = new_rate_limit_bucket()
+_team_key_rate_limiter = new_rate_limit_bucket()
 
-
-def _team_addr_rate_limited(ip: str) -> bool:
-    now = time.monotonic()
-    window = settings.mc_status_rate_limit_window_seconds
-    limit = settings.mc_status_rate_limit_attempts
-    if len(_team_addr_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-        stale = [k for k, hits in _team_addr_rate_limit_hits.items() if not hits or now - hits[-1] >= window]
-        for k in stale:
-            del _team_addr_rate_limit_hits[k]
-        if len(_team_addr_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-            _team_addr_rate_limit_hits.clear()
-    hits = [t for t in _team_addr_rate_limit_hits.get(ip, []) if now - t < window]
-    if len(hits) >= limit:
-        _team_addr_rate_limit_hits[ip] = hits
-        return True
-    hits.append(now)
-    _team_addr_rate_limit_hits[ip] = hits
-    return False
-
-
-def _team_rate_limited(key_hash: str) -> bool:
-    now = time.monotonic()
-    window = settings.node_api_rate_limit_window_seconds
-    limit = settings.node_api_rate_limit_attempts
-    if len(_team_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-        stale = [k for k, hits in _team_rate_limit_hits.items() if not hits or now - hits[-1] >= window]
-        for k in stale:
-            del _team_rate_limit_hits[k]
-        if len(_team_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-            _team_rate_limit_hits.clear()
-    hits = [t for t in _team_rate_limit_hits.get(key_hash, []) if now - t < window]
-    if len(hits) >= limit:
-        _team_rate_limit_hits[key_hash] = hits
-        return True
-    hits.append(now)
-    _team_rate_limit_hits[key_hash] = hits
-    return False
-
-
-async def _authenticate(request: Request):
-    """Resolve the caller's X-API-Key header to a player_id. Identical
-    contract and status codes to app/nodes_api.py's _authenticate() --
-    "not_found" and "revoked" both collapse to a generic 401 so a
-    caller can never learn from the response alone whether a key ever
-    existed. "disabled" is a 403: this is also where a disabled
-    player is rejected, since app/mc_ingest.py's authenticate() already
-    resolves disabled_at as part of the same key lookup every other
-    key-authenticated route relies on -- no separate check needed here.
-    """
-    ip = _client_ip(request)
-    if _team_addr_rate_limited(ip):
-        return None, JSONResponse({"error": "rate limited"}, status_code=429)
-
-    raw_key = request.headers.get("X-API-Key", "")
-    if not raw_key:
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    ingestor = request.app.state.mc_ingestor
-    auth = await ingestor.authenticate(raw_key)
-    if auth.status in ("not_found", "revoked"):
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    if auth.status == "disabled":
-        return None, JSONResponse({"error": "forbidden"}, status_code=403)
-
-    key_hash = hash_secret(raw_key)
-    if _team_rate_limited(key_hash):
-        return None, JSONResponse({"error": "rate limited"}, status_code=429)
-
-    return auth.player_id, None
+require_team_principal = require_api_key_principal(
+    pre_auth_limiter=_team_addr_rate_limiter,
+    post_auth_limiter=_team_key_rate_limiter,
+)
 
 
 def _current_month_window(now: int) -> tuple[int, int]:
@@ -486,16 +425,16 @@ def _switch_used_this_month(conn, player_id: int, start: int, end: int) -> bool:
 
 
 @router.get("/api/team")
-async def team_status(request: Request) -> JSONResponse:
+async def team_status(
+    request: Request, principal: Principal = Depends(require_team_principal)
+) -> JSONResponse:
     """Read-only status for the switch-team UI: the player's current
     team, whether a self-switch is available right now, and
     next_switch_at -- always the end of the current month window (when
     the switch allowance next resets), regardless of switch_available.
     That value is true and useful in both states, so it is never null.
     """
-    player_id, err = await _authenticate(request)
-    if err is not None:
-        return err
+    player_id = principal.player_id
 
     now = int(time.time())
     start, end = _current_month_window(now)
@@ -523,14 +462,14 @@ async def team_status(request: Request) -> JSONResponse:
 
 
 @router.post("/api/team")
-async def switch_team(request: Request) -> JSONResponse:
+async def switch_team(
+    request: Request, principal: Principal = Depends(require_team_principal)
+) -> JSONResponse:
     """Change the caller's own team, once per calendar month. See the
     module-level comment above this section for what does and does not
     move with the player.
     """
-    player_id, err = await _authenticate(request)
-    if err is not None:
-        return err
+    player_id = principal.player_id
 
     try:
         body = await request.json()

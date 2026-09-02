@@ -11,10 +11,16 @@ confused with each other:
   key-authenticated exactly like app/nodes_api.py's radio management
   routes: no session, no cookie, the player's existing API key (from
   /api/join) is the only credential, in the X-API-Key header, never the
-  URL or body. Reuses the same
-  request.app.state.mc_ingestor.authenticate() short-TTL-cached key
-  lookup and the same two-tier (address, then key) rate limiting
-  app/nodes_api.py already established.
+  URL or body. Authenticated through app/auth.py's
+  require_api_key_principal() -- the same short-TTL-cached
+  request.app.state.mc_ingestor.authenticate() lookup and the same
+  two-tier (address, then key) rate limiting app/nodes_api.py already
+  established, wired up as require_checkin_principal below. Its
+  pre-auth address limiter is the one exception to "independent budget
+  per site" app/auth.py's own docstring calls out: it's the SAME
+  _addr_rate_limiter instance the two public pickers below call
+  directly, exactly as this module's original hand-rolled version
+  already shared one dict between both.
 
 - The two node-picker routes (GET /api/checkin/mc/nodes,
   GET /api/checkin/mt/nodes) are deliberately PUBLIC -- no key at all.
@@ -48,26 +54,35 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
 from .checkin import companion_directory_entries, mt_roster_entries
 from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
-from .mc_ingest import hash_secret
 from .node_ref import normalize_sender_name
 
 router = APIRouter()
 
-# Independent bounded dicts, same pattern (and same reasoning) as every
-# other rate limiter in this codebase -- see app/nodes_api.py's module
-# docstring for the two-tier (address, then key) shape the fallback-name
-# routes below copy, and app/join_api.py / app/mc_api.py's
-# _status_rate_limited for the address-only shape the public pickers use.
-_RATE_LIMIT_MAX_TRACKED = 10000
-_rate_limit_hits: dict[str, list[float]] = {}
-_addr_rate_limit_hits: dict[str, list[float]] = {}
+# Independent app/auth.py new_rate_limit_bucket() instances, same
+# pattern (and same reasoning) as every other rate limiter in this
+# codebase -- see app/auth.py's require_api_key_principal() docstring
+# for the two-tier (address, then key) shape the fallback-name routes
+# below use, and app/mc_api.py's POST /api/mc/status for the
+# address-only shape the public pickers use.
+#
+# _addr_rate_limiter is deliberately ONE instance shared two ways: as
+# the pre-auth tier passed into require_checkin_principal() below, AND
+# called directly (see _client_ip usage further down) by the two public
+# picker routes, which have no key at all to authenticate. That sharing
+# is not new here -- the original hand-rolled _addr_rate_limited() was
+# already the same single dict serving both -- so an address that's
+# been hammering the public pickers arrives at the fallback-name routes
+# with less budget left, same as before this module existed.
+_addr_rate_limiter = new_rate_limit_bucket()
+_key_rate_limiter = new_rate_limit_bucket()
 
 
 def _client_ip(request: Request) -> str:
@@ -79,90 +94,32 @@ def _client_ip(request: Request) -> str:
 
 def _addr_rate_limited(ip: str) -> bool:
     """True if `ip` has used up its budget for the current window --
-    shared by the two public picker routes below AND as the first
-    (pre-auth) tier for the key-authenticated fallback-name routes,
-    same as app/nodes_api.py's own address tier. Reuses
-    settings.mc_status_rate_limit_attempts/window_seconds rather than
-    adding a new pair of settings: this is the same "occasional,
-    human-driven request from one address" usage shape
-    /api/mc/status was already sized for, and the coordinator was
-    explicit not to invent a third rate-limit mechanism.
+    shared by the two public picker routes below AND (via
+    require_checkin_principal()'s pre_auth_limiter) the first tier for
+    the key-authenticated fallback-name routes. See _addr_rate_limiter's
+    own comment above for why that sharing is intentional.
     """
-    now = time.monotonic()
-    window = settings.mc_status_rate_limit_window_seconds
-    limit = settings.mc_status_rate_limit_attempts
-    if len(_addr_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-        stale = [k for k, hits in _addr_rate_limit_hits.items() if not hits or now - hits[-1] >= window]
-        for k in stale:
-            del _addr_rate_limit_hits[k]
-        if len(_addr_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-            _addr_rate_limit_hits.clear()
-    hits = [t for t in _addr_rate_limit_hits.get(ip, []) if now - t < window]
-    if len(hits) >= limit:
-        _addr_rate_limit_hits[ip] = hits
-        return True
-    hits.append(now)
-    _addr_rate_limit_hits[ip] = hits
-    return False
+    return _addr_rate_limiter.limited(
+        ip,
+        limit=settings.mc_status_rate_limit_attempts,
+        window=settings.mc_status_rate_limit_window_seconds,
+    )
 
 
-def _rate_limited(key_hash: str) -> bool:
-    now = time.monotonic()
-    window = settings.node_api_rate_limit_window_seconds
-    limit = settings.node_api_rate_limit_attempts
-    if len(_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-        stale = [k for k, hits in _rate_limit_hits.items() if not hits or now - hits[-1] >= window]
-        for k in stale:
-            del _rate_limit_hits[k]
-        if len(_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
-            _rate_limit_hits.clear()
-    hits = [t for t in _rate_limit_hits.get(key_hash, []) if now - t < window]
-    if len(hits) >= limit:
-        _rate_limit_hits[key_hash] = hits
-        return True
-    hits.append(now)
-    _rate_limit_hits[key_hash] = hits
-    return False
-
-
-async def _authenticate(request: Request):
-    """Resolve the caller's X-API-Key header to a player_id. Returns
-    (player_id, None) on success, or (None, JSONResponse) to return
-    as-is -- identical contract and status codes to
-    app/nodes_api.py's _authenticate. Only the fallback-name routes
-    below use this -- the two node-picker routes are public and never
-    call it.
-    """
-    ip = _client_ip(request)
-    if _addr_rate_limited(ip):
-        return None, JSONResponse({"error": "rate limited"}, status_code=429)
-
-    raw_key = request.headers.get("X-API-Key", "")
-    if not raw_key:
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    ingestor = request.app.state.mc_ingestor
-    auth = await ingestor.authenticate(raw_key)
-    if auth.status in ("not_found", "revoked"):
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    if auth.status == "disabled":
-        return None, JSONResponse({"error": "forbidden"}, status_code=403)
-
-    key_hash = hash_secret(raw_key)
-    if _rate_limited(key_hash):
-        return None, JSONResponse({"error": "rate limited"}, status_code=429)
-
-    return auth.player_id, None
+require_checkin_principal = require_api_key_principal(
+    pre_auth_limiter=_addr_rate_limiter,
+    post_auth_limiter=_key_rate_limiter,
+)
 
 
 # ---- last-resort fallback name (key-authenticated) ------------------------
 
 
 @router.get("/api/checkin/name")
-async def get_checkin_name(request: Request) -> JSONResponse:
-    player_id, err = await _authenticate(request)
-    if err is not None:
-        return err
+async def get_checkin_name(
+    request: Request, principal: Principal = Depends(require_checkin_principal)
+) -> JSONResponse:
+    player_id = principal.player_id
     conn = connect()
     try:
         row = conn.execute(
@@ -179,7 +136,9 @@ async def get_checkin_name(request: Request) -> JSONResponse:
 
 
 @router.post("/api/checkin/name")
-async def set_checkin_name(request: Request) -> JSONResponse:
+async def set_checkin_name(
+    request: Request, principal: Principal = Depends(require_checkin_principal)
+) -> JSONResponse:
     """Set (not add) the caller's last-resort fallback check-in name.
 
     This binding is only ever consulted by app/checkin.py when the
@@ -187,9 +146,7 @@ async def set_checkin_name(request: Request) -> JSONResponse:
     module's docstring. Registering one does not affect a player the
     bridge already resolves; it exists for the player it doesn't.
     """
-    player_id, err = await _authenticate(request)
-    if err is not None:
-        return err
+    player_id = principal.player_id
 
     try:
         body = await request.json()
@@ -237,10 +194,10 @@ async def set_checkin_name(request: Request) -> JSONResponse:
 
 
 @router.delete("/api/checkin/name")
-async def delete_checkin_name(request: Request) -> JSONResponse:
-    player_id, err = await _authenticate(request)
-    if err is not None:
-        return err
+async def delete_checkin_name(
+    request: Request, principal: Principal = Depends(require_checkin_principal)
+) -> JSONResponse:
+    player_id = principal.player_id
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")

@@ -38,6 +38,7 @@ from sse_starlette.sse import EventSourceResponse
 from . import mc_api
 from .admin_api import router as admin_router
 from .admin_ops import router as admin_ops_router
+from .auth import require_api_key_principal
 from .checkin_api import router as checkin_router
 from .clientlog_api import router as clientlog_router
 from .config import settings
@@ -564,6 +565,29 @@ def _node_hex(node_id: int | None) -> str:
     return f"!{node_id:08x}"
 
 
+# app/auth.py's require_api_key_principal(), with BOTH of its optional
+# rate limiters left off -- this endpoint never had a dict-based
+# pre-auth address limiter or post-auth per-key limiter (unlike
+# app/join_api.py, app/nodes_api.py, app/checkin_api.py's routes, or
+# even app/mc_api.py's POST /api/mc/status). Its only rate limiting is
+# McIngestor.rate_limit_ok() below, a per-key, post-auth check on its
+# own settings (mc_ingest_rate_limit_batches/window_seconds) sized for
+# a wardriving app's batch cadence -- that stays exactly where it was,
+# separate from authentication, since it's ingest-specific throttling
+# out of scope for this consolidation. See app/auth.py's module
+# docstring for the full rundown of what differs at each of the five
+# key-authenticated call sites and why.
+#
+# Called directly below (awaited, not wired up as a FastAPI
+# Depends(...)) rather than added as a route parameter: it has to run
+# AFTER the settings.mc_ingest_enabled check, so a caller reaches "mc
+# ingest disabled" (503) before this ever inspects their key, exactly
+# as before this dependency existed -- a Depends(...) parameter would
+# resolve before the route body runs at all, which would silently
+# reverse that order.
+_ingest_principal = require_api_key_principal()
+
+
 @router.post("/api/mc/ingest")
 async def mc_ingest(request: Request) -> JSONResponse:
     """Accepts a batch of wardriving pings pushed by the MeshCore
@@ -573,19 +597,16 @@ async def mc_ingest(request: Request) -> JSONResponse:
     if not settings.mc_ingest_enabled:
         return JSONResponse({"error": "mc ingest disabled"}, status_code=503)
 
+    principal = await _ingest_principal(request)
+
+    # _ingest_principal only ever validates the header (see above), so
+    # re-reading it here for the hash is safe -- it's already known
+    # non-empty and valid, this just needs the raw bytes again for
+    # hash_secret, exactly like the pre-app/auth.py version of this
+    # function computed key_hash after its own equivalent checks.
     raw_key = request.headers.get("X-API-Key", "")
-    if not raw_key:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    ingestor = request.app.state.mc_ingestor
-    auth = await ingestor.authenticate(raw_key)
-    if auth.status in ("not_found", "revoked"):
-        # Generic message for both cases -- don't reveal whether a key exists.
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if auth.status == "disabled":
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-
     key_hash = hash_secret(raw_key)
+    ingestor = request.app.state.mc_ingestor
 
     # Per-key rate limit, checked as early as possible on the request
     # path (no database read -- see McIngestor.rate_limit_ok) so a key
@@ -599,7 +620,7 @@ async def mc_ingest(request: Request) -> JSONResponse:
     # after auth succeeds, so an unauthenticated caller can never make us
     # write to disk, and before body validation, so malformed payloads
     # are captured too.
-    log_raw_batch(auth.player_id, key_hash, await request.body())
+    log_raw_batch(principal.player_id, key_hash, await request.body())
 
     try:
         body = await request.json()
@@ -613,7 +634,7 @@ async def mc_ingest(request: Request) -> JSONResponse:
     if not data or len(data) > settings.mc_max_batch_pings:
         return JSONResponse({"error": "bad request"}, status_code=400)
 
-    accepted = ingestor.submit(auth.player_id, key_hash, data, int(time.time()))
+    accepted = ingestor.submit(principal.player_id, key_hash, data, int(time.time()))
     if not accepted:
         return JSONResponse({"error": "queue full"}, status_code=503)
 

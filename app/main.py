@@ -5,11 +5,12 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from .api import mount
+from .auth import http_exception_as_error_body
 from .checkin import CheckinPoller
 from .config import settings
 from .db import connect, init_db
@@ -154,6 +155,31 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+# Every hand-rolled error response in this app -- long before
+# app/auth.py existed, and everywhere that hasn't been touched by it --
+# is a JSONResponse shaped {"error": "..."}. Starlette's own default
+# HTTPException handler instead renders {"detail": "..."}. app/auth.py's
+# shared authentication dependency (see that module) is the first place
+# in this codebase to raise HTTPException rather than building a
+# JSONResponse by hand, specifically so it can be used as a real FastAPI
+# dependency (Depends(...) can only short-circuit a request via a raised
+# exception, not a returned value) -- but doing that must not change the
+# JSON body a client already depending on {"error": ...} sees.
+# http_exception_as_error_body (defined in app/auth.py, next to the code
+# that's the only thing in this codebase raising HTTPException) is that
+# translation, registered once, app-wide (keyed on fastapi.HTTPException
+# -- the exact type app/auth.py raises -- which takes priority over
+# FastAPI's own default handler, registered on the
+# starlette.exceptions.HTTPException base class it subclasses, since
+# lookup walks the exception's MRO from its exact type outward and this
+# is the more specific match) so any HTTPException app/auth.py raises
+# renders in the same shape every existing error response already uses.
+# Nothing before app/auth.py ever raised one, so this has no effect on
+# any route this refactor didn't touch.
+app.add_exception_handler(HTTPException, http_exception_as_error_body)
+
 
 # The board routes return highly repetitive JSON -- thousands of cell
 # records sharing the same handful of keys and team names -- and every

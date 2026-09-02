@@ -36,10 +36,10 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 
-from .client_ip import get_client_ip
+from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
 from .config import settings
 from .db import connect
 from .grid import cell_bounds
@@ -59,17 +59,25 @@ router = APIRouter()
 # constant is this same string.
 MT_PROTOCOL = "mt"
 
-# ---- status-check rate limiting ---------------------------------------
+# ---- status-check authentication ---------------------------------------
 #
-# Bounded per-address tracking, same pattern as app/join_api.py's
-# _attempts/_rate_limited (itself modeled on McIngestor._key_cache in
-# app/mc_ingest.py): every distinct client IP that hits this public,
-# key-authenticated-but-still-abusable endpoint gets a tracking entry.
-# Sweep stale entries first when the cap is hit, and only clear the
-# whole dict if that alone doesn't bring it back under the cap.
-_STATUS_RATE_LIMIT_MAX_TRACKED = 10000
+# app/auth.py's require_api_key_principal(), configured to match this
+# endpoint's own original (and still different from the other four key-
+# authenticated endpoints') shape: a pre-auth address limiter using its
+# own new_rate_limit_bucket() instance -- same pattern as
+# app/join_api.py's join _attempts/_rate_limited (itself modeled on
+# McIngestor._key_cache in app/mc_ingest.py) -- but with this endpoint's
+# own, different rate-limited message ("too many attempts, try again
+# later", not the generic "rate limited" the other four use), and NO
+# post-auth per-key limiter at all -- this route never had one. See
+# app/auth.py's module docstring for the full list of what stayed
+# different on purpose.
+_status_addr_rate_limiter = new_rate_limit_bucket()
 
-_status_attempts: dict[str, list[float]] = {}
+require_status_principal = require_api_key_principal(
+    pre_auth_limiter=_status_addr_rate_limiter,
+    pre_auth_rate_limit_detail="too many attempts, try again later",
+)
 
 # Fallback roster used only if `settings` does not (yet) expose a
 # MeshCore team list, or exposes it under a name this module doesn't
@@ -99,40 +107,6 @@ def team_list() -> list[str]:
             if parsed:
                 return parsed
     return list(_FALLBACK_TEAMS)
-
-
-def _client_ip(request: Request) -> str:
-    # See app/client_ip.py's module docstring: this used to be
-    # request.client.host directly, which is always the Caddy reverse
-    # proxy's own address in every deployment, not the real caller's.
-    return get_client_ip(request)
-
-
-def _status_rate_limited(ip: str) -> bool:
-    """True if `ip` has used up its /api/mc/status budget for the
-    current window. Records this attempt (by timestamp) when allowed.
-    """
-    now = time.monotonic()
-    window = settings.mc_status_rate_limit_window_seconds
-    limit = settings.mc_status_rate_limit_attempts
-
-    if len(_status_attempts) >= _STATUS_RATE_LIMIT_MAX_TRACKED:
-        stale = [
-            k for k, times in _status_attempts.items()
-            if not times or now - times[-1] >= window
-        ]
-        for k in stale:
-            del _status_attempts[k]
-        if len(_status_attempts) >= _STATUS_RATE_LIMIT_MAX_TRACKED:
-            _status_attempts.clear()
-
-    times = [t for t in _status_attempts.get(ip, []) if now - t < window]
-    if len(times) >= limit:
-        _status_attempts[ip] = times
-        return True
-    times.append(now)
-    _status_attempts[ip] = times
-    return False
 
 
 def _relative_time(now_ts: int, then_ts: int) -> str:
@@ -1313,7 +1287,9 @@ def _counters_out_mt(row) -> dict:
 
 
 @router.post("/api/mc/status")
-async def mc_status(request: Request) -> JSONResponse:
+async def mc_status(
+    request: Request, principal: Principal = Depends(require_status_principal)
+) -> JSONResponse:
     """Lets a player check whether their wardriving app is actually
     reaching us. Every failure mode is already recorded in
     player_ingest_stat and api_key.last_seen_at -- this reads it back
@@ -1324,7 +1300,13 @@ async def mc_status(request: Request) -> JSONResponse:
     /api/mc/ingest, and for the same reason: a GET would put the key in
     the URL, where it can land in a server access log, browser history,
     or a Referer header. Checking status is deliberately not usage --
-    this never touches api_key.last_seen_at.
+    this never touches api_key.last_seen_at. Authenticated through
+    app/auth.py's require_api_key_principal() (require_status_principal
+    above), configured to match this endpoint's own original shape --
+    a pre-auth address limiter with its own rate-limited message
+    ("too many attempts, try again later") and no post-auth per-key
+    limiter, unlike the other four key-authenticated endpoints -- see
+    that module's docstring for why this one isn't force-fit to match.
 
     Despite the /api/mc/ URL, this now reports BOTH protocols a player
     might have radios for -- the top-level fields below (last_batch_at,
@@ -1343,23 +1325,7 @@ async def mc_status(request: Request) -> JSONResponse:
     filtered to MT_PROTOCOL throughout, never MC_PROTOCOL's helpers
     reused past what they were already filtering for.
     """
-    ip = _client_ip(request)
-    if _status_rate_limited(ip):
-        return JSONResponse({"error": "too many attempts, try again later"}, status_code=429)
-
-    raw_key = request.headers.get("X-API-Key", "")
-    if not raw_key:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    ingestor = request.app.state.mc_ingestor
-    auth = await ingestor.authenticate(raw_key)
-    if auth.status in ("not_found", "revoked"):
-        # Generic message for both -- don't reveal whether a key exists.
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if auth.status == "disabled":
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-
-    player_id = auth.player_id
+    player_id = principal.player_id
     now_ts = int(time.time())
 
     conn = connect()
