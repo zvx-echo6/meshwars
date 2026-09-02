@@ -170,6 +170,48 @@ def _attention(conn, directory: list[dict]) -> list[dict]:
                     "They can wardrive normally but can never earn a net check-in. "
                     "Register the name their check-ins appear under, below.", "warn")
 
+    # ---- check-in name drift, MeshCore only ---------------------------
+    # A player's check-in identity is a NAME match against the directory
+    # (app/checkin.py's module docstring), so the moment one of their
+    # nodes' display name changes, that contact's binding no longer
+    # matches anything and check-ins from it go quiet with no error
+    # anywhere -- the same invisible-failure shape as checkin_unreachable
+    # above, just triggered by a rename instead of a radio the directory
+    # never saw. checkin_node_name (app/db.py) is written by
+    # app/checkin.py's _build_directory_bridge every cycle it resolves a
+    # contact, one row per (connector, node_ref) -- a player with more
+    # than one bound MeshCore radio has more than one row, which is why
+    # this is keyed on the radio rather than the player (see that
+    # table's own comment for the false-positive an earlier player-keyed
+    # version produced). A recent changed_at means the rename JUST
+    # happened, which is exactly when an operator can still catch it
+    # before a whole net's worth of check-ins is missed. Independent of
+    # `directory` (unlike checkin_unreachable above) -- this reads
+    # history already on disk, not the poller's in-memory cache, so it
+    # still surfaces a rename even if the poller or its directory cache
+    # is briefly down when overview is loaded.
+    name_change_cutoff = now - _STALE_DAYS * 86400
+    for r in conn.execute(
+        "SELECT player_id, node_ref, name, previous_name, changed_at FROM checkin_node_name "
+        " WHERE changed_at IS NOT NULL AND changed_at > ? ORDER BY changed_at DESC",
+        (name_change_cutoff,),
+    ):
+        p = players.get(r["player_id"])
+        if not p:
+            continue  # disabled or otherwise gone -- nothing to act on
+        days_ago = (now - r["changed_at"]) // 86400
+        when = "earlier today" if days_ago < 1 else (
+            "1 day ago" if days_ago == 1 else "%d days ago" % days_ago)
+        add(p, "checkin_name_changed",
+            "MeshCore radio %s's display name changed from %r to %r %s" % (
+                r["node_ref"], r["previous_name"], r["name"], when,
+            ),
+            "Check-ins are matched by name, so that radio's old binding stopped "
+            "matching the moment its name changed -- any other bound radio this "
+            "player has is unaffected. Nothing to do once its new name starts "
+            "resolving again on its own -- confirm it has, or have them register "
+            "a fallback name if it hasn't.", "warn")
+
     order = {"bad": 0, "warn": 1, "info": 2}
     out.sort(key=lambda e: (order.get(e["severity"], 3), e["player"].lower()))
     return out
@@ -701,6 +743,40 @@ def _scrub_secrets(net: dict) -> dict:
     return out
 
 
+def _unresolved_by_net(conn) -> dict[int, dict]:
+    """net_id -> {"net_date", "count", "senders"} for each net's MOST
+    RECENT net_date carrying any checkin_unresolved_sender rows (app/
+    checkin.py's _record_unresolved_sender is the only writer) -- feeds
+    admin_checkin_nets' per-net unresolved-sender summary. A net absent
+    from the returned dict has never had an in-window message go
+    unresolved, or nothing recent enough to still be in the table (see
+    UNRESOLVED_SENDER_RETENTION_DAYS).
+
+    Only the LATEST net_date per net, not every date on record -- an
+    operator looking at the nets panel wants to know "did last week's
+    net have a problem," not a scrolling history of every past one; the
+    per-net-date detail already lives in the table for anyone who needs
+    to query it directly. One join query (latest net_date per net,
+    joined back to that date's own rows) rather than one query per net,
+    the same "bulk query, not N+1" preference this codebase applies
+    elsewhere (see app/checkin.py's mt_roster_entries).
+    """
+    rows = conn.execute(
+        "SELECT u.net_id, u.net_date, u.sender_name, u.message_count "
+        "  FROM checkin_unresolved_sender u "
+        "  JOIN (SELECT net_id, max(net_date) AS net_date "
+        "          FROM checkin_unresolved_sender GROUP BY net_id) latest "
+        "    ON latest.net_id = u.net_id AND latest.net_date = u.net_date "
+        " ORDER BY u.net_id, u.message_count DESC, u.sender_name"
+    ).fetchall()
+    out: dict[int, dict] = {}
+    for r in rows:
+        entry = out.setdefault(r["net_id"], {"net_date": r["net_date"], "count": 0, "senders": []})
+        entry["count"] += 1
+        entry["senders"].append({"sender_name": r["sender_name"], "message_count": r["message_count"]})
+    return out
+
+
 @router.get("/api/admin/checkin/nets")
 async def admin_checkin_nets(request: Request):
     """Every net (enabled or not) plus the global config singleton, for
@@ -708,6 +784,17 @@ async def admin_checkin_nets(request: Request):
     come straight off each checkin_net row -- see app/checkin.py's
     CheckinPoller, which writes them after every cycle -- so a net
     that's silently failing shows up here without anyone reading logs.
+
+    unresolved_net_date/unresolved_count/unresolved_senders are the same
+    kind of visibility, for a different failure: a net can be polling
+    perfectly and still be quietly missing people, because MeshCore
+    check-ins are matched by NAME and a message whose sender never
+    resolved to a player leaves no award and no error anywhere else --
+    see app/checkin.py's module docstring and _record_unresolved_sender.
+    Present only for the net's own most recent net_date with any such
+    rows (_unresolved_by_net above); a net with none gets count 0 and an
+    empty list, same shape either way so the frontend never has to
+    branch on the key being absent.
     """
     guard = _api_guard(request)
     if guard is not None:
@@ -718,6 +805,12 @@ async def admin_checkin_nets(request: Request):
             "SELECT * FROM checkin_net ORDER BY id").fetchall()]
         for n in nets:
             n["enabled"] = bool(n["enabled"])
+        unresolved = _unresolved_by_net(conn)
+        for n in nets:
+            entry = unresolved.get(n["id"])
+            n["unresolved_net_date"] = entry["net_date"] if entry else None
+            n["unresolved_count"] = entry["count"] if entry else 0
+            n["unresolved_senders"] = entry["senders"] if entry else []
         row = conn.execute("SELECT * FROM checkin_config WHERE id = 1").fetchone()
         config = dict(row) if row is not None else {}
         if config:

@@ -178,6 +178,16 @@ log = logging.getLogger("checkin")
 MC_PROTOCOL = "mc"
 MT_PROTOCOL = "mt"
 
+# How long a checkin_unresolved_sender row survives before
+# CheckinPoller._maybe_prune_unresolved_senders removes it -- mirrors
+# settings.mc_stat_retention_days' role for player_ingest_stat (app/
+# mc_ingest.py): long enough for an operator to notice and act on a
+# rename or a missed registration across several real nets, short
+# enough that the table cannot grow without bound on a channel with
+# persistent unregistered chatter during net windows.
+UNRESOLVED_SENDER_RETENTION_DAYS = 60
+_UNRESOLVED_PRUNE_INTERVAL_S = 3600.0
+
 # Connector KIND is the admin-chosen field (checkin_net.kind) -- which
 # upstream API a net's connector_url actually speaks. `protocol` above
 # is the scoring-board discriminator every award/season/streak query
@@ -536,6 +546,37 @@ def _seen(conn, connector: str, packet_id: str) -> bool:
         "SELECT 1 FROM checkin_seen_message WHERE connector = ? AND packet_id = ?",
         (connector, packet_id),
     ).fetchone() is not None
+
+
+def _record_unresolved_sender(
+    conn, net_id: int, net_date: str, sender_name: str, seen_at: int,
+) -> None:
+    """Note that an in-window MeshCore message from `sender_name` could
+    not be matched to a registered player, for this net's `net_date` --
+    see checkin_unresolved_sender's own comment in app/db.py for the
+    table shape and why (net_id, net_date) is the scope rather than
+    every unresolved message ever seen.
+
+    Upsert, not INSERT OR IGNORE: a repeat offender in the same net
+    bumps message_count and last_seen rather than being silently
+    ignored after the first sighting, the same "once per offender, not
+    once per message" idea mc_checkin_award's own PRIMARY KEY applies
+    to a successful check-in.
+
+    Deliberately does NOT touch checkin_seen_message -- see this
+    function's one caller (_process_mc_message) for why marking the
+    message seen is exactly the mistake that cost two players their
+    2026-08-19 award, and must not be reintroduced here.
+    """
+    conn.execute(
+        "INSERT INTO checkin_unresolved_sender"
+        "(net_id, net_date, sender_name, first_seen, last_seen, message_count) "
+        "VALUES (?, ?, ?, ?, ?, 1) "
+        "ON CONFLICT(net_id, net_date, sender_name) DO UPDATE SET "
+        "  last_seen = excluded.last_seen, "
+        "  message_count = message_count + 1",
+        (net_id, net_date, sender_name, seen_at, seen_at),
+    )
 
 
 def _mark_seen(conn, connector: str, packet_id: str, seen_at: int) -> None:
@@ -920,7 +961,63 @@ def _load_mc_manual_bindings(conn) -> dict[str, int]:
     return {r["sender_name"]: r["player_id"] for r in rows}
 
 
-def _build_directory_bridge(conn, directory_nodes: list[dict]) -> dict[str, int]:
+def _record_node_name(conn, connector: str, node_ref: str, player_id: int, name: str, now: int) -> None:
+    """Persist that MeshCore contact `node_ref` (bound to `player_id`)
+    currently resolves to `name` on `connector` (checkin_node_name,
+    app/db.py), and log the moment THAT NODE's name changes.
+
+    Why this matters more than an ordinary bookkeeping table: a rename
+    is the EXACT moment check-ins matched against the old name would
+    start silently going uncredited (see the module docstring --
+    resolution is name-matched against the directory, so the old
+    binding stops matching the instant the display name changes), and
+    nothing else in this schema records what a resolved name used to
+    be. Making that moment a log line (and a row app/admin_ops.py's
+    _attention can surface) is what turns an invisible failure into a
+    visible one, without changing resolution or awarding behavior at
+    all -- this function only ever observes and records; it plays no
+    part in deciding who gets credited.
+
+    Keyed on (connector, node_ref), NOT (connector, player_id) -- see
+    checkin_node_name's own comment in app/db.py for why: a player can
+    hold more than one bound MeshCore contact, each with its own
+    display name, and that is normal, not a rename. player_id is
+    carried through only so a row is self-describing to a reader.
+
+    First sighting of a (connector, node_ref) pair is an INSERT, not a
+    "change" -- there is no previous name to have drifted from, so
+    changed_at/previous_name are left at their column defaults (NULL,
+    '') rather than manufactured. Only a genuinely DIFFERENT name on a
+    later call updates the row and fires the log line; the common case
+    -- the same name resolving again this cycle -- is a no-op UPDATE-of-
+    nothing, not skipped by a separate read first, since the WHERE
+    clause below already makes that the cheap path.
+    """
+    cur = conn.execute(
+        "UPDATE checkin_node_name SET previous_name = name, name = ?, changed_at = ? "
+        " WHERE connector = ? AND node_ref = ? AND name != ?",
+        (name, now, connector, node_ref, name),
+    )
+    if cur.rowcount:
+        row = conn.execute(
+            "SELECT previous_name FROM checkin_node_name WHERE connector = ? AND node_ref = ?",
+            (connector, node_ref),
+        ).fetchone()
+        log.info(
+            "checkin: player %d's MeshCore node %s on %s changed name from %r to %r",
+            player_id, node_ref, connector, row["previous_name"] if row else None, name,
+        )
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO checkin_node_name(connector, node_ref, player_id, name, first_seen) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (connector, node_ref, player_id, name, now),
+    )
+
+
+def _build_directory_bridge(
+    conn, directory_nodes: list[dict], connector: str | None = None, now: int | None = None,
+) -> dict[str, int]:
     """normalized display name -> player_id, resolved by walking each
     non-disabled player's bound MeshCore radio contact (player_node,
     protocol='mc') through to `directory_nodes` (a live.mwmesh.com
@@ -949,6 +1046,19 @@ def _build_directory_bridge(conn, directory_nodes: list[dict]) -> dict[str, int]
     resolve through the bridge this cycle -- an explicit
     mc_checkin_binding registration, or a later unambiguous directory
     state, still works), never a best-effort pick.
+
+    `connector`/`now`: when given, every contact this bridge resolves is
+    also passed to _record_node_name against `connector` -- see that
+    function for why. Only _resolve_mc_identities' PRIMARY pass (this
+    net's own connector, see CheckinPoller._poll_mc_feed) supplies
+    these; the cross-connector fallback pass below leaves them None,
+    since `directory_nodes` there is already a union across every OTHER
+    connector currently polled and no single connector identity applies
+    to a name resolved from it. Recording nothing for that pass is not a
+    gap: the SAME contact, if it resolves at all, resolves through its
+    own net's primary pass on some cycle too (that is the common case
+    this whole bridge is built around), which is what actually gets
+    recorded.
     """
     by_name: dict[str, set[str]] = {}
     by_prefix: dict[str, list[dict]] = {}
@@ -991,11 +1101,16 @@ def _build_directory_bridge(conn, directory_nodes: list[dict]) -> dict[str, int]
         if normalized is None:
             continue
         bridge[normalized] = r["player_id"]
+        if connector is not None:
+            # See this function's own docstring for why only the
+            # PRIMARY pass (connector supplied) records here.
+            _record_node_name(conn, connector, contact, r["player_id"], name, now)
     return bridge
 
 
 def _resolve_mc_identities(
     conn, primary_directory: list[dict], other_directories: list[list[dict]],
+    primary_connector: str | None = None,
 ) -> dict[str, int]:
     """normalized sender name -> player_id, the single map
     _process_mc_message actually looks a check-in sender up in --
@@ -1051,8 +1166,16 @@ def _resolve_mc_identities(
     name that was never checked against the directory to begin with, and
     mc_checkin_binding's own PRIMARY KEY already prevents two players
     from registering the identical fallback string.
+
+    `primary_connector`, when given, is passed through to
+    _build_directory_bridge's PRIMARY-pass call only (never the fallback
+    pass) so it can record each resolved contact's current directory name
+    (checkin_node_name, app/db.py) against a single, unambiguous
+    connector -- see that function's own docstring for why the fallback
+    pass, built from a union across other connectors, never does this.
     """
-    primary_bridge = _build_directory_bridge(conn, primary_directory)
+    now = int(time.time())
+    primary_bridge = _build_directory_bridge(conn, primary_directory, connector=primary_connector, now=now)
     if other_directories:
         fallback_nodes = [node for nodes in other_directories for node in nodes]
         fallback_bridge = _build_directory_bridge(conn, fallback_nodes)
@@ -1351,6 +1474,17 @@ class CheckinPoller:
         # one. Zero until the first cycle finishes.
         self.last_poll_at: int = 0
         self.last_poll_error: str | None = None
+        # Gates _maybe_prune_unresolved_senders to at most once an hour --
+        # same interval and monotonic-clock idiom
+        # app/mqtt_subscriber.py's _HOUSEKEEPING_INTERVAL_S/
+        # _maybe_housekeeping and app/mc_ingest.py's McIngestor use for
+        # their own retention pruning, mirrored here rather than shared
+        # code since the tables involved are unrelated. There is nothing
+        # to prune on every 30-second poll cycle -- checkin_unresolved_
+        # sender only grows during net windows, a few hours a week -- so
+        # gating this the same way those two already do avoids a mostly-
+        # pointless DELETE on every cycle.
+        self._last_unresolved_prune: float = 0.0
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self.run_forever(), name="checkin-poller")
@@ -1452,9 +1586,33 @@ class CheckinPoller:
                 log.exception("checkin: mt poll failed")
                 errors.append("mt: %s" % e)
 
+        await self._maybe_prune_unresolved_senders()
+
         self.last_poll_at = int(time.time())
         self.last_poll_error = "; ".join(errors) if errors else None
         return config["poll_interval_seconds"]
+
+    async def _maybe_prune_unresolved_senders(self) -> None:
+        """Delete checkin_unresolved_sender rows older than
+        UNRESOLVED_SENDER_RETENTION_DAYS, at most once an hour -- see
+        that constant and _UNRESOLVED_PRUNE_INTERVAL_S for why. Pruned
+        on `last_seen` (the most recent sighting of that sender in that
+        net), not `first_seen`, so a name that keeps posting unresolved
+        week after week stays visible the whole time it remains a live
+        problem, and only drops off once it has genuinely gone quiet.
+        """
+        now = time.monotonic()
+        if now - self._last_unresolved_prune < _UNRESOLVED_PRUNE_INTERVAL_S:
+            return
+        self._last_unresolved_prune = now
+        cutoff = int(time.time()) - UNRESOLVED_SENDER_RETENTION_DAYS * 86400
+        async with WriteSession() as conn:
+            cur = conn.execute(
+                "DELETE FROM checkin_unresolved_sender WHERE last_seen < ?", (cutoff,)
+            )
+            removed = cur.rowcount
+        if removed:
+            log.info("checkin: pruned %d stale checkin_unresolved_sender row(s)", removed)
 
     # ---- client pooling ----------------------------------------------
 
@@ -1599,7 +1757,7 @@ class CheckinPoller:
         other_dirs = [self._mc_directory.get(u, []) for u in all_connectors if u != connector_url]
 
         async with WriteSession() as conn:
-            resolved = _resolve_mc_identities(conn, primary_dir, other_dirs)
+            resolved = _resolve_mc_identities(conn, primary_dir, other_dirs, primary_connector=connector_url)
             for m in messages:
                 self._process_mc_message(conn, connector_url, feed_nets, m, season_id, resolved, config, received_at)
 
@@ -1657,7 +1815,18 @@ class CheckinPoller:
                 # a real player whose bound contact has not reached the
                 # directory yet, or who has not registered their
                 # fallback name yet.
+                #
+                # Recorded here, not settled -- this is purely a
+                # visibility log for an operator (checkin_unresolved_sender,
+                # app/db.py) and must never be confused with the
+                # checkin_seen_message dedupe below. It is written INSIDE
+                # this per-net loop, keyed on THIS net's own net_date, so
+                # a message inside two different nets' windows (a
+                # theoretical edge case today) is recorded once against
+                # each net it actually fell inside, exactly the same
+                # scoping net_date_for_net already applies to awarding.
                 unresolved = True
+                _record_unresolved_sender(conn, net["id"], net_date, normalized, received_at)
                 continue
             _award_checkin(conn, config, season_id, player_id, net_date, MC_PROTOCOL,
                            pid_str, received_at, ts)

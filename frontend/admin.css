@@ -235,6 +235,12 @@ body {
 
 .adm-hint { color: var(--mw-text-6); font-size: 0.8125rem; margin: 0 0 14px; line-height: 1.5; }
 .adm-status-bad { color: var(--bad); }
+/* Same tone --dot-warn/.adm-tile-warn already use for --warn, applied
+   to plain text -- mirrors .adm-status-bad's existing text-color use of
+   --bad, just for the warn tier (checkin nets: unresolved sender
+   counts). No new color, just a second text-tone class alongside the
+   one that already exists. */
+.adm-status-warn { color: var(--warn); }
 
 @media (max-width: 720px) {
   .adm-body { grid-template-columns: 1fr; }
