@@ -415,11 +415,13 @@ async def teams_list() -> dict:
 
     Unlike the retired snake-draft `team_assignment` table (reassigned
     every season, keyed by season_id), a player's team in the new model
-    is a permanent attribute of the player row (see app/join_api.py) --
-    there is no seasonal reassignment any more, so this reads the player
-    roster directly and is not scoped to a season at all. Returns one
-    entry per player, not per radio -- a player may hold several nodes,
-    and the roster is a list of people, not of radios.
+    lives on the player row itself and changes only through
+    app/join_api.py's switch_team() or app/admin_api.py's
+    admin_set_team() -- there is no seasonal reassignment any more, so
+    this reads the player roster directly and is not scoped to a season
+    at all. Returns one entry per player, not per radio -- a player may
+    hold several nodes, and the roster is a list of people, not of
+    radios.
     """
     conn = connect()
     try:

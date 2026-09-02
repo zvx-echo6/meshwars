@@ -2,6 +2,22 @@
 
 Notable, player-facing changes. Plain language, newest first.
 
+## 2026-09-02 — Switch teams, once a month
+
+**Picked the wrong team, or just want to play somewhere else?** You can
+now switch teams yourself, once per calendar month, from the
+setup-check panel at the bottom of the Join page — paste your API key,
+then use the new team control right below your name and team.
+
+**Your points and streak come with you. Your ground doesn't.** Every
+check-in point, exploration point, and streak you've built stays
+attached to you, not your old team, so none of it is lost by switching.
+The squares you currently hold are the one thing that stays behind —
+they remain with the team that held them, exactly as if someone else
+on that team had painted them. The confirmation screen spells out both
+halves of that before you commit, along with the date you'll be able
+to switch again.
+
 ## 2026-08-27 — The Layers box gets out of the way
 
 **You can put the Layers panel away.** The layer switcher in the bottom

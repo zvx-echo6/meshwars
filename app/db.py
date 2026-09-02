@@ -200,6 +200,26 @@ CREATE TABLE IF NOT EXISTS player (
 );
 CREATE INDEX IF NOT EXISTS idx_player_team ON player(team);
 
+-- History of team changes. Exists so a player's once-per-calendar-month
+-- self-switch allowance (app/join_api.py's switch_team()) can be
+-- checked without touching player itself, and so an operator override
+-- (app/admin_api.py's admin_set_team()) is auditable. Deliberately NOT
+-- read by anything on the scoring path: mc_tile.owner_team is frozen
+-- at paint time and never re-derived from player.team, and check-in /
+-- exploration points and streaks all join live on player.team already
+-- -- a team change moves those for free and leaves ground exactly
+-- where it was. This table only ever gains a row; nothing deletes from
+-- it.
+CREATE TABLE IF NOT EXISTS player_team_change (
+    change_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id   INTEGER NOT NULL,
+    from_team   TEXT NOT NULL,
+    to_team     TEXT NOT NULL,
+    changed_at  INTEGER NOT NULL,
+    actor       TEXT NOT NULL           -- 'player' | 'operator'
+);
+CREATE INDEX IF NOT EXISTS idx_player_team_change_player ON player_team_change(player_id, changed_at);
+
 -- Which radios belong to which person.
 CREATE TABLE IF NOT EXISTS player_node (
     protocol   TEXT NOT NULL,              -- 'meshtastic' | 'meshcore'
