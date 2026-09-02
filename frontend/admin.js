@@ -145,6 +145,7 @@ const KIND_TITLES = {
   never_sent: 'connected a radio, never sent',
   wrong_owner: 'using someone else\'s radio',
   checkin_unreachable: 'cannot earn net check-ins',
+  checkin_name_changed: 'MeshCore name changed recently',
   stale: 'stopped playing',
 };
 
@@ -650,10 +651,43 @@ function renderNetRow(n) {
   }));
   row.appendChild(actions);
   wrap.appendChild(row);
-  wrap.appendChild(el('p', {
+
+  // Poll status and unresolved-sender count share the same health line
+  // -- both answer "is this net actually working," just for two
+  // different silent failures (the connector being unreachable, versus
+  // a message it fetched fine but could never credit to anyone -- see
+  // app/checkin.py's module docstring). The count is its own span so
+  // only it takes the warn tone; a poll error already colors the whole
+  // line bad and should not be diluted by also drawing the eye to a
+  // separate, less urgent warn-colored number.
+  const healthP = el('p', {
     className: 'adm-net-health' + (n.last_poll_error ? ' adm-status-bad' : ''),
-    text: netHealthText(n),
-  }));
+  });
+  healthP.appendChild(el('span', { text: netHealthText(n) }));
+  if (n.unresolved_count > 0) {
+    healthP.appendChild(el('span', {
+      className: 'adm-status-warn',
+      text: '  ·  ' + n.unresolved_count +
+        (n.unresolved_count === 1 ? ' unresolved sender' : ' unresolved senders') +
+        ' (' + n.unresolved_net_date + ')',
+    }));
+  }
+  wrap.appendChild(healthP);
+
+  // The names themselves, only when there are any -- compact, one line,
+  // built with textContent (never innerHTML) since a sender name is
+  // whatever a MeshCore node owner typed into their own device, not
+  // anything this app validated. Reuses .adm-net-health's own muted
+  // tone rather than a new class; this is a detail line under an
+  // already-established one, not a fresh kind of thing on the page.
+  if (n.unresolved_senders && n.unresolved_senders.length) {
+    wrap.appendChild(el('p', {
+      className: 'adm-net-health',
+      text: n.unresolved_senders
+        .map((s) => s.sender_name + ' (' + s.message_count + ')')
+        .join(', '),
+    }));
+  }
   return wrap;
 }
 

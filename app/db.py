@@ -742,6 +742,72 @@ CREATE TABLE IF NOT EXISTS checkin_seen_message (
     PRIMARY KEY (connector, packet_id)
 );
 
+-- A MeshCore channel message that fell INSIDE a net's window but whose
+-- sender name resolved to no registered player -- see
+-- app/checkin.py's _process_mc_message, which is the only writer.
+-- Existing to make an otherwise completely silent failure visible to an
+-- operator: the identity model cannot be strengthened (the packet
+-- genuinely carries no public key, only a free-text display name -- see
+-- app/checkin.py's module docstring), so the fix here is not resolving
+-- more senders, it is showing that a sender went unresolved at all.
+--
+-- Scoped to (net_id, net_date), not just net_id or a bare timestamp --
+-- a busy MeshCore channel carries constant chatter outside net hours,
+-- and logging all of it would bury the signal an operator actually
+-- wants under noise nobody attends to. Only a message that already
+-- passed net_date_for_net for THIS net is ever recorded here (see
+-- _process_mc_message), which is also why this table's net_id/net_date
+-- pair matches mc_checkin_award's own key shape rather than being an
+-- unscoped sender log.
+--
+-- Recording a row here is NOT the same as settling the message in
+-- checkin_seen_message -- it must never be, and must never become,
+-- an alternative way to mark a message seen. See _process_mc_message's
+-- own comment (and the 2026-08-19 incident it references) for why an
+-- unresolved sender has to stay eligible for a later poll to retry once
+-- the directory or a binding catches up.
+--
+-- One row per (net, net_date, sender), upserted -- message_count and
+-- last_seen accumulate across repeat posts from the same unresolved
+-- name in the same net, the same way a resolved sender would only earn
+-- once no matter how many times they posted (mc_checkin_award's own
+-- key), so this stays one line per offender per net rather than growing
+-- one row per message.
+CREATE TABLE IF NOT EXISTS checkin_unresolved_sender (
+    net_id        INTEGER NOT NULL,
+    net_date      TEXT NOT NULL,
+    sender_name   TEXT NOT NULL,
+    first_seen    INTEGER NOT NULL,
+    last_seen     INTEGER NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (net_id, net_date, sender_name)
+);
+CREATE INDEX IF NOT EXISTS idx_unresolved_net_date ON checkin_unresolved_sender(net_date);
+
+-- Last-known MeshCore directory display name per (connector, player) --
+-- see app/checkin.py's _build_directory_bridge, the only writer. A
+-- check-in is credited by resolving a player's bound radio contact to
+-- whatever display name its public key currently resolves to in a
+-- connector's node directory (see app/checkin.py's module docstring);
+-- if a player renames their node, that resolved name changes and their
+-- check-ins silently stop being credited under the name this table
+-- remembers -- nothing else in this schema records what a player's
+-- resolved name USED to be, so there is otherwise no way to notice a
+-- rename ever happened. previous_name/changed_at exist so that moment
+-- is visible (app/admin_ops.py's _attention surfaces a recent change)
+-- rather than only inferrable after check-ins have already gone quiet.
+-- changed_at is NULL until the first change is observed -- the initial
+-- insert is not itself a "change."
+CREATE TABLE IF NOT EXISTS checkin_player_name (
+    connector     TEXT NOT NULL,
+    player_id     INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    first_seen    INTEGER NOT NULL,
+    changed_at    INTEGER,
+    previous_name TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (connector, player_id)
+);
+
 -- ---------------------------------------------------------------------
 -- Monthly results (app/results.py). A six-month season leaves five
 -- months with nothing to show, so each calendar month closes with its
