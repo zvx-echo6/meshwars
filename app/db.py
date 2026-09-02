@@ -339,6 +339,27 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     PRIMARY KEY (player_id, protocol, day)
 );
 
+-- One row per FreqMapper verified-coverage event ever processed
+-- (app/freqmapper_ingest.py). verification_id is that event's whole
+-- identity -- a stable UUID FreqMapper itself assigns, one per event,
+-- never reused -- so this is a pure dedup table: INSERT OR IGNORE on the
+-- primary key means an event already seen (a page re-fetched after a
+-- restart before the cursor was persisted, a retry, an overlapping
+-- page) is a no-op rather than a re-processed, re-scored event. Recorded
+-- for EVERY event that reaches this check, regardless of whether the
+-- radio turns out to be registered or in bounds, or which source is
+-- currently painting the Meshtastic board (settings.mt_paint_source) --
+-- this table's only job is "have we ever looked at this specific event
+-- before," not "did it score." Pruned well past FreqMapper's own paging
+-- window by app/freqmapper_ingest.py's own housekeeping, the same
+-- reasoning app/mc_ingest.py's retention windows use, so this cannot
+-- grow without bound on a long-running deployment.
+CREATE TABLE IF NOT EXISTS freqmapper_verification (
+    verification_id TEXT PRIMARY KEY,
+    seen_at          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verification(seen_at);
+
 -- ---------------------------------------------------------------------
 -- MeshCore-model scoring tables. Both boards run on this model now,
 -- flat grid cells and players instead of the retired geohash tile/

@@ -50,6 +50,20 @@ services:
       CHECKIN_NET_START_DATE: "${CHECKIN_NET_START_DATE:-}"
       MC_CHECKIN_BASE_URL: "${MC_CHECKIN_BASE_URL:-}"
       CARTO_API_KEY: "${CARTO_API_KEY:-}"
+      # FreqMapper (app/freqmapper_ingest.py): alternative Meshtastic
+      # paint source to meshview's own position-packet feed above. See
+      # MT_PAINT_SOURCE below for which one actually paints the board.
+      FREQMAPPER_ENABLED: "${FREQMAPPER_ENABLED:-false}"
+      FREQMAPPER_BASE_URL: "${FREQMAPPER_BASE_URL:-https://dev.freqmapper.net:8443}"
+      FREQMAPPER_API_KEY: "${FREQMAPPER_API_KEY:-}"
+      FREQMAPPER_POLL_INTERVAL_SECONDS: "${FREQMAPPER_POLL_INTERVAL_SECONDS:-60}"
+      FREQMAPPER_PAGE_LIMIT: "${FREQMAPPER_PAGE_LIMIT:-200}"
+      FREQMAPPER_POINTS_PER_EVENT: "${FREQMAPPER_POINTS_PER_EVENT:-0.5}"
+      FREQMAPPER_UNIQUE_PAINTER_BONUS: "${FREQMAPPER_UNIQUE_PAINTER_BONUS:-0.5}"
+      # Which upstream source paints the Meshtastic board: "meshview"
+      # (default) or "freqmapper". Exactly one paints at a time -- see
+      # this setting's own comment in app/config.py.
+      MT_PAINT_SOURCE: "${MT_PAINT_SOURCE:-meshview}"
     volumes:
       # The game database, in a directory beside this compose file. A
       # plain directory rather than a named volume so the operator can

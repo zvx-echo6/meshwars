@@ -154,6 +154,54 @@ class Settings(BaseSettings):
     mt_points_per_feeder: float = 0.1    # points earned per distinct MQTT feeder that heard a ping
     mt_max_points_per_ping: float = 1.0  # ceiling on points from any one ping
 
+    # ---- FreqMapper paint source (app/freqmapper_ingest.py) --------------
+    # FreqMapper is a third-party, independently-operated Meshtastic
+    # coverage-mapping service -- an alternative source of "who painted
+    # which cell" evidence to meshview's own position-packet feed
+    # (app/ingest.py, above). It exposes one read-only endpoint
+    # (GET /api/v1/integrations/verified-coverage) that reports verified
+    # reception events, but deliberately does not say how many stations
+    # heard each one, so it cannot feed the same feeder-count scoring
+    # model meshview does -- see freqmapper_points_per_event below.
+    freqmapper_enabled: bool = False
+    freqmapper_base_url: str = "https://dev.freqmapper.net:8443"
+    # Empty means off, regardless of freqmapper_enabled -- same contract
+    # admin_token and mc_checkin_base_url already use: a blank secret
+    # must never be read as "authenticate with nothing," so an empty key
+    # disables the connector outright. Never logged, never returned from
+    # any route.
+    freqmapper_api_key: str = ""
+    freqmapper_poll_interval_seconds: int = 60
+    freqmapper_page_limit: int = 200
+    # Flat award per verified coverage event, replacing the feeder-count
+    # model above (mt_points_per_feeder) -- FreqMapper does not report a
+    # feeder/repeater count for an event, so there is nothing to count;
+    # see apply_paint()'s flat_points parameter in app/mc_scoring.py.
+    freqmapper_points_per_event: float = 0.5
+    # One-time bonus the first time a player paints a given cell for
+    # their team via FreqMapper -- same mechanic mc_score_per_unique_player
+    # drives for MeshCore (mc_tile_unique_painter / is_first_paint_for_player()),
+    # kept as its own independent knob (via apply_paint()'s
+    # unique_player_bonus parameter) rather than reusing
+    # mc_score_per_unique_player, so the two can be tuned independently.
+    freqmapper_unique_painter_bonus: float = 0.5
+
+    # Which upstream source paints the Meshtastic board: "meshview"
+    # (default -- today's behaviour, unchanged: app/ingest.py's
+    # position-packet poll and backfill score exactly as they always
+    # have) or "freqmapper" (app/ingest.py's position-painting paths --
+    # the portnum=3 poll and _backfill -- are gated off entirely; roster
+    # and nodeinfo keep running either way, since those are
+    # identity/roster concerns, not scoring). Exactly one may paint the
+    # Meshtastic board at a time -- this is the single switch both
+    # app/ingest.py and app/freqmapper_ingest.py read, so the mutual
+    # exclusion cannot be gotten wrong by checking two independent flags
+    # that could disagree. app/freqmapper_ingest.py's poll loop still
+    # runs (and dedupes) whenever freqmapper_enabled is true regardless
+    # of this value, so switching it later never replays history -- only
+    # the actual score/write is gated on it.
+    mt_paint_source: str = "meshview"
+
     # Minimum Meshtastic position precision a packet must carry to score.
     # A Meshtastic node can report its position at reduced precision
     # (Channel settings -> Precision, or a firmware default): the device

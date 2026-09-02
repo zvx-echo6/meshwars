@@ -275,6 +275,8 @@ def apply_paint(
     protocol: str,
     received_at: int,
     by_air: bool = False,
+    flat_points: float | None = None,
+    unique_player_bonus: float | None = None,
 ) -> PaintResult:
     """Score one accepted ping against a cell and resolve ownership.
 
@@ -287,6 +289,31 @@ def apply_paint(
     settings.mc_max_points_per_ping for MeshCore, the mt_ equivalents for
     Meshtastic) -- passed in rather than looked up here so this function
     stays board-agnostic, same as everything else in this module.
+
+    `flat_points`, when not None, bypasses the repeater-cooldown/cap
+    machinery below entirely (repeater_ids/points_per_repeater/
+    max_points_per_ping are all ignored) and awards exactly this many
+    points instead. This is for app/freqmapper_ingest.py: a FreqMapper
+    verified-coverage event carries no repeater/feeder count at all (the
+    API deliberately does not report how many stations heard the
+    transmission), so there is nothing to gate a per-repeater cooldown
+    on -- the event-level dedup that cooldown exists to provide is
+    instead handled once, before this function is ever called, by
+    FreqMapper's own verification_id table (app/db.py's
+    freqmapper_verification): each event is globally unique and
+    processed at most once, so every call made in this mode is a fresh,
+    intentional award, never a repeat that needs throttling. `repeater_ids`
+    is unused in this mode -- the caller passes an empty list -- so the
+    "named zero repeaters" rejection below (the ordinary no_signal case)
+    is skipped too, since a flat-scored event has no repeater concept to
+    reject on.
+
+    `unique_player_bonus`, when not None, overrides
+    settings.mc_score_per_unique_player for the one-time per-player
+    bonus below. FreqMapper's bonus (settings.freqmapper_unique_painter_bonus)
+    is configured as its own independent knob, not tied to MeshCore's,
+    and the two must be able to differ -- every other caller leaves this
+    None and gets exactly today's shared-setting behavior.
 
     Scoring is gated per REPEATER, not per ping. mc_cooldown_seconds
     exists to stop a player parked in one spot from spamming pings to run
@@ -329,43 +356,51 @@ def apply_paint(
     Caller must already hold app.db's write lock and have an open write
     transaction on `conn` -- this function does neither itself.
     """
-    if not repeater_ids:
-        return PaintResult("no_signal", cell_id, team)
+    if flat_points is None:
+        if not repeater_ids:
+            return PaintResult("no_signal", cell_id, team)
 
-    already_credited = _credited_repeaters(conn, player_id, protocol, cell_id, ts, settings.mc_cooldown_seconds)
-    new_ids = [r for r in dict.fromkeys(repeater_ids) if r not in already_credited]
-    if not new_ids:
-        # Every repeater this ping named has already been credited to
-        # this player on this cell within the window -- the spam case
-        # the cooldown exists to block.
-        return PaintResult("cooldown", cell_id, team)
+        already_credited = _credited_repeaters(conn, player_id, protocol, cell_id, ts, settings.mc_cooldown_seconds)
+        new_ids = [r for r in dict.fromkeys(repeater_ids) if r not in already_credited]
+        if not new_ids:
+            # Every repeater this ping named has already been credited to
+            # this player on this cell within the window -- the spam case
+            # the cooldown exists to block.
+            return PaintResult("cooldown", cell_id, team)
 
-    # The per-visit cap applies across the whole cooldown window, not
-    # just this one ping -- count what earlier pings in the window have
-    # already been credited before deciding how much of this ping fits.
-    already_points = min(len(already_credited) * points_per_repeater, max_points_per_ping)
-    remaining = max_points_per_ping - already_points
-    if remaining <= 0:
-        # New repeaters were named, but this visit already hit the cap
-        # from earlier credits in the window -- same spam protection,
-        # just triggered by the cap rather than an all-repeated ping.
-        return PaintResult("cooldown", cell_id, team)
+        # The per-visit cap applies across the whole cooldown window, not
+        # just this one ping -- count what earlier pings in the window have
+        # already been credited before deciding how much of this ping fits.
+        already_points = min(len(already_credited) * points_per_repeater, max_points_per_ping)
+        remaining = max_points_per_ping - already_points
+        if remaining <= 0:
+            # New repeaters were named, but this visit already hit the cap
+            # from earlier credits in the window -- same spam protection,
+            # just triggered by the cap rather than an all-repeated ping.
+            return PaintResult("cooldown", cell_id, team)
 
-    slots = int(remaining / points_per_repeater + 1e-9) if points_per_repeater > 0 else 0
-    credit_ids = new_ids[:slots]
-    if not credit_ids:
-        return PaintResult("cooldown", cell_id, team)
+        slots = int(remaining / points_per_repeater + 1e-9) if points_per_repeater > 0 else 0
+        credit_ids = new_ids[:slots]
+        if not credit_ids:
+            return PaintResult("cooldown", cell_id, team)
 
-    for repeater_id in credit_ids:
-        _record_repeater_credit(conn, player_id, protocol, cell_id, repeater_id, ts, received_at)
-    points = min(len(credit_ids) * points_per_repeater, remaining)
+        for repeater_id in credit_ids:
+            _record_repeater_credit(conn, player_id, protocol, cell_id, repeater_id, ts, received_at)
+        points = min(len(credit_ids) * points_per_repeater, remaining)
+    else:
+        # Flat-award mode (see this function's docstring) -- no repeater
+        # cooldown, no per-visit cap, no repeater-credit bookkeeping.
+        # FreqMapper's own verification_id dedup is what makes this safe:
+        # this function is never called twice for the same event.
+        points = flat_points
 
     # Effort score for this paint, plus the one-time unique-player bonus
     # the first time this player has painted this cell for this team.
+    bonus = settings.mc_score_per_unique_player if unique_player_bonus is None else unique_player_bonus
     current = get_team_score(conn, season_id, cell_id, team, ts)
     new_score = current + points
     if is_first_paint_for_player(conn, season_id, cell_id, team, player_id, ts):
-        new_score += settings.mc_score_per_unique_player
+        new_score += bonus
     upsert_team_score(conn, season_id, cell_id, team, new_score, ts)
 
     tile = conn.execute(

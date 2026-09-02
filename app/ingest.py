@@ -39,6 +39,17 @@ The one exception is the node_seen roster refresh (_refresh_roster
 below): it still records the same nodes the same way, but is now keyed
 on the active 'mt' mc_season instead of the retired `season` table,
 since that table is frozen history now and no longer rolls forward.
+
+settings.mt_paint_source (app/config.py) decides whether THIS module or
+app/freqmapper_ingest.py paints the Meshtastic board. Default is
+"meshview" -- unchanged from every line above. When it is "freqmapper"
+instead, the two position-painting paths below -- _poll_once's
+portnum=3 fetch and _backfill -- are gated off entirely: neither fetches
+packets, scores, nor writes player_cell_ping. _refresh_roster (node
+names/roster) and _poll_nodeinfo (portnum=4, mt_node_key) are identity/
+roster concerns, not scoring, and keep running either way -- see
+app/freqmapper_ingest.py's own module docstring for the other half of
+this switch.
 """
 from __future__ import annotations
 
@@ -218,12 +229,20 @@ class Ingestor:
     def __init__(self, client: MeshviewClient):
         self.client = client
         self._stop = asyncio.Event()
+        # Logged once, not every poll cycle, the first time a cycle finds
+        # painting gated off -- see _poll_once below.
+        self._logged_paint_gated_once = False
 
     def stop(self) -> None:
         self._stop.set()
 
     async def run_forever(self) -> None:
-        log.info("ingest loop starting; poll=%ds", settings.poll_interval_seconds)
+        log.info(
+            "ingest loop starting; poll=%ds paint_source=%s (%s)",
+            settings.poll_interval_seconds, settings.mt_paint_source,
+            "meshview is painting" if settings.mt_paint_source == "meshview"
+            else "meshview is NOT painting -- position poll and backfill are gated off",
+        )
         # Snapshot roster on startup so we have something to render. This
         # also ensures the active 'mt' mc_season exists (see
         # _refresh_roster below) -- there is no separate
@@ -347,7 +366,18 @@ class Ingestor:
         """On startup, pull position packets from the last N hours so the
         board fills in immediately for already-registered players. Pages
         backwards by import_time_us.
+
+        Gated off entirely when settings.mt_paint_source is not
+        "meshview" -- see this module's docstring. Backfill exists purely
+        to paint the board faster on a cold start; when FreqMapper is the
+        active paint source, meshview has nothing to backfill toward.
         """
+        if settings.mt_paint_source != "meshview":
+            log.info(
+                "meshview backfill skipped -- mt_paint_source=%s", settings.mt_paint_source
+            )
+            return
+
         import time as _time
         cutoff_s = int(_time.time()) - (settings.backfill_hours * 3600)
         cutoff_us = cutoff_s * 1_000_000
@@ -434,10 +464,44 @@ class Ingestor:
         log.info("backfill done: processed=%d", total_processed)
 
     async def _poll_once(self) -> None:
+        """One ingest cycle: position-packet painting (gated by
+        settings.mt_paint_source -- see this module's docstring) followed
+        by the NodeInfo identity pass, which always runs regardless of
+        which source is currently painting.
+        """
+        if settings.mt_paint_source == "meshview":
+            await self._poll_positions()
+        elif not self._logged_paint_gated_once:
+            log.info(
+                "meshview position poll skipped -- mt_paint_source=%s",
+                settings.mt_paint_source,
+            )
+            self._logged_paint_gated_once = True
+
+        # NodeInfo pass: passive accumulation into mt_node_key only (see
+        # that table's comment in app/db.py). Entirely separate from
+        # position ingest/scoring above -- nothing reads mt_node_key yet
+        # -- so it is isolated in its own try/except: a failure here
+        # (upstream hiccup, an unparsable payload) must never take
+        # position ingest or scoring down with it. Runs every cycle
+        # regardless of mt_paint_source: this is identity/roster data,
+        # not scoring, and stays on either way -- see this module's
+        # docstring.
+        try:
+            await self._poll_nodeinfo()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("nodeinfo poll failed")
+
+    async def _poll_positions(self) -> None:
         """Fetch the newest 100 position packets and process anything we
         haven't seen yet. Dedup is via the processed_packet table; we
         don't need a server-side cursor because the API always returns
         newest-first and 100 packets is plenty of overlap between polls.
+
+        Only ever called when settings.mt_paint_source == "meshview" --
+        see _poll_once above.
         """
         now = int(time.time())
         # Season bookkeeping WRITES mc_season (see the matching comment in
@@ -492,19 +556,6 @@ class Ingestor:
             "poll: packets=%d processed=%d skipped=%d max_import_us=%d",
             len(packets), n_processed, n_skipped, max_import_us,
         )
-
-        # NodeInfo pass: passive accumulation into mt_node_key only (see
-        # that table's comment in app/db.py). Entirely separate from the
-        # position poll above and from scoring -- nothing reads
-        # mt_node_key yet -- so it is isolated in its own try/except:
-        # a failure here (upstream hiccup, an unparsable payload) must
-        # never take position ingest or scoring down with it.
-        try:
-            await self._poll_nodeinfo()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("nodeinfo poll failed")
 
     async def _poll_nodeinfo(self) -> None:
         """Fetch the newest NodeInfo (portnum=4) packets and record any

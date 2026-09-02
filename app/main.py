@@ -13,6 +13,7 @@ from .api import mount
 from .checkin import CheckinPoller
 from .config import settings
 from .db import init_db
+from .freqmapper_ingest import FreqMapperIngestor
 from .ingest import Ingestor
 from .mc_ingest import McIngestor
 from .meshview_client import MeshviewClient
@@ -28,6 +29,12 @@ log = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("startup: meshview=%s db=%s", settings.meshview_url, settings.db_path)
+    # Which upstream source paints the Meshtastic board -- see
+    # settings.mt_paint_source's own comment in app/config.py. Logged
+    # once, up front, at the loudest point in startup so it is obvious
+    # from the logs alone which one is live, without having to correlate
+    # it against either connector's own per-cycle log lines.
+    log.info("meshtastic paint source: %s", settings.mt_paint_source)
     init_db()
 
     client = MeshviewClient()
@@ -37,6 +44,18 @@ async def lifespan(app: FastAPI):
     mc_ingestor = McIngestor()
     if settings.mc_ingest_enabled:
         await mc_ingestor.start()
+
+    # FreqMapper (app/freqmapper_ingest.py): an alternative Meshtastic
+    # paint source to meshview's position-packet feed above. Started
+    # unconditionally rather than gated on settings.freqmapper_enabled
+    # here -- run_forever() itself checks freqmapper_enabled and
+    # freqmapper_api_key on entry and returns immediately if either is
+    # unset, so a fresh install with FreqMapper never configured just
+    # starts (and instantly exits) a no-op task, the same shape
+    # settings.mc_ingest_enabled's own gate below takes for a different
+    # reason (there it guards .start(), here it lives inside the task).
+    freqmapper_ingestor = FreqMapperIngestor()
+    freqmapper_task = asyncio.create_task(freqmapper_ingestor.run_forever(), name="freqmapper-ingest")
 
     # Net check-ins (app/checkin.py). Shares `client` (the same
     # MeshviewClient the position-packet Ingestor above already holds)
@@ -73,6 +92,8 @@ async def lifespan(app: FastAPI):
     app.state.mc_ingestor = mc_ingestor
     app.state.checkin_poller = checkin_poller
     app.state.mqtt_subscriber = mqtt_subscriber
+    app.state.freqmapper_ingestor = freqmapper_ingestor
+    app.state.freqmapper_task = freqmapper_task
 
     try:
         yield
@@ -82,6 +103,12 @@ async def lifespan(app: FastAPI):
         task.cancel()
         try:
             await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        freqmapper_ingestor.stop()
+        freqmapper_task.cancel()
+        try:
+            await freqmapper_task
         except (asyncio.CancelledError, Exception):
             pass
         if settings.mc_ingest_enabled:
