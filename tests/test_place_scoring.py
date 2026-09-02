@@ -28,7 +28,7 @@ def _place(conn, place_id, ref_type, lat, lon, points, rotates=0, active=1):
 
 def test_credits_a_summit_and_caps_at_100(conn):
     cid = _place(conn, 1, "summit", 43.0, -116.0, points=100)
-    credited = credit_places(conn, player_id=1, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    credited = credit_places(conn, player_id=1, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert credited == [(1, 100)]
 
     total = conn.execute(
@@ -49,7 +49,7 @@ def test_landmarks_do_not_exceed_weekly_cap(conn):
 
     total_credited = 0
     for i, cid in enumerate(cell_ids, start=1):
-        credited = credit_places(conn, player_id=2, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+        credited = credit_places(conn, player_id=2, cell_id=cid, ts=NOW, paint_outcome="captured")
         total_credited += sum(pts for _, pts in credited)
 
     assert total_credited == WEEKLY_CAP_POINTS
@@ -69,8 +69,8 @@ def test_one_credit_per_reference_per_week(conn):
     """Painting the same place's cell twice in the same week must only
     credit it once."""
     cid = _place(conn, 1, "landmark", 43.0, -116.0, points=5)
-    first = credit_places(conn, player_id=3, cell_id=cid, ts=NOW, repeater_ids=["r1"])
-    second = credit_places(conn, player_id=3, cell_id=cid, ts=NOW + 60, repeater_ids=["r1"])
+    first = credit_places(conn, player_id=3, cell_id=cid, ts=NOW, paint_outcome="captured")
+    second = credit_places(conn, player_id=3, cell_id=cid, ts=NOW + 60, paint_outcome="captured")
 
     assert first == [(1, 5)]
     assert second == []
@@ -82,13 +82,13 @@ def test_one_credit_per_reference_per_week(conn):
 
 def test_no_signal_ping_credits_nothing(conn):
     cid = _place(conn, 1, "landmark", 43.0, -116.0, points=5)
-    credited = credit_places(conn, player_id=4, cell_id=cid, ts=NOW, repeater_ids=[])
+    credited = credit_places(conn, player_id=4, cell_id=cid, ts=NOW, paint_outcome="no_signal")
     assert credited == []
 
 
 def test_aircraft_excluded(conn):
     cid = _place(conn, 1, "landmark", 43.0, -116.0, points=5)
-    credited = credit_places(conn, player_id=5, cell_id=cid, ts=NOW, repeater_ids=["r1"], by_air=True)
+    credited = credit_places(conn, player_id=5, cell_id=cid, ts=NOW, paint_outcome="captured", by_air=True)
     assert credited == []
 
 
@@ -105,7 +105,7 @@ def test_rotating_place_only_credits_when_live(conn):
     # "this landmark exists but did not win this week's slot".
     conn.execute("INSERT INTO place_week(week_start, place_id) VALUES (?, ?)", (WEEK, 2))
 
-    credited = credit_places(conn, player_id=6, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    credited = credit_places(conn, player_id=6, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert credited == []
 
 
@@ -120,14 +120,14 @@ def test_place_worth_more_than_remaining_cap_is_clamped_to_the_remainder(conn):
     """
     landmark_cells = [_place(conn, i, "landmark", 43.0 + i * 0.01, -116.0, points=5) for i in range(1, 20)]
     for cid in landmark_cells:
-        credit_places(conn, player_id=7, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+        credit_places(conn, player_id=7, cell_id=cid, ts=NOW, paint_outcome="captured")
     total_so_far = conn.execute(
         "SELECT SUM(points) FROM place_activation WHERE player_id = ? AND week_start = ?", (7, WEEK)
     ).fetchone()[0]
     assert total_so_far == 95
 
     summit_cell = _place(conn, 100, "summit", 50.0, -120.0, points=100)
-    credited = credit_places(conn, player_id=7, cell_id=summit_cell, ts=NOW, repeater_ids=["r1"])
+    credited = credit_places(conn, player_id=7, cell_id=summit_cell, ts=NOW, paint_outcome="captured")
     assert credited == [(100, 5)]  # clamped to the remaining 5, not the full 100
 
     row_points = conn.execute(
@@ -143,7 +143,7 @@ def test_place_worth_more_than_remaining_cap_is_clamped_to_the_remainder(conn):
     # Budget is now exactly spent -- a further place credits nothing
     # and creates no row (it is not consumed for a zero-point activation).
     another_cell = _place(conn, 101, "landmark", 51.0, -121.0, points=5)
-    credited2 = credit_places(conn, player_id=7, cell_id=another_cell, ts=NOW, repeater_ids=["r1"])
+    credited2 = credit_places(conn, player_id=7, cell_id=another_cell, ts=NOW, paint_outcome="captured")
     assert credited2 == []
     count = conn.execute(
         "SELECT COUNT(*) FROM place_activation WHERE player_id = ? AND place_id = ?", (7, 101)
@@ -158,7 +158,7 @@ def test_place_larger_than_the_whole_cap_is_clamped_to_100(conn):
     player with the full budget still open, is clamped to exactly
     WEEKLY_CAP_POINTS in one activation."""
     cid = _place(conn, 1, "summit", 43.0, -116.0, points=150)
-    credited = credit_places(conn, player_id=30, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    credited = credit_places(conn, player_id=30, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert credited == [(1, WEEKLY_CAP_POINTS)]
 
     row_points = conn.execute(
@@ -180,16 +180,16 @@ def test_partially_credited_place_does_not_pay_again_same_week(conn):
     """
     landmark_cells = [_place(conn, i, "landmark", 43.0 + i * 0.01, -116.0, points=5) for i in range(1, 20)]
     for cid in landmark_cells:
-        credit_places(conn, player_id=31, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+        credit_places(conn, player_id=31, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert conn.execute(
         "SELECT SUM(points) FROM place_activation WHERE player_id = ? AND week_start = ?",
         (31, WEEK)).fetchone()[0] == 95
 
     summit_cell = _place(conn, 100, "summit", 50.0, -120.0, points=100)
-    first = credit_places(conn, player_id=31, cell_id=summit_cell, ts=NOW, repeater_ids=["r1"])
+    first = credit_places(conn, player_id=31, cell_id=summit_cell, ts=NOW, paint_outcome="captured")
     assert first == [(100, 5)]
 
-    second = credit_places(conn, player_id=31, cell_id=summit_cell, ts=NOW + 3600, repeater_ids=["r1"])
+    second = credit_places(conn, player_id=31, cell_id=summit_cell, ts=NOW + 3600, paint_outcome="captured")
     assert second == []
     count = conn.execute(
         "SELECT COUNT(*) FROM place_activation WHERE player_id = ? AND place_id = ?", (31, 100)
@@ -204,7 +204,7 @@ def test_inactive_place_cannot_be_scored(conn):
     row situation a real seed reload leaves behind.
     """
     cid = _place(conn, 1, "summit", 43.0, -116.0, points=100, active=0)
-    credited = credit_places(conn, player_id=8, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    credited = credit_places(conn, player_id=8, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert credited == []
     count = conn.execute(
         "SELECT COUNT(*) FROM place_activation WHERE place_id = ?", (1,)
@@ -234,7 +234,7 @@ def test_overlapping_places_credit_only_the_highest(conn):
     cid2 = _place_on(conn, 2, "landmark", 43.0, -116.0, points=10)
     assert cid == cid2, "both places must land on the same cell for this test"
 
-    credited = credit_places(conn, player_id=20, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    credited = credit_places(conn, player_id=20, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert credited == [(1, 25)]
 
     rows = conn.execute(
@@ -260,14 +260,14 @@ def test_equal_points_tiebreak_is_stable_and_not_insertion_order(conn):
     cid2 = _place_on(conn, 2, "landmark", 43.5, -116.5, points=10)
     assert cid == cid2
 
-    credited = credit_places(conn, player_id=21, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+    credited = credit_places(conn, player_id=21, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert credited == [(2, 10)]
 
     # Deterministic across runs: a fresh player on the same cell, and a
     # repeat call, must resolve to the same winner every time.
     for pid in (22, 23, 24):
         assert credit_places(conn, player_id=pid, cell_id=cid, ts=NOW,
-                             repeater_ids=["r1"]) == [(2, 10)]
+                              paint_outcome="captured") == [(2, 10)]
 
 
 def test_lesser_place_is_not_a_fallback_when_the_winner_is_clamped(conn):
@@ -280,7 +280,7 @@ def test_lesser_place_is_not_a_fallback_when_the_winner_is_clamped(conn):
     """
     for i in range(1, 20):
         cid = _place(conn, i, "landmark", 43.0 + i * 0.01, -116.0, points=5)
-        credit_places(conn, player_id=25, cell_id=cid, ts=NOW, repeater_ids=["r1"])
+        credit_places(conn, player_id=25, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert conn.execute(
         "SELECT SUM(points) FROM place_activation WHERE player_id = ? AND week_start = ?",
         (25, WEEK)).fetchone()[0] == 95
@@ -289,7 +289,7 @@ def test_lesser_place_is_not_a_fallback_when_the_winner_is_clamped(conn):
     _place_on(conn, 101, "landmark", 45.0, -114.0, points=5)
 
     assert credit_places(conn, player_id=25, cell_id=shared, ts=NOW,
-                         repeater_ids=["r1"]) == [(100, 5)]
+                          paint_outcome="captured") == [(100, 5)]
     # Only the winner (100) credited, clamped to 5 -- the lesser place
     # (101) never gets a row of its own.
     assert [tuple(r) for r in conn.execute(
@@ -307,8 +307,8 @@ def test_revisiting_a_cell_does_not_fall_through_to_the_lesser_place(conn):
     cid = _place_on(conn, 1, "park", 44.0, -115.0, points=25)
     _place_on(conn, 2, "landmark", 44.0, -115.0, points=10)
 
-    first = credit_places(conn, player_id=26, cell_id=cid, ts=NOW, repeater_ids=["r1"])
-    second = credit_places(conn, player_id=26, cell_id=cid, ts=NOW + 3600, repeater_ids=["r1"])
+    first = credit_places(conn, player_id=26, cell_id=cid, ts=NOW, paint_outcome="captured")
+    second = credit_places(conn, player_id=26, cell_id=cid, ts=NOW + 3600, paint_outcome="captured")
     assert first == [(1, 25)]
     assert second == []
     assert conn.execute(
@@ -339,7 +339,7 @@ def test_existing_stacked_history_is_never_rewritten(conn):
     assert before == [(1, 27, old_week, 25, old_ts), (2, 27, old_week, 10, old_ts)]
 
     # A fresh visit under the new rule, this week.
-    assert credit_places(conn, player_id=27, cell_id=cid, ts=NOW, repeater_ids=["r1"]) == [(1, 25)]
+    assert credit_places(conn, player_id=27, cell_id=cid, ts=NOW, paint_outcome="captured") == [(1, 25)]
 
     after = [tuple(r) for r in conn.execute(
         "SELECT place_id, player_id, week_start, points, awarded_at FROM place_activation "

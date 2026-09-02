@@ -87,6 +87,7 @@ from .config import settings
 from .db import WriteSession, connect, get_cursor, set_cursor
 from .grid import cell_id, in_play_area, valid_coord
 from .node_ref import normalize_node_ref
+from .place_scoring import credit_places
 
 log = logging.getLogger("freqmapper_ingest")
 
@@ -588,7 +589,7 @@ class FreqMapperIngestor:
             return "skipped_duplicate"
 
         try:
-            mc_scoring.apply_paint(
+            paint_result = mc_scoring.apply_paint(
                 conn, season_id, player_id, team, cell, ts,
                 [], 0.0, 0.0, PROTOCOL, seen_at,
                 flat_points=points_per_event,
@@ -601,12 +602,29 @@ class FreqMapperIngestor:
             )
             return "error"
 
-        # Places Worth Going (app/place_scoring.py) is deliberately NOT
-        # hooked in here: credit_places() gates on a non-empty
-        # repeater_ids list (the same "did this ping reach anyone" test
-        # apply_paint's own no_signal case uses), and a FreqMapper event
-        # carries no repeater/feeder list at all -- there is nothing for
-        # it to credit from, so calling it would only ever be a no-op.
+        # Places Worth Going (app/place_scoring.py). A FreqMapper event
+        # carries no repeater/feeder list at all -- the API deliberately
+        # does not report how many stations heard a transmission -- but
+        # every event reaching this point is independently-verified
+        # coverage, never a ping that reached nobody. credit_places()
+        # used to gate on a non-empty repeater list as a stand-in for
+        # "did this ping reach anyone", which read FreqMapper's always-
+        # empty list as exactly that and silently credited nothing for
+        # this whole board. It now gates on apply_paint()'s outcome
+        # instead (see its docstring): flat_points mode never returns
+        # "no_signal" -- there is no "named zero repeaters" check to
+        # fail when there's no repeater list to check -- so every
+        # accepted event here is eligible to credit a place, same as any
+        # scoring MeshCore or meshview ping. by_air is not a FreqMapper
+        # concept (no aircraft-speed detection on this path), so it is
+        # always False.
+        try:
+            credit_places(conn, player_id, cell, ts, paint_result.outcome, False, PROTOCOL)
+        except Exception:
+            log.exception(
+                "place scoring: credit_places failed for player %d cell %s",
+                player_id, cell,
+            )
 
         return "painted"
 

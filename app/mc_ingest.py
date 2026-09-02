@@ -764,8 +764,9 @@ class McIngestor:
         # counters already recorded above or abort the rest of the
         # batch -- log it and keep going.
         if team is not None:
+            paint_result = None
             try:
-                mc_scoring.apply_paint(
+                paint_result = mc_scoring.apply_paint(
                     conn, season_id, player_id, team, cell, ts, repeater_ids,
                     settings.mc_points_per_repeater, settings.mc_max_points_per_ping,
                     PROTOCOL, received_at, by_air,
@@ -778,18 +779,21 @@ class McIngestor:
 
             # Places Worth Going (app/place_scoring.py). Same write
             # transaction, own try/except so a places bug can never cost
-            # a batch its square scoring above. Gated on repeater_ids
-            # and by_air, not on apply_paint()'s outcome -- see
-            # credit_places()'s docstring for why the two are allowed to
-            # disagree (a square-scoring "cooldown" ping still credits a
-            # place).
-            try:
-                credit_places(conn, player_id, cell, ts, repeater_ids, by_air, PROTOCOL)
-            except Exception:
-                log.exception(
-                    "place scoring: credit_places failed for player %d cell %s",
-                    player_id, cell,
-                )
+            # a batch its square scoring above. Gated on apply_paint()'s
+            # outcome (paint_result.outcome), not on repeater_ids/by_air
+            # directly -- see credit_places()'s docstring for why a
+            # square-scoring "cooldown" ping still credits a place. If
+            # apply_paint itself raised above, paint_result is still
+            # None -- there is no outcome to gate on, so this is skipped
+            # rather than guessed at.
+            if paint_result is not None:
+                try:
+                    credit_places(conn, player_id, cell, ts, paint_result.outcome, by_air, PROTOCOL)
+                except Exception:
+                    log.exception(
+                        "place scoring: credit_places failed for player %d cell %s",
+                        player_id, cell,
+                    )
 
     # ---- housekeeping ---------------------------------------------------
 
