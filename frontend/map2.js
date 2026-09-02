@@ -706,7 +706,12 @@ async function fetchBoard(c) {
 const PROTOCOLS = {
   meshcore: {
     protocol: 'mc',
-    boardTitle: 'MeshCore Territory',
+    // "Score" not "Territory" -- this number is squares held PLUS
+    // check-in points PLUS exploration points (see scores_for() in
+    // app/mc_api.py), never squares alone, so the heading must not
+    // imply it is a territory/square count. See the Breakdown modal
+    // (openBreakdownModal) for where that split is actually shown.
+    boardTitle: 'MeshCore Score',
     topButtonLabel: 'Top Operators',
     topCaptureLabel: 'Wardrivers',
     topCheckinLabel: 'NetOps',
@@ -729,7 +734,7 @@ const PROTOCOLS = {
   },
   meshtastic: {
     protocol: 'mt',
-    boardTitle: 'Meshtastic Territory',
+    boardTitle: 'Meshtastic Score',
     topButtonLabel: 'Top Operators',
     topCaptureLabel: 'Wardrivers',
     topCheckinLabel: 'NetOps',
@@ -796,28 +801,33 @@ function formatCountdown(secondsRemaining) {
 }
 
 // A team's number, wherever it's shown: squares held PLUS check-in
-// points (app/mc_scoring.py's team_totals()) -- the combined figure
-// that actually decides the season now, not squares alone. Falls back
-// to tiles-only for the all-zero seed row renderScoreboard(null) hands
-// out before the first real fetch, which has no checkin_points/total
-// fields at all yet.
+// points PLUS exploration (Places Worth Going) points (app/mc_scoring.py's
+// team_totals()) -- the combined figure that actually decides the season
+// now, not squares alone. Falls back to tiles-only for the all-zero seed
+// row renderScoreboard(null) hands out before the first real fetch,
+// which has no checkin_points/explorer_points/total fields at all yet.
 function teamTotal(t) {
   if (typeof t.total === 'number') return t.total;
   return t.tiles ?? 0;
 }
 
+// See mc.js's own teamBreakdown for the full rationale -- states all
+// three components, even when a component is zero.
 function teamBreakdown(t) {
   const tiles = t.tiles ?? 0;
   const pts = t.checkin_points ?? 0;
+  const explorer = t.explorer_points ?? 0;
   const squareWord = tiles === 1 ? 'square' : 'squares';
   const pointWord = pts === 1 ? 'point' : 'points';
-  return `${tiles} ${squareWord} + ${pts} check-in ${pointWord}`;
+  const explorerWord = explorer === 1 ? 'point' : 'points';
+  return `${tiles} ${squareWord} + ${pts} check-in ${pointWord} + ${explorer} exploration ${explorerWord}`;
 }
 
 function teamBreakdownCompact(t) {
   const tiles = t.tiles ?? 0;
   const pts = t.checkin_points ?? 0;
-  return `${tiles}+${pts}`;
+  const explorer = t.explorer_points ?? 0;
+  return `${tiles}+${pts}+${explorer}`;
 }
 
 function bindBreakdownToggle(el) {
@@ -1128,6 +1138,45 @@ async function openRosterModal() {
   }
 }
 
+// Points breakdown per team -- squares held, check-in points, exploration
+// (Places Worth Going) points, and the total, side by side for every
+// team. See mc.js's own openBreakdownModal for the full rationale: same
+// c.scoresEndpoint fetch and the same teamTotal/teamBreakdownCompact
+// helpers the scoreboard itself uses, so this can never disagree with
+// it, and the same modal chrome as History/Roster/Top (openMcModal/
+// closeMcModal) -- no separate open/close logic here.
+async function openBreakdownModal() {
+  const c = cfg();
+  const body = openMcModal('Score Breakdown');
+  try {
+    const res = await fetch(c.scoresEndpoint);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const teams = (data && Array.isArray(data.teams) && data.teams.length)
+      ? data.teams
+      : TEAM_ORDER.map((t) => ({ team: t, tiles: 0, checkin_points: 0, explorer_points: 0, total: 0 }));
+
+    const ordered = teams.slice().sort((a, b) => (
+      teamTotal(b) - teamTotal(a) ||
+      TEAM_ORDER.indexOf(a.team) - TEAM_ORDER.indexOf(b.team)
+    ));
+
+    const rows = ordered.map((t) => `<tr>
+        <td><span class="mc-dot" style="background:${TEAM_COLORS[t.team] || '#888'}"></span>${teamName(t.team, t.team)}</td>
+        <td>${escapeHtml(t.tiles ?? 0)}</td>
+        <td>${escapeHtml(t.checkin_points ?? 0)}</td>
+        <td>${escapeHtml(t.explorer_points ?? 0)}</td>
+        <td><strong>${escapeHtml(teamTotal(t))}</strong></td>
+      </tr>`).join('');
+    body.innerHTML = `<table class="mc-history-table">
+      <thead><tr><th>Team</th><th>Squares</th><th>Check-in</th><th>Exploration</th><th>Total</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  } catch (err) {
+    showModalMessage(body, 'mc-modal-error', `Failed to load: ${err.message}`);
+  }
+}
+
 let topModalTab = 'captures';
 
 function topTabSpecs() {
@@ -1331,7 +1380,7 @@ function buildScoreboardControl(map) {
         <button type="button" id="mc-lookup-btn">Find</button>
       </div>
       <div id="mc-lookup-result" class="mc-lookup-result"></div>
-      <div class="mc-row"><a href="#" id="mc-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mc-roster-link">Roster</a></div>
+      <div class="mc-row"><a href="#" id="mc-history-link">History</a> &nbsp;|&nbsp; <a href="#" id="mc-roster-link">Roster</a> &nbsp;|&nbsp; <a href="#" id="mc-breakdown-link">Breakdown</a></div>
       <div class="mc-row mc-actions">
         <button type="button" id="mc-refresh-btn">Refresh map</button>
       </div>
@@ -1394,6 +1443,10 @@ function buildScoreboardControl(map) {
   div.querySelector('#mc-roster-link').addEventListener('click', (e) => {
     e.preventDefault();
     openRosterModal();
+  });
+  div.querySelector('#mc-breakdown-link').addEventListener('click', (e) => {
+    e.preventDefault();
+    openBreakdownModal();
   });
 
   const lookupBtn = div.querySelector('#mc-lookup-btn');
