@@ -408,6 +408,21 @@ body {
   border-radius: 3px;
 }
 
+/* Modifier for a .adm-mono value with no whitespace of its own to wrap
+   on (the FreqMapper cursor, a base64 blob) -- everywhere else .adm-mono
+   sits inline in a row and is short enough to just be short. Block-level
+   and width-capped so it can never stretch its container, with its own
+   scrollbar so the value stays on one line and fully selectable instead
+   of being broken mid-token by a wrap. */
+.adm-mono-block {
+  display: block;
+  max-width: 100%;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  overflow-x: auto;
+  white-space: pre;
+}
+
 .adm-sub-title {
   font-size: 0.6875rem;
   font-weight: 700;

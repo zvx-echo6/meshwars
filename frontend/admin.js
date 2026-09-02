@@ -768,9 +768,21 @@ function renderPaintStatus(cfg, cursor, verificationCount) {
   host.appendChild(countP);
 
   const cursorP = el('p', { className: 'adm-net-health' });
-  cursorP.appendChild(el('span', { text: 'cursor: ' }));
-  cursorP.appendChild(el('span', { className: 'adm-mono', text: cursor || '(none yet)' }));
+  cursorP.appendChild(el('span', { text: 'cursor:' }));
   host.appendChild(cursorP);
+
+  // The cursor is an opaque base64 blob with no whitespace of its own,
+  // so unlike the other .adm-mono values in this panel (a hash prefix,
+  // a connector URL) it can't just sit inline -- there is nowhere for
+  // it to wrap, and left alone it pushes the line out to whatever width
+  // it needs, ignoring the section around it. Boxing it as its own
+  // block with overflow-x scoped to that block keeps the value intact
+  // and copyable (drag-select still grabs the whole string) without
+  // ever letting it set the panel's width.
+  host.appendChild(el('div', {
+    className: 'adm-mono adm-mono-block',
+    text: cursor || '(none yet)',
+  }));
 }
 
 async function loadPaint() {
