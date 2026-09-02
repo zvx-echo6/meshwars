@@ -411,16 +411,25 @@ body {
 /* Modifier for a .adm-mono value with no whitespace of its own to wrap
    on (the FreqMapper cursor, a base64 blob) -- everywhere else .adm-mono
    sits inline in a row and is short enough to just be short. Block-level
-   and width-capped so it can never stretch its container, with its own
-   scrollbar so the value stays on one line and fully selectable instead
-   of being broken mid-token by a wrap. */
+   with its own scrollbar so the value stays on one line and fully
+   selectable instead of being broken mid-token by a wrap, and the
+   border + right margin are load-bearing, not decorative: .adm-mono's
+   own background is var(--mw-ink), which is body's background too, so
+   without a visible edge this box would be exactly as invisible as the
+   raw string it replaces and would still read as running off the
+   panel. Border/radius/background copy .adm-textarea's already-
+   established "boxed field on page-color background" look rather than
+   inventing a second one. */
 .adm-mono-block {
   display: block;
-  max-width: 100%;
-  margin: 4px 0 0;
+  box-sizing: border-box;
+  margin: 4px 14px 0 0;
   padding: 6px 8px;
   overflow-x: auto;
   white-space: pre;
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
 }
 
 .adm-sub-title {
