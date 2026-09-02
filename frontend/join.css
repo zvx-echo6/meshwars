@@ -202,6 +202,15 @@ body {
   color: var(--mw-page);
 }
 
+/* The current-team swatch inside the switch-team picker (#status-team
+   below) is rendered disabled rather than omitted -- still visible
+   proof the picker shows all seven teams, just not a valid pick. No
+   other .team-swatch on the page is ever disabled today. */
+.team-swatch:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .protocol-picker {
   display: flex;
   gap: 16px;
@@ -686,6 +695,58 @@ body {
   border-top: 1px solid var(--mw-raised);
   margin: 16px 0 12px;
 }
+
+/* ---- Switch team (GET/POST /api/team), inside #status-check-panel ------
+   Same rhythm as .status-radios just below it -- a bordered subsection
+   of the existing setup-check box, not a panel of its own. Only shown
+   once a status check has resolved a player (see loadTeamStatus() in
+   join.js). Light-guard inline confirm (pick a team, read the
+   confirmation, confirm) rather than the typed-name pattern -- a team
+   switch is fully reversible by switching back. */
+.status-team {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--mw-raised);
+}
+
+#status-team-switch-btn {
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+#status-team-switch-btn:hover { background: var(--mw-line); }
+#status-team-switch-btn:disabled { opacity: 0.5; cursor: default; }
+
+.status-team-picker-wrap {
+  margin-top: 10px;
+}
+
+.status-team-confirm {
+  margin-top: 10px;
+}
+
+.status-team-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.status-team-confirm-actions button:first-child {
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.status-team-confirm-actions button:first-child:hover { background: var(--mw-line); }
+.status-team-confirm-actions button:first-child:disabled { opacity: 0.5; cursor: default; }
 
 /* ---- "Your radios" (list + add/remove), inside #status-check-panel ------
    Extends the existing setup-check box rather than being a panel of its

@@ -34,6 +34,7 @@ from .config import settings
 from .db import connect
 from .mc_ingest import hash_secret
 from .node_ref import normalize_node_ref
+from .results import month_bounds, month_key
 
 router = APIRouter()
 
@@ -105,6 +106,20 @@ def _validate_display_name(raw: object) -> tuple[str | None, str | None]:
     if any(unicodedata.category(c) == "Cc" for c in name):
         return None, "display name contains invalid characters"
     return name, None
+
+
+def _validate_team(raw: object) -> tuple[str | None, str | None]:
+    """Same rule join()'s own inline team check applies at step 4 below
+    (strip, uppercase, must be in settings.teams_list) -- factored out
+    so switch_team() below shares one definition of "valid team"
+    instead of drifting from it. join()'s own check is left as it is;
+    this only saves the new route from carrying a second copy.
+    Returns (team, error); team is None if invalid.
+    """
+    team = raw.strip().upper() if isinstance(raw, str) else ""
+    if team not in settings.teams_list:
+        return None, "invalid team"
+    return team, None
 
 
 def _config_link(raw_key: str) -> str:
@@ -348,5 +363,227 @@ async def join_redeem(request: Request) -> JSONResponse:
 
     return JSONResponse(
         _registration_response(player["display_name"], player["team"], protocol, raw_key),
+        status_code=200,
+    )
+
+
+# ---- team switching (key-authenticated) ----------------------------------
+#
+# Everything below is a player changing their OWN team, capped at once
+# per calendar month -- app/admin_api.py's admin_set_team() is the
+# unlimited operator override. Ground stays exactly where it was
+# (mc_tile.owner_team is frozen at paint time and never re-derived from
+# player.team); check-in points, exploration points, and streaks all
+# join live on player.team already (app/checkin.py's
+# team_checkin_points()/team_place_points()), so they follow the player
+# to the new team for free. Nothing about scoring changes here -- this
+# only ever writes player.team and an audit row in player_team_change.
+#
+# Same two-tier (address, then key) rate limiting app/nodes_api.py and
+# app/checkin_api.py's key-authenticated routes already use, and the
+# same settings app/checkin_api.py's own copy reuses rather than
+# inventing a third rate-limit mechanism for -- see that module's
+# _addr_rate_limited docstring. Independent bounded dicts, same pattern
+# as _attempts above.
+
+_team_addr_rate_limit_hits: dict[str, list[float]] = {}
+_team_rate_limit_hits: dict[str, list[float]] = {}
+
+
+def _team_addr_rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    window = settings.mc_status_rate_limit_window_seconds
+    limit = settings.mc_status_rate_limit_attempts
+    if len(_team_addr_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
+        stale = [k for k, hits in _team_addr_rate_limit_hits.items() if not hits or now - hits[-1] >= window]
+        for k in stale:
+            del _team_addr_rate_limit_hits[k]
+        if len(_team_addr_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
+            _team_addr_rate_limit_hits.clear()
+    hits = [t for t in _team_addr_rate_limit_hits.get(ip, []) if now - t < window]
+    if len(hits) >= limit:
+        _team_addr_rate_limit_hits[ip] = hits
+        return True
+    hits.append(now)
+    _team_addr_rate_limit_hits[ip] = hits
+    return False
+
+
+def _team_rate_limited(key_hash: str) -> bool:
+    now = time.monotonic()
+    window = settings.node_api_rate_limit_window_seconds
+    limit = settings.node_api_rate_limit_attempts
+    if len(_team_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
+        stale = [k for k, hits in _team_rate_limit_hits.items() if not hits or now - hits[-1] >= window]
+        for k in stale:
+            del _team_rate_limit_hits[k]
+        if len(_team_rate_limit_hits) >= _RATE_LIMIT_MAX_TRACKED:
+            _team_rate_limit_hits.clear()
+    hits = [t for t in _team_rate_limit_hits.get(key_hash, []) if now - t < window]
+    if len(hits) >= limit:
+        _team_rate_limit_hits[key_hash] = hits
+        return True
+    hits.append(now)
+    _team_rate_limit_hits[key_hash] = hits
+    return False
+
+
+async def _authenticate(request: Request):
+    """Resolve the caller's X-API-Key header to a player_id. Identical
+    contract and status codes to app/nodes_api.py's _authenticate() --
+    "not_found" and "revoked" both collapse to a generic 401 so a
+    caller can never learn from the response alone whether a key ever
+    existed. "disabled" is a 403: this is also where a disabled
+    player is rejected, since app/mc_ingest.py's authenticate() already
+    resolves disabled_at as part of the same key lookup every other
+    key-authenticated route relies on -- no separate check needed here.
+    """
+    ip = _client_ip(request)
+    if _team_addr_rate_limited(ip):
+        return None, JSONResponse({"error": "rate limited"}, status_code=429)
+
+    raw_key = request.headers.get("X-API-Key", "")
+    if not raw_key:
+        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    ingestor = request.app.state.mc_ingestor
+    auth = await ingestor.authenticate(raw_key)
+    if auth.status in ("not_found", "revoked"):
+        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
+    if auth.status == "disabled":
+        return None, JSONResponse({"error": "forbidden"}, status_code=403)
+
+    key_hash = hash_secret(raw_key)
+    if _team_rate_limited(key_hash):
+        return None, JSONResponse({"error": "rate limited"}, status_code=429)
+
+    return auth.player_id, None
+
+
+def _current_month_window(now: int) -> tuple[int, int]:
+    """[start, end) unix timestamps for the calendar month `now` falls
+    in, in settings.checkin_net_timezone -- the exact convention
+    app/results.py scores a month on (month_key() + month_bounds(),
+    both imported unchanged from there), so a player's switch allowance
+    resets in lockstep with the scoring month rather than holding a
+    second opinion about when a month starts.
+    """
+    return month_bounds(month_key(now))
+
+
+def _switch_used_this_month(conn, player_id: int, start: int, end: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM player_team_change"
+        " WHERE player_id = ? AND actor = 'player'"
+        "   AND changed_at >= ? AND changed_at < ?",
+        (player_id, start, end),
+    ).fetchone()
+    return row is not None
+
+
+@router.get("/api/team")
+async def team_status(request: Request) -> JSONResponse:
+    """Read-only status for the switch-team UI: the player's current
+    team, whether a self-switch is available right now, and
+    next_switch_at -- always the end of the current month window (when
+    the switch allowance next resets), regardless of switch_available.
+    That value is true and useful in both states, so it is never null.
+    """
+    player_id, err = await _authenticate(request)
+    if err is not None:
+        return err
+
+    now = int(time.time())
+    start, end = _current_month_window(now)
+
+    conn = connect()
+    try:
+        player = conn.execute(
+            "SELECT team FROM player WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        used = _switch_used_this_month(conn, player_id, start, end)
+    finally:
+        conn.close()
+
+    if player is None:
+        return JSONResponse({"error": "player not found"}, status_code=404)
+
+    return JSONResponse(
+        {
+            "team": player["team"],
+            "switch_available": not used,
+            "next_switch_at": end,
+        },
+        status_code=200,
+    )
+
+
+@router.post("/api/team")
+async def switch_team(request: Request) -> JSONResponse:
+    """Change the caller's own team, once per calendar month. See the
+    module-level comment above this section for what does and does not
+    move with the player.
+    """
+    player_id, err = await _authenticate(request)
+    if err is not None:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    team, terr = _validate_team(body.get("team"))
+    if terr:
+        return JSONResponse({"error": terr}, status_code=400)
+
+    now = int(time.time())
+    start, end = _current_month_window(now)
+
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        player = conn.execute(
+            "SELECT team FROM player WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        if player is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "player not found"}, status_code=404)
+
+        if team == player["team"]:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "you are already on that team"}, status_code=400)
+
+        if _switch_used_this_month(conn, player_id, start, end):
+            conn.execute("ROLLBACK")
+            return JSONResponse(
+                {"error": "you can only switch teams once per month",
+                 "next_switch_at": end},
+                status_code=409,
+            )
+
+        conn.execute(
+            "UPDATE player SET team = ? WHERE player_id = ?",
+            (team, player_id),
+        )
+        conn.execute(
+            "INSERT INTO player_team_change"
+            "(player_id, from_team, to_team, changed_at, actor) "
+            "VALUES (?, ?, ?, ?, 'player')",
+            (player_id, player["team"], team, now),
+        )
+
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    return JSONResponse(
+        {"team": team, "next_switch_at": end},
         status_code=200,
     )
