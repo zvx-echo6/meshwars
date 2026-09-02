@@ -467,3 +467,71 @@ def test_join_api_team_switch_rate_limit_is_independent_of_nodes_api(monkeypatch
     # untouched -- still 401 (bad key), never 429.
     r_join = join_client.get("/api/team", headers={"X-API-Key": "whatever"})
     assert r_join.status_code == 401
+
+
+# ---- regression: the app-wide handler must not touch router-level 404/405 -
+#
+# app/main.py registers http_exception_as_error_body on
+# fastapi.exceptions.HTTPException (imported as `from fastapi import
+# HTTPException`), keyed to that exact class, with the comment "nothing
+# raised HTTPException before this change, so it has zero effect on any
+# untouched route." That claim was checked empirically (not just by
+# reading fastapi/starlette source) because it looked suspicious:
+# Starlette's own router raises HTTPException(404) for an unmatched
+# path and HTTPException(405) for a method mismatch, and StaticFiles
+# raises HTTPException(404) for a missing file -- all three look like
+# exactly the exception type this handler is registered for.
+#
+# They are not, in the one way that matters here: all three raise
+# `starlette.exceptions.HTTPException` (the base class), while this
+# handler is registered on `fastapi.exceptions.HTTPException` (a
+# *subclass* of it -- confirmed via issubclass() during investigation).
+# Starlette's exception middleware looks up a handler by walking the
+# raised exception INSTANCE's own class upward through its MRO; a
+# base-class instance's MRO never includes a child class, so a handler
+# keyed to the subclass never matches a base-class instance. Only code
+# that raises `fastapi.HTTPException` specifically (app/auth.py's
+# require_api_key_principal(), the only such call site in this app) is
+# ever caught by it. This test locks that in with a real TestClient
+# request, so a future change (e.g. registering the handler on
+# starlette.exceptions.HTTPException instead, which WOULD catch these)
+# can't silently flip every 404/405 on the site from {"detail": ...} to
+# {"error": ...} without a test noticing.
+def test_router_404_and_405_keep_fastapi_default_detail_shape():
+    app = FastAPI()
+
+    @app.get("/only-get")
+    async def only_get():
+        return {"ok": True}
+
+    # Same registration app/main.py performs.
+    app.add_exception_handler(HTTPException, http_exception_as_error_body)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    r404 = client.get("/does-not-exist")
+    assert r404.status_code == 404
+    assert r404.json() == {"detail": "Not Found"}
+
+    r405 = client.post("/only-get")
+    assert r405.status_code == 405
+    assert r405.json() == {"detail": "Method Not Allowed"}
+
+
+def test_handler_still_translates_a_directly_raised_http_exception():
+    """Contrast case for the test above: an HTTPException actually
+    raised by application code (the shape app/auth.py raises) IS caught
+    by the registered handler and rendered as {"error": ...}, same as
+    every hand-rolled JSONResponse in this app already does.
+    """
+    app = FastAPI()
+
+    @app.get("/raises")
+    async def raises():
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    app.add_exception_handler(HTTPException, http_exception_as_error_body)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.get("/raises")
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
