@@ -10,7 +10,7 @@
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260901-8" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260902-1" />
 </head>
 <body>
 
@@ -52,6 +52,7 @@
         </button>
         <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
         <button type="button" class="adm-nav-item" data-section="nets">Nets</button>
+        <button type="button" class="adm-nav-item" data-section="paint">Paint</button>
         <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
         <button type="button" class="adm-nav-item" data-section="months">Months</button>
         <button type="button" class="adm-nav-item" data-section="places">Places</button>
@@ -187,6 +188,61 @@
           <div id="nf-result" class="adm-result"></div>
         </section>
 
+        <section class="adm-section" data-section="paint" hidden>
+          <h2 class="adm-h2">Paint</h2>
+          <p class="adm-hint">Which source paints the Meshtastic board, plus FreqMapper's own connector and scoring. Exactly one source paints Meshtastic territory at a time; meshview keeps providing node names and roster either way. Read fresh by both pollers on their next cycle &mdash; no restart.</p>
+
+          <h3 class="adm-h3">Meshtastic paint source</h3>
+          <p class="adm-hint">Meshview paints from the position packets it already polls. FreqMapper paints from independently-verified reception events instead &mdash; it reports no per-event station count, so its scoring below is a flat award rather than a per-station one. Switching this changes where live Meshtastic territory comes from; saving asks you to confirm which source you are switching to.</p>
+          <div class="adm-form">
+            <label class="adm-field-label">Paint source
+              <select id="pt-source">
+                <option value="meshview">Meshview</option>
+                <option value="freqmapper">FreqMapper</option>
+              </select>
+            </label>
+          </div>
+
+          <h3 class="adm-h3">FreqMapper connector</h3>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="pt-enabled" class="adm-check" /> Enabled &mdash; poller fetches and dedupes events, regardless of which source is currently painting</label>
+          </div>
+          <div class="adm-form">
+            <input type="text" id="pt-base-url" autocomplete="off" placeholder="base URL, e.g. https://dev.freqmapper.net:8443" />
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label adm-field-label-wide">API key
+              <input type="password" id="pt-api-key" autocomplete="off" placeholder="leave blank to keep current" />
+            </label>
+            <label class="adm-check-label"><input type="checkbox" id="pt-clear-api-key" class="adm-check" /> Clear</label>
+            <span class="adm-hint" id="pt-api-key-hint"></span>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Poll interval (s)<input type="number" id="pt-poll-interval" step="1" min="1" /></label>
+            <label class="adm-field-label">Page limit<input type="number" id="pt-page-limit" step="1" min="1" max="1000" /></label>
+          </div>
+
+          <h3 class="adm-h3">Scoring</h3>
+          <p class="adm-hint">FreqMapper reports no per-event station count, which is why this is a flat award per event rather than a per-station one.</p>
+          <div class="adm-form">
+            <label class="adm-field-label">Points per event<input type="number" id="pt-points-per-event" step="0.1" min="0" /></label>
+            <label class="adm-field-label">Unique-painter bonus<input type="number" id="pt-unique-painter-bonus" step="0.1" min="0" /></label>
+          </div>
+
+          <div class="adm-form">
+            <button type="button" id="pt-save" class="adm-btn">Save</button>
+          </div>
+          <div id="pt-result" class="adm-result"></div>
+
+          <h3 class="adm-h3">Status</h3>
+          <div id="pt-status"></div>
+          <p class="adm-hint">Clearing the cursor makes the next poll re-walk FreqMapper's feed from the beginning &mdash; useful when the upstream moves to a new host and the stored cursor no longer resolves against it. Safe to do at any time: every event this deployment has already processed is remembered by its own id, so events already seen are skipped again on the re-walk, never double-scored.</p>
+          <div class="adm-form">
+            <button type="button" id="pt-clear-cursor" class="adm-btn adm-btn-quiet">Clear cursor</button>
+          </div>
+          <div id="pt-clear-result" class="adm-result"></div>
+        </section>
+
         <section class="adm-section" data-section="seasons" hidden>
           <h2 class="adm-h2">Seasons</h2>
           <p class="adm-hint">Changing the season length in config only affects the <em>next</em> season. This changes the one being played.</p>
@@ -252,6 +308,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260901-8"></script>
+  <script src="/static/admin.js?v=20260902-1"></script>
 </body>
 </html>

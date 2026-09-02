@@ -40,14 +40,22 @@ below): it still records the same nodes the same way, but is now keyed
 on the active 'mt' mc_season instead of the retired `season` table,
 since that table is frozen history now and no longer rolls forward.
 
-settings.mt_paint_source (app/config.py) decides whether THIS module or
-app/freqmapper_ingest.py paints the Meshtastic board. Default is
-"meshview" -- unchanged from every line above. When it is "freqmapper"
-instead, the two position-painting paths below -- _poll_once's
-portnum=3 fetch and _backfill -- are gated off entirely: neither fetches
-packets, scores, nor writes player_cell_ping. _refresh_roster (node
-names/roster) and _poll_nodeinfo (portnum=4, mt_node_key) are identity/
-roster concerns, not scoring, and keep running either way -- see
+mt_paint_source decides whether THIS module or app/freqmapper_ingest.py
+paints the Meshtastic board. It is DB-backed (app/db.py's
+freqmapper_config singleton, admin-editable through
+app/admin_ops.py's /api/admin/paint), not settings.py -- read fresh via
+app/freqmapper_ingest.py's load_freqmapper_config on every poll cycle
+(_poll_once) and once at startup (_backfill), never cached, so an
+operator's switch takes effect on the next cycle with no restart.
+settings.mt_paint_source (app/config.py) still exists as the seed value
+that singleton is bootstrapped from on first boot, and as the fallback
+if that row is somehow missing. Default is "meshview" -- unchanged from
+every line above. When it is "freqmapper" instead, the two position-
+painting paths below -- _poll_once's portnum=3 fetch and _backfill --
+are gated off entirely: neither fetches packets, scores, nor writes
+player_cell_ping. _refresh_roster (node names/roster) and
+_poll_nodeinfo (portnum=4, mt_node_key) are identity/roster concerns,
+not scoring, and keep running either way -- see
 app/freqmapper_ingest.py's own module docstring for the other half of
 this switch.
 """
@@ -63,6 +71,7 @@ from . import mc_scoring
 from .api import _node_hex
 from .config import settings
 from .db import WriteSession, connect, set_cursor
+from .freqmapper_ingest import load_freqmapper_config
 from .grid import cell_center, cell_id, distance_m, in_play_area, valid_coord
 from .mc_ingest import RepeaterEntry, record_repeater_observations
 from .place_scoring import credit_places
@@ -229,18 +238,33 @@ class Ingestor:
     def __init__(self, client: MeshviewClient):
         self.client = client
         self._stop = asyncio.Event()
-        # Logged once, not every poll cycle, the first time a cycle finds
-        # painting gated off -- see _poll_once below.
-        self._logged_paint_gated_once = False
+        # Logged only the first time, and again only when mt_paint_source
+        # actually flips -- see _poll_once below. None until the first
+        # cycle ever looks, so the initial state is always logged once.
+        # Mirrors app/freqmapper_ingest.py's own _last_logged_paint_source
+        # -- the two modules read the same DB-backed switch and log its
+        # transitions independently, from their own vantage point.
+        self._last_logged_paint_source: str | None = None
 
     def stop(self) -> None:
         self._stop.set()
 
     async def run_forever(self) -> None:
+        # mt_paint_source is DB-backed now (app/db.py's freqmapper_config,
+        # via load_freqmapper_config) -- read fresh here too rather than
+        # settings.mt_paint_source, so this startup line reflects
+        # whatever an operator last set through /api/admin/paint, not
+        # merely the env-var value this row was originally seeded from.
+        conn = connect()
+        try:
+            paint_source = load_freqmapper_config(conn)["mt_paint_source"]
+        finally:
+            conn.close()
+        self._last_logged_paint_source = paint_source
         log.info(
             "ingest loop starting; poll=%ds paint_source=%s (%s)",
-            settings.poll_interval_seconds, settings.mt_paint_source,
-            "meshview is painting" if settings.mt_paint_source == "meshview"
+            settings.poll_interval_seconds, paint_source,
+            "meshview is painting" if paint_source == "meshview"
             else "meshview is NOT painting -- position poll and backfill are gated off",
         )
         # Snapshot roster on startup so we have something to render. This
@@ -367,15 +391,23 @@ class Ingestor:
         board fills in immediately for already-registered players. Pages
         backwards by import_time_us.
 
-        Gated off entirely when settings.mt_paint_source is not
-        "meshview" -- see this module's docstring. Backfill exists purely
-        to paint the board faster on a cold start; when FreqMapper is the
-        active paint source, meshview has nothing to backfill toward.
+        Gated off entirely when mt_paint_source (app/db.py's
+        freqmapper_config, read fresh here rather than
+        settings.mt_paint_source -- see this module's docstring) is not
+        "meshview". Backfill exists purely to paint the board faster on
+        a cold start; when FreqMapper is the active paint source,
+        meshview has nothing to backfill toward. Read once, here, since
+        backfill itself only ever runs once, at startup -- unlike
+        _poll_once below, there is no later cycle where a fresher read
+        would matter.
         """
-        if settings.mt_paint_source != "meshview":
-            log.info(
-                "meshview backfill skipped -- mt_paint_source=%s", settings.mt_paint_source
-            )
+        conn = connect()
+        try:
+            paint_source = load_freqmapper_config(conn)["mt_paint_source"]
+        finally:
+            conn.close()
+        if paint_source != "meshview":
+            log.info("meshview backfill skipped -- mt_paint_source=%s", paint_source)
             return
 
         import time as _time
@@ -465,18 +497,29 @@ class Ingestor:
 
     async def _poll_once(self) -> None:
         """One ingest cycle: position-packet painting (gated by
-        settings.mt_paint_source -- see this module's docstring) followed
-        by the NodeInfo identity pass, which always runs regardless of
-        which source is currently painting.
+        mt_paint_source, read fresh from the database every cycle -- see
+        this module's docstring and app/freqmapper_ingest.py's
+        load_freqmapper_config) followed by the NodeInfo identity pass,
+        which always runs regardless of which source is currently
+        painting.
         """
-        if settings.mt_paint_source == "meshview":
-            await self._poll_positions()
-        elif not self._logged_paint_gated_once:
+        conn = connect()
+        try:
+            paint_source = load_freqmapper_config(conn)["mt_paint_source"]
+        finally:
+            conn.close()
+
+        if paint_source != self._last_logged_paint_source:
             log.info(
-                "meshview position poll skipped -- mt_paint_source=%s",
-                settings.mt_paint_source,
+                "meshview: mt_paint_source=%s (%s)",
+                paint_source,
+                "meshview is painting" if paint_source == "meshview"
+                else "meshview is NOT painting -- position poll is gated off",
             )
-            self._logged_paint_gated_once = True
+            self._last_logged_paint_source = paint_source
+
+        if paint_source == "meshview":
+            await self._poll_positions()
 
         # NodeInfo pass: passive accumulation into mt_node_key only (see
         # that table's comment in app/db.py). Entirely separate from
@@ -500,8 +543,8 @@ class Ingestor:
         don't need a server-side cursor because the API always returns
         newest-first and 100 packets is plenty of overlap between polls.
 
-        Only ever called when settings.mt_paint_source == "meshview" --
-        see _poll_once above.
+        Only ever called when mt_paint_source == "meshview" -- see
+        _poll_once above.
         """
         now = int(time.time())
         # Season bookkeeping WRITES mc_season (see the matching comment in

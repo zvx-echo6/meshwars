@@ -12,8 +12,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from .api import mount
 from .checkin import CheckinPoller
 from .config import settings
-from .db import init_db
-from .freqmapper_ingest import FreqMapperIngestor
+from .db import connect, init_db
+from .freqmapper_ingest import FreqMapperIngestor, load_freqmapper_config
 from .ingest import Ingestor
 from .mc_ingest import McIngestor
 from .meshview_client import MeshviewClient
@@ -29,13 +29,26 @@ log = logging.getLogger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("startup: meshview=%s db=%s", settings.meshview_url, settings.db_path)
-    # Which upstream source paints the Meshtastic board -- see
-    # settings.mt_paint_source's own comment in app/config.py. Logged
-    # once, up front, at the loudest point in startup so it is obvious
-    # from the logs alone which one is live, without having to correlate
-    # it against either connector's own per-cycle log lines.
-    log.info("meshtastic paint source: %s", settings.mt_paint_source)
     init_db()
+
+    # Which upstream source paints the Meshtastic board -- DB-backed now
+    # (app/db.py's freqmapper_config, admin-editable through
+    # app/admin_ops.py's /api/admin/paint), not settings.mt_paint_source
+    # -- see that column's own comment in app/db.py. Read here, after
+    # init_db() (so the seed from settings has already run on a fresh
+    # install), and logged once, up front, at the loudest point in
+    # startup so it is obvious from the logs alone which one is live at
+    # boot, without having to correlate it against either connector's
+    # own per-cycle log lines. Both Ingestor.run_forever and
+    # FreqMapperIngestor.run_forever log it again themselves whenever it
+    # CHANGES later, since an operator can flip it at runtime and this
+    # one-time startup line would otherwise go stale.
+    _conn = connect()
+    try:
+        _paint_source = load_freqmapper_config(_conn)["mt_paint_source"]
+    finally:
+        _conn.close()
+    log.info("meshtastic paint source: %s", _paint_source)
 
     client = MeshviewClient()
     ingestor = Ingestor(client)
@@ -47,13 +60,15 @@ async def lifespan(app: FastAPI):
 
     # FreqMapper (app/freqmapper_ingest.py): an alternative Meshtastic
     # paint source to meshview's position-packet feed above. Started
-    # unconditionally rather than gated on settings.freqmapper_enabled
-    # here -- run_forever() itself checks freqmapper_enabled and
-    # freqmapper_api_key on entry and returns immediately if either is
-    # unset, so a fresh install with FreqMapper never configured just
-    # starts (and instantly exits) a no-op task, the same shape
-    # settings.mc_ingest_enabled's own gate below takes for a different
-    # reason (there it guards .start(), here it lives inside the task).
+    # UNCONDITIONALLY -- run_forever() no longer gates on
+    # freqmapper_config.enabled and exit early the way it once gated on
+    # settings.freqmapper_enabled; `enabled` is a runtime toggle now
+    # (like settings.mc_ingest_enabled's own gate below, but living
+    # inside the task's own loop rather than guarding whether the task
+    # is created at all), so the loop has to keep running to notice an
+    # operator flipping it on later. A fresh install with FreqMapper
+    # never configured still starts this task; it simply does nothing
+    # each cycle until enabled and an api_key are both set.
     freqmapper_ingestor = FreqMapperIngestor()
     freqmapper_task = asyncio.create_task(freqmapper_ingestor.run_forever(), name="freqmapper-ingest")
 

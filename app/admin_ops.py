@@ -39,7 +39,8 @@ from .checkin import (
     KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_PROTOCOL,
 )
 from .config import settings
-from .db import connect
+from .db import connect, get_cursor
+from .freqmapper_ingest import CURSOR_KEY as FREQMAPPER_CURSOR_KEY, load_freqmapper_config
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .node_ref import normalize_sender_name
 from .place_rotation import preview_week, week_start_for_date, week_start_for_ts
@@ -1153,6 +1154,203 @@ async def admin_checkin_channels(request: Request):
                 raw = v
                 break
     return JSONResponse({"channels": _channel_names(raw), "applicable": True})
+
+
+# ---- paint source: meshview vs FreqMapper (app/db.py's freqmapper_config,
+# app/freqmapper_ingest.py's poller, app/ingest.py's meshview gate) -------
+
+
+def _scrub_freqmapper_secrets(cfg: dict) -> dict:
+    """Never let freqmapper_config.api_key leave this process in a JSON
+    response -- same rule, same shape as _scrub_secrets above for
+    checkin_net's broker_password/channel_key. Replaced with a
+    has_api_key boolean; every other field passes through unchanged.
+    """
+    out = dict(cfg)
+    out["has_api_key"] = bool(out.pop("api_key", ""))
+    return out
+
+
+@router.get("/api/admin/paint")
+async def admin_paint(request: Request):
+    """Current meshview/FreqMapper paint-source config (secrets
+    scrubbed) plus live status, for the admin panel's Paint section.
+    config comes from load_freqmapper_config (app/freqmapper_ingest.py)
+    -- the same fresh-every-read singleton both FreqMapperIngestor and
+    app/ingest.py's Ingestor poll from, never settings.py, so what this
+    route returns is exactly what the next poll cycle will act on.
+    last_poll_at/last_poll_error inside it are written by
+    FreqMapperIngestor after every completed cycle (see that module's
+    _record_ok/_record_error). cursor is the raw stored FreqMapper
+    cursor value (app/db.py's cursor table, keyed
+    freqmapper_ingest.CURSOR_KEY) -- opaque to this app, shown as-is so
+    an operator can tell whether it has ever advanced at all.
+    verification_count is how many distinct FreqMapper events this
+    deployment has ever recorded (app/db.py's freqmapper_verification),
+    the plainest "is anything actually arriving" number available.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    conn = connect()
+    try:
+        cfg = load_freqmapper_config(conn)
+        cursor = get_cursor(conn, FREQMAPPER_CURSOR_KEY, "")
+        verification_count = conn.execute(
+            "SELECT count(*) FROM freqmapper_verification"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return JSONResponse({
+        "config": _scrub_freqmapper_secrets(cfg),
+        "cursor": cursor,
+        "verification_count": verification_count,
+    })
+
+
+@router.post("/api/admin/paint")
+async def admin_paint_update(request: Request):
+    """Update the meshview/FreqMapper paint-source config singleton.
+    Takes effect on the very next poll cycle for both
+    FreqMapperIngestor and app/ingest.py's Ingestor -- both read
+    freqmapper_config fresh every cycle (load_freqmapper_config), never
+    settings.py, by design (see app/freqmapper_ingest.py's module
+    docstring). Switching mt_paint_source changes where live Meshtastic
+    territory comes from; the admin panel guards that specific field
+    with its own confirmation prompt before ever calling this route --
+    this route itself has no way to tell an intentional switch from a
+    typo, so it enforces only shape, not intent.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    mt_paint_source = body.get("mt_paint_source")
+    if mt_paint_source not in ("meshview", "freqmapper"):
+        return JSONResponse(
+            {"error": "mt_paint_source must be 'meshview' or 'freqmapper'"}, status_code=400)
+
+    enabled = bool(body.get("enabled"))
+    base_url = (body.get("base_url") or "").strip().rstrip("/")
+    if enabled and not (base_url.startswith("http://") or base_url.startswith("https://")):
+        return JSONResponse(
+            {"error": "base_url must be an http:// or https:// URL when FreqMapper is enabled"},
+            status_code=400)
+
+    def _int(key, min_v, max_v):
+        v = body.get(key)
+        if isinstance(v, bool) or not isinstance(v, int):
+            return None
+        if not (min_v <= v <= max_v):
+            return None
+        return v
+
+    def _num(key, min_v):
+        v = body.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        v = float(v)
+        if v < min_v:
+            return None
+        return v
+
+    poll_interval_seconds = _int("poll_interval_seconds", 1, 86400)
+    # 1-1000: 1000 is the upstream's own documented page-size ceiling --
+    # see app/freqmapper_ingest.py's _MAX_LIMIT, which clamps to the
+    # same range independently of this validation (defense in depth,
+    # not the only place this is enforced).
+    page_limit = _int("page_limit", 1, 1000)
+    points_per_event = _num("points_per_event", 0)
+    unique_painter_bonus = _num("unique_painter_bonus", 0)
+
+    if None in (poll_interval_seconds, page_limit, points_per_event, unique_painter_bonus):
+        return JSONResponse(
+            {"error": "poll_interval_seconds (1-86400), page_limit (1-1000), "
+                      "points_per_event, and unique_painter_bonus (both >= 0) are all "
+                      "required and must be within range"},
+            status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        # api_key is a SECRET (see app/db.py's checkin_net comment on
+        # broker_password/channel_key for the general rule this
+        # follows): a blank submitted value means KEEP THE EXISTING key,
+        # not "clear it" -- GET /api/admin/paint never returns the real
+        # value, so a form that always echoes '' into this field would
+        # otherwise silently wipe the key on every unrelated edit.
+        # clear_api_key is the explicit way to actually blank it out.
+        current = conn.execute("SELECT api_key FROM freqmapper_config WHERE id = 1").fetchone()
+        current_api_key = current["api_key"] if current else ""
+        if body.get("clear_api_key") is True:
+            api_key = ""
+        else:
+            submitted = body.get("api_key")
+            api_key = submitted if isinstance(submitted, str) and submitted else current_api_key
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO freqmapper_config(id, mt_paint_source, enabled, base_url, api_key, "
+            " poll_interval_seconds, page_limit, points_per_event, unique_painter_bonus, "
+            " updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  mt_paint_source = excluded.mt_paint_source, enabled = excluded.enabled, "
+            "  base_url = excluded.base_url, api_key = excluded.api_key, "
+            "  poll_interval_seconds = excluded.poll_interval_seconds, "
+            "  page_limit = excluded.page_limit, points_per_event = excluded.points_per_event, "
+            "  unique_painter_bonus = excluded.unique_painter_bonus, "
+            "  updated_at = excluded.updated_at",
+            (mt_paint_source, int(enabled), base_url, api_key, poll_interval_seconds,
+             page_limit, points_per_event, unique_painter_bonus, now),
+        )
+        conn.execute("COMMIT")
+        cfg = load_freqmapper_config(conn)
+    finally:
+        conn.close()
+    log.info(
+        "admin: paint config updated (mt_paint_source=%s enabled=%s base_url=%s)",
+        mt_paint_source, enabled, base_url,
+    )
+    return JSONResponse({"config": _scrub_freqmapper_secrets(cfg)})
+
+
+@router.post("/api/admin/paint/clear-cursor")
+async def admin_paint_clear_cursor(request: Request):
+    """Clear the stored FreqMapper cursor (app/db.py's cursor table,
+    key freqmapper_ingest.CURSOR_KEY) so the next poll re-walks the
+    verified-coverage feed from the very beginning. A real operational
+    need, not just a reset button: when the upstream moves from its
+    development host to production, a cursor issued by the old backend
+    may not resolve against the new one at all -- polling would then
+    either error or silently never advance.
+
+    Re-walking from the beginning is safe because dedup is keyed on
+    verification_id and runs BEFORE anything else touches an event (see
+    app/freqmapper_ingest.py's _process_one_event and
+    freqmapper_verification's own comment in app/db.py) -- every event
+    this loop has ever looked at, painted or not, is already recorded
+    there, so an already-seen event coming back around after a clear is
+    a no-op, not a replay or a double-score.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM cursor WHERE k = ?", (FREQMAPPER_CURSOR_KEY,))
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: cleared freqmapper cursor")
+    return JSONResponse({"cleared": True})
 
 
 @router.get("/api/admin/notice")
