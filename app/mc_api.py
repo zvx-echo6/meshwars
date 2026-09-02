@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
+from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
 from .grid import cell_bounds
@@ -101,7 +102,10 @@ def team_list() -> list[str]:
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    # See app/client_ip.py's module docstring: this used to be
+    # request.client.host directly, which is always the Caddy reverse
+    # proxy's own address in every deployment, not the real caller's.
+    return get_client_ip(request)
 
 
 def _status_rate_limited(ip: str) -> bool:

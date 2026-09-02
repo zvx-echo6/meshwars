@@ -54,6 +54,38 @@ class Settings(BaseSettings):
     listen_host: str = "0.0.0.0"
     listen_port: int = 8090
 
+    # Reverse proxy trust (app/client_ip.py). This app is always reached
+    # through a reverse proxy in every deployment known to run it --
+    # docker-compose.yml publishes a plain host:container port, not
+    # network_mode: host, so request.client.host is the PROXY's address,
+    # never the real caller's. Every per-address rate limiter in this
+    # codebase (app/join_api.py, app/nodes_api.py, app/checkin_api.py,
+    # app/clientlog_api.py, app/mc_api.py, app/public_api.py) keyed on
+    # that value, which silently collapsed every caller on the internet
+    # onto the proxy's one address.
+    #
+    # X-Forwarded-For carries the real chain, but it is only as
+    # trustworthy as whoever last touched it -- so it is read back ONLY
+    # when the peer that actually connected to us appears in this set,
+    # comma-separated bare IPs and/or CIDR ranges (e.g.
+    # "203.0.113.10,10.0.0.0/8"). Empty is the safe default and means
+    # exactly what it means everywhere else in this file (join_invite_code,
+    # admin_token, ...): OFF, not "trust everyone" -- a fresh clone with
+    # no reverse proxy named here must never let an untrusted caller's
+    # own header pick its own rate-limit bucket. A deployment that sits
+    # behind a reverse proxy MUST set this to that proxy's real
+    # address(es) via the environment (see .env.example), or every
+    # limiter above stays exactly as broken as it is without this
+    # setting. Left unset here (rather than defaulting to this
+    # deployment's own proxy address) because that address is private
+    # infrastructure and this is a public repository -- see
+    # .env.example for where it's actually configured.
+    trusted_proxies: str = ""
+
+    @property
+    def trusted_proxies_set(self) -> set[str]:
+        return {p.strip() for p in self.trusted_proxies.split(",") if p.strip()}
+
     # Meshtastic portnum constant
     position_app_portnum: int = 3
 

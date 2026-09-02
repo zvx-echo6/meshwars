@@ -17,6 +17,18 @@ services:
       # Required: point this at any meshview instance
       MESHVIEW_BASE_URL: "${MESHVIEW_BASE_URL}"
       # Optional overrides
+      # Reverse-proxy trust for accurate per-caller rate limiting (see
+      # app/client_ip.py and TRUSTED_PROXIES' own comment in
+      # app/config.py). Empty means every request is treated as coming
+      # straight from request.client.host with no X-Forwarded-For
+      # trusted at all -- correct but not useful behind a reverse proxy,
+      # which is every real deployment. Set this to your reverse proxy's
+      # real address (comma-separated IPs and/or CIDR ranges are both
+      # accepted) once it's known. FORWARDED_ALLOW_IPS is the matching
+      # knob one layer down, for uvicorn's own --proxy-headers handling
+      # (see the Dockerfile CMD) -- set both to the same value.
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
       POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-45}"
       SEASON_DAYS: "${SEASON_DAYS:-180}"
       WINNER_BANNER_HOURS: "${WINNER_BANNER_HOURS:-72}"

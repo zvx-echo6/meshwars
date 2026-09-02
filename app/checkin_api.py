@@ -52,6 +52,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from .checkin import companion_directory_entries, mt_roster_entries
+from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
 from .mc_ingest import hash_secret
@@ -70,7 +71,10 @@ _addr_rate_limit_hits: dict[str, list[float]] = {}
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    # See app/client_ip.py's module docstring: this used to be
+    # request.client.host directly, which is always the Caddy reverse
+    # proxy's own address in every deployment, not the real caller's.
+    return get_client_ip(request)
 
 
 def _addr_rate_limited(ip: str) -> bool:

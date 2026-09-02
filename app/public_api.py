@@ -47,6 +47,7 @@ from fastapi.responses import JSONResponse
 
 from . import mc_api, results
 from .checkin import load_checkin_config
+from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL, hash_secret
@@ -139,7 +140,10 @@ _MAX_TRACKED = 10000
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    # See app/client_ip.py's module docstring: this used to be
+    # request.client.host directly, which is always the Caddy reverse
+    # proxy's own address in every deployment, not the real caller's.
+    return get_client_ip(request)
 
 
 def _rate_limited(bucket: str) -> bool:
