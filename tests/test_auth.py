@@ -45,6 +45,8 @@ needing a database at all.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import time
 
 import pytest
 from fastapi import FastAPI, HTTPException, Request
@@ -57,7 +59,9 @@ from app.auth import (
     require_api_key_principal,
 )
 from app.config import settings
+from app.db import MIGRATIONS, SCHEMA
 from app.mc_ingest import AuthResult
+from app.sessions import create_session
 
 GOOD_KEY = "good-key"
 DISABLED_KEY = "disabled-key"
@@ -107,10 +111,14 @@ def _request(
     *,
     peer: str = "198.51.100.10",
     api_key: str | None = None,
+    session_token: str | None = None,
 ) -> Request:
     headers = []
     if api_key is not None:
         headers.append((b"x-api-key", api_key.encode("latin-1")))
+    if session_token is not None:
+        from app.sessions import SESSION_COOKIE_NAME
+        headers.append((b"cookie", f"{SESSION_COOKIE_NAME}={session_token}".encode("latin-1")))
     scope = {
         "type": "http",
         "method": "GET",
@@ -535,3 +543,159 @@ def test_handler_still_translates_a_directly_raised_http_exception():
     resp = client.get("/raises")
     assert resp.status_code == 401
     assert resp.json() == {"error": "unauthorized"}
+
+
+# ---- session-cookie fallback (app/sessions.py) ---------------------------
+#
+# require_api_key_principal()'s built dependency now also accepts a
+# session cookie in place of an X-API-Key header (see app/auth.py's own
+# module docstring for the full contract). Every test above this
+# section is completely unmodified by that change -- they still pass
+# exactly as written, which is itself the proof that a KEY-bearing
+# request's behavior is byte-for-byte unchanged. The tests below add
+# coverage for the new branch specifically: a request carrying NO key
+# at all, with and without a usable session.
+#
+# These need a real file-backed database (app/sessions.py's
+# create_session/verify_session go through app/db.py's connect()/
+# WriteSession, not the FakeIngestor) -- same fixture shape as
+# tests/test_sessions.py and tests/test_write_session.py, and the same
+# reasoning: two independent connections to ":memory:" don't share
+# data, so a real temp file is required.
+
+def _init_schema(path: str) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA)
+    for stmt in MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                continue
+            raise
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def db_path(tmp_path, monkeypatch):
+    import app.db as db_module
+
+    path = str(tmp_path / "game.db")
+    _init_schema(path)
+    monkeypatch.setattr(db_module.settings, "db_path", path)
+    return path
+
+
+def _make_account(path: str) -> int:
+    conn = sqlite3.connect(path)
+    cur = conn.execute("INSERT INTO account(created_at) VALUES (?)", (int(time.time()),))
+    conn.commit()
+    account_id = cur.lastrowid
+    conn.close()
+    return account_id
+
+
+def _make_player(path: str, *, account_id: int) -> int:
+    conn = sqlite3.connect(path)
+    cur = conn.execute(
+        "INSERT INTO player(display_name, team, created_at, account_id) VALUES (?, ?, ?, ?)",
+        ("Tester", "RED", int(time.time()), account_id),
+    )
+    conn.commit()
+    player_id = cur.lastrowid
+    conn.close()
+    return player_id
+
+
+def test_key_present_authenticates_via_key_even_with_a_session_cookie_also_present(db_path):
+    """A request carrying BOTH a valid X-API-Key and a valid session
+    cookie must authenticate via the key, exactly as it always has --
+    the session branch is never even consulted when a key is present.
+    Uses a deliberately BOGUS session cookie precisely so that if the
+    session path were consulted, this would fail loudly rather than
+    coincidentally passing.
+    """
+    ingestor = FakeIngestor()
+    dep = require_api_key_principal()
+
+    principal = _run(dep(_request(ingestor, api_key=GOOD_KEY, session_token="not-a-real-session-token")))
+
+    assert principal == Principal(player_id=PLAYER_ID, source="api_key")
+    assert ingestor.calls == [GOOD_KEY]
+
+
+def test_no_key_valid_session_with_linked_player_authenticates_via_session(db_path):
+    account_id = _make_account(db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+
+    ingestor = FakeIngestor()
+    dep = require_api_key_principal()
+
+    principal = _run(dep(_request(ingestor, session_token=raw_token)))
+
+    assert principal == Principal(player_id=player_id, account_id=account_id, source="session")
+    # The session path never touches the ingestor at all.
+    assert ingestor.calls == []
+
+
+def test_no_key_valid_session_without_linked_player_is_401(db_path):
+    """An account with no linked player can't satisfy this dependency
+    -- every existing call site reads principal.player_id as a real
+    player, so this must fall through to the same 401 a missing
+    credential always produced, never a 500.
+    """
+    account_id = _make_account(db_path)
+    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+
+    ingestor = FakeIngestor()
+    dep = require_api_key_principal()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run(dep(_request(ingestor, session_token=raw_token)))
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "unauthorized"
+
+
+def test_no_key_invalid_session_cookie_is_401(db_path):
+    ingestor = FakeIngestor()
+    dep = require_api_key_principal()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run(dep(_request(ingestor, session_token="garbage-never-issued")))
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "unauthorized"
+
+
+def test_no_key_no_session_cookie_is_401_same_as_before(db_path):
+    """No credential of either kind -- identical to the pre-existing
+    test_missing_header_is_401_unauthorized_without_calling_the_ingestor
+    above, just re-asserted here alongside the new session tests for
+    contrast.
+    """
+    ingestor = FakeIngestor()
+    dep = require_api_key_principal()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run(dep(_request(ingestor)))
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "unauthorized"
+    assert ingestor.calls == []
+
+
+def test_revoked_session_is_401_not_accepted(db_path):
+    from app.sessions import revoke_session, verify_session
+
+    account_id = _make_account(db_path)
+    _make_player(db_path, account_id=account_id)
+    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    token_hash = _run(verify_session(raw_token)).token_hash
+    _run(revoke_session(token_hash))
+
+    ingestor = FakeIngestor()
+    dep = require_api_key_principal()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run(dep(_request(ingestor, session_token=raw_token)))
+    assert exc_info.value.status_code == 401

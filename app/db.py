@@ -1189,6 +1189,182 @@ CREATE TABLE IF NOT EXISTS notice (
     active      INTEGER NOT NULL DEFAULT 0,
     updated_at  INTEGER NOT NULL DEFAULT 0
 );
+
+-- ---------------------------------------------------------------------
+-- Account layer (app/sessions.py, app/account_api.py): a login identity
+-- sitting ABOVE the existing hashed-API-key player model, not replacing
+-- it. Every table above this comment (player, api_key, player_node,
+-- ...) is completely unmodified by this -- a player who only ever
+-- registers a MeshMapper key and never creates an account behaves
+-- exactly as they always have, in every respect. An account is a new,
+-- optional handle a person can additionally acquire: it can sign in
+-- through more than one identity (Google, GitHub, Discord, Apple,
+-- email -- whichever providers actually ship; nothing in this schema
+-- or these tables builds an OAuth provider or sends email, that is
+-- separate follow-up work), and it can be linked to AT MOST ONE
+-- existing player, one-to-one, nullable in both directions -- see
+-- player.account_id's own MIGRATIONS entry below for the column that
+-- carries that link (an account has no equivalent column pointing back
+-- at a player; the FK lives on the "many candidate rows, one true
+-- owner" side the same way api_key.player_id already does, and the
+-- UNIQUE index on player.account_id is what actually enforces the
+-- one-to-one half of the contract).
+--
+-- Deliberately NOT a replacement identity model, and deliberately NOT
+-- auto-merging: an account_identity row is never folded into an
+-- existing account just because it happens to share an email address
+-- with one -- see that table's own comment for why silent merging
+-- would be an account-takeover surface, not a convenience. A future
+-- merge TOOL (an operator, or a person proving they control two
+-- accounts) is the only way two accounts ever combine, and nothing in
+-- this migration builds that tool -- see `account.merged_into` below.
+-- ---------------------------------------------------------------------
+
+-- One row per person who has ever created an account. created_at/
+-- last_login_at/disabled_at mirror `player`'s own columns above for
+-- the same reasons: an operator needs to know when an account was
+-- created and last used, and disabling one (spam, abuse, a support
+-- request) must not delete anything an audit trail or a later merge
+-- still needs to read.
+--
+-- merged_into: nullable self-reference for a LATER merge tool (two
+-- accounts one person somehow created independently -- e.g. signing in
+-- with Google once and GitHub another time before ever linking them --
+-- discovered to be the same person after the fact). Added now,
+-- alongside the rest of this table, specifically so that future tool
+-- never needs its own ALTER TABLE migration -- same reasoning
+-- `place.rotates`/`active` show what happens when a column like this
+-- ISN'T added up front (two extra migrations, each with its own
+-- backfill story). Nothing reads or writes this column yet: every
+-- account_* query anywhere in this codebase today filters on
+-- account_id alone and has no merge concept to account for.
+CREATE TABLE IF NOT EXISTS account (
+    account_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at     INTEGER NOT NULL,
+    last_login_at  INTEGER,
+    disabled_at    INTEGER,
+    merged_into    INTEGER
+);
+
+-- One row per (provider, subject) sign-in identity a person can use to
+-- reach an account -- provider's own opaque, stable subject id ("sub"
+-- in OAuth/OIDC terms; for provider='email' the subject is the address
+-- itself, lowercased). PRIMARY KEY on the (provider, subject) pair, not
+-- account_id, because that pair IS exactly what a provider's login
+-- callback hands back: resolving a callback to an account is a single
+-- indexed lookup on the two fields the provider gave us, with no
+-- secondary index needed.
+--
+-- account_id is NOT unique here on purpose -- one account can hold
+-- SEVERAL identities (a person who first signed in with Google, later
+-- added GitHub, without ever losing access through either) -- see
+-- idx_account_identity_account below for the account -> identities
+-- direction app/account_api.py's GET /api/account reads.
+--
+-- email/email_verified travel with the IDENTITY, not with the account:
+-- two identities on the same account can legitimately carry two
+-- different provider-reported addresses (a work GitHub email, a
+-- personal Google one), and a provider's own verified-or-not claim is
+-- a fact about that provider's assertion, not a fact about the account
+-- as a whole. Both nullable -- not every provider this app might add
+-- necessarily returns an email at all.
+--
+-- Never auto-merged: two DIFFERENT (provider, subject) rows that
+-- happen to report the same email are never collapsed into one account
+-- just because the addresses match. An email address is exactly the
+-- kind of thing a provider lets its own user set to whatever they
+-- like, so treating email equality as identity equality would let
+-- someone sign in as "the same person" as an account they do not
+-- actually control -- a real account-takeover path, not a convenience
+-- worth the risk. Every distinct (provider, subject) either binds to
+-- an account explicitly (a logged-in user linking a second provider
+-- themselves) or creates a brand new account -- there is no automatic
+-- path between two rows that merely share an email.
+CREATE TABLE IF NOT EXISTS account_identity (
+    provider        TEXT NOT NULL,       -- 'google' | 'github' | 'discord' | 'apple' | 'email'
+    subject         TEXT NOT NULL,       -- provider's own stable id ("sub"); the address itself for 'email'
+    account_id      INTEGER NOT NULL,
+    email           TEXT,
+    email_verified  INTEGER NOT NULL DEFAULT 0,
+    linked_at       INTEGER NOT NULL,
+    last_login_at   INTEGER,
+    PRIMARY KEY (provider, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_account_identity_account ON account_identity(account_id);
+
+-- One row per login session, active or historical. token_hash is a
+-- SHA-256 digest of the actual session token (app/sessions.py reuses
+-- app/mc_ingest.py's hash_secret() for this -- see that module's own
+-- comment for why this app deliberately never grows a second hasher
+-- for the same job). The raw token itself is never stored anywhere,
+-- mirroring api_key.key_hash above: a stolen database backup must
+-- never be enough to impersonate a logged-in session, only to know one
+-- existed and when.
+--
+-- expires_at/last_seen_at together implement SLIDING expiry
+-- (app/sessions.py's touch_session()): a session's effective lifetime
+-- is measured forward from last_seen_at, not frozen at created_at, so
+-- someone actively using the site is never logged out mid-session, but
+-- a session nobody has touched in a long time still expires on
+-- schedule rather than living forever. last_seen_at is deliberately
+-- NOT bumped on every single request -- see touch_session()'s own
+-- comment for why (SQLite write-lock contention with the check-in
+-- poller's own periodic writes, the same WriteSession lock every write
+-- in this codebase now serializes through).
+--
+-- revoked_at: set by an explicit logout (one session) or logout-all
+-- (every session on the account) -- checked ahead of expires_at on
+-- every verify, so a revoked-but-not-yet-expired token stops working
+-- on the very next request, rather than waiting out its natural
+-- sliding expiry.
+--
+-- user_agent/ip are NOT security controls -- nothing here pins a
+-- session to either one, and nothing rejects a request whose address
+-- moved (a phone changing towers mid-session is normal, not suspect).
+-- They exist purely so app/account_api.py's GET /api/account can show
+-- a person a recognisable list of their own active sessions ("Chrome
+-- on 100.x.x.x, last seen 3 minutes ago") so they can tell which ones
+-- are actually theirs before deciding to revoke one.
+CREATE TABLE IF NOT EXISTS account_session (
+    token_hash    TEXT PRIMARY KEY,
+    account_id    INTEGER NOT NULL,
+    created_at    INTEGER NOT NULL,
+    expires_at    INTEGER NOT NULL,
+    last_seen_at  INTEGER NOT NULL,
+    revoked_at    INTEGER,
+    user_agent    TEXT,
+    ip            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_account_session_account ON account_session(account_id);
+
+-- Append-only audit trail for account-affecting events -- the same
+-- role `player_team_change` plays for `player.team` above (read that
+-- table's own comment first; this mirrors it deliberately, right down
+-- to "only ever gains a row; nothing here is ever updated or
+-- deleted"). Never read by any scoring or authentication path -- it
+-- exists purely so an operator (and, eventually, the account holder's
+-- own history view) can see WHAT happened and WHEN, which a row's
+-- current live state alone can never answer on its own (a player who
+-- was linked and later unlinked leaves no trace anywhere else).
+--
+-- detail is free-text, not a foreign key to whatever the event
+-- happened to -- `kind` alone (identity_linked/identity_unlinked/
+-- player_linked/player_unlinked) already says which OTHER table
+-- changed, and forcing every future kind of event through the same
+-- fixed set of nullable foreign-key columns would mean adding a new
+-- column to this table every time a new kind of account event needs
+-- describing. A plain text note (built by whichever code path writes
+-- the row) is enough for an audit trail nothing downstream parses back
+-- out.
+CREATE TABLE IF NOT EXISTS account_link_event (
+    event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  INTEGER NOT NULL,
+    kind        TEXT NOT NULL,     -- 'identity_linked' | 'identity_unlinked' | 'player_linked' | 'player_unlinked'
+    detail      TEXT,
+    actor       TEXT NOT NULL,     -- 'user' | 'operator'
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_link_event_account ON account_link_event(account_id, created_at);
 """
 
 
@@ -1479,6 +1655,36 @@ MIGRATIONS = [
     # deployment upgrading into this migration keeps painting exactly
     # nothing extra until an operator explicitly sets a date.
     "ALTER TABLE freqmapper_config ADD COLUMN paint_from TEXT NOT NULL DEFAULT ''",
+    # The account layer's link to the existing player model (see the
+    # "Account layer" section in SCHEMA above for the full story) --
+    # `player` is a pre-existing table with rows already in it on every
+    # real deployment, so this new column has to be an ALTER, unlike
+    # account/account_identity/account_session/account_link_event
+    # themselves (brand new tables, CREATE TABLE IF NOT EXISTS in SCHEMA
+    # already covers them). NULL for every row until a player links an
+    # account through app/account_api.py's POST /api/account/link-key --
+    # correct for 100% of existing rows, since the account layer did not
+    # exist before this migration and nothing could have set it.
+    "ALTER TABLE player ADD COLUMN account_id INTEGER",
+    # Enforces the "at most one player per account" half of the
+    # one-to-one contract at the database level, not just in
+    # application code -- app/account_api.py's link-key handler already
+    # checks this itself before writing (see its own comment for why:
+    # a friendly, specific error beats a raw IntegrityError leaking out
+    # as a 500), but a UNIQUE index means that invariant holds even
+    # against a future code path that forgets to check. A UNIQUE index
+    # in SQLite treats every NULL as distinct from every other NULL, so
+    # any number of players with no linked account (NULL) coexist
+    # freely -- only two REAL, non-null account_id values colliding is
+    # rejected. Same reason idx_place_active isn't created inside
+    # SCHEMA's CREATE TABLE block: on a database that already ran
+    # SCHEMA before this ALTER added the column, conn.executescript(SCHEMA)
+    # executes before this MIGRATIONS list ever runs, so an index
+    # referencing account_id here would fail startup on every existing
+    # deployment with "no such column: account_id" -- it has to be
+    # created down here, after the ALTER immediately above guarantees
+    # the column exists first.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_player_account ON player(account_id)",
 ]
 
 PRAGMAS = [

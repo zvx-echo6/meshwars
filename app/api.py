@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from . import mc_api
+from .account_api import router as account_router
 from .admin_api import router as admin_router
 from .admin_ops import router as admin_ops_router
 from .auth import require_api_key_principal
@@ -931,6 +932,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(mc_router)
     app.include_router(join_router)
+    app.include_router(account_router)
     app.include_router(admin_router)
     app.include_router(admin_ops_router)
     app.include_router(nodes_router)

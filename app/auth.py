@@ -60,14 +60,33 @@ _BoundedHits instance into both places -- this module doesn't change
 that, it just gives checkin_api.py a reusable class to do it with
 instead of a hand-rolled dict.
 
-This is also the seam a future session-cookie login plugs into.
-Principal.source exists (always "api_key" today) so a caller can
-branch on how someone authenticated without every call site needing to
-change when a second source appears; sessions do not exist yet and
-this module does not build them.
+This is also the seam a session-cookie login plugs into, and now does:
+Principal.source is "api_key" (default, and the ONLY value every
+existing call site has ever seen) or "session" -- account_id is set
+for the latter, always None for the former. require_api_key_principal()'s
+built dependency below now falls back to a session cookie (see
+_try_session_principal) whenever a request carries no X-API-Key header
+at all -- but ONLY then: a request that DOES carry a key is
+authenticated exactly as it always has been, on the exact same code
+path, with the session fallback never even consulted. This is
+deliberately additive, not a replacement: the five existing call sites
+(app/join_api.py, app/nodes_api.py, app/checkin_api.py, app/api.py's
+POST /api/mc/ingest, app/mc_api.py's POST /api/mc/status) needed zero
+code changes to gain this -- they all resolve their Principal through
+this one function, so a session-authenticated caller is now ACCEPTED
+wherever a key-authenticated one already was, with no per-site wiring.
+tests/test_auth.py locks in that a key-bearing request's behavior is
+unchanged byte-for-byte by this addition. A session that resolves to
+an account with no linked player (see app/db.py's player.account_id)
+cannot satisfy this dependency -- every one of these five routes
+operates on a specific player's data (their radios, their team, their
+key), so a session with nothing to point at falls through to the same
+401 a missing credential always produced, never a 500 from a None
+player_id reaching a query that assumes an int.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -78,6 +97,7 @@ from fastapi.responses import JSONResponse
 from .client_ip import get_client_ip
 from .config import settings
 from .mc_ingest import hash_secret
+from .sessions import SESSION_COOKIE_NAME, _lookup_linked_player_sync, verify_session
 
 # ---- error rendering ---------------------------------------------------
 #
@@ -109,15 +129,25 @@ async def http_exception_as_error_body(request: Request, exc: HTTPException) -> 
 class Principal:
     """Who a request is authenticated as, and how.
 
-    Only player_id and source exist today -- source is always
-    "api_key", the only credential kind this app has. Deliberately NOT
-    adding an account_id field, or a "session" source, until a session
-    login actually exists: every call site below only ever reads
-    principal.player_id, so those can be added later (an account_id
-    alongside player_id, a "session" value for source) without touching
-    any of them.
+    source is "api_key" (default -- every one of the five existing call
+    sites, always) or "session" (app/sessions.py's cookie fallback,
+    below). account_id is always None for "api_key" -- a raw API key
+    has no account concept at all -- and set for "session". player_id
+    is typed nullable for the "session" case in principle (an account
+    with no linked player has none), but require_api_key_principal()'s
+    own dependency (below) never actually returns a Principal with
+    player_id=None: a session that resolves to no linked player fails
+    to authenticate here entirely (401), the same as no credential at
+    all, since every existing call site unconditionally reads
+    principal.player_id as a real player. A session that legitimately
+    has no linked player yet is instead handled by
+    app/sessions.py's own require_session() dependency
+    (SessionPrincipal, a separate type), which app/account_api.py's
+    routes use directly -- those routes need account identity, not
+    necessarily a player.
     """
-    player_id: int
+    player_id: int | None
+    account_id: int | None = None
     source: str = "api_key"
 
 
@@ -171,6 +201,32 @@ class _BoundedHits:
         hits.append(now)
         self._hits[key] = hits
         return False
+
+
+async def _try_session_principal(request: Request) -> Principal | None:
+    """Session-cookie fallback consulted only when a request carries no
+    X-API-Key at all (see the call site in require_api_key_principal's
+    dependency below) -- a request that DOES carry a key never reaches
+    this function, so its existence has zero effect on key-bearing
+    requests. Returns None (never raises) on any failure: no cookie, an
+    invalid/expired/revoked session, or a session whose account has no
+    linked player -- the caller treats None exactly like "no key was
+    presented," falling through to the same 401 unauthorized it always
+    raised for that case.
+    """
+    raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not raw_token:
+        return None
+
+    result = await verify_session(raw_token)
+    if result.status != "ok":
+        return None
+
+    player_id = await asyncio.to_thread(_lookup_linked_player_sync, result.account_id)
+    if player_id is None:
+        return None
+
+    return Principal(player_id=player_id, account_id=result.account_id, source="session")
 
 
 def new_rate_limit_bucket(max_tracked: int = _DEFAULT_MAX_TRACKED) -> _BoundedHits:
@@ -240,6 +296,14 @@ def require_api_key_principal(
 
         raw_key = request.headers.get("X-API-Key", "")
         if not raw_key:
+            # No key at all -- try a session cookie before giving up.
+            # See _try_session_principal's own docstring and this
+            # module's docstring for the full reasoning; this branch is
+            # the ENTIRE session-fallback addition; everything below it
+            # in this function is the original, untouched key path.
+            session_principal = await _try_session_principal(request)
+            if session_principal is not None:
+                return session_principal
             raise HTTPException(status_code=401, detail="unauthorized")
 
         ingestor = request.app.state.mc_ingestor

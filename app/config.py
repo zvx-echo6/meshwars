@@ -556,6 +556,62 @@ class Settings(BaseSettings):
     mqtt_buffer_retention_hours: int = 48
     mqtt_reconcile_interval_seconds: int = 30
 
+    # ---- Account layer (app/sessions.py, app/account_api.py) -------------
+    # A login session sitting above the existing hashed-API-key player
+    # model -- see app/db.py's "Account layer" SCHEMA comment for the
+    # full design. Nothing here touches the key-only path at all.
+
+    # Sliding-expiry lifetime: how long a session stays valid AFTER its
+    # most recent touch, not from creation. 30 days is generous on
+    # purpose -- this is a browser session cookie for a casual
+    # territory-game site, not a banking app, and the cost of getting
+    # logged out unexpectedly (having to sign in again) is a much worse
+    # experience here than the cost of a long-lived cookie.
+    account_session_lifetime_seconds: int = 60 * 60 * 24 * 30  # 30 days
+
+    # How stale last_seen_at has to be before a verify actually writes a
+    # fresh value, rather than treating the session as "seen recently
+    # enough already." Bumping last_seen_at (and, with it, expires_at --
+    # see account_session's own comment in app/db.py) on literally every
+    # authenticated request would mean a write, through the same global
+    # WriteSession lock every other write in this app already
+    # serializes through (app/db.py), on every single page a logged-in
+    # visitor loads -- directly contending with the check-in poller's
+    # own periodic writes for no real benefit, since "logged in 4
+    # seconds ago" and "logged in 3 minutes ago" are indistinguishable
+    # to a human reading their own session list. A few minutes of slack
+    # costs nothing observable and removes nearly all of that write
+    # volume.
+    account_session_touch_threshold_seconds: int = 300  # 5 minutes
+
+    # Secure flag on the session cookie -- browsers refuse to send a
+    # Secure cookie back over plain http. True is the correct default
+    # for every real deployment (this app is always reached through a
+    # TLS-terminating reverse proxy -- see app/client_ip.py's own
+    # docstring), so a fresh clone is safe by default; a developer
+    # running the server bare over http on localhost sets this to false
+    # in their own .env to be able to log in at all, the same escape
+    # hatch trusted_proxies and every other empty-means-off setting in
+    # this file gives a local dev loop.
+    account_session_cookie_secure: bool = True
+
+    # Address-keyed rate limit on POST /api/account/link-key
+    # (app/account_api.py). That endpoint takes an arbitrary API key in
+    # its request body and reports back whether it was valid -- with no
+    # limit at all, a logged-in attacker could use it to brute-force
+    # other players' keys (which are otherwise only ever transmitted,
+    # never guessed at) simply by trying candidates until one links.
+    # Reuses the same _BoundedHits shape app/auth.py's
+    # require_api_key_principal() already uses for its own pre-auth
+    # limiter, as its own independent budget (see that module's
+    # docstring for why each call site keeps its own instance rather
+    # than sharing a pool) -- sized separately from
+    # node_api_rate_limit_*/mc_status_rate_limit_* because this is a
+    # session-authenticated, occasional, one-time-per-account action,
+    # not a routine polling or ingest budget.
+    account_link_key_rate_limit_attempts: int = 5
+    account_link_key_rate_limit_window_seconds: int = 60
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
