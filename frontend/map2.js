@@ -760,17 +760,52 @@ const PROTOCOLS = {
 const REFRESH_INTERVAL_MS = 30000;
 
 // ---- module state (territory panel) ----
-let mode = 'meshcore'; // key into PROTOCOLS -- set from /config's
-                        // mc_default_view before the panel is built
-                        // (see fetchBootConfig/main), same source of
-                        // truth mc.js's loadConfig() reads. The board
-                        // choice itself is never written to
-                        // localStorage on either page -- mc.js persists
-                        // only the map view itself (its 'mapView' key),
-                        // never which board was showing, and this page
-                        // does not persist the map view at all yet.
+let mode = 'meshcore'; // key into PROTOCOLS -- placeholder only. The
+                        // real value is decided in main(), before the
+                        // map is even constructed, in priority order:
+                        // an explicit ?board= link, then this browser's
+                        // remembered choice (BOARD_MODE_KEY, below),
+                        // then /config's mc_default_view -- same source
+                        // of truth mc.js's loadConfig() reads. Every
+                        // time it changes after that (the toggle
+                        // buttons, the first-visit board-choice modal)
+                        // the new value is written back to
+                        // BOARD_MODE_KEY so the next load starts there.
+                        // mc.js's own 'mapView' key is unrelated -- that
+                        // remembers the camera position, never the
+                        // board.
 function cfg() {
   return PROTOCOLS[mode];
+}
+
+// Remembered per browser, same throw-survives idiom as
+// NOTICE_DISMISSED_KEY/LAYERS_COLLAPSED_KEY further down this file:
+// private browsing or blocked site data must never break the map, it
+// just means the choice is not remembered next time.
+const BOARD_MODE_KEY = 'mwBoardMode';
+
+// Only 'meshcore'/'meshtastic' are ever trusted back out of storage --
+// anything else (hand-edited, cleared mid-value, a future build's
+// value read by an older one) is treated the same as nothing stored,
+// never passed through, so a corrupt value can't wedge the map into an
+// invalid mode.
+function getStoredBoardMode() {
+  try {
+    const v = localStorage.getItem(BOARD_MODE_KEY);
+    return v === 'meshcore' || v === 'meshtastic' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberBoardMode(newMode) {
+  try {
+    localStorage.setItem(BOARD_MODE_KEY, newMode);
+  } catch {
+    // Storage unavailable (private browsing, quota) -- the choice just
+    // is not remembered next time, same failure direction as the other
+    // localStorage keys on this page.
+  }
 }
 let scoreboardTitleEl = null;
 let scoreboardTopBtn = null;
@@ -1425,10 +1460,12 @@ function buildScoreboardControl(map) {
   div.querySelector('#mc-toggle-meshtastic').addEventListener('click', (e) => {
     e.stopPropagation();
     setBoardMode('meshtastic', map);
+    rememberBoardMode(mode); // read back the normalized value setBoardMode just set
   });
   div.querySelector('#mc-toggle-meshcore').addEventListener('click', (e) => {
     e.stopPropagation();
     setBoardMode('meshcore', map);
+    rememberBoardMode(mode);
   });
 
   div.querySelector('#mc-header-btn').addEventListener('click', (e) => {
@@ -1533,6 +1570,107 @@ function setBoardMode(newMode, map) {
   // otherwise switching boards leaves the other board's colours on them.
   loadPlacesViewport(map);
   loadPlacesPanel(map);
+}
+
+// ===== First-visit board choice =====
+//
+// Shown exactly once per browser: only when main() finds neither a
+// linked ?board= nor a remembered BOARD_MODE_KEY (see main()'s own
+// comment on that check). Every other modal on this page -- the update
+// notice, History, Roster, Top Operators -- closes on an X, a backdrop
+// click, or Escape. This one does not: it is a single two-option
+// question with no wrong answer to walk away from, and a dismiss that
+// left BOARD_MODE_KEY unset would just reopen the identical modal on
+// the very next load, which is worse than making the visitor answer it
+// once. So there is no close button, wrap has no click listener, and
+// Escape is not handled at all (onBoardChoiceKeydown below only ever
+// acts on Tab) -- picking Meshtastic or MeshCore is the only way out.
+let boardChoiceModalEl = null;
+
+// Keeps Tab cycling between the two options instead of escaping onto
+// the page underneath -- there is nothing else focusable inside the
+// modal to include in the cycle, and no dismiss control to worry about
+// leaving out of it.
+function onBoardChoiceKeydown(e) {
+  if (e.key !== 'Tab' || !boardChoiceModalEl) return;
+  const opts = boardChoiceModalEl.querySelectorAll('.mw-board-choice-option');
+  if (opts.length < 2) return;
+  const first = opts[0];
+  const last = opts[opts.length - 1];
+  if (e.shiftKey) {
+    if (document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    }
+  } else if (document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+// Static markup only (no operator- or player-authored text anywhere in
+// it), so this is built the same way buildScoreboardControl's card is --
+// one innerHTML template, then querySelector to wire it up -- rather
+// than showNoticeModal's element-by-element/.textContent construction,
+// which exists specifically to keep operator-authored title/body out of
+// innerHTML. Nothing here is ever untrusted input.
+function showBoardChoiceModal(map) {
+  const wrap = document.createElement('div');
+  wrap.className = 'mw-board-choice-modal';
+  wrap.innerHTML = `
+    <div class="mw-board-choice-modal-inner" role="dialog" aria-modal="true" aria-labelledby="mw-board-choice-title">
+      <div class="mw-board-choice-modal-header" id="mw-board-choice-title">Which board do you want to see?</div>
+      <p class="mw-board-choice-modal-intro">MeshWars runs a separate board for each of two mesh radio protocols. Pick the one that matches the radio you carry; you can switch anytime from the toggle in the corner.</p>
+      <div class="mw-board-choice-options">
+        <button type="button" class="mw-board-choice-option" id="mw-board-choice-meshtastic">
+          <span class="mw-board-choice-option-title">Meshtastic</span>
+          <span class="mw-board-choice-option-desc">The board for players running Meshtastic firmware.</span>
+        </button>
+        <button type="button" class="mw-board-choice-option" id="mw-board-choice-meshcore">
+          <span class="mw-board-choice-option-title">MeshCore</span>
+          <span class="mw-board-choice-option-desc">The board for players running MeshCore firmware.</span>
+        </button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+  boardChoiceModalEl = wrap;
+
+  const choose = (chosen) => {
+    rememberBoardMode(chosen);
+    // mapLoaded (module-scoped, set true by map.on('load') in main())
+    // tells whether there is already a board on screen to swap live. If
+    // the map has not loaded yet, just set `mode` directly -- main()'s
+    // own map.on('load') handler calls setBoardMode(mode, map) once the
+    // style finishes loading and picks this up then; calling
+    // setBoardMode here first would reach into a 'board' source that
+    // does not exist until that handler adds it, for no benefit since
+    // that same call is coming regardless.
+    if (mapLoaded) {
+      setBoardMode(chosen, map);
+    } else {
+      mode = chosen;
+    }
+    document.removeEventListener('keydown', onBoardChoiceKeydown);
+    wrap.remove();
+    boardChoiceModalEl = null;
+    // main() held loadNotice() back specifically because this modal was
+    // still up -- see its own comment on needsBoardChoice. Now that the
+    // question is answered and this modal is gone, the notice is free
+    // to run exactly the check it always runs (dismissed-version and
+    // hasAwardParams) and show itself if it's still due; nothing here
+    // pre-empts or forces that decision.
+    loadNotice();
+  };
+
+  wrap.querySelector('#mw-board-choice-meshtastic').addEventListener('click', () => choose('meshtastic'));
+  wrap.querySelector('#mw-board-choice-meshcore').addEventListener('click', () => choose('meshcore'));
+  document.addEventListener('keydown', onBoardChoiceKeydown);
+
+  // Focus moves into the modal on open, same as showNoticeModal's own
+  // closeBtn.focus() -- there is no close button here, so the first
+  // option is the natural landing spot instead.
+  wrap.querySelector('#mw-board-choice-meshtastic').focus();
 }
 
 // ---- Places Worth Going (docs/features/places.md) ----------------------
@@ -3107,20 +3245,51 @@ function setupLayersCollapse() {
 setupLayersCollapse();
 
 async function main() {
-  // Not awaited: a single small GET against a one-row table, kicked off
-  // in parallel with the map's own boot rather than gating first paint
-  // on it -- see loadNotice()'s own comment for why a failure here is
-  // silent.
-  loadNotice();
-
-  const { playAreaBounds, defaultMode, cartoKey } = await fetchBootConfig();
   // ?board= wins over the configured default. Without this an award link
   // from the Meshtastic results page opened the map on whichever board
   // the config preferred, and drew a Meshtastic highlight over MeshCore
   // territory -- the square the link exists to show was simply not
   // there.
+  //
+  // Read up here, ahead of fetchBootConfig, purely so loadNotice() below
+  // can see needsBoardChoice before it decides whether to fire -- the
+  // priority order these feed into (?board= over a remembered choice
+  // over /config's default) is unchanged and still resolved into `mode`
+  // below, once defaultMode is in hand.
   const linked = boardParam();
-  mode = linked || defaultMode;
+  const storedMode = getStoredBoardMode();
+  // Whether this load still owes the visitor the first-visit board
+  // question below (see showBoardChoiceModal's own comment on why it
+  // exists and has no dismiss-without-choosing path). Used twice: once
+  // here, to decide whether loadNotice() can run now or has to wait,
+  // and again at the showBoardChoiceModal call site itself.
+  const needsBoardChoice = !linked && !storedMode;
+
+  // Not awaited: a single small GET against a one-row table, kicked off
+  // in parallel with the map's own boot rather than gating first paint
+  // on it -- see loadNotice()'s own comment for why a failure here is
+  // silent. Held back when needsBoardChoice, though: the board question
+  // is the first thing an undecided visitor has to answer -- it is
+  // required and has no way to dismiss it -- so the notice, which is
+  // neither, cannot be allowed to race that fetch onto the screen. Left
+  // to run here, both modals could end up open at once, stacked, with
+  // the notice also sitting underneath and stealing clicks meant for
+  // the board modal on top of it. showBoardChoiceModal's choose() fires
+  // loadNotice() itself once the question is answered, so the notice
+  // still appears this same visit, just after, never instead.
+  if (!needsBoardChoice) {
+    loadNotice();
+  }
+
+  const { playAreaBounds, defaultMode, cartoKey } = await fetchBootConfig();
+  // Read before anything paints (see BOARD_MODE_KEY's own comment) so a
+  // returning visitor's remembered board is baked into `mode` before the
+  // scoreboard panel or map.on('load')'s setBoardMode call ever run --
+  // there is no intermediate state where the wrong board's chrome is
+  // built and then swapped. Below ?board= (a linked award/view should
+  // never be overridden by a stale preference) but above /config's
+  // default (a remembered choice always beats the operator's fallback).
+  mode = linked || storedMode || defaultMode;
   if (!playAreaBounds) {
     console.warn('MeshWars map2: play area bounds unavailable from /config, map is unbounded');
   }
@@ -3391,6 +3560,17 @@ async function main() {
   // popping in once tiles start arriving.
   buildScoreboardControl(map);
   renderScoreboard(null); // seed all-zero rows immediately, before the first fetch
+
+  // First-visit board choice: only when needsBoardChoice (computed
+  // above, before loadNotice()'s own call) -- see showBoardChoiceModal's
+  // own comment for why this one has no dismiss-without-choosing path.
+  // Built here rather than inside map.on('load') below for the same
+  // reason the panel above is: no dependency on the map style, so no
+  // reason to make a first-time visitor wait for tiles before being
+  // asked.
+  if (needsBoardChoice) {
+    showBoardChoiceModal(map);
+  }
 
   // Territory panel starts collapsed on narrow screens only (phones) --
   // it otherwise eats a lot of a phone screen. Desktop always starts

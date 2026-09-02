@@ -441,6 +441,119 @@
   text-decoration: underline;
 }
 
+/* ===== First-visit board choice (map2.js's showBoardChoiceModal) =====
+   Same dimmed-backdrop/dark-card shape as .mw-notice-modal above, one
+   z-index tier higher (2200 vs 2100): this gates which board even
+   paints, so on the rare first-ever visit that also carries an active
+   operator notice, the choice is answered first and the notice is still
+   there, unobscured, the moment this modal is gone. The two options
+   reuse .mc-switch-btn's own surface/border/hover language (mc.css) --
+   enlarged and stacked to fit a title plus a description line, rather
+   than the toggle's compact side-by-side pair -- so a first-time
+   visitor's very first choice already looks like the control they will
+   use to change their mind later. Only theme tokens below, same as the
+   notice modal, so both skins read correctly with no theme-specific
+   rule here. */
+.mw-board-choice-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 16px;
+}
+
+.mw-board-choice-modal-inner {
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 8px;
+  width: min(480px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  padding: 18px;
+  animation: mw-board-choice-in 0.15s ease;
+}
+
+/* The modal's only motion: a small settle-in on open, nothing on close
+   (closing only ever removes the element outright, once a choice is
+   made). Reduced to nothing under prefers-reduced-motion below. */
+@keyframes mw-board-choice-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-board-choice-modal-inner {
+    animation: none;
+  }
+}
+
+.mw-board-choice-modal-header {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--mw-accent);
+  margin: 0 0 8px;
+}
+
+.mw-board-choice-modal-intro {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--mw-text-2);
+}
+
+.mw-board-choice-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mw-board-choice-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  background: var(--mw-raised);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 6px;
+  padding: 12px 14px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.mw-board-choice-option:hover {
+  background: var(--mw-line);
+}
+
+/* Explicit ring rather than the browser default: both themes' surfaces
+   here are dark enough that a default outline can wash out against
+   them. Inset (negative offset) so it never gets clipped by the card's
+   own overflow:auto. No .active/.selected state to also style -- unlike
+   .mc-switch-btn, neither option has been picked yet by definition,
+   since this modal only shows when nothing is stored. */
+.mw-board-choice-option:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: -2px;
+}
+
+.mw-board-choice-option-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--mw-accent);
+}
+
+.mw-board-choice-option-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--mw-text-2);
+}
+
 /* -------------------------------------------------------------------------
    Map failure banner (map2.js's showMapErrorBanner) -- replaces
    #loading-overlay the first time the map construction throws,
