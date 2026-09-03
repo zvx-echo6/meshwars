@@ -387,8 +387,6 @@ async def account_stats(session: SessionPrincipal = Depends(require_session)) ->
     if session.player_id is None:
         return _no_linked_player_error()
 
-    from .checkin import checkin_streak
-
     conn = connect()
     try:
         player = conn.execute(
@@ -417,10 +415,15 @@ async def account_stats(session: SessionPrincipal = Depends(require_session)) ->
             # honest answer, not "1" (which is what passing a made-up
             # net_date would produce -- see that function's own
             # docstring on why it always returns at least 1 once called).
-            streak = (
-                checkin_streak(conn, session.player_id, protocol, latest_net_date)
-                if latest_net_date else 0
-            )
+            # Imported here, not at module level (see this module's own
+            # import comment) -- and only on this branch, so a player
+            # with no check-ins on a protocol never pays for importing
+            # app.checkin's heavy chain at all.
+            if latest_net_date:
+                from .checkin import checkin_streak
+                streak = checkin_streak(conn, session.player_id, protocol, latest_net_date)
+            else:
+                streak = 0
             board["nets_checked_in"] = nets_checked_in
             board["checkin_streak"] = streak
             boards[protocol] = board
