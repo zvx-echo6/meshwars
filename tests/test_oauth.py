@@ -17,6 +17,8 @@ import pytest
 from app.config import settings
 from app.oauth import (
     GITHUB,
+    PROVIDER_LABELS,
+    PROVIDERS,
     OAuthError,
     Provider,
     ProviderIdentity,
@@ -51,6 +53,22 @@ def test_get_provider_returns_github():
 
 def test_get_provider_unknown_name_returns_none():
     assert get_provider("not-a-real-provider") is None
+
+
+def test_every_wired_up_provider_has_a_display_label():
+    """PROVIDER_LABELS is the single source of truth for how a provider
+    name renders in the UI (GET /auth/providers, GET /api/account's
+    identities, GET /api/account/pending) -- a provider present in
+    PROVIDERS with no entry in PROVIDER_LABELS would silently render as
+    its raw lowercase name instead of failing loudly, exactly the bug
+    this test exists to catch before it ships. PROVIDER_LABELS is
+    allowed to be broader than PROVIDERS (it also covers "email", which
+    is never a PROVIDERS entry, and providers commented out in
+    PROVIDERS pending their own Provider(...) row) -- only the other
+    direction, a PROVIDERS entry missing its label, is a bug.
+    """
+    missing = [name for name in PROVIDERS if name not in PROVIDER_LABELS]
+    assert missing == [], f"PROVIDERS entries missing from PROVIDER_LABELS: {missing}"
 
 
 def test_provider_disabled_by_default(monkeypatch):

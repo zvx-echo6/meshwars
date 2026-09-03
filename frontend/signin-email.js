@@ -10,10 +10,15 @@
 // frontend/nav-auth.js already carries, and for the same reason: there
 // is only one correct way to render GET /auth/providers as a row of
 // sign-in buttons plus the "email" entry's address-and-submit form, and
-// unlike TEAM_COLORS or PROVIDER_LABELS (which ARE duplicated per page
-// script, on purpose, so each page stays loadable on its own), this
-// piece has nothing page-specific in it to justify a third (now
-// fourth) copy -- see nav-auth.js's own header comment.
+// unlike TEAM_COLORS (which IS duplicated per page script, on purpose,
+// so each page stays loadable on its own), this piece has nothing
+// page-specific in it to justify a third (now fourth) copy -- see
+// nav-auth.js's own header comment. Provider display labels are never
+// duplicated anywhere in the frontend either: app/oauth.py's
+// PROVIDER_LABELS is the single source of truth, and every API
+// response that names a provider (GET /auth/providers, GET
+// /api/account, GET /api/account/pending) already carries the label
+// alongside the raw name.
 //
 // "email" is never rendered as a plain provider link -- unlike every
 // OAuth provider, there is no GET /auth/email/start redirect to point

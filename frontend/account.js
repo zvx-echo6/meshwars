@@ -48,16 +48,12 @@
 
 import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-1';
 
-// Duplicated from app/oauth.py's PROVIDER_LABELS -- same reasoning as
-// TEAM_COLORS' own duplication comment in join.js: this page has to
-// stay correct and loadable entirely on its own, with no shared import
-// from another page's script or from the backend beyond a plain
-// provider NAME in each API response.
-const PROVIDER_LABELS = { github: 'GitHub', email: 'Email' };
-
-function providerLabel(name) {
-  return PROVIDER_LABELS[name] || name;
-}
+// No local PROVIDER_LABELS map here -- app/oauth.py's PROVIDER_LABELS
+// is the single source of truth, and every API response this page
+// reads that names a provider (GET /api/account's identities,
+// GET /api/account/pending) already carries the label alongside the
+// raw name (`label` / `provider_label`), so this page never has to
+// guess a display capitalization itself.
 
 // Same seven-team palette every other page script here carries its own
 // copy of (join.js, mc.js, map2.js, results.js) -- see join.js's own
@@ -286,7 +282,7 @@ function renderIdentities(identities) {
     const nameLine = document.createElement('div');
     nameLine.className = 'account-identity-name';
     const strong = document.createElement('strong');
-    strong.textContent = providerLabel(identity.provider);
+    strong.textContent = identity.label || identity.provider;
     nameLine.appendChild(strong);
     li.appendChild(nameLine);
 
@@ -1624,7 +1620,7 @@ async function maybeCompletePendingLink() {
     const res = await fetch('/api/account/pending/link', { method: 'POST' });
     if (!res.ok) return; // e.g. already linked elsewhere -- say nothing, not an error the visitor caused
     const banner = document.getElementById('account-linked-banner');
-    banner.textContent = `Connected: ${pending.provider_label || providerLabel(pending.provider)} is now signed in to this account.`;
+    banner.textContent = `Connected: ${pending.provider_label || pending.provider} is now signed in to this account.`;
     banner.hidden = false;
   } catch (err) {
     // Offline -- leave it for the next page load to try again.

@@ -279,15 +279,30 @@ PROVIDERS: dict[str, Provider] = {
     # "apple": APPLE,      # not yet implemented -- see module docstring
 }
 
-# Display label for each entry in PROVIDERS above -- GET /auth/providers
-# (app/oauth_api.py) reads this so the frontend never hardcodes "GitHub"
-# capitalization or spells a future provider's name itself. Keyed the
-# same as PROVIDERS; a provider missing here would be a bug in adding
-# it, not something a caller should have to guard against, so
-# GET /auth/providers indexes this directly rather than falling back to
-# provider.name.
+# Display label for every provider the system knows about -- not just
+# the entries actually wired up in PROVIDERS above. GET /auth/providers
+# and GET /api/account/pending (app/oauth_api.py) and GET /api/account
+# (app/account_api.py) all read this so the frontend never hardcodes
+# "GitHub" capitalization or spells a provider's name itself; the
+# single source of truth lives here, not duplicated per page script.
+#
+# Deliberately broader than PROVIDERS: PROVIDERS today only has
+# "github" wired up (google/discord/apple are commented-out future
+# entries -- see that table's own comment above), and "email" is never
+# a PROVIDERS entry at all (list_providers() below adds it by hand,
+# since it is not an OAuth provider and has no Provider(...) row). But
+# every one of those five names is a name this codebase's own routes,
+# comments, and pending-identity rows can produce, so every one gets a
+# real label now rather than waiting for its Provider(...) entry to
+# land -- a provider missing here is a bug, not something a caller
+# should have to guard against with a fallback to the raw lowercase
+# name.
 PROVIDER_LABELS: dict[str, str] = {
     "github": "GitHub",
+    "google": "Google",
+    "discord": "Discord",
+    "apple": "Apple",
+    "email": "Email",
 }
 
 

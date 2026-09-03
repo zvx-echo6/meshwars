@@ -544,7 +544,7 @@ async def list_providers() -> JSONResponse:
         if provider_enabled(prov)
     ]
     if email_login_enabled():
-        providers.append({"name": "email", "label": "Email"})
+        providers.append({"name": "email", "label": PROVIDER_LABELS.get("email", "email")})
     return JSONResponse({"providers": providers}, status_code=200)
 
 

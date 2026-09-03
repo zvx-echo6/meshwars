@@ -197,6 +197,7 @@ def test_get_account_masks_identity_emails(client, db_path):
     assert len(body["identities"]) == 1
     identity = body["identities"][0]
     assert identity["provider"] == "google"
+    assert identity["label"] == "Google"
     assert identity["email"] == "j***@example.com"
     assert "jdoe" not in identity["email"]
     assert identity["email_verified"] is True

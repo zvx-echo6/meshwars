@@ -95,6 +95,7 @@ from .email_login import (
     normalize_email,
     send_magic_link_email,
 )
+from .oauth import PROVIDER_LABELS
 # Reaching into app/checkin.py's underscore-prefixed helpers here is
 # deliberate, not a style slip: the four read-only routes at the bottom
 # of this module (stats/honors/checkins/checkin-health) exist
@@ -233,6 +234,11 @@ def _identities_out(conn, account_id: int) -> list[dict]:
     return [
         {
             "provider": r["provider"],
+            # Same PROVIDER_LABELS table GET /auth/providers and GET
+            # /api/account/pending read (app/oauth.py) -- the frontend
+            # never hardcodes a provider's display capitalization or
+            # guesses one for a provider it doesn't recognise.
+            "label": PROVIDER_LABELS.get(r["provider"], r["provider"]),
             "email": _mask_email(r["email"]),
             # Whether THIS identity's address is provider-verified --
             # never the raw address, same masking reasoning _mask_email()
