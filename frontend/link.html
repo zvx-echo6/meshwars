@@ -93,6 +93,23 @@
           <div class="link-choice-title">Already have an account</div>
           <p class="link-hint">Sign in the way you normally do, and this method will be connected to that same account instead of a new one.</p>
           <div id="link-existing-providers" class="signin-providers"></div>
+
+          <!-- "email" is one of the entries GET /auth/providers can
+               list, but -- like frontend/join.js's own sign-in panel --
+               there is no GET /auth/email/start redirect to build a
+               plain link to, so link.js special-cases it into revealing
+               this form (address + submit) instead of adding it to
+               #link-existing-providers above. See app/oauth_api.py's
+               "email sign-in" section comment for the shape. -->
+          <form id="link-email-form" class="signin-email-form" novalidate hidden>
+            <div id="link-email-error" class="link-error" role="alert" hidden></div>
+            <label>
+              <span>Email</span>
+              <input type="email" id="f-link-email" autocomplete="email" required />
+            </label>
+            <button type="submit" class="signin-email-submit-btn">Email me a sign-in link</button>
+            <p id="link-email-sent" class="signin-email-sent" hidden>If that address can sign in, a link is on its way — check your inbox.</p>
+          </form>
         </div>
 
         <div id="link-error" class="link-error" role="alert" hidden></div>

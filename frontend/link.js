@@ -89,6 +89,7 @@ async function loadPending() {
   const expiredEl = document.getElementById('link-expired');
   const summaryEl = document.getElementById('link-summary');
   const existingWrap = document.getElementById('link-existing-providers');
+  const emailForm = document.getElementById('link-email-form');
 
   let pending = null;
   try {
@@ -126,17 +127,29 @@ async function loadPending() {
   // Never offer the SAME provider that produced this pending identity
   // as an "existing method" choice -- retrying it just re-authenticates
   // the identical (provider, subject) pair, which cannot resolve any
-  // differently (see this file's own module comment).
+  // differently (see this file's own module comment). This applies to
+  // "email" exactly like every OAuth provider: if THIS pending identity
+  // came from a mailed link, offering "email" again as an "existing
+  // method" would just resend a link for the identical address.
   const otherProviders = allProviders.filter((p) => p.name !== pending.provider);
 
+  // "email" is never rendered into #link-existing-providers as a plain
+  // link -- same reason join.js's setupSignIn() pulls it out of its own
+  // provider loop (there is no GET /auth/email/start redirect to point
+  // one at). It instead reveals #link-email-form, this page's own
+  // sibling of that same form.
+  const hasEmail = otherProviders.some((p) => p.name === 'email');
+  const linkableProviders = otherProviders.filter((p) => p.name !== 'email');
+  if (emailForm) emailForm.hidden = !hasEmail;
+
   existingWrap.replaceChildren();
-  if (otherProviders.length === 0) {
+  if (linkableProviders.length === 0 && !hasEmail) {
     const note = document.createElement('p');
     note.className = 'hint';
     note.textContent = 'No other sign-in method is enabled yet — create a new account instead.';
     existingWrap.appendChild(note);
   } else {
-    otherProviders.forEach((p) => {
+    linkableProviders.forEach((p) => {
       const link = document.createElement('a');
       link.className = 'signin-provider-btn';
       link.href = `/auth/${encodeURIComponent(p.name)}/start`;
@@ -146,8 +159,76 @@ async function loadPending() {
   }
 }
 
+// Same shape as join.js's handleSigninEmailSubmit() -- duplicated
+// rather than imported, same reasoning as fetchEnabledProviders' own
+// duplication comment above: this page has to stay loadable and
+// correct entirely on its own. Always answered with the SAME
+// confirmation regardless of whether the address has an account or the
+// mail actually went out -- see app/oauth_api.py's email_start()
+// docstring for why.
+async function handleLinkEmailSubmit(e) {
+  e.preventDefault();
+  const input = document.getElementById('f-link-email');
+  const errEl = document.getElementById('link-email-error');
+  const sentEl = document.getElementById('link-email-sent');
+  const btn = document.querySelector('#link-email-form .signin-email-submit-btn');
+  if (errEl) errEl.hidden = true;
+  if (sentEl) sentEl.hidden = true;
+
+  const email = input.value.trim();
+  if (!email) {
+    if (errEl) {
+      errEl.textContent = 'Enter your email address.';
+      errEl.hidden = false;
+    }
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/auth/email/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+
+    if (res.status === 429) {
+      if (errEl) {
+        errEl.textContent = 'Too many attempts. Wait a moment and try again.';
+        errEl.hidden = false;
+      }
+      return;
+    }
+    if (res.status === 400) {
+      if (errEl) {
+        errEl.textContent = 'Enter a valid email address.';
+        errEl.hidden = false;
+      }
+      return;
+    }
+    if (!res.ok) {
+      if (errEl) {
+        errEl.textContent = 'Something went wrong. Try again in a moment.';
+        errEl.hidden = false;
+      }
+      return;
+    }
+
+    if (sentEl) sentEl.hidden = false;
+    input.value = '';
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = 'Could not reach the server. Check your connection and try again.';
+      errEl.hidden = false;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function boot() {
   document.getElementById('link-create-btn').addEventListener('click', handleCreateClick);
+  document.getElementById('link-email-form').addEventListener('submit', handleLinkEmailSubmit);
   loadPending();
 }
 

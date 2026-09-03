@@ -1408,6 +1408,43 @@ CREATE TABLE IF NOT EXISTS account_pending_identity (
     expires_at      INTEGER NOT NULL,
     consumed_at     INTEGER
 );
+
+-- Hashed single-use magic-link token for passwordless email sign-in
+-- (app/oauth_api.py's POST /auth/email/start and GET
+-- /auth/email/callback) -- the exact same hashed-single-use-ticket
+-- shape as join_token above and account_pending_identity just above
+-- this comment: token_hash (SHA-256, app/mc_ingest.py's hash_secret())
+-- is the only thing ever stored, the raw token exists only in the one
+-- link mailed to the address that requested it, consumed_at makes
+-- redemption idempotently single-use rather than deleting the row, and
+-- expires_at (settings.email_login_token_lifetime_seconds, 15 minutes
+-- by default) bounds how long an unopened link stays valid.
+--
+-- email is the normalized (lowercased, trimmed) address the link was
+-- sent to -- GET /auth/email/callback feeds it straight into the exact
+-- same callback decision tree every OAuth provider already uses
+-- (resolve_oauth_callback() in app/oauth_api.py), as
+-- provider='email' / subject=email / email=email / email_verified=1:
+-- clicking a link mailed to that address IS this app's proof of
+-- ownership for it, the same role a provider's own consent screen
+-- plays for GitHub/Google/etc -- see account_identity's own comment
+-- above on why email_verified gates auto-linking.
+--
+-- No index beyond the token_hash primary key -- like
+-- account_pending_identity above, every read of this table is a point
+-- lookup by token_hash (the callback redeeming its own link); nothing
+-- in this codebase ever looks a row up by email. Rows are opportunistically
+-- swept (deleted once expired/consumed past a grace period) by
+-- app/oauth_api.py's _sweep_stale_rows(), run inline whenever a fresh
+-- row is written to this table or to account_pending_identity -- see
+-- that function's own comment for why no cron/scheduled job is needed.
+CREATE TABLE IF NOT EXISTS email_login_token (
+    token_hash   TEXT PRIMARY KEY,
+    email        TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    consumed_at  INTEGER
+);
 """
 
 

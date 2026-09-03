@@ -109,17 +109,35 @@
          (app/account_api.py, app/oauth_api.py), the sign-in layer that
          can later be pointed at that player from /account. Structured
          as one provider button per entry in GET /auth/providers, not a
-         hardcoded list, so google/discord/apple/email slot in later as
+         hardcoded list, so google/discord/apple slot in later as
          siblings the moment each has its own Provider(...) entry in
          app/oauth.py -- see join.js's setupSignIn() for why an
          unconfigured provider is never rendered here at all, and why
          this whole panel starts hidden until there's something (a
-         provider, or an auth_error to show) worth showing. -->
+         provider, or an auth_error to show) worth showing.
+
+         Email sign-in (#signin-email-form below) is a SIBLING of the
+         provider buttons, not one of them -- GET /auth/providers still
+         lists it (as "email") so setupSignIn() knows to reveal this
+         form, but there is no GET /auth/email/start redirect to build a
+         plain link to (POST /auth/email/start, a JSON endpoint, is a
+         different shape entirely -- see app/oauth_api.py's own
+         "email sign-in" section comment). -->
     <section id="signin-panel" class="join-panel" hidden>
       <div class="join-panel-title">Sign in</div>
       <p class="hint">Signing in links your play across devices and lets you manage your account from one place — it's separate from registering a radio below, and you can do either first.</p>
       <div id="signin-error" class="join-error" role="alert" hidden></div>
       <div id="signin-providers" class="signin-providers"></div>
+
+      <form id="signin-email-form" class="signin-email-form" novalidate hidden>
+        <div id="signin-email-error" class="join-error" role="alert" hidden></div>
+        <label>
+          <span>Email</span>
+          <input type="email" id="f-signin-email" autocomplete="email" required />
+        </label>
+        <button type="submit" class="signin-email-submit-btn">Email me a sign-in link</button>
+        <p id="signin-email-sent" class="signin-email-sent" hidden>If that address can sign in, a link is on its way — check your inbox.</p>
+      </form>
     </section>
 
     <section id="join-flow-panel" class="join-panel">

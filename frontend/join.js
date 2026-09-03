@@ -1627,6 +1627,14 @@ function setupStatusKeyToggle() {
 // join.html and is only revealed once there is something worth
 // showing (a real provider, or an auth_error to report), so an
 // all-disabled deployment never flashes an empty "Sign in" box at all.
+//
+// "email" is the one entry in that list that is NOT rendered as a
+// plain link -- there is no GET /auth/email/start redirect to point
+// one at (POST /auth/email/start is a JSON endpoint -- see
+// app/oauth_api.py's own "email sign-in" section comment). It instead
+// just reveals #signin-email-form, the address-field-and-submit sibling
+// already sitting in join.html, hidden until this function decides
+// it's actually configured.
 const AUTH_ERROR_MESSAGES = {
   provider_declined: 'Sign-in was cancelled.',
   invalid_session: 'That sign-in attempt expired or was already used. Try again.',
@@ -1637,6 +1645,7 @@ async function setupSignIn() {
   const panel = document.getElementById('signin-panel');
   const wrap = document.getElementById('signin-providers');
   const errEl = document.getElementById('signin-error');
+  const emailForm = document.getElementById('signin-email-form');
   if (!panel || !wrap) return;
 
   // A failed sign-in attempt (GET /auth/{provider}/callback -- see
@@ -1661,15 +1670,87 @@ async function setupSignIn() {
   }
 
   wrap.replaceChildren();
+  let hasEmail = false;
   providers.forEach((p) => {
+    if (p.name === 'email') {
+      hasEmail = true;
+      return;
+    }
     const link = document.createElement('a');
     link.className = 'signin-provider-btn';
     link.href = `/auth/${encodeURIComponent(p.name)}/start`;
     link.textContent = `Sign in with ${p.label}`;
     wrap.appendChild(link);
   });
+  if (emailForm) emailForm.hidden = !hasEmail;
 
   if (providers.length > 0 || errorCode) panel.hidden = false;
+}
+
+// POST /auth/email/start, always answered with the SAME confirmation
+// message regardless of whether the address has an account or the mail
+// actually went out -- see app/oauth_api.py's email_start() docstring
+// for why: this response must never be an account-enumeration oracle.
+// The only distinct outcomes handled here (rate limited, malformed
+// address) are about the REQUEST, not about whether the address exists.
+async function handleSigninEmailSubmit(e) {
+  e.preventDefault();
+  const input = document.getElementById('f-signin-email');
+  const errEl = document.getElementById('signin-email-error');
+  const sentEl = document.getElementById('signin-email-sent');
+  const btn = document.querySelector('#signin-email-form .signin-email-submit-btn');
+  if (errEl) errEl.hidden = true;
+  if (sentEl) sentEl.hidden = true;
+
+  const email = input.value.trim();
+  if (!email) {
+    if (errEl) {
+      errEl.textContent = 'Enter your email address.';
+      errEl.hidden = false;
+    }
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/auth/email/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+
+    if (res.status === 429) {
+      if (errEl) {
+        errEl.textContent = 'Too many attempts. Wait a moment and try again.';
+        errEl.hidden = false;
+      }
+      return;
+    }
+    if (res.status === 400) {
+      if (errEl) {
+        errEl.textContent = 'Enter a valid email address.';
+        errEl.hidden = false;
+      }
+      return;
+    }
+    if (!res.ok) {
+      if (errEl) {
+        errEl.textContent = 'Something went wrong. Try again in a moment.';
+        errEl.hidden = false;
+      }
+      return;
+    }
+
+    if (sentEl) sentEl.hidden = false;
+    input.value = '';
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = 'Could not reach the server. Check your connection and try again.';
+      errEl.hidden = false;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function boot() {
@@ -1691,6 +1772,7 @@ function boot() {
   setupStatusKeyToggle();
   setupEndpointCopy();
   document.getElementById('join-submit').addEventListener('click', handleJoinClick);
+  document.getElementById('signin-email-form').addEventListener('submit', handleSigninEmailSubmit);
   document.getElementById('status-form').addEventListener('submit', handleStatusSubmit);
   document.getElementById('add-radio-form').addEventListener('submit', handleAddRadioSubmit);
   document.getElementById('checkin-name-form').addEventListener('submit', handleCheckinNameSubmit);

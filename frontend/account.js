@@ -29,7 +29,7 @@
 // stay correct and loadable entirely on its own, with no shared import
 // from another page's script or from the backend beyond a plain
 // provider NAME in each API response.
-const PROVIDER_LABELS = { github: 'GitHub' };
+const PROVIDER_LABELS = { github: 'GitHub', email: 'Email' };
 
 function providerLabel(name) {
   return PROVIDER_LABELS[name] || name;
@@ -105,12 +105,27 @@ async function renderSignedOut() {
     providers = [];
   }
 
+  // "email" is deliberately left out of this particular list: unlike
+  // every OAuth provider here, there is no GET /auth/email/start
+  // redirect to point a plain link at (POST /auth/email/start is a
+  // JSON endpoint -- see app/oauth_api.py's own "email sign-in" section
+  // comment) -- it needs the address-field-and-submit form
+  // frontend/join.js's #signin-email-form and frontend/link.js's
+  // #link-email-form carry, which this signed-out welcome state does
+  // not offer today.
+  const linkableProviders = providers.filter((p) => p.name !== 'email');
+
   wrap.replaceChildren();
   if (providers.length === 0) {
+    // Truly nothing configured anywhere -- see this deployment's own
+    // GET /auth/providers. Left as `providers`, not `linkableProviders`,
+    // so an email-only deployment (nothing here to render, but email
+    // sign-in IS reachable from /join or /link) never shows this
+    // page's "no sign-in method enabled" hint when one genuinely is.
     noneEl.hidden = false;
     return;
   }
-  providers.forEach((p) => {
+  linkableProviders.forEach((p) => {
     const link = document.createElement('a');
     link.className = 'signin-provider-btn';
     link.href = `/auth/${encodeURIComponent(p.name)}/start`;

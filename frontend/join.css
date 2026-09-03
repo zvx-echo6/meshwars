@@ -106,6 +106,67 @@ body {
 }
 .signin-provider-btn:hover { background: var(--mw-line); }
 
+/* ---- Email sign-in (POST /auth/email/start) ------------------------------
+   A sibling of .signin-providers above, not one of its entries -- see
+   join.html's own comment on #signin-email-form for why email needs a
+   real form (address field + submit) rather than the one-line
+   provider-button link shape. Shown/hidden by join.js's setupSignIn()
+   depending on whether GET /auth/providers lists "email" as enabled. */
+.signin-email-form {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--mw-line);
+}
+
+.signin-email-form label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 0.75rem;
+  color: var(--mw-text-5);
+}
+
+.signin-email-form label > span {
+  display: block;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.6875rem;
+}
+
+.signin-email-form input[type="email"] {
+  width: 100%;
+  background: var(--mw-page);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.875rem;
+}
+.signin-email-form input[type="email"]:focus {
+  outline: none;
+  border-color: var(--mw-accent);
+}
+
+.signin-email-submit-btn {
+  width: 100%;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.signin-email-submit-btn:hover { background: var(--mw-line); }
+.signin-email-submit-btn:disabled { opacity: 0.5; cursor: default; }
+
+.signin-email-sent {
+  font-size: 0.6875rem;
+  color: var(--mw-text-6);
+  margin: 8px 0 0;
+}
+
 .join-panel-title {
   font-weight: 700;
   font-size: 0.75rem;

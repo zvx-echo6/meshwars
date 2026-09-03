@@ -10,6 +10,16 @@ renders a dead sign-in button for one that isn't configured. GET
 /api/account/pending/link are how a parked ("pending") identity from
 case 4 is described to a person and then redeemed.
 
+POST /auth/email/start and GET /auth/email/callback are a second,
+independent way to reach an identity: passwordless sign-in by a mailed
+single-use link, rather than an OAuth provider's own consent screen.
+Independent of app/oauth.py's provider table (see app/email_login.py's
+own module docstring for why), but sharing everything past "here is an
+identity" -- the account model, and resolve_oauth_callback() itself --
+with every provider above. See that pair of routes' own docstrings, and
+this module's "email sign-in (magic link)" section comment, for the
+full shape.
+
 ---- browser redirect vs. JSON: who each response shape is for -----------
 
 GET /auth/{provider}/callback is where a real browser lands straight off
@@ -111,6 +121,13 @@ from .auth import new_rate_limit_bucket
 from .client_ip import get_client_ip
 from .config import settings
 from .db import WriteSession, connect
+from .email_login import (
+    EmailSendError,
+    email_login_enabled,
+    looks_like_email,
+    normalize_email,
+    send_magic_link_email,
+)
 from .mc_ingest import hash_secret
 from .oauth import (
     PROVIDERS,
@@ -310,6 +327,58 @@ def _link_identity(
     )
 
 
+# How long a just-expired or just-consumed row in a hashed-single-use-
+# ticket table is kept around before _sweep_stale_rows below deletes it
+# -- long enough that an operator glancing at the table mid-incident (or
+# this module's own tests) still sees a row that finished a moment ago,
+# short enough that the table never grows unbounded in normal operation.
+_SWEEP_GRACE_SECONDS = 3600  # 1 hour
+
+# The only two tables this sweep is ever run against -- both hashed,
+# single-use, TTL'd tickets with the exact same three lifecycle columns
+# (expires_at, consumed_at). Asserted in _sweep_stale_rows below rather
+# than trusted, since `table` is interpolated directly into the SQL
+# text (there is no parameter placeholder for an identifier) -- every
+# call site in this module passes a literal from this tuple, never
+# anything derived from a request.
+_SWEEPABLE_TABLES = ("account_pending_identity", "email_login_token")
+
+
+def _sweep_stale_rows(conn: sqlite3.Connection, table: str, now: int) -> None:
+    """Opportunistic cleanup for account_pending_identity and
+    email_login_token -- both accumulate a row on every OAuth case-4
+    callback / every POST /auth/email/start, most of which are either
+    redeemed once (consumed_at set) or simply abandoned (left to expire)
+    and then never touched again. Nothing before this change ever
+    deleted a row from either table.
+
+    No cron, no scheduled job: this is called inline, in the SAME
+    transaction, every time a fresh row is written to either table (see
+    resolve_oauth_callback's case 4 below, and POST /auth/email/start) --
+    the write that is already happening is the trigger, so a deployment
+    that sees a login attempt once a week sweeps once a week, and one
+    that never sees a single attempt never runs this at all. That keeps
+    the cost proportional to actual traffic on the exact table being
+    grown, rather than a fixed-interval job that has to exist (and be
+    monitored, and survive a restart) even when there is nothing to
+    clean.
+
+    Deletes rows that are BOTH past their usefulness (expired, or
+    already consumed) AND past _SWEEP_GRACE_SECONDS since that happened
+    -- see that constant's own comment for why the grace period exists
+    at all. A single indexed-by-nothing DELETE with a WHERE clause is
+    cheap here specifically because this sweep keeps the table small in
+    the first place; it would not scale the same way against a table
+    this mechanism did not already keep bounded.
+    """
+    assert table in _SWEEPABLE_TABLES
+    cutoff = now - _SWEEP_GRACE_SECONDS
+    conn.execute(
+        f"DELETE FROM {table} WHERE expires_at < ? OR (consumed_at IS NOT NULL AND consumed_at < ?)",
+        (cutoff, cutoff),
+    )
+
+
 def resolve_oauth_callback(
     conn: sqlite3.Connection,
     *,
@@ -402,6 +471,7 @@ def resolve_oauth_callback(
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (token_hash, provider_name, identity.subject, identity.email, int(identity.email_verified), now, expires_at),
     )
+    _sweep_stale_rows(conn, "account_pending_identity", now)
     return {"case": "pending", "raw_token": raw_token, "expires_at": expires_at}
 
 
@@ -420,13 +490,221 @@ async def list_providers() -> JSONResponse:
     automatically once each has its own Provider(...) entry there, with
     no route or frontend change needed here) and keeps only the ones
     provider_enabled() actually approves.
+
+    Email sign-in is appended last, exactly once, when
+    email_login_enabled() (app/email_login.py) says the SMTP settings
+    are actually configured -- it is not a PROVIDERS table entry (see
+    app/email_login.py's own module docstring for why), so it can't fall
+    out of the comprehension above the way a future OAuth provider
+    would; this is the one place that has to know about it explicitly.
+    frontend/join.js's setupSignIn() and frontend/link.js's loadPending()
+    both special-case the name "email" in this list to render a form
+    (address + submit) instead of the plain `/auth/{name}/start` link
+    every OTHER entry here gets -- there is no GET .../start redirect
+    for email at all, POST /auth/email/start below is a different shape
+    entirely.
     """
     providers = [
         {"name": prov.name, "label": PROVIDER_LABELS.get(prov.name, prov.name)}
         for prov in PROVIDERS.values()
         if provider_enabled(prov)
     ]
+    if email_login_enabled():
+        providers.append({"name": "email", "label": "Email"})
     return JSONResponse({"providers": providers}, status_code=200)
+
+
+# ---- email sign-in (magic link) --------------------------------------------
+#
+# POST /auth/email/start mails a single-use link; GET /auth/email/callback
+# redeems it. Independent of the OAuth provider table above (see
+# app/email_login.py's own module docstring for why this is not a
+# Provider(...) entry), but reaching for the exact same account model
+# and the exact same resolve_oauth_callback() decision tree once an
+# identity is in hand -- provider="email", subject/email=the token's own
+# normalized address, email_verified=True. That last one is not a
+# simplification: clicking a link mailed to an address IS this app's
+# proof that whoever clicked it controls that address, the same role a
+# provider's own consent screen plays for GitHub/Google/etc, so
+# email_verified=True here is a genuine fact, not an assumed one.
+
+_email_start_ip_limiter = new_rate_limit_bucket()
+_email_start_addr_limiter = new_rate_limit_bucket()
+
+# The one response POST /auth/email/start ever returns once a request
+# has passed rate limiting and shape validation -- see that route's own
+# docstring for why this is a single constant, never built differently
+# depending on whether the address matched an account, or whether the
+# mail actually went out.
+_EMAIL_START_RESPONSE_BODY = {
+    "ok": True,
+    "message": "If that address can sign in, a link is on its way — check your inbox.",
+}
+
+
+@router.post("/auth/email/start")
+async def email_start(request: Request) -> JSONResponse:
+    """Mails a single-use sign-in link to the posted address, if email
+    sign-in is configured at all (email_login_enabled() --
+    app/email_login.py) -- 404s otherwise, the same "indistinguishable
+    from not existing" contract a disabled OAuth provider's routes
+    already use (see oauth_start's own docstring).
+
+    ---- no account enumeration ------------------------------------------
+
+    This endpoint takes an arbitrary address from an unauthenticated
+    caller and triggers an outbound mail send -- the response it gives
+    back must never depend on whether that address belongs to an
+    existing account (an account is not even looked up here -- the
+    token is issued and mailed unconditionally) or on whether the send
+    itself succeeded (see app/email_login.py's EmailSendError -- caught
+    below, logged, and otherwise invisible to the caller). Every path
+    past rate limiting and shape validation returns the exact same
+    _EMAIL_START_RESPONSE_BODY. The two things that DO get a different
+    response -- rate limiting (429) and an obviously malformed address
+    (400) -- are not enumeration risks: neither one depends on whether
+    the address has an account, only on the request's own shape/pace.
+
+    ---- rate limiting -----------------------------------------------------
+
+    Two independent budgets, both must pass -- per source IP
+    (settings.email_login_start_ip_rate_limit_*) and per target address
+    (settings.email_login_start_address_rate_limit_*) -- see those
+    settings' own comment in app/config.py for why both are needed:
+    this is the most abusable surface this feature adds, an
+    unauthenticated endpoint that triggers a real outbound send.
+    """
+    if not email_login_enabled():
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    ip = get_client_ip(request)
+    if _email_start_ip_limiter.limited(
+        ip,
+        limit=settings.email_login_start_ip_rate_limit_attempts,
+        window=settings.email_login_start_ip_rate_limit_window_seconds,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    raw_email = body.get("email") if isinstance(body, dict) else None
+    if not isinstance(raw_email, str) or not raw_email:
+        return JSONResponse({"error": "email is required"}, status_code=400)
+
+    email = normalize_email(raw_email)
+    if not looks_like_email(email):
+        # A shape problem, never an account-existence one -- see this
+        # route's own "no account enumeration" section above for why a
+        # distinct response here is safe.
+        return JSONResponse({"error": "invalid email address"}, status_code=400)
+
+    if _email_start_addr_limiter.limited(
+        email,
+        limit=settings.email_login_start_address_rate_limit_attempts,
+        window=settings.email_login_start_address_rate_limit_window_seconds,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hash_secret(raw_token)
+    now = int(time.time())
+    expires_at = now + settings.email_login_token_lifetime_seconds
+    async with WriteSession() as conn:
+        conn.execute(
+            "INSERT INTO email_login_token(token_hash, email, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token_hash, email, now, expires_at),
+        )
+        _sweep_stale_rows(conn, "email_login_token", now)
+
+    link_url = f"{settings.oauth_public_base_url.rstrip('/')}/auth/email/callback?token={raw_token}"
+    try:
+        await send_magic_link_email(email, link_url)
+    except EmailSendError:
+        # Logged inside send_magic_link_email() itself; never surfaced
+        # here -- see this route's own "no account enumeration" section.
+        pass
+
+    return JSONResponse(_EMAIL_START_RESPONSE_BODY, status_code=200)
+
+
+@router.get("/auth/email/callback")
+async def email_callback(request: Request) -> Response:
+    """Completes the magic-link flow POST /auth/email/start began:
+    consumes the token (single-use -- unknown, expired, or already-
+    consumed all collapse to the same generic failure, mirroring
+    oauth_callback's own "don't reveal which part failed" state/PKCE
+    check) and then feeds the token's own normalized address into the
+    EXACT SAME callback decision tree resolve_oauth_callback() above
+    already implements for every OAuth provider -- see this module's own
+    "email sign-in" section comment for the provider="email" identity
+    shape and why email_verified=True is a genuine fact here, not an
+    assumption.
+
+    Response shape matches oauth_callback exactly -- login/linked/
+    auto_linked go to /account with a session cookie, pending goes to
+    /link with the pending cookie, any failure goes back to /join with
+    a short auth_error code -- because both routes share
+    _respond_to_callback_outcome (login/pending/error) and
+    _callback_error_response (error only) rather than each building
+    these responses by hand. The ?format=json escape hatch
+    (_wants_json) is honored the same way too, for this module's own
+    tests -- a real mailed link never carries it.
+
+    404s when email sign-in is not configured at all
+    (email_login_enabled()), same as every route above.
+    """
+    if not email_login_enabled():
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        return _callback_error_response(
+            request,
+            message="invalid or expired sign-in link",
+            redirect_code="invalid_session",
+            status_code=400,
+        )
+
+    # Resolved BEFORE the write transaction below opens, same ordering
+    # oauth_callback uses and for the same reason (see
+    # _resolve_current_account_id's own docstring): verify_session() can
+    # itself write (sliding-expiry's touch, app/sessions.py's
+    # _maybe_touch) through its own separate WriteSession, and this
+    # app's write lock (app/db.py's WriteSession) is not reentrant --
+    # calling it from inside an already-open WriteSession block would
+    # deadlock the request against itself.
+    current_account_id = await _resolve_current_account_id(request)
+    now = int(time.time())
+
+    async with WriteSession() as conn:
+        token_hash = hash_secret(raw_token)
+        row = conn.execute(
+            "SELECT email, expires_at, consumed_at FROM email_login_token WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if row is None or row["consumed_at"] is not None or row["expires_at"] <= now:
+            return _callback_error_response(
+                request,
+                message="invalid or expired sign-in link",
+                redirect_code="invalid_session",
+                status_code=400,
+            )
+
+        conn.execute("UPDATE email_login_token SET consumed_at = ? WHERE token_hash = ?", (now, token_hash))
+        _sweep_stale_rows(conn, "email_login_token", now)
+
+        identity = ProviderIdentity(subject=row["email"], email=row["email"], email_verified=True)
+        outcome = resolve_oauth_callback(
+            conn,
+            provider_name="email",
+            identity=identity,
+            current_account_id=current_account_id,
+            now=now,
+        )
+
+    return await _respond_to_callback_outcome(request, outcome=outcome, identity=identity, now=now)
 
 
 @router.get("/auth/{provider}/start")
@@ -493,6 +771,63 @@ def _callback_error_response(
     else:
         resp = RedirectResponse(f"{_JOIN_PAGE_PATH}?auth_error={redirect_code}", status_code=302)
     _clear_flow_cookies(resp)
+    return resp
+
+
+async def _respond_to_callback_outcome(
+    request: Request, *, outcome: dict, identity: ProviderIdentity, now: int
+) -> Response:
+    """Turns resolve_oauth_callback()'s outcome dict into the actual
+    response -- factored out of oauth_callback below (which it still
+    drives, unchanged in behavior) so GET /auth/email/callback can share
+    it byte-for-byte rather than reimplementing this mapping a second
+    time. resolve_oauth_callback() itself is already fully
+    provider-agnostic (see its own docstring); everything past the
+    decision tree -- which case gets which redirect, which cookie,
+    whether a session gets issued -- is identical regardless of whether
+    the identity came from an OAuth provider's callback or a magic-link
+    token, which is exactly what makes sharing this safe.
+
+    Does NOT touch the OAuth flow cookies (mw_oauth_state /
+    mw_oauth_pkce_verifier) -- oauth_callback clears those itself, right
+    after calling this, via _clear_flow_cookies; the email callback has
+    no flow cookie of its own to clear at all, since it never sets one
+    (see GET /auth/email/callback's own docstring).
+    """
+    want_json = _wants_json(request)
+
+    if outcome["case"] == "pending":
+        if want_json:
+            return JSONResponse(
+                {
+                    "result": "pending",
+                    "pending_token": outcome["raw_token"],
+                    "expires_at": outcome["expires_at"],
+                    "email": identity.email,
+                    "email_verified": identity.email_verified,
+                },
+                status_code=200,
+            )
+        resp = RedirectResponse(_LINK_PAGE_PATH, status_code=302)
+        _set_pending_cookie(resp, raw_token=outcome["raw_token"], expires_at=outcome["expires_at"], now=now)
+        return resp
+
+    # "login" (case 1) and "auto_linked" (case 3) both issue a fresh
+    # session. "linked" (case 2) deliberately does NOT -- the caller
+    # already had a valid session (current_account_id came straight from
+    # it), so reissuing one here would be pointless at best and would
+    # invite a subtle bug at worst (a stale reference to the OLD token
+    # somewhere still expecting it to work).
+    account_id = outcome["account_id"]
+    if want_json:
+        resp = JSONResponse({"result": outcome["case"], "account_id": account_id}, status_code=200)
+    else:
+        resp = RedirectResponse(_ACCOUNT_PAGE_PATH, status_code=302)
+    if outcome["case"] in ("login", "auto_linked"):
+        raw_session_token = await create_session(
+            account_id, user_agent=request.headers.get("user-agent"), ip=get_client_ip(request)
+        )
+        set_session_cookie(resp, raw_session_token)
     return resp
 
 
@@ -605,44 +940,7 @@ async def oauth_callback(provider: str, request: Request) -> Response:
             now=now,
         )
 
-    want_json = _wants_json(request)
-
-    if outcome["case"] == "pending":
-        if want_json:
-            resp = JSONResponse(
-                {
-                    "result": "pending",
-                    "pending_token": outcome["raw_token"],
-                    "expires_at": outcome["expires_at"],
-                    "email": identity.email,
-                    "email_verified": identity.email_verified,
-                },
-                status_code=200,
-            )
-        else:
-            resp = RedirectResponse(_LINK_PAGE_PATH, status_code=302)
-            _set_pending_cookie(
-                resp, raw_token=outcome["raw_token"], expires_at=outcome["expires_at"], now=now
-            )
-        _clear_flow_cookies(resp)
-        return resp
-
-    # "login" (case 1) and "auto_linked" (case 3) both issue a fresh
-    # session. "linked" (case 2) deliberately does NOT -- the caller
-    # already had a valid session (current_account_id came straight from
-    # it), so reissuing one here would be pointless at best and would
-    # invite a subtle bug at worst (a stale reference to the OLD token
-    # somewhere still expecting it to work).
-    account_id = outcome["account_id"]
-    if want_json:
-        resp = JSONResponse({"result": outcome["case"], "account_id": account_id}, status_code=200)
-    else:
-        resp = RedirectResponse(_ACCOUNT_PAGE_PATH, status_code=302)
-    if outcome["case"] in ("login", "auto_linked"):
-        raw_session_token = await create_session(
-            account_id, user_agent=request.headers.get("user-agent"), ip=get_client_ip(request)
-        )
-        set_session_cookie(resp, raw_session_token)
+    resp = await _respond_to_callback_outcome(request, outcome=outcome, identity=identity, now=now)
     _clear_flow_cookies(resp)
     return resp
 

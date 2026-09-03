@@ -673,6 +673,67 @@ class Settings(BaseSettings):
     # ticket.
     account_pending_identity_lifetime_seconds: int = 900  # 15 minutes
 
+    # ---- Email sign-in (magic link) (app/email_login.py, app/oauth_api.py) --
+    # Passwordless sign-in by a one-time link sent to an address --
+    # POST /auth/email/start mails the link, GET /auth/email/callback
+    # redeems it and feeds the exact same identity-resolution decision
+    # tree resolve_oauth_callback() above already implements for every
+    # OAuth provider, as provider="email". Not a Provider(...) table
+    # entry in app/oauth.py -- there is no authorize/token/userinfo
+    # round trip here, no client id/secret, no PKCE; it only shares the
+    # account model and the callback decision tree those providers do.
+    #
+    # Same "empty means off" contract as every optional feature in this
+    # file: an empty smtp_host means email sign-in is not offered at
+    # all -- GET /auth/providers omits it and both routes below 404,
+    # the same "indistinguishable from not existing" contract
+    # app/oauth.py's provider_enabled() already gives a disabled OAuth
+    # provider. See app/email_login.py's email_login_enabled() for the
+    # exact check (it also requires oauth_public_base_url below to be
+    # set, since that setting already names this deployment's own
+    # public base address -- the same fact the magic link itself has to
+    # be built from -- rather than this feature inventing a second
+    # setting for the identical concept).
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_address: str = "admin@meshwars.com"
+
+    # "starttls" (default -- connect on the plain-text port, typically
+    # 587, then upgrade the connection via STARTTLS before sending
+    # anything else) or "implicit" (TLS from the very first byte,
+    # typically port 465). Anything else is treated as "starttls" -- see
+    # app/email_login.py's _send_sync() for exactly how each is dialed.
+    # This deliberately does not configure or verify SPF/DKIM/DNS for
+    # smtp_from_address's own domain -- that is a mail-server-side
+    # concern handled separately from this application.
+    smtp_tls_mode: str = "starttls"
+
+    # How long a magic-link token (app/db.py's email_login_token) stays
+    # redeemable via GET /auth/email/callback before it expires -- same
+    # 15-minute default and reasoning as
+    # account_pending_identity_lifetime_seconds above: long enough to
+    # find the mail and click it, short enough that an unopened link is
+    # not a meaningful standing liability.
+    email_login_token_lifetime_seconds: int = 900  # 15 minutes
+
+    # Rate limits on POST /auth/email/start -- the most abusable surface
+    # this feature adds: an unauthenticated endpoint that triggers an
+    # outbound mail send for whatever address is posted to it. TWO
+    # independent budgets, both enforced -- per SOURCE IP (stop one
+    # client from flooding sign-in mail at arbitrary addresses) and per
+    # TARGET EMAIL ADDRESS (stop one address from being mail-bombed by
+    # many different source IPs). Reuses app/auth.py's
+    # new_rate_limit_bucket()/_BoundedHits, the same bounded-dictionary
+    # counter every other rate limit in this app already uses, as its
+    # own independent budget per the reasoning app/auth.py's module
+    # docstring gives for why call sites never share one.
+    email_login_start_ip_rate_limit_attempts: int = 5
+    email_login_start_ip_rate_limit_window_seconds: int = 300
+    email_login_start_address_rate_limit_attempts: int = 3
+    email_login_start_address_rate_limit_window_seconds: int = 600
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
