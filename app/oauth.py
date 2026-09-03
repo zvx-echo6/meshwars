@@ -14,12 +14,12 @@ Every provider this app can ever sign in through is one Provider entry
 in PROVIDERS below: its authorize/token/userinfo URLs, its scopes, and
 one function (extract_identity) that turns that provider's own
 token+userinfo shape into the three facts every provider ultimately
-has to produce -- (subject, email, email_verified). GITHUB and DISCORD
-are implemented; adding google later means writing that provider's own
-extract_identity (every provider's userinfo response is shaped a
-little differently -- that variation is irreducible, not something a
-shared code path could paper over) and adding one Provider(...) entry
-to the table. Nothing in
+has to produce -- (subject, email, email_verified). GITHUB, DISCORD,
+and GOOGLE are implemented; adding apple later means writing that
+provider's own extract_identity (every provider's userinfo response is
+shaped a little differently -- that variation is irreducible, not
+something a shared code path could paper over) and adding one
+Provider(...) entry to the table. Nothing in
 app/oauth_api.py's routes, app/oauth.py's flow functions
 (build_authorize_url/exchange_code/fetch_identity), or the callback
 decision tree changes to add one.
@@ -339,11 +339,91 @@ DISCORD = Provider(
 )
 
 
+# ---- Google -------------------------------------------------------------
+#
+# Google's is a genuine OIDC userinfo endpoint (unlike GitHub's REST
+# /user and Discord's own /users/@me), which is why this section's
+# field names differ slightly from Discord's even though the shape of
+# the code is identical: `sub` is OIDC's name for the stable subject
+# (never `email` -- a Google address can be released and reassigned to
+# a different person after an account closes or an org's domain
+# changes hands, exactly the "never a username or email" rule
+# ProviderIdentity's own docstring states), and `email_verified` is
+# OIDC's name for what Discord calls `verified`. Same single userinfo
+# GET as Discord, no second call -- the `openid` scope is required for
+# an OIDC-shaped response at all, `email`/`profile` get the
+# email/name/picture claims populated.
+#
+# Google's token endpoint also returns an `id_token` (a JWT carrying
+# these same claims, signed) alongside the access token. This
+# implementation deliberately does NOT decode it -- doing so would mean
+# fetching and caching Google's JWKS and verifying iss/aud/exp/sig, new
+# cryptographic surface this app has no other use for, when the plain
+# userinfo GET already answers the exact three-fact contract
+# fetch_identity() needs. See this module's own docstring for why that
+# id_token path is reserved for Apple, which has no userinfo endpoint
+# and so has no simpler option.
+
+GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+
+# openid is what makes this an OIDC request at all (and is what makes
+# `sub` show up in the userinfo response); email/profile get the
+# email/email_verified and name/picture claims populated -- without
+# them the userinfo response would omit those fields entirely, the
+# same "absent, not guessed" shape as a scope-starved Discord response.
+GOOGLE_SCOPES = ("openid", "email", "profile")
+
+
+async def _google_extract_identity(
+    userinfo: dict, http_client: httpx.AsyncClient, access_token: str
+) -> ProviderIdentity:
+    """userinfo is Google's GET /v1/userinfo (OIDC) response. subject is
+    `sub`, OIDC's own stable, opaque identifier for the account -- see
+    this section's own comment above for why `email` must never be
+    used as the subject.
+
+    email/email_verified come straight off userinfo's own `email`/
+    `email_verified` claims, with no second call needed (same shape as
+    Discord -- see _discord_extract_identity above): this reports
+    email=None, email_verified=False unless `email_verified` is
+    LITERALLY True and `email` is a non-empty string -- the same
+    "absent, never a guessed or unverified address" contract every
+    other provider's extract_identity in this module applies, not a
+    google-specific policy.
+    """
+    subject = str(userinfo["sub"])
+
+    email = userinfo.get("email")
+    verified = userinfo.get("email_verified") is True
+    if isinstance(email, str) and email and verified:
+        return ProviderIdentity(subject=subject, email=email, email_verified=True)
+
+    # Either no email on the response at all (email scope refused, or
+    # Google has none on file), email is present but null, or Google
+    # itself has not verified it -- absent, never a fallback to an
+    # unverified/missing address.
+    return ProviderIdentity(subject=subject, email=None, email_verified=False)
+
+
+GOOGLE = Provider(
+    name="google",
+    authorize_url=GOOGLE_AUTHORIZE_URL,
+    token_url=GOOGLE_TOKEN_URL,
+    userinfo_url=GOOGLE_USERINFO_URL,
+    scopes=GOOGLE_SCOPES,
+    client_id_setting="oauth_google_client_id",
+    client_secret_setting="oauth_google_client_secret",
+    extract_identity=_google_extract_identity,
+)
+
+
 # ---- the table itself ------------------------------------------------
 #
-# Adding google/apple later: write that provider's own
-# _<name>_extract_identity() next to GITHUB's/DISCORD's above (each
-# provider gets its own section, same shape as this one), build a
+# Adding apple later: write that provider's own
+# _<name>_extract_identity() next to GITHUB's/DISCORD's/GOOGLE's above
+# (each provider gets its own section, same shape as this one), build a
 # Provider(...) for it, and add it to this dict. Nothing else in this
 # module or in app/oauth_api.py's routes needs to change -- get_provider()/
 # provider_enabled()/build_authorize_url()/exchange_code()/
@@ -352,7 +432,7 @@ DISCORD = Provider(
 PROVIDERS: dict[str, Provider] = {
     "github": GITHUB,
     "discord": DISCORD,
-    # "google": GOOGLE,    # not yet implemented
+    "google": GOOGLE,
     # "apple": APPLE,      # not yet implemented -- see module docstring
 }
 
@@ -363,9 +443,9 @@ PROVIDERS: dict[str, Provider] = {
 # "GitHub" capitalization or spells a provider's name itself; the
 # single source of truth lives here, not duplicated per page script.
 #
-# Deliberately broader than PROVIDERS: PROVIDERS today only has
-# "github" and "discord" wired up (google/apple are commented-out
-# future entries -- see that table's own comment above), and "email" is never
+# Deliberately broader than PROVIDERS: PROVIDERS today has "github",
+# "discord", and "google" wired up ("apple" is a commented-out future
+# entry -- see that table's own comment above), and "email" is never
 # a PROVIDERS entry at all (list_providers() below adds it by hand,
 # since it is not an OAuth provider and has no Provider(...) row). But
 # every one of those five names is a name this codebase's own routes,

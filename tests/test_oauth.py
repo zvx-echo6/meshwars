@@ -18,6 +18,7 @@ from app.config import settings
 from app.oauth import (
     DISCORD,
     GITHUB,
+    GOOGLE,
     PROVIDER_LABELS,
     PROVIDERS,
     OAuthError,
@@ -51,6 +52,12 @@ def _enable_discord(monkeypatch) -> None:
     monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
 
 
+def _enable_google(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "oauth_google_client_id", "test-google-client-id")
+    monkeypatch.setattr(settings, "oauth_google_client_secret", "test-google-client-secret")
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+
+
 # ---- provider table / enable-disable ------------------------------------
 
 
@@ -64,6 +71,10 @@ def test_get_provider_unknown_name_returns_none():
 
 def test_get_provider_returns_discord():
     assert get_provider("discord") is DISCORD
+
+
+def test_get_provider_returns_google():
+    assert get_provider("google") is GOOGLE
 
 
 def test_every_wired_up_provider_has_a_display_label():
@@ -87,6 +98,7 @@ def test_provider_disabled_by_default(monkeypatch):
     # run must start with every provider off.
     assert provider_enabled(GITHUB) is False
     assert provider_enabled(DISCORD) is False
+    assert provider_enabled(GOOGLE) is False
 
 
 def test_discord_provider_enabled_requires_client_id_and_secret(monkeypatch):
@@ -96,6 +108,15 @@ def test_discord_provider_enabled_requires_client_id_and_secret(monkeypatch):
 
     _enable_discord(monkeypatch)
     assert provider_enabled(DISCORD) is True
+
+
+def test_google_provider_enabled_requires_client_id_and_secret(monkeypatch):
+    monkeypatch.setattr(settings, "oauth_google_client_id", "")
+    monkeypatch.setattr(settings, "oauth_google_client_secret", "")
+    assert provider_enabled(GOOGLE) is False
+
+    _enable_google(monkeypatch)
+    assert provider_enabled(GOOGLE) is True
 
 
 def test_provider_enabled_requires_client_id_and_secret_and_base_url(monkeypatch):
@@ -231,6 +252,41 @@ def test_redirect_uri_for_discord_matches_registered_preview_and_prod_values(mon
 
     monkeypatch.setattr(settings, "oauth_public_base_url", "https://meshwars.com")
     assert redirect_uri_for("discord") == "https://meshwars.com/auth/discord/callback"
+
+
+def test_build_authorize_url_google_matches_oidc_shape(monkeypatch):
+    """Cross-checks the constructed authorize URL against Google's own
+    OAuth 2.0 / OIDC endpoint: authorize is
+    https://accounts.google.com/o/oauth2/v2/auth, response_type=code,
+    and scope must serialize to exactly "openid email profile" -- no
+    extras. A mismatch on any of these (or on redirect_uri not matching
+    the registered value byte for byte) is a silent production failure,
+    not a test-only concern -- see redirect_uri_for's own docstring for
+    why redirect_uri has to match exactly.
+    """
+    _enable_google(monkeypatch)
+    url = build_authorize_url(GOOGLE, state="the-state", code_challenge="the-challenge")
+
+    assert url.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+
+    params = dict(httpx.QueryParams(httpx.URL(url).query))
+    assert params["scope"] == "openid email profile"
+    assert params["response_type"] == "code"
+    assert params["redirect_uri"] == "https://mw.test/auth/google/callback"
+    assert "client_secret" not in params
+
+
+def test_redirect_uri_for_google_matches_registered_preview_and_prod_values(monkeypatch):
+    """Directly reproduces the two redirect_uri values Google's OAuth
+    client would be registered with (mwpreview.k7zvx.com for preview,
+    meshwars.com for prod) -- same reasoning as the Discord version of
+    this test above.
+    """
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mwpreview.k7zvx.com")
+    assert redirect_uri_for("google") == "https://mwpreview.k7zvx.com/auth/google/callback"
+
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://meshwars.com")
+    assert redirect_uri_for("google") == "https://meshwars.com/auth/google/callback"
 
 
 # ---- token exchange --------------------------------------------------------
@@ -607,6 +663,133 @@ def test_discord_extract_identity_verified_but_no_email_value():
     async def go():
         async with _mock_client(lambda r: httpx.Response(500)) as client:
             return await _discord_extract_identity(userinfo, client, "tok")
+
+    identity = _run(go())
+    assert identity.email is None
+    assert identity.email_verified is False
+
+
+# ---- fetch_identity end-to-end / Google (_google_extract_identity) --------
+#
+# Same reasoning as the Discord block above: Google's OIDC userinfo
+# response carries email/email_verified directly -- no second call, so
+# fetch_identity()'s single GET already exercises the whole path.
+
+
+def test_fetch_identity_end_to_end_google(monkeypatch):
+    """The full fetch_identity() path for Google: one GET to
+    /v1/userinfo, resolved directly into a ProviderIdentity -- no
+    second call, same shape as Discord's own end-to-end test above.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer google-token-abc"
+        assert request.url == GOOGLE.userinfo_url
+        return httpx.Response(
+            200,
+            json={
+                "sub": "108234567890123456789",
+                "name": "Matt Johnson",
+                "picture": "https://example.com/pic.jpg",
+                "email": "matt@example.com",
+                "email_verified": True,
+            },
+        )
+
+    async def go():
+        async with _mock_client(handler) as client:
+            return await fetch_identity(GOOGLE, {"access_token": "google-token-abc"}, client)
+
+    identity = _run(go())
+    assert identity == ProviderIdentity(
+        subject="108234567890123456789", email="matt@example.com", email_verified=True
+    )
+
+
+def test_google_extract_identity_maps_representative_payload():
+    """A representative Google OIDC userinfo payload -- sub is the
+    subject (never email, which can be reassigned -- see this module's
+    Google section comment), email/email_verified come straight off
+    email/email_verified.
+    """
+    from app.oauth import _google_extract_identity
+
+    userinfo = {
+        "sub": "108234567890123456789",
+        "name": "Octo Duck",
+        "given_name": "Octo",
+        "family_name": "Duck",
+        "picture": "https://example.com/pic.jpg",
+        "email": "octoduck@example.com",
+        "email_verified": True,
+    }
+
+    async def go():
+        async with _mock_client(lambda r: httpx.Response(500)) as client:
+            return await _google_extract_identity(userinfo, client, "tok")
+
+    identity = _run(go())
+    assert identity == ProviderIdentity(
+        subject="108234567890123456789", email="octoduck@example.com", email_verified=True
+    )
+    # subject must be sub, never the mutable/reassignable email address.
+    assert identity.subject != userinfo["email"]
+
+
+def test_google_extract_identity_unverified_email_not_reported_as_verified():
+    """Google's own `email_verified` claim, false -- must not be
+    reported as a verified email even though `email` itself is present.
+    Same "getting `verified` right" reasoning as Discord's own test
+    above -- this is what the account-requires-password-when-email-
+    verified rule depends on getting right.
+    """
+    from app.oauth import _google_extract_identity
+
+    userinfo = {"sub": "1", "email": "maybe@example.com", "email_verified": False}
+
+    async def go():
+        async with _mock_client(lambda r: httpx.Response(500)) as client:
+            return await _google_extract_identity(userinfo, client, "tok")
+
+    identity = _run(go())
+    assert identity.email is None
+    assert identity.email_verified is False
+    assert identity.subject == "1"
+
+
+def test_google_extract_identity_missing_email_handled_without_raising():
+    """The `email`/`profile` scopes can be granted but Google still
+    omits `email`/`email_verified` from the response entirely -- must
+    resolve to email=None, email_verified=False rather than raising a
+    KeyError or crashing on a missing field.
+    """
+    from app.oauth import _google_extract_identity
+
+    userinfo = {"sub": "2", "name": "u"}  # no email/email_verified keys at all
+
+    async def go():
+        async with _mock_client(lambda r: httpx.Response(500)) as client:
+            return await _google_extract_identity(userinfo, client, "tok")
+
+    identity = _run(go())
+    assert identity.email is None
+    assert identity.email_verified is False
+    assert identity.subject == "2"
+
+
+def test_google_extract_identity_verified_but_no_email_value():
+    """Belt-and-suspenders on the same "absent, never guessed" contract:
+    email_verified=True with email explicitly null must still resolve
+    to email=None, not treat email_verified=True as license to invent
+    an address.
+    """
+    from app.oauth import _google_extract_identity
+
+    userinfo = {"sub": "3", "email": None, "email_verified": True}
+
+    async def go():
+        async with _mock_client(lambda r: httpx.Response(500)) as client:
+            return await _google_extract_identity(userinfo, client, "tok")
 
     identity = _run(go())
     assert identity.email is None

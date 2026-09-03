@@ -639,6 +639,15 @@ class Settings(BaseSettings):
     oauth_discord_client_id: str = ""
     oauth_discord_client_secret: str = ""
 
+    # Same "empty means off" contract as the GitHub/Discord pairs
+    # above, for Google's OAuth 2.0 client credentials -- see
+    # app/oauth.py's GOOGLE Provider(...) entry and
+    # _google_extract_identity for how these are used. Registered as a
+    # Google Cloud "OAuth client ID" (Web application type), not an API
+    # key -- Google's own console terminology for this pair.
+    oauth_google_client_id: str = ""
+    oauth_google_client_secret: str = ""
+
     # Base URL (scheme + host, no trailing slash, e.g.
     # "https://meshwars.com") this deployment is publicly reachable at,
     # used to build the exact redirect_uri
