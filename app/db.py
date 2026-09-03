@@ -1349,17 +1349,30 @@ CREATE INDEX IF NOT EXISTS idx_account_session_account ON account_session(accoun
 --
 -- detail is free-text, not a foreign key to whatever the event
 -- happened to -- `kind` alone (identity_linked/identity_unlinked/
--- player_linked/player_unlinked) already says which OTHER table
+-- player_linked/player_unlinked/key_rotated/password_set/
+-- password_removed/contact_email_set) already says which OTHER table
 -- changed, and forcing every future kind of event through the same
 -- fixed set of nullable foreign-key columns would mean adding a new
 -- column to this table every time a new kind of account event needs
 -- describing. A plain text note (built by whichever code path writes
 -- the row) is enough for an audit trail nothing downstream parses back
 -- out.
+--
+-- key_rotated (app/account_api.py's POST /api/account/rotate-key):
+-- the player-facing twin of admin_api.py's own reissue -- a player
+-- revoking every key they hold and minting one fresh one, without an
+-- operator. password_set/password_removed
+-- (app/account_api.py's POST/DELETE /api/account/password): the fifth
+-- sign-in door being created, changed, or removed -- never carries the
+-- password itself in `detail`, only that it changed. contact_email_set
+-- (app/account_api.py's POST /api/account/contact-email): the
+-- contact-only address being set/changed -- see account.contact_email's
+-- own MIGRATIONS comment for why this can never become a sign-in
+-- identity.
 CREATE TABLE IF NOT EXISTS account_link_event (
     event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id  INTEGER NOT NULL,
-    kind        TEXT NOT NULL,     -- 'identity_linked' | 'identity_unlinked' | 'player_linked' | 'player_unlinked'
+    kind        TEXT NOT NULL,     -- 'identity_linked' | 'identity_unlinked' | 'player_linked' | 'player_unlinked' | 'key_rotated' | 'password_set' | 'password_removed' | 'contact_email_set'
     detail      TEXT,
     actor       TEXT NOT NULL,     -- 'user' | 'operator'
     created_at  INTEGER NOT NULL
@@ -1445,6 +1458,73 @@ CREATE TABLE IF NOT EXISTS email_login_token (
     expires_at   INTEGER NOT NULL,
     consumed_at  INTEGER
 );
+
+-- A fifth sign-in door: one row per account that has set a password,
+-- app/password_login.py's own module docstring explains why this is
+-- hashlib.scrypt (stdlib, memory-hard) and NOT app/mc_ingest.py's
+-- hash_secret() (a bare, fast SHA-256 -- correct for a long random
+-- token like api_key.key_hash/account_session.token_hash above, badly
+-- wrong for a human-chosen password an offline attacker could
+-- otherwise brute-force at SHA-256 speed). account_id is the PRIMARY
+-- KEY, not a surrogate id: exactly one password per account, the same
+-- "one row, keyed on the thing it belongs to" shape freqmapper_config's
+-- own singleton row uses, just per-account instead of global.
+--
+-- n/r/p/dklen travel WITH the hash, not as a global constant, so a
+-- future change to app/password_login.py's own parameters (raising the
+-- cost as hardware gets faster, the standard scrypt-hardening story)
+-- never invalidates a password set under the old parameters -- verify
+-- reads whatever this row itself recorded, and only a future re-hash
+-- (naturally, next time this account signs in and the parameters are
+-- bumped, or a dedicated migration) ever changes what is stored here.
+-- salt/hash are both stored hex-encoded (TEXT), the same encoding
+-- app/mc_ingest.py's hash_secret() already uses for key_hash/
+-- token_hash, so every credential digest in this database has one
+-- consistent on-disk representation.
+CREATE TABLE IF NOT EXISTS account_password (
+    account_id   INTEGER PRIMARY KEY,
+    salt         TEXT NOT NULL,
+    n            INTEGER NOT NULL,
+    r            INTEGER NOT NULL,
+    p            INTEGER NOT NULL,
+    dklen        INTEGER NOT NULL,
+    hash         TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+
+-- Hashed single-use verification token for account.contact_email (see
+-- that column's own MIGRATIONS comment below for what contact_email
+-- IS and, just as important, what it is deliberately NOT). Same
+-- hashed-single-use-ticket shape as account_pending_identity/
+-- email_login_token above -- token_hash only, raw token exists only in
+-- the one mailed link, consumed_at makes redemption idempotent,
+-- expires_at bounds how long an unopened link stays valid -- but this
+-- is its OWN table, not a reuse of email_login_token, on purpose: a
+-- row in email_login_token is fed straight into
+-- resolve_oauth_callback() as a login-capable, provider='email'
+-- identity the instant it is redeemed (see that table's own comment).
+-- A contact-email verification token must NEVER be capable of that --
+-- see account.contact_email's own comment below -- so giving it a
+-- shape that happens to be identical but a table that is NEVER read by
+-- that decision tree is the whole point, not an accident of copy-paste.
+--
+-- email is the normalized address this token was issued for, captured
+-- at send time -- if the account's contact_email is changed again
+-- before this link is clicked, app/oauth_api.py's verify route checks
+-- the token's own email still matches the account's CURRENT
+-- contact_email before marking it verified, so an abandoned link for
+-- an old address can never verify whatever address happens to be set
+-- later.
+CREATE TABLE IF NOT EXISTS account_contact_email_token (
+    token_hash   TEXT PRIMARY KEY,
+    account_id   INTEGER NOT NULL,
+    email        TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    consumed_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_account_contact_email_token_account ON account_contact_email_token(account_id);
 """
 
 
@@ -1765,6 +1845,27 @@ MIGRATIONS = [
     # created down here, after the ALTER immediately above guarantees
     # the column exists first.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_player_account ON player(account_id)",
+    # contact_email: a user-editable address on the ACCOUNT itself, for
+    # contact purposes only (an operator or a future notification
+    # reaching the person who owns this account) -- a pre-existing
+    # table with rows already in it on every real deployment, so this
+    # is an ALTER same as player.account_id above, not a CREATE TABLE.
+    # Deliberately NOT an account_identity row and NOT usable to sign
+    # in: account_identity's own email/email_verified columns are what
+    # the callback decision tree (app/oauth_api.py's
+    # resolve_oauth_callback, case 3) and password sign-in
+    # (app/oauth_api.py's POST /auth/password/start) both read to
+    # decide who an address belongs to, and both deliberately read
+    # ONLY that table, never this column -- see the case-3 matching
+    # query's own comment in app/oauth_api.py for exactly why folding
+    # this column into that check would be an account-takeover path.
+    # NULL for every row until a person sets one through
+    # app/account_api.py's POST /api/account/contact-email; unverified
+    # (contact_email_verified_at NULL) the moment it is set, verified
+    # only once GET /auth/contact-email/verify redeems a token mailed
+    # to it.
+    "ALTER TABLE account ADD COLUMN contact_email TEXT",
+    "ALTER TABLE account ADD COLUMN contact_email_verified_at INTEGER",
 ]
 
 PRAGMAS = [

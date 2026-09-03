@@ -734,6 +734,96 @@ class Settings(BaseSettings):
     email_login_start_address_rate_limit_attempts: int = 3
     email_login_start_address_rate_limit_window_seconds: int = 600
 
+    # ---- Player-facing key rotation (app/account_api.py) -------------------
+    # Session-keyed rate limit on POST /api/account/rotate-key -- same
+    # reasoning as account_link_key_rate_limit_* above (an occasional,
+    # one-time-per-sitting, session-authenticated action, not a routine
+    # polling budget), kept as its own separate setting rather than
+    # reused so the two can be tuned independently -- rotate-key has no
+    # guessing-oracle shape at all (it takes no attacker-supplied
+    # secret), the risk here is closer to "an automated script mashing
+    # the button" than key brute-forcing, so this can run a little
+    # tighter without the same justification link-key's limit needs.
+    account_rotate_key_rate_limit_attempts: int = 5
+    account_rotate_key_rate_limit_window_seconds: int = 60
+
+    # ---- Account password (app/password_login.py, app/oauth_api.py) -------
+    # The fifth sign-in door: hashlib.scrypt (stdlib, memory-hard) set/
+    # changed via POST /api/account/password, checked at sign-in via
+    # POST /auth/password/start. See app/password_login.py's own module
+    # docstring for the full reasoning on why scrypt and not
+    # app/mc_ingest.py's hash_secret().
+    #
+    # scrypt cost parameters. n=2**14 (16384), r=8, p=1 is RFC 7914's
+    # own "interactive login" recommendation -- the standard baseline
+    # for a password checked on every sign-in request, not a
+    # backup-encryption key checked once in a while (which is where
+    # RFC 7914 suggests a much heavier n). Memory cost is 128*n*r*p
+    # bytes = 128*16384*8*1 = 16 MiB, comfortably under Python's
+    # hashlib.scrypt default 32 MiB maxmem ceiling, so no maxmem
+    # override is needed. dklen=32 (256 bits) matches every other
+    # derived-key/digest length already used in this codebase
+    # (secrets.token_urlsafe(32) for every raw token, hash_secret's own
+    # 32-byte SHA-256 digest). These parameters are stored ALONGSIDE
+    # each password hash (app/db.py's account_password table), not
+    # read fresh from these settings at verify time, so raising them
+    # later never invalidates a password hashed under today's values --
+    # see that table's own comment for why.
+    account_password_scrypt_n: int = 2 ** 14
+    account_password_scrypt_r: int = 8
+    account_password_scrypt_p: int = 1
+    account_password_scrypt_dklen: int = 32
+
+    # Minimum password length -- a length floor only, deliberately no
+    # character-class rules (no forced uppercase/digit/symbol): NIST
+    # SP 800-63B's own current guidance is that length is the dominant
+    # factor in resisting an offline guessing attack and that composition
+    # rules mostly just push people toward predictable substitutions
+    # ("Password1!") without adding real entropy. 8 is that guidance's
+    # own floor.
+    account_password_min_length: int = 8
+
+    # Rate limits on POST /auth/password/start -- same two-budget shape
+    # as email_login_start_*_rate_limit_* above and the same reasoning
+    # (per SOURCE IP, per TARGET address), since this is an
+    # unauthenticated endpoint taking a guessable secret (a password,
+    # unlike a magic-link token) and reporting back success/failure.
+    account_password_start_ip_rate_limit_attempts: int = 10
+    account_password_start_ip_rate_limit_window_seconds: int = 300
+    account_password_start_address_rate_limit_attempts: int = 5
+    account_password_start_address_rate_limit_window_seconds: int = 600
+
+    # Escalating backoff on repeated failed password attempts for one
+    # TARGET address, on top of (not instead of) the flat address
+    # window limit just above -- a flat window alone lets an attacker
+    # spend the whole budget in a burst right at the start of every
+    # window, forever, at a steady rate; escalating backoff instead
+    # makes each successive failure against the same address cost more
+    # wall-clock time than the last, which degrades a sustained
+    # guessing campaign much faster than a brute-force script expects.
+    # base_seconds is the lockout after the FIRST failure, doubled
+    # (factor) for each failure after that, capped at max_seconds so a
+    # very long failure streak does not lock the address out
+    # effectively forever. Reset to nothing on the next SUCCESSFUL
+    # sign-in for that address (see app/oauth_api.py's
+    # _PasswordBackoff.record_success()).
+    account_password_backoff_base_seconds: float = 2.0
+    account_password_backoff_factor: float = 2.0
+    account_password_backoff_max_seconds: float = 900.0  # 15 minutes
+
+    # ---- Contact email (app/account_api.py, app/oauth_api.py) -------------
+    # A user-editable address on the account, for contact purposes
+    # ONLY -- see account.contact_email's own MIGRATIONS comment in
+    # app/db.py for exactly why this can never sign anyone in or
+    # auto-link a new provider identity. Verified via a mailed,
+    # single-use link, the same hashed-single-use-ticket shape as
+    # email_login_token but its OWN table
+    # (account_contact_email_token) -- see that table's own comment for
+    # why it is not a reuse of email_login_token.
+    account_contact_email_token_lifetime_seconds: int = 900  # 15 minutes
+    account_contact_email_rate_limit_attempts: int = 3
+    account_contact_email_rate_limit_window_seconds: int = 600
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
