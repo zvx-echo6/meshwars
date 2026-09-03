@@ -16,6 +16,7 @@ import pytest
 
 from app.config import settings
 from app.oauth import (
+    DISCORD,
     GITHUB,
     PROVIDER_LABELS,
     PROVIDERS,
@@ -44,6 +45,12 @@ def _enable_github(monkeypatch) -> None:
     monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
 
 
+def _enable_discord(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "oauth_discord_client_id", "test-discord-client-id")
+    monkeypatch.setattr(settings, "oauth_discord_client_secret", "test-discord-client-secret")
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+
+
 # ---- provider table / enable-disable ------------------------------------
 
 
@@ -53,6 +60,10 @@ def test_get_provider_returns_github():
 
 def test_get_provider_unknown_name_returns_none():
     assert get_provider("not-a-real-provider") is None
+
+
+def test_get_provider_returns_discord():
+    assert get_provider("discord") is DISCORD
 
 
 def test_every_wired_up_provider_has_a_display_label():
@@ -75,6 +86,16 @@ def test_provider_disabled_by_default(monkeypatch):
     # conftest.py never sets any oauth_* setting -- a fresh clone/test
     # run must start with every provider off.
     assert provider_enabled(GITHUB) is False
+    assert provider_enabled(DISCORD) is False
+
+
+def test_discord_provider_enabled_requires_client_id_and_secret(monkeypatch):
+    monkeypatch.setattr(settings, "oauth_discord_client_id", "")
+    monkeypatch.setattr(settings, "oauth_discord_client_secret", "")
+    assert provider_enabled(DISCORD) is False
+
+    _enable_discord(monkeypatch)
+    assert provider_enabled(DISCORD) is True
 
 
 def test_provider_enabled_requires_client_id_and_secret_and_base_url(monkeypatch):
@@ -168,6 +189,48 @@ def test_build_authorize_url_carries_every_required_param(monkeypatch):
     # token exchange below.
     assert "client_secret" not in params
     assert "test-client-secret" not in url
+
+
+def test_build_authorize_url_discord_matches_registered_app_shape(monkeypatch):
+    """Cross-checks the constructed authorize URL against the exact
+    shape Matt registered Discord's OAuth2 app with (confirmed via a
+    real authorize URL Discord itself generated for both the preview
+    and prod redirect URIs): the authorize endpoint is
+    https://discord.com/oauth2/authorize (NOT under /api/, unlike
+    Discord's token endpoint which IS), response_type=code, and scope
+    must serialize to exactly "identify email" -- no extras, no
+    "openid". A mismatch on any of these (or on redirect_uri not
+    matching the registered value byte for byte) is a silent
+    production failure, not a test-only concern -- see
+    redirect_uri_for's own docstring for why redirect_uri has to match
+    exactly.
+    """
+    _enable_discord(monkeypatch)
+    url = build_authorize_url(DISCORD, state="the-state", code_challenge="the-challenge")
+
+    assert url.startswith("https://discord.com/oauth2/authorize?")
+    assert not url.startswith("https://discord.com/api/")
+
+    params = dict(httpx.QueryParams(httpx.URL(url).query))
+    assert params["scope"] == "identify email"
+    assert params["response_type"] == "code"
+    assert params["redirect_uri"] == "https://mw.test/auth/discord/callback"
+    assert "client_secret" not in params
+
+
+def test_redirect_uri_for_discord_matches_registered_preview_and_prod_values(monkeypatch):
+    """Directly reproduces the two redirect_uri values Matt registered
+    Discord's OAuth2 app with (mwpreview.k7zvx.com for preview,
+    meshwars.com for prod) -- proves redirect_uri_for produces exactly
+    what Discord's app console expects for each deployment, since
+    Discord rejects the entire flow on any mismatch (trailing slash,
+    scheme, anything).
+    """
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mwpreview.k7zvx.com")
+    assert redirect_uri_for("discord") == "https://mwpreview.k7zvx.com/auth/discord/callback"
+
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://meshwars.com")
+    assert redirect_uri_for("discord") == "https://meshwars.com/auth/discord/callback"
 
 
 # ---- token exchange --------------------------------------------------------
@@ -416,3 +479,135 @@ def test_github_emails_endpoint_non_200_raises():
 
     with pytest.raises(OAuthError):
         _run(go())
+
+
+# ---- fetch_identity end-to-end / Discord (_discord_extract_identity) ------
+#
+# Unlike GitHub, Discord's /users/@me response carries email/verified
+# directly -- no second call, so fetch_identity()'s single GET already
+# exercises the whole path. These tests hit _discord_extract_identity
+# directly (same reasoning as the GitHub email-selection tests above:
+# asserting the exact mapping rule without also depending on an HTTP
+# round trip succeeding), plus one full fetch_identity() test for the
+# end-to-end path GitHub's own test above covers.
+
+
+def test_fetch_identity_end_to_end_discord(monkeypatch):
+    """The full fetch_identity() path for Discord: one GET to
+    /users/@me, resolved directly into a ProviderIdentity -- no second
+    call, unlike GitHub's /user + /user/emails.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer discord-token-abc"
+        assert request.url == DISCORD.userinfo_url
+        return httpx.Response(
+            200,
+            json={
+                "id": "123456789012345678",
+                "username": "mattjohnson",
+                "global_name": "Matt",
+                "email": "matt@example.com",
+                "verified": True,
+            },
+        )
+
+    async def go():
+        async with _mock_client(handler) as client:
+            return await fetch_identity(DISCORD, {"access_token": "discord-token-abc"}, client)
+
+    identity = _run(go())
+    assert identity == ProviderIdentity(
+        subject="123456789012345678", email="matt@example.com", email_verified=True
+    )
+
+
+def test_discord_extract_identity_maps_representative_payload():
+    """A representative Discord /users/@me payload -- id is the
+    subject (never username/global_name, both user-editable -- see
+    this module's Discord section comment), email/email_verified come
+    straight off email/verified.
+    """
+    from app.oauth import _discord_extract_identity
+
+    userinfo = {
+        "id": "999888777666555444",
+        "username": "octoduck",
+        "discriminator": "0",
+        "global_name": "Octo Duck",
+        "email": "octoduck@example.com",
+        "verified": True,
+    }
+
+    async def go():
+        async with _mock_client(lambda r: httpx.Response(500)) as client:
+            return await _discord_extract_identity(userinfo, client, "tok")
+
+    identity = _run(go())
+    assert identity == ProviderIdentity(
+        subject="999888777666555444", email="octoduck@example.com", email_verified=True
+    )
+    # subject must be the id, never the mutable/reusable username.
+    assert identity.subject != userinfo["username"]
+
+
+def test_discord_extract_identity_unverified_email_not_reported_as_verified():
+    """Discord's own `verified` flag, false -- must not be reported as
+    a verified email even though `email` itself is present. This is
+    the exact case the account-requires-password-when-email-verified
+    rule depends on getting right: wrongly marking this verified would
+    both weaken sign-in resolution (an unverified address auto-linking
+    an account) and wrongly compel a password.
+    """
+    from app.oauth import _discord_extract_identity
+
+    userinfo = {"id": "1", "username": "u", "email": "maybe@example.com", "verified": False}
+
+    async def go():
+        async with _mock_client(lambda r: httpx.Response(500)) as client:
+            return await _discord_extract_identity(userinfo, client, "tok")
+
+    identity = _run(go())
+    assert identity.email is None
+    assert identity.email_verified is False
+    assert identity.subject == "1"
+
+
+def test_discord_extract_identity_missing_email_handled_without_raising():
+    """The `email` scope can be granted but Discord still omits `email`/
+    `verified` from the response entirely (no email on file, or the
+    scope was silently dropped by the consent screen) -- must resolve
+    to email=None, email_verified=False rather than raising a KeyError
+    or crashing on a missing field.
+    """
+    from app.oauth import _discord_extract_identity
+
+    userinfo = {"id": "2", "username": "u"}  # no email/verified keys at all
+
+    async def go():
+        async with _mock_client(lambda r: httpx.Response(500)) as client:
+            return await _discord_extract_identity(userinfo, client, "tok")
+
+    identity = _run(go())
+    assert identity.email is None
+    assert identity.email_verified is False
+    assert identity.subject == "2"
+
+
+def test_discord_extract_identity_verified_but_no_email_value():
+    """Belt-and-suspenders on the same "absent, never guessed" contract:
+    verified=True with email explicitly null (Discord can return this
+    shape) must still resolve to email=None, not treat verified=True
+    as license to invent an address.
+    """
+    from app.oauth import _discord_extract_identity
+
+    userinfo = {"id": "3", "username": "u", "email": None, "verified": True}
+
+    async def go():
+        async with _mock_client(lambda r: httpx.Response(500)) as client:
+            return await _discord_extract_identity(userinfo, client, "tok")
+
+    identity = _run(go())
+    assert identity.email is None
+    assert identity.email_verified is False

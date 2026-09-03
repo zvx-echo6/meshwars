@@ -632,6 +632,13 @@ class Settings(BaseSettings):
     oauth_github_client_id: str = ""
     oauth_github_client_secret: str = ""
 
+    # Same "empty means off" contract as the GitHub pair above, for
+    # Discord's OAuth2 app credentials -- see app/oauth.py's DISCORD
+    # Provider(...) entry and _discord_extract_identity for how these
+    # are used.
+    oauth_discord_client_id: str = ""
+    oauth_discord_client_secret: str = ""
+
     # Base URL (scheme + host, no trailing slash, e.g.
     # "https://meshwars.com") this deployment is publicly reachable at,
     # used to build the exact redirect_uri

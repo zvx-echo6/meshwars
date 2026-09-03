@@ -36,7 +36,7 @@ from app.auth import http_exception_as_error_body
 from app.config import settings
 from app.db import MIGRATIONS, SCHEMA
 from app.mc_ingest import hash_secret
-from app.oauth import GITHUB, ProviderIdentity
+from app.oauth import DISCORD, GITHUB, ProviderIdentity
 from app.oauth_api import router as oauth_router
 from app.oauth_api import resolve_oauth_callback
 from app.sessions import SESSION_COOKIE_NAME, create_session
@@ -313,6 +313,36 @@ def _enable_github(monkeypatch) -> None:
     # one of them would incorrectly read as "invalid or expired oauth
     # login attempt" regardless of what it's actually trying to prove.
     monkeypatch.setattr(settings, "account_session_cookie_secure", False)
+
+
+def _enable_discord(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "oauth_discord_client_id", "test-discord-client-id")
+    monkeypatch.setattr(settings, "oauth_discord_client_secret", "test-discord-client-secret")
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+    # Same cookie-jar/TestClient reasoning as _enable_github above.
+    monkeypatch.setattr(settings, "account_session_cookie_secure", False)
+
+
+def _discord_handler(*, discord_user_id: str = "999888777666555444", email: str | None = "dev@example.com", verified: bool = True):
+    """A MockTransport handler standing in for discord.com across the
+    whole /start -> /callback round trip: the token exchange and the
+    single userinfo call (/users/@me) -- Discord needs no second call,
+    unlike GitHub's /user + /user/emails (see app/oauth.py's Discord
+    section comment).
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url == DISCORD.token_url:
+            return httpx.Response(200, json={"access_token": "discord-access-token", "token_type": "Bearer"})
+        if request.url == DISCORD.userinfo_url:
+            body = {"id": discord_user_id, "username": "octoduck", "global_name": "Octo Duck"}
+            if email is not None:
+                body["email"] = email
+                body["verified"] = verified
+            return httpx.Response(200, json=body)
+        return httpx.Response(404)
+
+    return handler
 
 
 def _github_handler(*, github_user_id: int = 999, primary_email: str | None = "dev@example.com", verified: bool = True):
@@ -616,6 +646,88 @@ def test_callback_unverified_email_never_auto_links(db_path, monkeypatch):
     assert resp.json()["result"] == "pending"
 
 
+# ---- /auth/discord/callback: same decision tree, a different provider -----
+#
+# The callback decision tree (resolve_oauth_callback) is provider-
+# agnostic -- Part 1 above already proves that against a bare `conn`.
+# These mirror the GitHub full-HTTP-round-trip tests above (brand-new
+# identity -> pending, existing identity -> login) for Discord
+# specifically, proving the whole /start -> /callback path (state/PKCE
+# cookies, token exchange, the single userinfo call, no second call
+# needed) reaches the same outcomes GitHub's does.
+
+
+def test_callback_brand_new_identity_returns_pending_discord(db_path, monkeypatch):
+    _enable_discord(monkeypatch)
+    _patch_provider_http(monkeypatch, _discord_handler(discord_user_id="111", email=None))
+    client = _client()
+    state = _start_and_get_state(client, provider="discord")
+
+    resp = client.get("/auth/discord/callback", params={"code": "the-code", "state": state, "format": "json"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["result"] == "pending"
+    assert isinstance(body["pending_token"], str) and body["pending_token"]
+    assert "mw_session" not in resp.cookies  # no account exists yet -- no session issued
+
+
+def test_callback_existing_identity_logs_in_discord(db_path, monkeypatch):
+    _enable_discord(monkeypatch)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute("INSERT INTO account(created_at) VALUES (?)", (int(time.time()),))
+    account_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO account_identity(provider, subject, account_id, email, email_verified, linked_at) "
+        "VALUES ('discord', '111', ?, 'dev@example.com', 1, ?)",
+        (account_id, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    _patch_provider_http(monkeypatch, _discord_handler(discord_user_id="111"))
+    client = _client()
+    state = _start_and_get_state(client, provider="discord")
+
+    resp = client.get("/auth/discord/callback", params={"code": "the-code", "state": state, "format": "json"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"result": "login", "account_id": account_id}
+    assert "mw_session" in resp.cookies
+
+
+def test_callback_unverified_discord_email_never_auto_links(db_path, monkeypatch):
+    """Mirrors test_callback_unverified_email_never_auto_links above,
+    for Discord: an account already exists with a verified email at
+    the same address, but Discord itself reports verified=False for
+    this sign-in -- must fall to pending, never auto-link. This is the
+    exact case Step 4 of the task calls out: getting `verified` right
+    here is what the account-requires-password-on-verified-email rule
+    depends on.
+    """
+    _enable_discord(monkeypatch)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute("INSERT INTO account(created_at) VALUES (?)", (int(time.time()),))
+    account_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO account_identity(provider, subject, account_id, email, email_verified, linked_at) "
+        "VALUES ('google', 'g-1', ?, 'shared@example.com', 1, ?)",
+        (account_id, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    _patch_provider_http(
+        monkeypatch, _discord_handler(discord_user_id="555", email="shared@example.com", verified=False)
+    )
+    client = _client()
+    state = _start_and_get_state(client, provider="discord")
+
+    resp = client.get("/auth/discord/callback", params={"code": "the-code", "state": state, "format": "json"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["result"] == "pending"
+
+
 # ---- POST /api/account/pending/create --------------------------------------
 
 
@@ -772,6 +884,25 @@ def test_list_providers_omits_a_half_configured_provider(db_path, monkeypatch):
     resp = client.get("/auth/providers")
     assert resp.status_code == 200
     assert resp.json() == {"providers": []}
+
+
+def test_list_providers_includes_discord_once_enabled(db_path, monkeypatch):
+    _enable_discord(monkeypatch)
+    client = _client()
+    resp = client.get("/auth/providers")
+    assert resp.status_code == 200
+    assert resp.json() == {"providers": [{"name": "discord", "label": "Discord"}]}
+
+
+def test_list_providers_omits_discord_when_not_configured(db_path, monkeypatch):
+    # Only GitHub configured -- Discord must not appear until its own
+    # client id/secret are set, mirroring the half-configured test
+    # above but for a provider that is entirely untouched.
+    _enable_github(monkeypatch)
+    client = _client()
+    resp = client.get("/auth/providers")
+    assert resp.status_code == 200
+    assert resp.json() == {"providers": [{"name": "github", "label": "GitHub"}]}
 
 
 # =========================================================================

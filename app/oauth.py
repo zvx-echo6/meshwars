@@ -14,12 +14,12 @@ Every provider this app can ever sign in through is one Provider entry
 in PROVIDERS below: its authorize/token/userinfo URLs, its scopes, and
 one function (extract_identity) that turns that provider's own
 token+userinfo shape into the three facts every provider ultimately
-has to produce -- (subject, email, email_verified). GITHUB is the only
-one actually implemented; adding google or discord later means writing
-that provider's own extract_identity (every provider's userinfo
-response is shaped a little differently -- that variation is
-irreducible, not something a shared code path could paper over) and
-adding one Provider(...) entry to the table. Nothing in
+has to produce -- (subject, email, email_verified). GITHUB and DISCORD
+are implemented; adding google later means writing that provider's own
+extract_identity (every provider's userinfo response is shaped a
+little differently -- that variation is irreducible, not something a
+shared code path could paper over) and adding one Provider(...) entry
+to the table. Nothing in
 app/oauth_api.py's routes, app/oauth.py's flow functions
 (build_authorize_url/exchange_code/fetch_identity), or the callback
 decision tree changes to add one.
@@ -262,20 +262,97 @@ GITHUB = Provider(
 )
 
 
+# ---- Discord -----------------------------------------------------------
+#
+# Discord's OAuth2 app flow is a much closer fit to plain OIDC-style
+# "userinfo" than GitHub's: a single authenticated GET to
+# https://discord.com/api/users/@me returns id/username/global_name/
+# email/verified all in one response, so unlike GitHub there is no
+# second call here -- the `identify` scope gets the profile fields,
+# `email` gets the email field populated at all (without it, `email`
+# is simply absent from the response). Note the authorize endpoint is
+# NOT under /api/ (https://discord.com/oauth2/authorize) while the
+# token and userinfo endpoints ARE (https://discord.com/api/...) --
+# Discord's own inconsistency, not a typo here.
+#
+# verified reflects whether DISCORD has confirmed the user controls
+# that address -- it says nothing about whether the *username* is
+# trustworthy, which is why subject below is the id (a permanent
+# snowflake), never the username or global_name (both user-editable,
+# and username is even reusable after a user changes it -- see
+# app/db.py's account_identity comment for why (provider, subject)
+# must be a stable, non-reassignable pair).
+
+DISCORD_AUTHORIZE_URL = "https://discord.com/oauth2/authorize"
+DISCORD_TOKEN_URL = "https://discord.com/api/oauth2/token"
+DISCORD_USERINFO_URL = "https://discord.com/api/users/@me"
+
+# identify for id/username/global_name, email for the email/verified
+# fields -- without the email scope, Discord's /users/@me response
+# simply omits `email` and `verified` entirely rather than erroring,
+# handled below the same way a GitHub account with no primary+verified
+# email is handled: email=None, email_verified=False, never guessed.
+DISCORD_SCOPES = ("identify", "email")
+
+
+async def _discord_extract_identity(
+    userinfo: dict, http_client: httpx.AsyncClient, access_token: str
+) -> ProviderIdentity:
+    """userinfo is Discord's GET /users/@me response. subject is the
+    account's snowflake id, a permanent numeric string Discord itself
+    treats as the stable identifier -- see this section's own comment
+    above for why that is required and username/global_name are not
+    usable here.
+
+    email/email_verified come straight off userinfo's own `email`/
+    `verified` fields, with no second call needed (unlike GitHub --
+    see this section's comment above): if `email` is missing (the
+    `email` scope was not granted, or Discord simply has none on file)
+    or `verified` is not literally True, this reports email=None,
+    email_verified=False -- the exact same "absent, never a guessed or
+    unverified address" contract _github_extract_identity applies, and
+    the one ProviderIdentity's own docstring requires of every
+    provider, not a discord-specific policy.
+    """
+    subject = str(userinfo["id"])
+
+    email = userinfo.get("email")
+    verified = userinfo.get("verified") is True
+    if isinstance(email, str) and email and verified:
+        return ProviderIdentity(subject=subject, email=email, email_verified=True)
+
+    # Either no email on the response at all (email scope refused, or
+    # Discord has none on file) or Discord itself has not verified it --
+    # absent, never a fallback to an unverified/missing address.
+    return ProviderIdentity(subject=subject, email=None, email_verified=False)
+
+
+DISCORD = Provider(
+    name="discord",
+    authorize_url=DISCORD_AUTHORIZE_URL,
+    token_url=DISCORD_TOKEN_URL,
+    userinfo_url=DISCORD_USERINFO_URL,
+    scopes=DISCORD_SCOPES,
+    client_id_setting="oauth_discord_client_id",
+    client_secret_setting="oauth_discord_client_secret",
+    extract_identity=_discord_extract_identity,
+)
+
+
 # ---- the table itself ------------------------------------------------
 #
-# Adding google/discord/apple later: write that provider's own
-# _<name>_extract_identity() next to GITHUB's above (each provider gets
-# its own section, same shape as this one), build a Provider(...) for
-# it, and add it to this dict. Nothing else in this module or in
-# app/oauth_api.py's routes needs to change -- get_provider()/
+# Adding google/apple later: write that provider's own
+# _<name>_extract_identity() next to GITHUB's/DISCORD's above (each
+# provider gets its own section, same shape as this one), build a
+# Provider(...) for it, and add it to this dict. Nothing else in this
+# module or in app/oauth_api.py's routes needs to change -- get_provider()/
 # provider_enabled()/build_authorize_url()/exchange_code()/
 # fetch_identity() below are all already provider-agnostic.
 
 PROVIDERS: dict[str, Provider] = {
     "github": GITHUB,
+    "discord": DISCORD,
     # "google": GOOGLE,    # not yet implemented
-    # "discord": DISCORD,  # not yet implemented
     # "apple": APPLE,      # not yet implemented -- see module docstring
 }
 
@@ -287,8 +364,8 @@ PROVIDERS: dict[str, Provider] = {
 # single source of truth lives here, not duplicated per page script.
 #
 # Deliberately broader than PROVIDERS: PROVIDERS today only has
-# "github" wired up (google/discord/apple are commented-out future
-# entries -- see that table's own comment above), and "email" is never
+# "github" and "discord" wired up (google/apple are commented-out
+# future entries -- see that table's own comment above), and "email" is never
 # a PROVIDERS entry at all (list_providers() below adds it by hand,
 # since it is not an OAuth provider and has no Provider(...) row). But
 # every one of those five names is a name this codebase's own routes,
