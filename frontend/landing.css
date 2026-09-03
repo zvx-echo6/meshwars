@@ -543,6 +543,21 @@ body {
 .mw-nav-links a:hover { background: var(--mw-raised); color: var(--mw-accent); }
 .mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
 
+/* Signed-in indicator on the Account nav link -- see join.css's own
+   copy of this rule for the full reasoning; duplicated here for the
+   same reason the rest of the nav block is duplicated per owning
+   stylesheet. */
+.mw-nav-account-signed-in::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--mw-friendly);
+  vertical-align: middle;
+}
+
 /* GitHub mark: deliberately understated per the owner ("faded into the
    background so its visible but not prominent") -- low opacity at rest,
    full opacity on hover/focus. Lives inside .mw-nav-links (not a third

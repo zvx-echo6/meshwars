@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <!-- Applied before any stylesheet paints, so a reader who chose the
+       neon skin never sees a frame of gold first. Deliberately inline
+       and tiny: a fetched script here would block first paint, which is
+       the thing this exists to avoid. Mirrors theme-toggle.js, which
+       owns everything after load. -->
+  <script>
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
+  </script>
+  <title>MeshWars — Your Account</title>
+  <!-- A signed-in visitor's own page -- nothing here is the same between
+       two visitors, so there is no meaningful search result or social
+       card for it. noindex, no canonical/OG/JSON-LD, same reasoning
+       frontend/link.html's own head gives. -->
+  <meta name="robots" content="noindex">
+
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v= on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
+  <link rel="stylesheet" href="/static/account.css?v=20260903-1" />
+</head>
+<body>
+
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/">Map</a>
+      <a href="/results">Results</a>
+      <a href="/rules">Rules</a>
+      <a href="/docs">Docs</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <a href="/account" id="mw-nav-account" class="active">Account</a>
+      <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+      </button>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main class="account-wrap">
+
+    <div id="account-loading" class="account-hint">Loading...</div>
+
+    <!-- Signed-out state: no session cookie, or an expired/revoked one
+         (GET /api/account came back 401 -- see account.js's loadAccount()).
+         Offers the same sign-in-with-provider component join.html's
+         #signin-panel uses, sourced the same way from GET
+         /auth/providers, so an unconfigured provider is never shown
+         here either. -->
+    <section id="account-signed-out" class="account-panel" hidden>
+      <div class="account-title">Sign in</div>
+      <p class="account-hint">Sign in to see your connected sign-in methods, your linked player, and your active sessions.</p>
+      <div id="account-signin-providers" class="signin-providers"></div>
+      <p id="account-signin-none" class="account-hint" hidden>No sign-in method is enabled on this deployment yet.</p>
+    </section>
+
+    <!-- Signed-in state. -->
+    <section id="account-content" hidden>
+
+      <!-- Shown once, only when this page load just completed a
+           pending-identity link (see account.js's maybeCompletePendingLink())
+           -- confirms the connection happened rather than leaving it
+           implicit in the identities list below. -->
+      <div id="account-linked-banner" class="account-banner" hidden></div>
+
+      <section class="account-panel">
+        <div class="account-title">Sign-in methods</div>
+        <p class="account-hint">Each of these is an independent way into this same account -- add another any time from the join page.</p>
+        <ul id="account-identities" class="account-identities"></ul>
+      </section>
+
+      <section class="account-panel">
+        <div class="account-title">Player</div>
+        <div id="account-player-linked" hidden>
+          <p class="account-hint">This account is connected to a MeshWars player.</p>
+          <p id="account-player-name" class="account-player-line"></p>
+          <p id="account-player-team" class="account-player-line"></p>
+        </div>
+        <div id="account-player-unlinked" hidden>
+          <p class="account-hint">No player is connected to this account yet. If you've played before and have your API key, connect it here to claim your player. Registering for the first time? <a href="/join">Join MeshWars</a> instead.</p>
+          <div id="account-connect-error" class="account-error" role="alert" hidden></div>
+          <form id="account-connect-form" class="account-connect-form" novalidate autocomplete="off">
+            <label class="account-field">
+              <span>API key</span>
+              <input type="password" id="f-account-key" autocomplete="off" required />
+            </label>
+            <button type="submit" id="account-connect-submit">Connect</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="account-panel">
+        <div class="account-title">Sessions</div>
+        <p class="account-hint">Every device currently signed in to this account.</p>
+        <ul id="account-sessions" class="account-sessions"></ul>
+        <div id="account-session-error" class="account-error" role="alert" hidden></div>
+        <div class="account-session-actions">
+          <button type="button" id="account-logout-btn">Sign out</button>
+          <button type="button" id="account-logout-all-btn">Sign out everywhere</button>
+        </div>
+      </section>
+
+    </section>
+
+  </main>
+
+  <script src="/static/account.js?v=20260903-1" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
+  <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
+</body>
+</html>

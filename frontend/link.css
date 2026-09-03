@@ -1,0 +1,117 @@
+/* MeshWars: styles for the /link sign-in decision page (frontend/link.js).
+   Loaded alongside theme.css + landing.css (frontend/link.html) --
+   landing.css already supplies the page-wide html/body rules (base font
+   size, background, text color) and the shared .mw-nav block, so this
+   file only carries what's specific to this one small page. */
+
+.link-wrap {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: calc(var(--mw-nav-h) + 24px) 16px 64px;
+}
+
+.link-panel {
+  background: var(--mw-panel);
+  border: 1px solid var(--mw-line);
+  border-radius: 8px;
+  padding: 16px 18px;
+}
+
+.link-title {
+  font-weight: 700;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--mw-accent);
+  margin-bottom: 8px;
+}
+
+.link-hint {
+  font-size: 0.75rem;
+  color: var(--mw-text-5);
+  margin: 4px 0 0;
+}
+
+.link-summary {
+  font-size: 0.9375rem;
+  color: var(--mw-text-1);
+  line-height: 1.5;
+  margin: 0 0 4px;
+}
+
+.link-error {
+  background: #2a1414;
+  border: 1px solid #663333;
+  color: #f08080;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.75rem;
+  margin-top: 14px;
+}
+
+/* One bordered block per choice -- "create a new account" and "sign in
+   with a method you already use" read as two clearly separate doors,
+   not two paragraphs in a row a person might skim past. */
+.link-choice {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--mw-raised);
+}
+
+.link-choice-title {
+  font-weight: 700;
+  font-size: 0.8125rem;
+  color: var(--mw-text-1);
+  margin-bottom: 4px;
+}
+
+#link-create-btn {
+  width: 100%;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-top: 8px;
+}
+#link-create-btn:hover { background: var(--mw-line); }
+#link-create-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- Sign in (GET /auth/{provider}/start) --------------------------------
+   Same component join.css defines for the join page's own sign-in
+   panel -- duplicated here rather than shared, since this page does not
+   load join.css (see this file's own header comment). A plain link per
+   enabled provider: /auth/{provider}/start is a GET redirect
+   (app/oauth_api.py), so clicking one of these IS the whole action, no
+   click handler needed. */
+.signin-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.signin-provider-btn {
+  display: block;
+  text-align: center;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+.signin-provider-btn:hover { background: var(--mw-line); }
+
+.link-hint a {
+  color: var(--mw-accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+.link-hint a:hover { text-decoration: underline; }

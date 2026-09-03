@@ -1,0 +1,224 @@
+/* MeshWars: styles for the /account page (frontend/account.js).
+   Loaded alongside theme.css + landing.css (frontend/account.html) --
+   landing.css already supplies the page-wide html/body rules and the
+   shared .mw-nav block, so this file only carries what's specific to
+   this one page. */
+
+.account-wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: calc(var(--mw-nav-h) + 24px) 16px 64px;
+}
+
+.account-hint {
+  font-size: 0.8125rem;
+  color: var(--mw-text-5);
+  margin: 4px 0 0;
+}
+
+.account-panel {
+  background: var(--mw-panel);
+  border: 1px solid var(--mw-line);
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.account-title {
+  font-weight: 700;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--mw-accent);
+  margin-bottom: 8px;
+}
+
+.account-error {
+  background: #2a1414;
+  border: 1px solid #663333;
+  color: #f08080;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.75rem;
+  margin: 10px 0;
+}
+
+/* A completed pending-identity link (frontend/account.js's own
+   maybeCompletePendingLink()) -- confirms once, in place, at the top of
+   the signed-in view, rather than leaving the connection implicit in
+   the identities list below it. Same green "everything's fine" tint
+   join.css's .status-diagnosis-ok uses for the same kind of message. */
+.account-banner {
+  background: #16240f;
+  border: 1px solid var(--mw-friendly);
+  color: #b8e0a0;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+/* ---- Sign in (GET /auth/providers) -- signed-out state -------------------
+   Same component join.css/link.css each define for their own sign-in
+   panel -- duplicated here rather than shared, since this page does not
+   load either of those files. */
+.signin-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.signin-provider-btn {
+  display: block;
+  text-align: center;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+.signin-provider-btn:hover { background: var(--mw-line); }
+
+/* ---- Sign-in methods list -------------------------------------------- */
+
+.account-identities {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.account-identities-empty {
+  list-style: none;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+}
+
+.account-identity-item {
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.account-identity-item:last-child { margin-bottom: 0; }
+
+.account-identity-name {
+  font-size: 0.875rem;
+  color: var(--mw-text-1);
+}
+
+.account-identity-detail {
+  font-size: 0.6875rem;
+  color: var(--mw-text-6);
+  margin-top: 2px;
+}
+
+/* ---- Player -------------------------------------------------------- */
+
+.account-player-line {
+  font-size: 0.875rem;
+  color: var(--mw-text-1);
+  margin: 4px 0;
+}
+
+.account-field {
+  display: block;
+  margin: 12px 0 10px;
+  font-size: 0.75rem;
+  color: var(--mw-text-5);
+}
+.account-field > span {
+  display: block;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.6875rem;
+}
+.account-field input {
+  width: 100%;
+  background: var(--mw-page);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.875rem;
+}
+.account-field input:focus {
+  outline: none;
+  border-color: var(--mw-accent);
+}
+
+.account-connect-form button,
+#account-logout-btn,
+#account-logout-all-btn {
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.account-connect-form button:hover,
+#account-logout-btn:hover,
+#account-logout-all-btn:hover { background: var(--mw-line); }
+.account-connect-form button:disabled,
+#account-logout-btn:disabled,
+#account-logout-all-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- Sessions -------------------------------------------------------- */
+
+.account-sessions {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.account-sessions-empty {
+  list-style: none;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+}
+
+.account-session-item {
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.account-session-item:last-child { margin-bottom: 0; }
+
+.account-session-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8125rem;
+  color: var(--mw-text-1);
+}
+
+.account-session-current-tag {
+  display: inline-block;
+  background: var(--mw-accent-wash);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-accent-wash-line);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.account-session-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}

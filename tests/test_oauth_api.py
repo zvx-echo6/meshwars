@@ -420,7 +420,10 @@ def test_callback_state_mismatch_rejected(db_path, monkeypatch):
     client = _client()
     _start_and_get_state(client)  # sets real cookies
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": "tampered-state-value"})
+    resp = client.get(
+        "/auth/github/callback",
+        params={"code": "the-code", "state": "tampered-state-value", "format": "json"},
+    )
     assert resp.status_code == 400
     assert resp.json() == {"error": "invalid or expired oauth login attempt"}
     # Single-use: the flow cookies are cleared even on rejection.
@@ -434,7 +437,7 @@ def test_callback_missing_pkce_verifier_cookie_rejected(db_path, monkeypatch):
     state = _start_and_get_state(client)
     client.cookies.delete("mw_oauth_pkce_verifier")
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 400
     assert resp.json() == {"error": "invalid or expired oauth login attempt"}
 
@@ -445,7 +448,7 @@ def test_callback_missing_state_cookie_rejected(db_path, monkeypatch):
     state = _start_and_get_state(client)
     client.cookies.delete("mw_oauth_state")
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 400
 
 
@@ -454,7 +457,7 @@ def test_callback_provider_error_param_rejected(db_path, monkeypatch):
     client = _client()
     _start_and_get_state(client)
 
-    resp = client.get("/auth/github/callback", params={"error": "access_denied"})
+    resp = client.get("/auth/github/callback", params={"error": "access_denied", "format": "json"})
     assert resp.status_code == 400
 
 
@@ -464,7 +467,7 @@ def test_callback_provider_http_failure_returns_502(db_path, monkeypatch):
     client = _client()
     state = _start_and_get_state(client)
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 502
 
 
@@ -477,7 +480,7 @@ def test_callback_brand_new_identity_returns_pending(db_path, monkeypatch):
     client = _client()
     state = _start_and_get_state(client)
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["result"] == "pending"
@@ -503,7 +506,7 @@ def test_callback_existing_identity_logs_in(db_path, monkeypatch):
     client = _client()
     state = _start_and_get_state(client)
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"result": "login", "account_id": account_id}
     assert "mw_session" in resp.cookies
@@ -518,7 +521,7 @@ def test_callback_links_while_logged_in(db_path, monkeypatch):
     client.cookies.set(SESSION_COOKIE_NAME, raw_session)
     state = _start_and_get_state(client)
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"result": "linked", "account_id": account_id}
     # No NEW session issued -- the caller already had one.
@@ -551,7 +554,7 @@ def test_callback_verified_email_auto_links_and_logs_in(db_path, monkeypatch):
     client = _client()
     state = _start_and_get_state(client)
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"result": "auto_linked", "account_id": account_id}
     assert "mw_session" in resp.cookies  # this one WAS a login, not just a link
@@ -582,7 +585,7 @@ def test_callback_ambiguous_email_match_does_not_link(db_path, monkeypatch):
     client = _client()
     state = _start_and_get_state(client)
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["result"] == "pending"
 
@@ -608,7 +611,7 @@ def test_callback_unverified_email_never_auto_links(db_path, monkeypatch):
     client = _client()
     state = _start_and_get_state(client)
 
-    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state})
+    resp = client.get("/auth/github/callback", params={"code": "the-code", "state": state, "format": "json"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["result"] == "pending"
 
@@ -738,3 +741,228 @@ def test_pending_link_expired_token(db_path):
     resp = client.post("/api/account/pending/link", json={"pending_token": raw_token})
     assert resp.status_code == 403
     assert resp.json() == {"error": "token expired"}
+
+
+# =========================================================================
+# Part 3: GET /auth/providers
+# =========================================================================
+
+
+def test_list_providers_empty_when_none_configured(db_path):
+    client = _client()
+    resp = client.get("/auth/providers")
+    assert resp.status_code == 200
+    assert resp.json() == {"providers": []}
+
+
+def test_list_providers_includes_github_once_enabled(db_path, monkeypatch):
+    _enable_github(monkeypatch)
+    client = _client()
+    resp = client.get("/auth/providers")
+    assert resp.status_code == 200
+    assert resp.json() == {"providers": [{"name": "github", "label": "GitHub"}]}
+
+
+def test_list_providers_omits_a_half_configured_provider(db_path, monkeypatch):
+    # client_id set, secret blank -- provider_enabled() treats this as
+    # fully off (app/oauth.py), never as "trust an empty secret."
+    monkeypatch.setattr(settings, "oauth_github_client_id", "test-client-id")
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+    client = _client()
+    resp = client.get("/auth/providers")
+    assert resp.status_code == 200
+    assert resp.json() == {"providers": []}
+
+
+# =========================================================================
+# Part 4: GET /auth/{provider}/callback -- the default BROWSER (redirect)
+# shape, as opposed to Part 2's `?format=json` coverage of the same
+# decision tree above. Same fixtures/helpers as Part 2; every request
+# here is made WITHOUT format=json and WITH follow_redirects=False, so
+# each assertion is against the raw 302 this route now sends a real
+# browser by default -- see oauth_callback's own docstring for the full
+# case -> destination mapping.
+# =========================================================================
+
+
+def test_callback_redirect_login_goes_to_account_with_session_cookie(db_path, monkeypatch):
+    _enable_github(monkeypatch)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute("INSERT INTO account(created_at) VALUES (?)", (int(time.time()),))
+    account_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO account_identity(provider, subject, account_id, email, email_verified, linked_at) "
+        "VALUES ('github', '111', ?, 'dev@example.com', 1, ?)",
+        (account_id, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    _patch_provider_http(monkeypatch, _github_handler(github_user_id=111))
+    client = _client()
+    state = _start_and_get_state(client)
+
+    resp = client.get(
+        "/auth/github/callback", params={"code": "the-code", "state": state}, follow_redirects=False
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/account"
+    assert "mw_session" in resp.cookies
+    # Single-use flow cookies are still cleared on this path.
+    assert client.cookies.get("mw_oauth_state") is None
+
+
+def test_callback_redirect_linked_goes_to_account_no_new_session(db_path, monkeypatch):
+    _enable_github(monkeypatch)
+    account_id, raw_session = _make_account_and_session(db_path)
+
+    _patch_provider_http(monkeypatch, _github_handler(github_user_id=222, primary_email=None))
+    client = _client()
+    client.cookies.set(SESSION_COOKIE_NAME, raw_session)
+    state = _start_and_get_state(client)
+
+    resp = client.get(
+        "/auth/github/callback", params={"code": "the-code", "state": state}, follow_redirects=False
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/account"
+    assert "mw_session" not in resp.cookies  # already had one -- see oauth_callback's own comment
+
+
+def test_callback_redirect_pending_goes_to_link_with_pending_cookie(db_path, monkeypatch):
+    _enable_github(monkeypatch)
+    _patch_provider_http(monkeypatch, _github_handler(github_user_id=999, primary_email=None))
+    client = _client()
+    state = _start_and_get_state(client)
+
+    resp = client.get(
+        "/auth/github/callback", params={"code": "the-code", "state": state}, follow_redirects=False
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/link"
+    assert "mw_session" not in resp.cookies  # no account exists yet
+    assert "mw_pending_token" in resp.cookies
+    # The raw token is never on the URL or in a JSON body here -- only in
+    # the cookie. Confirm it actually redeems (proves it's a real,
+    # freshly-issued pending token, not a placeholder).
+    raw_token = resp.cookies["mw_pending_token"]
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT provider, subject FROM account_pending_identity WHERE token_hash = ?",
+        (hash_secret(raw_token),),
+    ).fetchone()
+    conn.close()
+    assert row["provider"] == "github"
+    assert row["subject"] == "999"
+
+
+def test_callback_redirect_error_goes_to_join_with_auth_error(db_path, monkeypatch):
+    _enable_github(monkeypatch)
+    client = _client()
+    _start_and_get_state(client)
+
+    resp = client.get(
+        "/auth/github/callback", params={"error": "access_denied"}, follow_redirects=False
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/join?auth_error=provider_declined"
+
+
+def test_callback_redirect_state_mismatch_goes_to_join_with_auth_error(db_path, monkeypatch):
+    _enable_github(monkeypatch)
+    client = _client()
+    _start_and_get_state(client)
+
+    resp = client.get(
+        "/auth/github/callback",
+        params={"code": "the-code", "state": "tampered-state-value"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/join?auth_error=invalid_session"
+
+
+def test_callback_redirect_provider_http_failure_goes_to_join_with_auth_error(db_path, monkeypatch):
+    _enable_github(monkeypatch)
+    _patch_provider_http(monkeypatch, lambda r: httpx.Response(500))
+    client = _client()
+    state = _start_and_get_state(client)
+
+    resp = client.get(
+        "/auth/github/callback", params={"code": "the-code", "state": state}, follow_redirects=False
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/join?auth_error=provider_error"
+
+
+# =========================================================================
+# Part 5: the pending token as a cookie -- GET /api/account/pending, and
+# POST /api/account/pending/{create,link} redeeming a COOKIE-carried
+# token rather than a JSON body (Part 2 above already covers the body
+# fallback exhaustively).
+# =========================================================================
+
+
+def test_pending_get_describes_a_valid_pending_cookie(db_path):
+    raw_token = _make_pending(db_path, subject="peek-1", email="peek1@example.com", email_verified=True)
+    client = _client()
+    client.cookies.set("mw_pending_token", raw_token)
+
+    resp = client.get("/api/account/pending")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["provider"] == "github"
+    assert body["provider_label"] == "GitHub"
+    assert body["email"] == "p***@example.com"  # masked, never the raw address
+    assert body["email_verified"] is True
+
+
+def test_pending_get_no_cookie_is_404(db_path):
+    client = _client()
+    resp = client.get("/api/account/pending")
+    assert resp.status_code == 404
+
+
+def test_pending_get_expired_cookie_is_404(db_path):
+    raw_token = _make_pending(db_path, subject="peek-2", ttl=-10)
+    client = _client()
+    client.cookies.set("mw_pending_token", raw_token)
+    resp = client.get("/api/account/pending")
+    assert resp.status_code == 404
+
+
+def test_pending_create_via_cookie_redeems_and_clears_cookie(db_path):
+    raw_token = _make_pending(db_path, subject="cookie-create-1", email="cc1@example.com", email_verified=True)
+    client = _client()
+    client.cookies.set("mw_pending_token", raw_token)
+
+    # No JSON body at all -- a real browser POST from frontend/link.js
+    # relies entirely on the cookie.
+    resp = client.post("/api/account/pending/create")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["result"] == "created"
+    assert "mw_session" in resp.cookies
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    identity = conn.execute(
+        "SELECT account_id FROM account_identity WHERE provider='github' AND subject='cookie-create-1'"
+    ).fetchone()
+    conn.close()
+    assert identity["account_id"] == body["account_id"]
+
+
+def test_pending_link_via_cookie_redeems(db_path):
+    account_id, raw_session = _make_account_and_session(db_path)
+    raw_token = _make_pending(db_path, subject="cookie-link-1", email="cl1@example.com", email_verified=True)
+
+    client = _client()
+    client.cookies.set(SESSION_COOKIE_NAME, raw_session)
+    client.cookies.set("mw_pending_token", raw_token)
+
+    resp = client.post("/api/account/pending/link")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"result": "linked", "account_id": account_id}

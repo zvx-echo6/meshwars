@@ -279,6 +279,17 @@ PROVIDERS: dict[str, Provider] = {
     # "apple": APPLE,      # not yet implemented -- see module docstring
 }
 
+# Display label for each entry in PROVIDERS above -- GET /auth/providers
+# (app/oauth_api.py) reads this so the frontend never hardcodes "GitHub"
+# capitalization or spells a future provider's name itself. Keyed the
+# same as PROVIDERS; a provider missing here would be a bug in adding
+# it, not something a caller should have to guard against, so
+# GET /auth/providers indexes this directly rather than falling back to
+# provider.name.
+PROVIDER_LABELS: dict[str, str] = {
+    "github": "GitHub",
+}
+
 
 def get_provider(name: str) -> Provider | None:
     """The table lookup app/oauth_api.py's routes use for the

@@ -71,7 +71,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/join.css?v=20260902-1" />
+  <link rel="stylesheet" href="/static/join.css?v=20260903-1" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -89,6 +89,7 @@
       <a href="/docs">Docs</a>
       <a href="/about">About</a>
       <a href="/join" class="active">Join</a>
+      <a href="/account" id="mw-nav-account">Account</a>
       <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
       </button>
@@ -101,6 +102,25 @@
   <main class="join-wrap">
 
     <p class="join-check-teaser">Already registered and want to add a radio, or check your setup? <a href="#status-check-panel">Jump down here</a>.</p>
+
+    <!-- Sign in with an account provider -- a SEPARATE thing from the
+         invite-code registration flow below it: that flow makes a
+         PLAYER (a radio, a team, an API key); this makes an ACCOUNT
+         (app/account_api.py, app/oauth_api.py), the sign-in layer that
+         can later be pointed at that player from /account. Structured
+         as one provider button per entry in GET /auth/providers, not a
+         hardcoded list, so google/discord/apple/email slot in later as
+         siblings the moment each has its own Provider(...) entry in
+         app/oauth.py -- see join.js's setupSignIn() for why an
+         unconfigured provider is never rendered here at all, and why
+         this whole panel starts hidden until there's something (a
+         provider, or an auth_error to show) worth showing. -->
+    <section id="signin-panel" class="join-panel" hidden>
+      <div class="join-panel-title">Sign in</div>
+      <p class="hint">Signing in links your play across devices and lets you manage your account from one place -- it's separate from registering a radio below, and you can do either first.</p>
+      <div id="signin-error" class="join-error" role="alert" hidden></div>
+      <div id="signin-providers" class="signin-providers"></div>
+    </section>
 
     <section id="join-flow-panel" class="join-panel">
       <div class="join-panel-title">Join MeshWars</div>
@@ -593,5 +613,6 @@
   <script src="/static/play-area-map.js?v=20260827-1"></script>
   <script src="/static/join.js?v=20260902-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
+  <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>
 </html>

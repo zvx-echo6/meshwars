@@ -3,10 +3,42 @@ and GET /auth/{provider}/callback drive app/oauth.py's provider table
 through an actual authorization-code-with-PKCE round trip, and
 implement the callback decision tree that decides whether a provider
 identity logs someone in, links onto an account, or has to wait for a
-person to choose (resolve_oauth_callback below). POST
-/api/account/pending/create and POST /api/account/pending/link are the
-two ways a parked ("pending") identity from that last case is ever
-redeemed.
+person to choose (resolve_oauth_callback below). GET /auth/providers
+tells the frontend which providers are actually enabled, so it never
+renders a dead sign-in button for one that isn't configured. GET
+/api/account/pending, POST /api/account/pending/create, and POST
+/api/account/pending/link are how a parked ("pending") identity from
+case 4 is described to a person and then redeemed.
+
+---- browser redirect vs. JSON: who each response shape is for -----------
+
+GET /auth/{provider}/callback is where a real browser lands straight off
+a provider's own consent screen -- by default it now RESPONDS WITH A
+REDIRECT (to /account, /link, or /join with an error, depending on the
+outcome -- see oauth_callback's own docstring for the full mapping),
+because a person completing a sign-in has nowhere to go if the response
+is a bare JSON body. The original JSON-bodied response this route
+always returned is still available, at `?format=json` -- see
+_wants_json's own docstring for exactly who that's for (this module's
+own tests, and any non-browser caller) and why a real sign-in never
+carries that param itself.
+
+---- case 4's pending token: an HttpOnly cookie, not a query string -------
+
+A case-4 ("pending") outcome hands the browser a bearer-shaped token
+that has to survive one more redirect (to /link) and then get spent by
+one of the two redemption routes below. See _set_pending_cookie's own
+docstring for the full reasoning; the short version is that a query
+string ends up in Referer headers, browser history, and access logs,
+none of which a bearer token belongs in, while an HttpOnly cookie
+avoids all three and is exactly the same trade this app's own session
+cookie already makes. GET /api/account/pending reads that cookie
+server-side to describe the pending identity (provider, masked email)
+for /link to render, without the raw token ever reaching page
+JavaScript; POST /api/account/pending/{create,link} read it the same
+way to redeem it (see _resolve_pending_token below, which also accepts
+a `pending_token` JSON body field as a fallback for a non-browser
+caller or this module's own tests).
 
 ---- CSRF/state and PKCE storage: cookies, not a table -------------------
 
@@ -78,9 +110,11 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from .auth import new_rate_limit_bucket
 from .client_ip import get_client_ip
 from .config import settings
-from .db import WriteSession
+from .db import WriteSession, connect
 from .mc_ingest import hash_secret
 from .oauth import (
+    PROVIDERS,
+    PROVIDER_LABELS,
     OAuthError,
     ProviderIdentity,
     build_authorize_url,
@@ -106,6 +140,24 @@ router = APIRouter()
 
 _STATE_COOKIE_NAME = "mw_oauth_state"
 _VERIFIER_COOKIE_NAME = "mw_oauth_pkce_verifier"
+
+# Carries case 4's pending token from the callback redirect to the
+# decision page (frontend/link.html) and on to whichever of
+# POST /api/account/pending/{create,link} it submits to -- see this
+# module's own "case 4: the browser redirect" section below for why a
+# cookie, not a query string. Path="/" (not scoped narrower, unlike
+# _STATE_COOKIE_NAME/_VERIFIER_COOKIE_NAME above): it has to reach both
+# /link and the /api/account/pending/* routes, which do not share a
+# path prefix with each other.
+_PENDING_COOKIE_NAME = "mw_pending_token"
+
+# Where a browser flow lands for each callback outcome. Plain module-
+# level constants, not settings -- these are routes this exact app
+# serves (app/api.py's mount()), not deployment-configurable addresses
+# the way oauth_public_base_url is.
+_ACCOUNT_PAGE_PATH = "/account"
+_LINK_PAGE_PATH = "/link"
+_JOIN_PAGE_PATH = "/join"
 
 
 def _set_flow_cookies(response: Response, *, state: str, code_verifier: str) -> None:
@@ -141,6 +193,62 @@ def _clear_flow_cookies(response: Response) -> None:
     common = dict(path="/auth", httponly=True, samesite="lax", secure=settings.account_session_cookie_secure)
     response.delete_cookie(_STATE_COOKIE_NAME, **common)
     response.delete_cookie(_VERIFIER_COOKIE_NAME, **common)
+
+
+def _set_pending_cookie(response: Response, *, raw_token: str, expires_at: int, now: int) -> None:
+    """Carries a case-4 pending token to the browser as a short-lived,
+    HttpOnly cookie rather than a query-string parameter on the
+    redirect to /link -- the choice this change actually had to make,
+    called out explicitly since a URL is not a safe place for a
+    bearer-shaped secret: a query string is copied verbatim into the
+    Referer header of any request /link's own page makes to a
+    third-party resource, into browser history, and into any access log
+    (this app's own reverse proxy included) that records the request
+    line rather than just the path. An HttpOnly cookie hits none of
+    those: it is never put in Referer (cookies aren't), it is not part
+    of what a "copy link" or a history entry captures, and it is
+    unreadable from page JavaScript -- the exact same trade
+    SESSION_COOKIE_NAME already makes for the session token itself
+    (app/sessions.py's module comment on HttpOnly). The tradeoff, spelled
+    out for the same reason _set_flow_cookies' sibling functions spell
+    theirs out: /link's own page script cannot read this value directly
+    either -- but it never needs to. GET /api/account/pending reads the
+    cookie server-side to describe the pending identity (provider,
+    masked email) for display, and POST /api/account/pending/{create,link}
+    read it server-side too (see _resolve_pending_token below) to
+    redeem it -- the raw token itself never has to reach client-side
+    script at all.
+
+    max_age is capped at the token's own remaining lifetime (expires_at
+    - now) rather than a fixed duration: this cookie must never outlive
+    the account_pending_identity row it names, or a browser could hold a
+    cookie pointing at an already-expired token indefinitely.
+    """
+    response.set_cookie(
+        _PENDING_COOKIE_NAME,
+        raw_token,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=settings.account_session_cookie_secure,
+        max_age=max(0, expires_at - now),
+    )
+
+
+def _clear_pending_cookie(response: Response) -> None:
+    """Attributes must match _set_pending_cookie's exactly -- same
+    reasoning as _clear_flow_cookies above. Called once a pending token
+    is redeemed (pending_create/pending_link below) or replaced by a
+    fresh callback -- single-use, same as the flow cookies.
+    """
+    response.delete_cookie(
+        _PENDING_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=settings.account_session_cookie_secure,
+    )
+
 
 
 async def _resolve_current_account_id(request: Request) -> int | None:
@@ -299,6 +407,28 @@ def resolve_oauth_callback(
 
 # ---- routes ---------------------------------------------------------------
 
+
+@router.get("/auth/providers")
+async def list_providers() -> JSONResponse:
+    """Which providers are actually reachable right now -- the frontend
+    (frontend/join.js's sign-in section, frontend/link.js) calls this
+    instead of hardcoding a provider list, so an unconfigured provider
+    (no client id/secret, or no oauth_public_base_url -- see
+    provider_enabled() in app/oauth.py) is never rendered as a dead
+    button that 404s the moment someone clicks it. Iterates PROVIDERS in
+    table order (github today; google/discord/apple fall in
+    automatically once each has its own Provider(...) entry there, with
+    no route or frontend change needed here) and keeps only the ones
+    provider_enabled() actually approves.
+    """
+    providers = [
+        {"name": prov.name, "label": PROVIDER_LABELS.get(prov.name, prov.name)}
+        for prov in PROVIDERS.values()
+        if provider_enabled(prov)
+    ]
+    return JSONResponse({"providers": providers}, status_code=200)
+
+
 @router.get("/auth/{provider}/start")
 async def oauth_start(provider: str, request: Request) -> Response:
     """Redirects the browser to `provider`'s own authorize screen.
@@ -320,13 +450,87 @@ async def oauth_start(provider: str, request: Request) -> Response:
     return response
 
 
+def _wants_json(request: Request) -> bool:
+    """Whether this callback request should get the old, machine-shaped
+    JSON response instead of the browser redirect the route now sends
+    by default -- see oauth_callback's own docstring for the full
+    reasoning. `?format=json` on the request itself, never anything
+    provider-controlled: this route's real callers are (a) a browser,
+    landing here via a 302 from the provider that this app has no say
+    over the query string of beyond what it put in redirect_uri in the
+    first place (and redirect_uri has to match the provider's own
+    registered value to the byte -- see redirect_uri_for()'s own
+    comment in app/oauth.py -- so it cannot vary per request), and (b) a
+    test or script hitting this route directly, which can put whatever
+    it wants on the URL. A real sign-in never carries this param; a test
+    or a future bot/CLI client that wants the old machine-readable body
+    back sets it explicitly.
+    """
+    return request.query_params.get("format") == "json"
+
+
+def _callback_error_response(
+    request: Request, *, message: str, redirect_code: str, status_code: int
+) -> Response:
+    """One error outcome, shaped for whichever caller asked for it --
+    see _wants_json's own docstring. The JSON shape and status code are
+    exactly what this route always returned for each of these failures;
+    the redirect shape is new: send a person back to the sign-in page
+    (before this change it never sent them anywhere -- a raw JSON error
+    body is fine for a test's assertion, not for a person who just
+    clicked "Sign in with GitHub"), with a short, non-sensitive `auth_error`
+    code in the query string frontend/join.js reads to show a message.
+    That code is deliberately an enum-like word (see the call sites
+    below), never the raw exception text or provider response -- a
+    query string lands in browser history and any access log that
+    records the request line, so nothing sensitive belongs in it; a
+    generic reason word is the same class of information a "?error=..."
+    query param already carries on countless other sites and carries no
+    secret.
+    """
+    if _wants_json(request):
+        resp = JSONResponse({"error": message}, status_code=status_code)
+    else:
+        resp = RedirectResponse(f"{_JOIN_PAGE_PATH}?auth_error={redirect_code}", status_code=302)
+    _clear_flow_cookies(resp)
+    return resp
+
+
 @router.get("/auth/{provider}/callback")
-async def oauth_callback(provider: str, request: Request) -> JSONResponse:
+async def oauth_callback(provider: str, request: Request) -> Response:
     """Completes the flow /auth/{provider}/start began: verifies state
     and PKCE, exchanges the code, fetches the provider's identity, and
     runs resolve_oauth_callback() above to decide what happens to it.
 
-    Every failure path clears the flow cookies before returning -- see
+    ---- redirect, not a JSON body, by default -------------------------
+
+    This is where a real person's browser lands straight from the
+    provider's own consent screen -- returning raw JSON here used to mean
+    a person who just finished signing in landed on a blank page of
+    `{"result": "login", "account_id": 4}`, which is correct for a
+    machine and wrong for a browser. The default response now for every
+    outcome is a 302 that takes a real visitor somewhere that renders:
+
+      - login / linked / auto_linked -> the session cookie is set (same
+        as before) and the browser is sent to /account, so a completed
+        sign-in lands on the page that shows it worked.
+      - pending (case 4) -> the pending token is handed to the browser as
+        a short-lived HttpOnly cookie (_set_pending_cookie -- see its own
+        docstring for why a cookie and not a query string) and the
+        browser is sent to /link, the decision screen that offers
+        "create a new account" or "sign in with a method you already
+        use" for an identity this app has never seen before.
+      - any failure (provider declined, state/PKCE mismatch, provider
+        HTTP error) -> _callback_error_response above sends the browser
+        back to /join with a short `auth_error` code it can display next
+        to the sign-in button, rather than a bare JSON error body.
+
+    The original JSON-bodied response (tested exhaustively in
+    tests/test_oauth_api.py, which drives this route directly rather
+    than through a real browser) is still available at
+    `?format=json` -- see _wants_json's own docstring for exactly who
+    that is for and why a real sign-in never carries it. Every failure
+    path clears the flow cookies before returning either shape -- see
     _clear_flow_cookies' own docstring for why that happens
     unconditionally rather than only on success.
     """
@@ -338,9 +542,12 @@ async def oauth_callback(provider: str, request: Request) -> JSONResponse:
         # The provider itself declined (user hit "cancel" on the consent
         # screen, a misconfigured scope, ...) -- never reaches token
         # exchange at all.
-        resp = JSONResponse({"error": "oauth provider returned an error"}, status_code=400)
-        _clear_flow_cookies(resp)
-        return resp
+        return _callback_error_response(
+            request,
+            message="oauth provider returned an error",
+            redirect_code="provider_declined",
+            status_code=400,
+        )
 
     code = request.query_params.get("code")
     returned_state = request.query_params.get("state")
@@ -364,9 +571,12 @@ async def oauth_callback(provider: str, request: Request) -> JSONResponse:
         or not cookie_verifier
         or not secrets.compare_digest(returned_state, cookie_state)
     ):
-        resp = JSONResponse({"error": "invalid or expired oauth login attempt"}, status_code=400)
-        _clear_flow_cookies(resp)
-        return resp
+        return _callback_error_response(
+            request,
+            message="invalid or expired oauth login attempt",
+            redirect_code="invalid_session",
+            status_code=400,
+        )
 
     async with httpx.AsyncClient(timeout=10.0) as http_client:
         try:
@@ -376,9 +586,12 @@ async def oauth_callback(provider: str, request: Request) -> JSONResponse:
             identity = await fetch_identity(prov, token_response, http_client)
         except OAuthError:
             log.exception("oauth: %s callback failed talking to the provider", provider)
-            resp = JSONResponse({"error": "oauth provider error"}, status_code=502)
-            _clear_flow_cookies(resp)
-            return resp
+            return _callback_error_response(
+                request,
+                message="oauth provider error",
+                redirect_code="provider_error",
+                status_code=502,
+            )
 
     current_account_id = await _resolve_current_account_id(request)
     now = int(time.time())
@@ -392,17 +605,25 @@ async def oauth_callback(provider: str, request: Request) -> JSONResponse:
             now=now,
         )
 
+    want_json = _wants_json(request)
+
     if outcome["case"] == "pending":
-        resp = JSONResponse(
-            {
-                "result": "pending",
-                "pending_token": outcome["raw_token"],
-                "expires_at": outcome["expires_at"],
-                "email": identity.email,
-                "email_verified": identity.email_verified,
-            },
-            status_code=200,
-        )
+        if want_json:
+            resp = JSONResponse(
+                {
+                    "result": "pending",
+                    "pending_token": outcome["raw_token"],
+                    "expires_at": outcome["expires_at"],
+                    "email": identity.email,
+                    "email_verified": identity.email_verified,
+                },
+                status_code=200,
+            )
+        else:
+            resp = RedirectResponse(_LINK_PAGE_PATH, status_code=302)
+            _set_pending_cookie(
+                resp, raw_token=outcome["raw_token"], expires_at=outcome["expires_at"], now=now
+            )
         _clear_flow_cookies(resp)
         return resp
 
@@ -413,7 +634,10 @@ async def oauth_callback(provider: str, request: Request) -> JSONResponse:
     # invite a subtle bug at worst (a stale reference to the OLD token
     # somewhere still expecting it to work).
     account_id = outcome["account_id"]
-    resp = JSONResponse({"result": outcome["case"], "account_id": account_id}, status_code=200)
+    if want_json:
+        resp = JSONResponse({"result": outcome["case"], "account_id": account_id}, status_code=200)
+    else:
+        resp = RedirectResponse(_ACCOUNT_PAGE_PATH, status_code=302)
     if outcome["case"] in ("login", "auto_linked"):
         raw_session_token = await create_session(
             account_id, user_agent=request.headers.get("user-agent"), ip=get_client_ip(request)
@@ -474,17 +698,112 @@ def _load_pending(conn: sqlite3.Connection, raw_token: str, now: int) -> tuple[s
     return row, None
 
 
-async def _read_pending_token_body(request: Request) -> tuple[str | None, JSONResponse | None]:
+async def _resolve_pending_token(request: Request) -> tuple[str | None, JSONResponse | None]:
+    """Where GET /api/account/pending and POST /api/account/pending/
+    {create,link} all get the raw pending token from: the HttpOnly
+    _PENDING_COOKIE_NAME cookie oauth_callback's redirect sets on a real
+    browser flow, PREFERRED, falling back to a `pending_token` field in
+    a JSON request body when the cookie is absent. The fallback exists
+    for two callers, neither of them a browser holding the cookie: this
+    module's own tests (tests/test_oauth_api.py, unchanged by this
+    fallback -- see this module's module docstring's "keep the JSON
+    behavior available for tests" note) and any non-browser caller that
+    received the raw token directly from GET
+    /auth/{provider}/callback?format=json's response body instead of
+    the cookie a browser gets by default. A browser flow never has to
+    (and, since the cookie is HttpOnly, cannot) supply the body field
+    itself -- see /link's own frontend/link.js for the POST calls this
+    makes with no body at all.
+
+    The body is only ever parsed when no cookie is present, so a
+    cookie-carrying POST with a malformed or missing JSON body (which
+    is every real browser POST from /link) never fails on that account.
+    """
+    cookie_token = request.cookies.get(_PENDING_COOKIE_NAME)
+    if cookie_token:
+        return cookie_token, None
     try:
         body = await request.json()
     except Exception:
-        return None, JSONResponse({"error": "bad request"}, status_code=400)
+        body = None
     if not isinstance(body, dict):
-        return None, JSONResponse({"error": "bad request"}, status_code=400)
+        return None, JSONResponse({"error": "pending_token is required"}, status_code=400)
     raw_token = body.get("pending_token")
     if not isinstance(raw_token, str) or not raw_token:
         return None, JSONResponse({"error": "pending_token is required"}, status_code=400)
     return raw_token, None
+
+
+# Rate limit on the read below too, alongside the two redemption limiters
+# -- GET /api/account/pending falls back to the same cookie-or-body
+# token resolution as the redemption routes (a caller could still probe
+# it with a guessed token in a JSON body, even though the cookie path a
+# real browser takes never guesses anything), and it reports back
+# (200 vs. 404) whether a token is valid, which is the same "with no
+# limit at all this is a guessing oracle" reasoning the module comment
+# above already gives for the redemption routes.
+_pending_read_addr_limiter = new_rate_limit_bucket()
+
+
+@router.get("/api/account/pending")
+async def pending_get(request: Request) -> JSONResponse:
+    """Describes the pending identity a case-4 callback parked, for
+    frontend/link.js to render the decision screen ("You signed in with
+    GitHub as j***@example.com. We haven't seen this identity before.")
+    without the raw pending token ever reaching page JavaScript -- see
+    _set_pending_cookie's own docstring for why the token itself is
+    HttpOnly. Read-only and does not consume the token; only
+    pending_create/pending_link below do that. 404 (not 403, unlike the
+    redemption routes below) for a missing/unknown/expired/consumed
+    token -- there is nothing to redeem yet at this point, so "not
+    found" is the honest status, not "forbidden."
+    """
+    ip = get_client_ip(request)
+    if _pending_read_addr_limiter.limited(
+        ip,
+        limit=settings.account_link_key_rate_limit_attempts,
+        window=settings.account_link_key_rate_limit_window_seconds,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    raw_token, err = await _resolve_pending_token(request)
+    if err is not None:
+        return JSONResponse({"error": "no pending sign-in"}, status_code=404)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        row, load_err = _load_pending(conn, raw_token, now)
+    finally:
+        conn.close()
+    if load_err is not None:
+        return JSONResponse({"error": "no pending sign-in"}, status_code=404)
+
+    return JSONResponse(
+        {
+            "provider": row["provider"],
+            "provider_label": PROVIDER_LABELS.get(row["provider"], row["provider"]),
+            "email": _mask_pending_email(row["email"]),
+            "email_verified": bool(row["email_verified"]),
+            "expires_at": row["expires_at"],
+        },
+        status_code=200,
+    )
+
+
+def _mask_pending_email(email: str | None) -> str | None:
+    """Same masking app/account_api.py's own _mask_email() applies to a
+    LINKED identity's email -- duplicated rather than imported, since
+    that function lives in a module this router does not otherwise
+    depend on and the rule is three lines: never show a pending
+    identity's full address to the page that is about to ask "is this
+    you?" any more than an already-linked one gets shown in full.
+    """
+    if not email or "@" not in email:
+        return None
+    local, _, domain = email.partition("@")
+    masked_local = local[0] + "***" if local else "***"
+    return f"{masked_local}@{domain}"
 
 
 @router.post("/api/account/pending/create")
@@ -501,7 +820,7 @@ async def pending_create(request: Request) -> JSONResponse:
     ):
         return JSONResponse({"error": "rate limited"}, status_code=429)
 
-    raw_token, err = await _read_pending_token_body(request)
+    raw_token, err = await _resolve_pending_token(request)
     if err is not None:
         return err
 
@@ -535,6 +854,11 @@ async def pending_create(request: Request) -> JSONResponse:
     )
     resp = JSONResponse({"result": "created", "account_id": account_id}, status_code=200)
     set_session_cookie(resp, raw_session_token)
+    # Single-use, same as the flow cookies -- harmless to clear even when
+    # the token actually arrived via the JSON-body fallback rather than
+    # this cookie (there is then nothing to clear, and delete_cookie on
+    # an absent cookie is a no-op).
+    _clear_pending_cookie(resp)
     return resp
 
 
@@ -558,7 +882,7 @@ async def pending_link(
     ):
         return JSONResponse({"error": "rate limited"}, status_code=429)
 
-    raw_token, err = await _read_pending_token_body(request)
+    raw_token, err = await _resolve_pending_token(request)
     if err is not None:
         return err
 
@@ -600,4 +924,6 @@ async def pending_link(
             (now, row["token_hash"]),
         )
 
-    return JSONResponse({"result": "linked", "account_id": session.account_id}, status_code=200)
+    resp = JSONResponse({"result": "linked", "account_id": session.account_id}, status_code=200)
+    _clear_pending_cookie(resp)  # see pending_create's matching comment above
+    return resp

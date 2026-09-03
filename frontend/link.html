@@ -14,14 +14,15 @@
       document.documentElement.setAttribute('data-theme', 'neon');
     } } catch (e) {}
   </script>
-  <title>MeshWars — Monthly Results</title>
-  <meta name="description" content="Monthly standings and honors for MeshWars: which team gained the most ground, and who took, held, explored and checked in the most each month.">
-  <link rel="canonical" href="https://meshwars.com/results">
+  <title>MeshWars — Confirm Sign-In</title>
+  <!-- Reached only by redirect from GET /auth/{provider}/callback (a
+       case-4 "we've never seen this identity before" outcome -- see
+       app/oauth_api.py's oauth_callback()), never a destination anyone
+       links to or is meant to land on directly. noindex, and no
+       canonical/OG/JSON-LD -- there is nothing here worth a search
+       result or a social card. -->
+  <meta name="robots" content="noindex">
 
-  <!-- See index.html's matching comment: Google reads a site's
-       search-results favicon from the home page specifically, but these
-       declarations are kept identical across all three pages so the
-       <head> stays consistent site-wide. -->
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
@@ -30,49 +31,14 @@
   <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
   <link rel="manifest" href="/static/assets/site.webmanifest">
 
-  <meta property="og:type" content="website">
-  <meta property="og:title" content="MeshWars — Monthly Results">
-  <meta property="og:description" content="Every calendar month gets its own standings and honors, scored on the month rather than the season.">
-  <meta property="og:url" content="https://meshwars.com/results">
-  <meta property="og:image" content="https://meshwars.com/static/assets/social/og-image.png">
-  <meta property="og:image:width" content="1200">
-  <meta property="og:image:height" content="630">
-
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="MeshWars — Monthly Results">
-  <meta name="twitter:description" content="Every calendar month gets its own standings and honors, scored on the month rather than the season.">
-  <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
-
-  <!-- See index.html's matching comment for what this describes and why
-       it's minimal. Same content, this page's own "url". -->
-  <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@type": "Game",
-    "name": "MeshWars",
-    "alternateName": "Mesh Wars",
-    "url": "https://meshwars.com/results",
-    "publisher": { "@id": "https://meshwars.com/#org" },
-    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
-    "genre": ["Location-based game", "Capture the flag"],
-    "isBasedOn": {
-      "@type": "SoftwareSourceCode",
-      "name": "MeshWars",
-      "codeRepository": "https://github.com/zvx-echo6/meshwars",
-      "programmingLanguage": "Python",
-      "license": "https://opensource.org/licenses/MIT"
-    }
-  }
-  </script>
-
   <!-- Cache-busting: /static assets are served cacheable while these HTML
        pages are no-cache. Without a version string, a returning visitor can get
-       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
+       fresh HTML paired with a stale cached stylesheet/script. Bump v= on
        EVERY /static CSS/JS reference on this page whenever any of those files
-       change -- do not touch the pinned external Leaflet CDN links. -->
+       change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/results.css?v=20260831-6" />
+  <link rel="stylesheet" href="/static/link.css?v=20260903-1" />
 </head>
 <body>
 
@@ -80,7 +46,7 @@
     <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
     <div class="mw-nav-links">
       <a href="/">Map</a>
-      <a href="/results" class="active">Results</a>
+      <a href="/results">Results</a>
       <a href="/rules">Rules</a>
       <a href="/docs">Docs</a>
       <a href="/about">About</a>
@@ -95,25 +61,52 @@
     </div>
   </nav>
 
-  <main class="landing-wrap rs-wrap">
+  <main class="link-wrap">
 
-    <header class="landing-header">
-      <h1 class="landing-title">Results</h1>
-      <p class="landing-sub">A season runs six months, and every calendar month inside it gets its own result. The month goes to the team holding the most ground when it closes, counted the same way the scoreboard counts it. Check-in and exploration points are listed beside that territory, never added to it.</p>
-    </header>
+    <section class="link-panel">
 
-    <div class="rs-board-toggle" role="group" aria-label="Which board">
-      <button type="button" class="rs-board-btn" data-board="meshtastic">Meshtastic</button>
-      <button type="button" class="rs-board-btn active" data-board="meshcore">MeshCore</button>
-    </div>
+      <!-- Filled in by link.js's loadPending() from GET
+           /api/account/pending, which reads the mw_pending_token
+           HttpOnly cookie server-side -- the raw token is never
+           available to this page's own script (see
+           app/oauth_api.py's _set_pending_cookie() docstring for why),
+           only this descriptive summary of it. -->
+      <div id="link-loading" class="link-hint">Loading...</div>
 
-    <div id="rs-months" aria-live="polite">
-      <p class="rs-loading">Loading results&hellip;</p>
-    </div>
+      <div id="link-content" hidden>
+        <div class="link-title">Confirm sign-in</div>
+
+        <!-- The one sentence that explains why this screen exists at
+             all -- filled in with the provider label and masked email
+             GET /api/account/pending returned. -->
+        <p id="link-summary" class="link-summary"></p>
+
+        <p class="link-hint">This screen exists so signing in a new way never quietly creates a second, separate account for you. Pick one:</p>
+
+        <div class="link-choice">
+          <div class="link-choice-title">New here</div>
+          <p class="link-hint">Create a brand new MeshWars account for this sign-in method.</p>
+          <button type="button" id="link-create-btn">Create a new account</button>
+        </div>
+
+        <div class="link-choice">
+          <div class="link-choice-title">Already have an account</div>
+          <p class="link-hint">Sign in the way you normally do, and this method will be connected to that same account instead of a new one.</p>
+          <div id="link-existing-providers" class="signin-providers"></div>
+        </div>
+
+        <div id="link-error" class="link-error" role="alert" hidden></div>
+      </div>
+
+      <div id="link-expired" class="link-hint" hidden>
+        This sign-in attempt has expired or was already used. <a href="/join">Go back and try again.</a>
+      </div>
+
+    </section>
 
   </main>
 
-  <script src="/static/results.js?v=20260831-5" type="module"></script>
+  <script src="/static/link.js?v=20260903-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

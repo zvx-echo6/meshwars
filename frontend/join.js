@@ -1601,6 +1601,77 @@ function setupStatusKeyToggle() {
   });
 }
 
+// ---- Sign in with an account provider (GET /auth/providers) --------------
+//
+// A SEPARATE thing from the invite-code registration flow above it on
+// this page: that flow makes a PLAYER (app/join_api.py -- a radio, a
+// team, an API key); this makes an ACCOUNT (app/account_api.py,
+// app/oauth_api.py), the sign-in layer /account later lets someone
+// point at that player via the connect-by-key flow. See #signin-panel's
+// own comment in join.html for why the two are independent and can be
+// done in either order.
+//
+// Duplicates the small "fetch the provider list, render a button per
+// entry" shape frontend/link.js and frontend/account.js also carry --
+// same reasoning as TEAM_COLORS' own duplication comment further up
+// this file: every page here has to stay loadable and correct entirely
+// on its own.
+//
+// Each enabled provider becomes a plain <a href="/auth/{name}/start">
+// -- that route is itself a GET redirect (app/oauth_api.py), so no
+// click handler is needed here at all, only the decision of which
+// providers to render. GET /auth/providers only ever lists a provider
+// that is actually configured (app/oauth.py's provider_enabled()), so
+// an unconfigured one is never rendered as a button that would 404 the
+// moment someone clicked it -- and the whole panel starts `hidden` in
+// join.html and is only revealed once there is something worth
+// showing (a real provider, or an auth_error to report), so an
+// all-disabled deployment never flashes an empty "Sign in" box at all.
+const AUTH_ERROR_MESSAGES = {
+  provider_declined: 'Sign-in was cancelled.',
+  invalid_session: 'That sign-in attempt expired or was already used. Try again.',
+  provider_error: 'The sign-in provider had a problem. Try again in a moment.',
+};
+
+async function setupSignIn() {
+  const panel = document.getElementById('signin-panel');
+  const wrap = document.getElementById('signin-providers');
+  const errEl = document.getElementById('signin-error');
+  if (!panel || !wrap) return;
+
+  // A failed sign-in attempt (GET /auth/{provider}/callback -- see
+  // app/oauth_api.py's oauth_callback()) redirects back here with a
+  // short, non-sensitive reason code in the query string, never the
+  // raw provider error -- see that route's own docstring for why.
+  const errorCode = new URLSearchParams(window.location.search).get('auth_error');
+  if (errorCode && errEl) {
+    errEl.textContent = AUTH_ERROR_MESSAGES[errorCode] || 'Sign-in failed. Try again.';
+    errEl.hidden = false;
+  }
+
+  let providers = [];
+  try {
+    const res = await fetch('/auth/providers');
+    if (res.ok) {
+      const data = await res.json();
+      providers = Array.isArray(data && data.providers) ? data.providers : [];
+    }
+  } catch (err) {
+    providers = [];
+  }
+
+  wrap.replaceChildren();
+  providers.forEach((p) => {
+    const link = document.createElement('a');
+    link.className = 'signin-provider-btn';
+    link.href = `/auth/${encodeURIComponent(p.name)}/start`;
+    link.textContent = `Sign in with ${p.label}`;
+    wrap.appendChild(link);
+  });
+
+  if (providers.length > 0 || errorCode) panel.hidden = false;
+}
+
 function boot() {
   buildTeamPicker();
   mcPicker = createNodePicker('mc');
@@ -1616,6 +1687,7 @@ function boot() {
   setupProtocolToggle();
   applyMeshtasticAvailability();
   applyInviteCodeHint();
+  setupSignIn();
   setupStatusKeyToggle();
   setupEndpointCopy();
   document.getElementById('join-submit').addEventListener('click', handleJoinClick);

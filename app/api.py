@@ -999,6 +999,26 @@ def mount(app: FastAPI) -> None:
         async def join_page(request: Request):
             return _templated_html_page(request, frontend_dir / "join.html", "join page not bundled")
 
+        # The account layer's own page (app/account_api.py) -- which
+        # sign-in methods are connected, the linked player (or the
+        # connect-by-key flow to claim one), and active sessions. Served
+        # the same way as every other top-level page here; the route
+        # itself carries no session check of its own -- GET /api/account
+        # (session-cookie-authenticated) is what actually decides
+        # signed-in vs. signed-out, and frontend/account.js renders
+        # either state from that response.
+        @app.get("/account", response_class=HTMLResponse, include_in_schema=False)
+        async def account_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "account.html", "account page not bundled")
+
+        # The case-4 sign-in decision screen (frontend/link.js) -- reached
+        # only by redirect from GET /auth/{provider}/callback when a
+        # provider identity has never been seen before. Not in the nav;
+        # a person only ever arrives here via that redirect.
+        @app.get("/link", response_class=HTMLResponse, include_in_schema=False)
+        async def link_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "link.html", "link page not bundled")
+
         @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
         async def about_page(request: Request):
             return _templated_html_page(request, frontend_dir / "about.html", "about page not bundled")

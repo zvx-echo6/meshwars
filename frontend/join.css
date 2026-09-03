@@ -51,7 +51,8 @@ body {
    around the flow rather than being fed to the fields themselves. */
 #join-flow-panel,
 #status-check-panel,
-#working-check-panel {
+#working-check-panel,
+#signin-panel {
   max-width: 560px;
   margin-left: auto;
   margin-right: auto;
@@ -74,6 +75,36 @@ body {
   text-decoration: none;
 }
 .join-check-teaser a:hover { text-decoration: underline; }
+
+/* ---- Sign in (GET /auth/{provider}/start) --------------------------------
+   A plain link per enabled provider, not a <button> -- /auth/{provider}/
+   start is a GET redirect (app/oauth_api.py), so clicking one of these
+   link IS the whole sign-in action, no click handler needed. join.js's
+   setupSignIn() only decides which providers to render (and reveals
+   #signin-panel, which starts `hidden` in join.html) -- see that
+   function's own comment for why an unconfigured provider is never
+   rendered here as a dead button. */
+.signin-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.signin-provider-btn {
+  display: block;
+  text-align: center;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+.signin-provider-btn:hover { background: var(--mw-line); }
 
 .join-panel-title {
   font-weight: 700;
@@ -1023,6 +1054,27 @@ body {
 }
 .mw-nav-links a:hover { background: var(--mw-raised); color: var(--mw-accent); }
 .mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
+
+/* Signed-in indicator on the Account nav link -- applied by
+   frontend/nav-auth.js once GET /api/account confirms a live session.
+   A small dot rather than changing the link's own text or color, so
+   "Account" reads the same either way and the signed-in state is a
+   glance-able extra rather than a relabel. Same --mw-friendly token the
+   status-check panel already uses for an "everything's fine" state
+   (join.css's own .status-diagnosis-ok). Duplicated in coverage.css and
+   landing.css -- see this file's own nav-block comment above for why
+   the whole nav block is duplicated per owning stylesheet rather than
+   shared. */
+.mw-nav-account-signed-in::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--mw-friendly);
+  vertical-align: middle;
+}
 
 /* GitHub mark: deliberately understated per the owner ("faded into the
    background so its visible but not prominent") -- low opacity at rest,
