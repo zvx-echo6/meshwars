@@ -11,12 +11,21 @@ board, scoped to protocol='mt' via app/mc_api.py's protocol-parameterized
 helpers (active_season, board_for, scores_for, history_for,
 cell_detail_for, ...) rather than duplicating that query logic here.
 
-The legacy tables above are NOT dropped and NOT written to any more --
-three completed seasons of history live in them and the owner wants that
-data kept, just no longer surfaced anywhere in this API. A couple of
-routes below (/get-samples, /teams, /team/{node_ref}) used to read them
-too; they have been re-pointed at the new player/mc_tile model instead,
-since there is no legacy-shaped equivalent left to fall back to.
+Most of the legacy tables above are NOT dropped and NOT written to any
+more -- three completed seasons of history live in them and the owner
+wants that data kept, just no longer surfaced anywhere in this API. The
+one exception is `sample`: a privacy audit found it stored ~19m-precision
+position history keyed to radio identity, including for radios that
+never registered with MeshWars at all, with no deletion anywhere in the
+codebase -- so unlike its siblings it was dropped outright (see
+app/db.py's SCHEMA comment, right before node_seen, and its MIGRATIONS
+DROP TABLE entry). Its only route, /get-samples, was already dead code
+(ingest stopped writing `sample` well before this was noticed, so the
+route only ever returned a hardcoded empty list) and has been removed
+along with it. A couple of the routes below (/teams, /team/{node_ref})
+used to read the other legacy tables; they have been re-pointed at the
+new player/mc_tile model instead, since there is no legacy-shaped
+equivalent left to fall back to.
 """
 from __future__ import annotations
 
@@ -248,8 +257,12 @@ def _build_get_nodes(*, include_attribution: bool) -> dict:
     replaces the old geohash `tile`/`tile_score`/`tile_capture` reads.
     Team-colored, no identity attached to a cell here -- exactly what
     the privacy rule this pass implements keeps public regardless of
-    who is asking. There is no more `samples` key -- see /get-samples
-    below for why.
+    who is asking. There is no more `samples` key -- the old `sample`
+    table and its /get-samples route are gone entirely now (see this
+    module's own docstring and app/db.py's SCHEMA comment for the
+    privacy reasoning); this `coverage` list is the cell-level
+    replacement, and was already the replacement in practice before the
+    route was removed.
 
     `repeaters` is node_seen's per-node marker data. Per Matt's explicit
     call on this endpoint (privacy-hardening pass, 2026-09): the EXACT
@@ -374,19 +387,6 @@ async def mt_award_geometry(month: str, award: str) -> JSONResponse:
     if geo is None:
         return JSONResponse({"error": "no geometry for that award"}, status_code=404)
     return JSONResponse(geo)
-
-
-@router.get("/get-samples")
-async def get_samples() -> dict:
-    """Per-position sample data from the retired geohash board (the old
-    `sample` table) has no equivalent in the new grid-cell model --
-    ingest no longer writes anything there (see app/ingest.py), and
-    /get-nodes' `coverage` list is the cell-level replacement. This
-    route is kept, always empty, so an old caller gets a sane empty
-    response instead of a 404 or 500 -- not because it still does
-    anything.
-    """
-    return {"keys": []}
 
 
 @router.get("/live-tracks")

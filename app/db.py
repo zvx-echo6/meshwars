@@ -60,21 +60,24 @@ CREATE TABLE IF NOT EXISTS tile (
 
 CREATE INDEX IF NOT EXISTS idx_tile_owner ON tile(season_id, owner_team);
 
--- Individual position samples (8-char geohash) for the existing /get-samples endpoint.
--- Retained for the current season only; cleared on season transition.
-CREATE TABLE IF NOT EXISTS sample (
-    season_id       INTEGER NOT NULL,
-    sample_hash     TEXT NOT NULL,           -- 8-char geohash
-    sender_node_id  INTEGER NOT NULL,
-    ts              INTEGER NOT NULL,
-    snr             REAL,
-    rssi            REAL,
-    path_json       TEXT NOT NULL DEFAULT '[]',
-    observed        INTEGER NOT NULL DEFAULT 1,
-    PRIMARY KEY (season_id, sample_hash, sender_node_id, ts)
-);
-
-CREATE INDEX IF NOT EXISTS idx_sample_season ON sample(season_id);
+-- `sample` (8-char geohash position samples, keyed to sender_node_id --
+-- radio identity) used to live here, for the /get-samples endpoint. It
+-- is GONE, not just retired-and-kept the way tile/tile_score/tile_capture*
+-- above are: a privacy audit found it held the finest-grained position
+-- data anywhere in this schema (~19m geohash precision, far tighter than
+-- the ~300m grid the live scoring path deliberately uses), tied to radio
+-- identity, dead code on both ends (app/ingest.py stopped writing it long
+-- before this was noticed; /get-samples has returned a hardcoded empty
+-- list ever since -- see that route's own comment), and had no deletion
+-- anywhere in the codebase -- no sweep, no retention, nothing ever
+-- expired a row. On preview it held movement history for hundreds of
+-- radios that were never registered with MeshWars at all -- people who
+-- never signed up, being tracked to house-level precision, forever. Matt's
+-- call: it serves no purpose and holds the most sensitive data in the
+-- system, so it does not get the "kept for history" treatment the
+-- fortress-game tables above got -- it is dropped outright. See
+-- db.py's MIGRATIONS list below for the DROP TABLE IF EXISTS that
+-- removes it from a database that still has it.
 
 -- Repeater/node roster cache: snapshot of nodes seen in this season so the
 -- frontend can render them as markers.
@@ -2006,6 +2009,20 @@ MIGRATIONS = [
     # to it.
     "ALTER TABLE account ADD COLUMN contact_email TEXT",
     "ALTER TABLE account ADD COLUMN contact_email_verified_at INTEGER",
+    # `sample` removed entirely -- see the comment left in its place in
+    # SCHEMA above (right before node_seen) for the full privacy
+    # reasoning. Unlike checkin_player_name's own DROP TABLE further up
+    # this list, there is no in-place migration to consider and nothing
+    # to backfill anywhere else first: this table was dead code on both
+    # ends (app/ingest.py stopped writing it before this was noticed;
+    # /get-samples -- also removed now, see app/api.py -- only ever
+    # returned a hardcoded empty list), so dropping it changes no
+    # behavior, only removes data at rest. DROP TABLE IF EXISTS is
+    # naturally idempotent on its own: a database that already had this
+    # migration applied (or was created fresh under the current SCHEMA,
+    # which never has `sample` at all) sees a no-op here, same as every
+    # other run.
+    "DROP TABLE IF EXISTS sample",
 ]
 
 PRAGMAS = [

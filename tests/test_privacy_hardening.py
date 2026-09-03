@@ -385,3 +385,99 @@ def test_public_roster_still_works_unauthenticated(client, db_path):
 def test_public_board_routes_still_work_unauthenticated(client, db_path, path):
     resp = client.get(path)
     assert resp.status_code == 200
+
+
+# ---- `sample` table removal: another privacy-audit finding, dropped -----
+# entirely rather than merely gated. It held ~19m-precision position
+# history keyed to radio identity (sender_node_id), for radios that were
+# never registered with MeshWars at all, and had no deletion anywhere in
+# the codebase -- see app/db.py's SCHEMA comment, right before
+# node_seen, for the full reasoning. Its only route, /get-samples, was
+# already dead code (ingest stopped writing `sample` long before this was
+# noticed) and has been removed along with the table.
+
+def test_fresh_schema_has_no_sample_table():
+    """A database created from the current SCHEMA never has `sample` at
+    all -- unlike the fortress-game tables around it (tile/tile_score/
+    tile_capture*), which are deliberately kept, unwritten, for their
+    completed-season history, `sample` was dropped outright."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(SCHEMA)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "sample" not in tables
+
+
+def test_migrations_drop_a_pre_existing_sample_table(tmp_path):
+    """A database that still carries the old `sample` table -- built by
+    hand here, the same way tests/test_sessions.py's _old_shape_db
+    builds the pre-migration account_session shape, since SCHEMA itself
+    no longer defines `sample` at all -- gets it dropped by the
+    MIGRATIONS list's own DROP TABLE IF EXISTS entry: the same one every
+    real boot runs through app/db.py's init_db(). A row is inserted
+    first specifically to prove this is a real DROP (data and all), not
+    just a schema-shape check against an already-empty table.
+    """
+    path = str(tmp_path / "pre_migration_sample.db")
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA)
+    conn.execute(
+        "CREATE TABLE sample ("
+        "  season_id INTEGER NOT NULL,"
+        "  sample_hash TEXT NOT NULL,"
+        "  sender_node_id INTEGER NOT NULL,"
+        "  ts INTEGER NOT NULL,"
+        "  snr REAL, rssi REAL,"
+        "  path_json TEXT NOT NULL DEFAULT '[]',"
+        "  observed INTEGER NOT NULL DEFAULT 1,"
+        "  PRIMARY KEY (season_id, sample_hash, sender_node_id, ts)"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO sample(season_id, sample_hash, sender_node_id, ts) VALUES (1, 'abc12345', 42, 100)"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(path)
+    for stmt in MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                continue
+            raise
+    conn.commit()
+
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "sample" not in tables
+
+
+def test_migrations_are_a_no_op_when_sample_is_already_gone(db_path):
+    """db_path's fixture already runs the current SCHEMA+MIGRATIONS (see
+    this file's own _init_schema), so `sample` is already absent --
+    running MIGRATIONS a second time, exactly what every later boot of
+    init_db() does, must not raise on the DROP TABLE IF EXISTS entry.
+    """
+    conn = sqlite3.connect(db_path)
+    for stmt in MIGRATIONS:
+        try:
+            conn.execute(stmt)  # must not raise
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                continue
+            raise
+    conn.commit()
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "sample" not in tables
+
+
+def test_get_samples_route_is_gone(client):
+    """/get-samples used to serve a hardcoded empty response for a table
+    that ingest had already stopped writing; now that `sample` itself is
+    dropped, the route is removed rather than kept as permanent dead
+    weight -- confirmed nothing in frontend/ still calls it."""
+    resp = client.get("/get-samples")
+    assert resp.status_code == 404

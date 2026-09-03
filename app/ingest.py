@@ -4,9 +4,13 @@ grid cell through the shared MeshCore-model scoring path
 (app/mc_scoring.py) -- for REGISTERED Meshtastic players only.
 
 This board used to run its own geohash-tile fortress game (see the
-now-retired tile/tile_score/tile_capture*/sample/activity/team_assignment
+now-retired tile/tile_score/tile_capture*/activity/team_assignment
 tables, app/scoring.py, and app/draft.py) that auto-enrolled every node
-meshview ever saw. That is gone. Meshtastic now works exactly like
+meshview ever saw. That is gone. (A sibling table from that era, `sample`,
+went further than "retired": a privacy audit found it held ~19m-precision
+position history keyed to radio identity with no deletion anywhere in the
+codebase, so it was dropped outright rather than kept unwritten like the
+tables above -- see app/db.py's SCHEMA comment, right before node_seen.) Meshtastic now works exactly like
 MeshCore: a packet only scores if its sender is a registered player
 (app/api.py's /api/join flow, bound via player_node with protocol='mt'),
 scoring happens on flat grid cells via app/mc_scoring.apply_paint(), and
