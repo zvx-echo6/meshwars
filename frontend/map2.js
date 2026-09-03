@@ -1015,6 +1015,21 @@ async function doPlayerFind(value) {
       resultEl.textContent = `Not found: ${query}`;
       return;
     }
+    // Privacy hardening (2026-09): /find and /api/mc/find now require a
+    // signed-in session (see app/sessions.py's require_session, wired
+    // into both routes) -- looking a named player's location up is
+    // exactly the person-to-place link a visitor must sign in to make.
+    // A logged-out visitor gets 401 here, not an error; say so plainly
+    // rather than falling into the generic "Search failed." below,
+    // which would read as broken rather than as "sign in to do this."
+    if (res.status === 401 || res.status === 403) {
+      resultEl.textContent = 'Sign in to search players by name.';
+      return;
+    }
+    if (res.status === 429) {
+      resultEl.textContent = 'Too many searches -- try again in a moment.';
+      return;
+    }
     if (!res.ok) {
       resultEl.textContent = 'Search failed.';
       return;

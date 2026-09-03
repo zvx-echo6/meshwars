@@ -395,6 +395,22 @@ class Settings(BaseSettings):
     node_api_rate_limit_attempts: int = 30
     node_api_rate_limit_window_seconds: int = 60
 
+    # Address-keyed rate limit on GET /find and GET /api/mc/find
+    # (app/api.py, app/mc_api.py) -- the "where is this named player"
+    # lookup, now gated behind app/sessions.py's require_session (see
+    # that dependency's own privacy-hardening docstring) but still
+    # unthrottled at the address level before this setting existed.
+    # Requiring a session bounds WHO can ask, not how often -- a single
+    # signed-in account could otherwise script this into exactly the
+    # people-finder the session gate exists to prevent, one display_name
+    # guess at a time. Same shape and same per-address budget as
+    # mc_status_rate_limit_*/node_api_rate_limit_* above; sized the same
+    # (30/60s) since this is the same "a human repeats it a few times,
+    # a script does not get to hammer it" polling budget, not the
+    # tighter one-time-action budget account_link_key_rate_limit_* uses.
+    find_rate_limit_attempts: int = 30
+    find_rate_limit_window_seconds: int = 60
+
     # Client-side failure reporting (POST /api/clientlog,
     # app/clientlog_api.py). Public and unauthenticated -- reached by
     # frontend/map2.js's window.onerror/unhandledrejection hooks and its

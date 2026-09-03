@@ -40,12 +40,14 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 
 from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
+from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
 from .grid import cell_bounds
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .mc_scoring import team_checkin_points, team_place_points, team_tile_counts
 from .places_api import _stable_tiebreak
+from .sessions import SessionPrincipal, optional_session, require_session
 from . import results
 
 router = APIRouter()
@@ -85,6 +87,29 @@ require_status_principal = require_api_key_principal(
     # that doesn't.
     allow_session_fallback=True,
 )
+
+# ---- player-lookup ("find") rate limiting -------------------------------
+#
+# Address-keyed budget for GET /api/mc/find. app/api.py's GET /find (the
+# Meshtastic counterpart, same find_for() helper) keeps its own separate
+# _BoundedHits instance rather than sharing this one -- same "state is
+# never shared across call sites, even ones that read the same
+# settings" reasoning app/auth.py's module docstring already gives for
+# every other rate limiter in this app. Session-gated now (see
+# mc_find() below and app/sessions.py's require_session), but a session
+# only proves WHO is asking, not that they get to ask without limit --
+# see find_rate_limit_attempts/window_seconds' own comment in
+# app/config.py for why this exists even behind a login.
+_find_addr_rate_limiter = new_rate_limit_bucket()
+
+
+def _find_rate_limited(request: Request) -> bool:
+    return _find_addr_rate_limiter.limited(
+        get_client_ip(request),
+        limit=settings.find_rate_limit_attempts,
+        window=settings.find_rate_limit_window_seconds,
+    )
+
 
 # Fallback roster used only if `settings` does not (yet) expose a
 # MeshCore team list, or exposes it under a name this module doesn't
@@ -806,13 +831,30 @@ def find_for(protocol: str, name: str) -> dict | None:
 
 
 @router.get("/api/mc/find")
-async def mc_find(name: str):
+async def mc_find(
+    request: Request, name: str, session: SessionPrincipal = Depends(require_session)
+):
     """Case-insensitive exact match on a player's display name, scoped
     to the active MeshCore season. See find_for(). Request path,
     request shape, and response shape are unchanged by the addition of
     find_for()'s `protocol` argument -- this route still always passes
     MC_PROTOCOL, same as before this module had a second caller.
+
+    Privacy-hardening: this route exists solely to answer "where is
+    this person" -- a display name in, a bounding box and a
+    last-position timestamp out -- which is exactly the person-to-place
+    link app/sessions.py's require_session() dependency now gates. There
+    is deliberately no unauthenticated variant; a visitor who wants this
+    has to sign in, the same as every other place-tied-to-identity
+    lookup this pass gates. `session` itself is unused beyond proving a
+    session exists -- this lookup isn't scoped to the caller's own
+    account -- but the parameter has to be named to be a real FastAPI
+    dependency. Also rate-limited per address (_find_rate_limited)
+    now that it costs a real query rather than being free to hammer;
+    see that helper's own comment for why a session alone isn't enough.
     """
+    if _find_rate_limited(request):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
     result = find_for(MC_PROTOCOL, name)
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1229,14 +1271,49 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
     return _safe_query(run)
 
 
+# Privacy-hardening: the ONLY per-person field cell_detail_for() puts on
+# the wire is recent_captures[].by_display_name -- everything else in
+# its shape (owner_team, scores, timestamps, repeaters, park) is team-
+# or infrastructure-level, which is exactly what the rule this pass
+# implements ("a square's history stays public at team level; WHO
+# captured it requires a session") says stays public regardless of who
+# is asking. cell_detail_for() itself is left returning the full shape
+# unchanged -- tests/test_mc_api_cell_park.py and friends call it
+# directly and expect that -- so the redaction happens here, once, at
+# the boundary where a response actually leaves the server, and is
+# shared by both cell routes (this one and app/api.py's /cell/{cell_id})
+# rather than duplicated.
+def _redact_cell_detail(detail: dict, *, authenticated: bool) -> dict:
+    if authenticated:
+        return detail
+    recent = detail.get("recent_captures")
+    if not recent:
+        return detail
+    return {
+        **detail,
+        "recent_captures": [
+            {k: v for k, v in cap.items() if k != "by_display_name"} for cap in recent
+        ],
+    }
+
+
 @router.get("/api/mc/cell/{cell_id}")
-async def mc_cell(cell_id: str):
+async def mc_cell(cell_id: str, session: SessionPrincipal | None = Depends(optional_session)):
     """Detail for one cell on the active MeshCore board. See
-    cell_detail_for()."""
+    cell_detail_for().
+
+    Public at team level -- owner, scores, capture timestamps, repeater/
+    park evidence -- same as before this pass. WHO captured it
+    (recent_captures[].by_display_name) is stripped unless `session`
+    resolves to a real signed-in account (see optional_session() in
+    app/sessions.py and _redact_cell_detail() above) -- that is the
+    "who captured a square requires a session" half of the privacy
+    rule this endpoint implements.
+    """
     detail = cell_detail_for(MC_PROTOCOL, cell_id)
     if detail is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return detail
+    return _redact_cell_detail(detail, authenticated=session is not None)
 
 
 _STAT_COLUMNS = (

@@ -30,7 +30,7 @@ from email.utils import formatdate
 from pathlib import Path
 
 import anyio
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -39,8 +39,9 @@ from . import mc_api
 from .account_api import router as account_router
 from .admin_api import router as admin_router
 from .admin_ops import router as admin_ops_router
-from .auth import require_api_key_principal
+from .auth import new_rate_limit_bucket, require_api_key_principal
 from .checkin_api import router as checkin_router
+from .client_ip import get_client_ip
 from .clientlog_api import router as clientlog_router
 from .config import settings
 from .db import connect
@@ -54,6 +55,7 @@ from .notice_api import router as notice_router
 from .oauth_api import router as oauth_router
 from .places_api import router as places_router
 from .public_api import router as public_router
+from .sessions import SessionPrincipal, optional_session, require_session
 
 log = logging.getLogger("api")
 
@@ -232,7 +234,7 @@ def _mt_node_teams(conn) -> dict[int, str]:
     return out
 
 
-def _build_get_nodes() -> dict:
+def _build_get_nodes(*, include_attribution: bool) -> dict:
     """Build the map's main data payload.
 
     Split from the route below so it can be served through
@@ -244,10 +246,40 @@ def _build_get_nodes() -> dict:
     `coverage` is grid cells straight from mc_tile/mc_tile_score/
     mc_tile_capture (owner team, per-team scores, capture time) --
     replaces the old geohash `tile`/`tile_score`/`tile_capture` reads.
-    `repeaters` still comes from node_seen, same as before this cutover;
-    that is a map-marker/display concern entirely separate from scoring
-    and was never part of the retired game logic. There is no more
-    `samples` key -- see /get-samples below for why.
+    Team-colored, no identity attached to a cell here -- exactly what
+    the privacy rule this pass implements keeps public regardless of
+    who is asking. There is no more `samples` key -- see /get-samples
+    below for why.
+
+    `repeaters` is node_seen's per-node marker data. Per Matt's explicit
+    call on this endpoint (privacy-hardening pass, 2026-09): the EXACT
+    lat/lon/elev/name/time here stay in the response unauthenticated,
+    same as always -- these positions are already broadcast in the
+    clear on the mesh and already republished by the upstream feeds
+    (meshview, CoreScope, mwmesh) this app itself reads from, so
+    withholding or coarsening them here would not un-publish anything,
+    only make this map worse at the one thing a map is for. What DOES
+    get withheld unauthenticated is `team` -- the one field that binds
+    a node to a registered MeshWars player rather than just describing
+    the node itself (its name/position, which the mesh already
+    broadcasts). That is the actual person-to-place JOIN this whole
+    pass exists to gate: identity and location are each independently
+    public; team attribution is what proves "this specific player was
+    right here," and that is exactly the link app/sessions.py's session
+    gate keeps behind a login. `include_attribution=False` skips the
+    _mt_node_teams() query entirely (not just the field in the
+    response) so the common logged-out case doesn't pay for a lookup
+    whose result it isn't allowed to see.
+
+    Checked against frontend/mc.js and frontend/map2.js: neither
+    fetchBoardCells() (mc.js) nor fetchBoard() (map2.js) reads anything
+    but `data.coverage` from this route's response today -- `repeaters`
+    (this field) has had no on-page consumer since the map moved onto
+    the unified cell-based renderer, team attribution included. So
+    dropping `team` for a logged-out request changes zero pixels on the
+    current map; it only matters the day a caller starts reading
+    `repeaters` again, at which point it will already degrade to an
+    unattributed marker instead of a wrong one.
     """
     conn = connect()
     try:
@@ -277,7 +309,7 @@ def _build_get_nodes() -> dict:
                 "east": c["east"],
             })
 
-        node_teams = _mt_node_teams(conn)
+        node_teams = _mt_node_teams(conn) if include_attribution else {}
         node_rows = conn.execute(
             "SELECT node_id, name, lat, lon, elev, last_seen "
             "  FROM node_seen "
@@ -293,7 +325,9 @@ def _build_get_nodes() -> dict:
                 "lon": r["lon"],
                 "elev": r["elev"] or 0,
                 "time": _truncate(r["last_seen"]),
-                "team": node_teams.get(r["node_id"]),
+                # None unauthenticated (see docstring) -- never the
+                # registered player's team unless include_attribution.
+                "team": node_teams.get(r["node_id"]) if include_attribution else None,
             })
     finally:
         conn.close()
@@ -302,9 +336,23 @@ def _build_get_nodes() -> dict:
 
 
 @router.get("/get-nodes")
-async def get_nodes() -> Response:
-    """The map's main data route. See _build_get_nodes() above."""
-    return mc_api.cached_json_response("mt_board", _build_get_nodes)
+async def get_nodes(session: SessionPrincipal | None = Depends(optional_session)) -> Response:
+    """The map's main data route. See _build_get_nodes() above.
+
+    Cached separately per auth state (`mt_board_public` vs.
+    `mt_board_authed`, not one shared `mt_board` key) -- sharing one
+    cache slot across both would mean whichever request happens to
+    build it first decides what EVERY caller sees for the next
+    board_cache_seconds, logged in or not: a public request could serve
+    a cached authenticated build (the leak this whole pass exists to
+    close) just as easily as an authenticated request could serve a
+    stale public one. Two independent cache entries -- one per shape --
+    is the only way this stays both cached and correct.
+    """
+    cache_key = "mt_board_authed" if session is not None else "mt_board_public"
+    return mc_api.cached_json_response(
+        cache_key, lambda: _build_get_nodes(include_attribution=session is not None)
+    )
 
 
 # Deliberately NOT the bare "/results" the other Meshtastic data routes
@@ -502,15 +550,37 @@ async def team_lookup(node_ref: str) -> dict:
     }
 
 
+# Address-keyed rate limit on GET /find -- its own independent
+# _BoundedHits instance, not shared with app/mc_api.py's identically-
+# shaped one for /api/mc/find (see that module's own comment on why
+# call sites never share rate-limit state, even ones reading the same
+# settings). See find_rate_limit_attempts/window_seconds' own comment
+# in app/config.py.
+_find_addr_rate_limiter = new_rate_limit_bucket()
+
+
 @router.get("/find")
-async def find_player(name: str):
+async def find_player(
+    request: Request, name: str, session: SessionPrincipal = Depends(require_session)
+):
     """Case-insensitive exact match on a player's display name, scoped
     to the active Meshtastic season -- the Meshtastic counterpart of
     /api/mc/find, and (unlike /team/{node_ref} above) a lookup by NAME
     that returns a bounds box the map can zoom to, same as MeshCore's.
     See app/mc_api.py's find_for(); response shape is identical to
     /api/mc/find's.
+
+    Privacy-hardening: gated behind app/sessions.py's require_session()
+    for the exact same reason as /api/mc/find -- see that route's own
+    docstring in app/mc_api.py for the full reasoning, which applies
+    here unchanged. `session` is unused beyond proving one exists.
     """
+    if _find_addr_rate_limiter.limited(
+        get_client_ip(request),
+        limit=settings.find_rate_limit_attempts,
+        window=settings.find_rate_limit_window_seconds,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
     result = mc_api.find_for(MT_PROTOCOL, name)
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -548,17 +618,20 @@ async def top_explorer_players() -> list[dict]:
 
 
 @router.get("/cell/{cell_id}")
-async def cell_detail(cell_id: str):
+async def cell_detail(
+    cell_id: str, session: SessionPrincipal | None = Depends(optional_session)
+):
     """Rich popup data for a single grid cell -- the cell-keyed
     replacement for the old geohash-keyed /tile/{geohash}. See
     app/mc_api.py's cell_detail_for(), which this calls directly with
     protocol='mt' rather than duplicating its query logic; the response
-    shape is identical to /api/mc/cell/{cell_id}'s.
+    shape (once redacted the same way -- see mc_api._redact_cell_detail)
+    is identical to /api/mc/cell/{cell_id}'s.
     """
     detail = mc_api.cell_detail_for(MT_PROTOCOL, cell_id)
     if detail is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return detail
+    return mc_api._redact_cell_detail(detail, authenticated=session is not None)
 
 
 def _node_hex(node_id: int | None) -> str:

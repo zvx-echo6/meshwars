@@ -264,6 +264,54 @@ async def require_session(request: Request) -> SessionPrincipal:
     )
 
 
+# ---- FastAPI dependency: "this route's response varies by whether the
+# caller is signed in, but a missing/expired/revoked session is not an
+# error" -----------------------------------------------------------------
+#
+# Added for the privacy-hardening pass that gates person-to-place data
+# (app/mc_api.py's /api/mc/cell/{cell_id}, app/api.py's /get-nodes):
+# those routes must keep working for a logged-out visitor -- the map and
+# a square's team-level history are the "shop window" and stay public --
+# while adding fields that JOIN a place to a specific registered player
+# (who captured a square; which registered player's radio a node
+# belongs to) only once a real session is present. Position itself
+# (a node's exact lat/lon) is NOT one of those fields -- see
+# app/api.py's _build_get_nodes() docstring for Matt's explicit call on
+# why coordinates already public via the mesh and upstream feeds are
+# not re-withheld here; only the identity JOIN on top of them is. This
+# is a strictly weaker check than require_session() above: never raise,
+# just resolve to None when there is nothing to authenticate.
+#
+# Two ad hoc versions of exactly this "peek at the session, don't
+# enforce it" read already existed before this helper: app/oauth_api.py's
+# _resolve_current_account_id() (account id only, for the OAuth callback
+# decision tree) and app/auth.py's _try_session_principal() (an
+# api_key-shaped Principal, and only consulted when a request carries no
+# X-API-Key at all). Neither returns a SessionPrincipal, and both are
+# private to their own module -- this is the one general-purpose version,
+# so a third hand-rolled copy doesn't show up the next time a route needs
+# "more detail if you're signed in, same route either way."
+async def optional_session(request: Request) -> SessionPrincipal | None:
+    """Like require_session(), but resolves to None instead of raising
+    on any failure -- no cookie, unknown token, revoked, expired. A
+    route using this as its dependency must treat None exactly like
+    require_session() raising 401 would: fall back to the public shape
+    of the response, never a 500 from code that assumed a principal.
+    """
+    raw_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not raw_token:
+        return None
+
+    result = await verify_session(raw_token)
+    if result.status != "ok":
+        return None
+
+    player_id = await asyncio.to_thread(_lookup_linked_player_sync, result.account_id)
+    return SessionPrincipal(
+        account_id=result.account_id, player_id=player_id, token_hash=result.token_hash
+    )
+
+
 # ---- cookie handling --------------------------------------------------
 #
 # HttpOnly: never readable from page JavaScript -- a session token has
