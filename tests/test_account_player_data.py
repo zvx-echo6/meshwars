@@ -493,19 +493,20 @@ def test_checkin_health_nothing_at_all(client, db_path):
     assert "no meshcore contact" in body["summary"].lower()
 
 
-def test_checkin_health_recent_unresolved_names_carry_a_disclaimer_and_are_time_bounded(client, db_path):
+def test_checkin_health_does_not_leak_recent_unresolved_names(client, db_path):
+    # checkin_unresolved_sender is keyed by NAME, not by player -- every
+    # live, actively-posting unclaimed name on it is a ready-made target
+    # for POST /api/checkin/name (no proof of possession required). That
+    # signal stays admin-only (see app/admin_ops.py); a player's own
+    # checkin-health response must never surface it.
     account_id, _ = _login(client, db_path)
     _make_player(db_path, account_id=account_id)
     _unresolved(db_path, "2026-08-26", "MysteryPerson", last_seen=NOW - 3600)
-    _unresolved(db_path, "2026-01-01", "AncientName", last_seen=NOW - 400 * 86400)  # far outside lookback
+    _unresolved(db_path, "2026-01-01", "AncientName", last_seen=NOW - 400 * 86400)
 
     body = client.get("/api/account/checkin-health").json()
 
-    names = [e["sender_name"] for e in body["recent_unresolved_names"]["entries"]]
-    assert "MysteryPerson" in names
-    assert "AncientName" not in names
-    note = body["recent_unresolved_names"]["note"].lower()
-    assert "may or may not be yours" in note
+    assert "recent_unresolved_names" not in body
 
 
 def test_checkin_health_with_no_poller_degrades_to_empty_directory(client, db_path):

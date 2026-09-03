@@ -138,13 +138,6 @@ router = APIRouter()
 # risks the same cycle those two modules already avoid.
 MT_PROTOCOL = "mt"
 
-# How far back a "recent unresolved sender name" is still worth
-# surfacing to a player -- see account_checkin_health()'s own docstring
-# for why these can only ever be shown as "may or may not be yours."
-# Same order of magnitude as app/admin_ops.py's _STALE_DAYS, for the
-# same reason: a name from months ago is noise, not a diagnosis.
-_UNRESOLVED_LOOKBACK_DAYS = 14
-
 # Address-keyed rate limit on link-key -- see
 # settings.account_link_key_rate_limit_attempts/window_seconds' own
 # comment in app/config.py for why this endpoint needs one at all (it's
@@ -1213,13 +1206,6 @@ async def account_checkin_health(
     directory is empty and every contact reports "not_in_directory" --
     an honest answer, not a 500: there is genuinely nothing to resolve
     against right now.
-
-    `recent_unresolved_names` is checkin_unresolved_sender read back
-    almost as-is, with one deliberate limitation stated up front:
-    that table is keyed by NAME, not by player_id (a message that
-    resolved to nobody has no player to attribute it to), so entries
-    here can never be asserted as "yours" -- only offered as names a
-    player can eyeball for a typo or a stale binding of their own.
     """
     if session.player_id is None:
         return _no_linked_player_error()
@@ -1231,14 +1217,6 @@ async def account_checkin_health(
     try:
         contacts = _checkin_contacts_status(conn, session.player_id, directory)
         binding = _checkin_binding_status(conn, session.player_id, directory)
-
-        cutoff = int(time.time()) - _UNRESOLVED_LOOKBACK_DAYS * 86400
-        unresolved_rows = conn.execute(
-            "SELECT sender_name, net_date, first_seen, last_seen, message_count "
-            "  FROM checkin_unresolved_sender WHERE last_seen > ? "
-            " ORDER BY last_seen DESC LIMIT 25",
-            (cutoff,),
-        ).fetchall()
     finally:
         conn.close()
 
@@ -1269,15 +1247,6 @@ async def account_checkin_health(
             "summary": summary,
             "contacts": contacts,
             "binding": binding,
-            "recent_unresolved_names": {
-                "note": (
-                    "Recent check-in messages nobody could be matched to. "
-                    "Keyed by name, not by player -- these may or may not be "
-                    "yours. Never assume one is you just because the name "
-                    "looks close."
-                ),
-                "entries": [dict(r) for r in unresolved_rows],
-            },
         },
         status_code=200,
     )

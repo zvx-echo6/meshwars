@@ -875,24 +875,6 @@ function renderCheckinHealth(data) {
     explanation.textContent = b.explanation;
     panel.appendChild(explanation);
   }
-
-  if (data.recent_unresolved_names && data.recent_unresolved_names.entries && data.recent_unresolved_names.entries.length > 0) {
-    panel.appendChild(buildLabel('Recent unresolved check-in names'));
-    const note = document.createElement('p');
-    note.className = 'account-hint account-disclaimer';
-    note.textContent = data.recent_unresolved_names.note;
-    panel.appendChild(note);
-
-    const list = document.createElement('ul');
-    list.className = 'account-unresolved-list';
-    data.recent_unresolved_names.entries.forEach((e) => {
-      const li = document.createElement('li');
-      li.className = 'account-hint';
-      li.textContent = `"${e.sender_name}" — last seen ${relativeTimeFromEpoch(e.last_seen)}, ${e.message_count} message${e.message_count === 1 ? '' : 's'}`;
-      list.appendChild(li);
-    });
-    panel.appendChild(list);
-  }
 }
 
 function showCheckinHealthError(message) {

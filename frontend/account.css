@@ -584,8 +584,7 @@
 .account-table td { text-align: center; }
 
 /* ---- Why my check-ins may not be counting ------------------------------ */
-.account-contacts-list,
-.account-unresolved-list {
+.account-contacts-list {
   list-style: none;
   margin: 4px 0 12px;
   padding: 0;
@@ -624,20 +623,6 @@
   color: #f0c0a8;
   border: 1px solid var(--mw-hostile);
 }
-.account-unresolved-list li {
-  padding: 4px 0;
-  border-bottom: 1px solid var(--mw-raised);
-}
-.account-unresolved-list li:last-child { border-bottom: none; }
-
-/* The explicit "these are not attributed to you" disclaimer -- never
-   allowed to blend into the surrounding hint copy, since misreading it
-   is exactly the mistake this whole section exists to prevent. */
-.account-disclaimer {
-  color: var(--mw-text-3);
-  font-style: italic;
-}
-
 /* ---- My check-in name --------------------------------------------------- */
 .account-checkin-name-form {
   display: flex;
