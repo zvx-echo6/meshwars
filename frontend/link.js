@@ -133,7 +133,7 @@ async function loadPending() {
   if (otherProviders.length === 0) {
     const note = document.createElement('p');
     note.className = 'hint';
-    note.textContent = 'No other sign-in method is enabled yet -- create a new account instead.';
+    note.textContent = 'No other sign-in method is enabled yet — create a new account instead.';
     existingWrap.appendChild(note);
   } else {
     otherProviders.forEach((p) => {

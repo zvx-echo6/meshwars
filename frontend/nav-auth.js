@@ -35,7 +35,7 @@ async function applySignedInState() {
     if (!res.ok) return;
     await res.json();
     link.classList.add('mw-nav-account-signed-in');
-    link.title = 'Signed in -- view your account';
+    link.title = 'Signed in — view your account';
   } catch (err) {
     // Offline, or the request otherwise never completed -- leave the
     // nav exactly as it rendered by default.

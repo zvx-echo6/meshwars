@@ -48,10 +48,40 @@ const TEAM_COLORS = {
   PINK: '#f01ec0',
 };
 
-function formatTimestamp(ts) {
+// Date-only, no time of day (year/month/day) -- the same convention
+// frontend/about.js's formatEndsAt() uses. For a fact where only the
+// day matters (an identity's Added date, a session's Signed-in date).
+function formatDate(ts) {
   if (!ts) return 'unknown';
   try {
-    return new Date(ts * 1000).toLocaleString();
+    return new Date(ts * 1000).toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
+// Same date, plus a minute-precision time -- for a fact where the time
+// of day itself is useful (an identity's last-used moment, a session's
+// last-seen moment), without the seconds a plain toLocaleString() would
+// tack on.
+function formatDateTime(ts) {
+  if (!ts) return 'unknown';
+  try {
+    const d = new Date(ts * 1000);
+    const date = d.toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+    const time = d.toLocaleTimeString(undefined, {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    return `${date}, ${time}`;
   } catch (e) {
     return 'unknown';
   }
@@ -110,18 +140,19 @@ function renderIdentities(identities) {
     const strong = document.createElement('strong');
     strong.textContent = providerLabel(identity.provider);
     nameLine.appendChild(strong);
-    if (identity.email) {
-      nameLine.appendChild(document.createTextNode(' -- '));
-      const emailSpan = document.createElement('span');
-      emailSpan.textContent = identity.email;
-      nameLine.appendChild(emailSpan);
-    }
     li.appendChild(nameLine);
+
+    if (identity.email) {
+      const emailLine = document.createElement('div');
+      emailLine.className = 'account-identity-detail';
+      emailLine.textContent = identity.email;
+      li.appendChild(emailLine);
+    }
 
     const detailLine = document.createElement('div');
     detailLine.className = 'account-identity-detail';
     detailLine.textContent =
-      `Added ${formatTimestamp(identity.linked_at)} -- last used ${formatTimestamp(identity.last_login_at)}`;
+      `Added ${formatDate(identity.linked_at)} — last used ${formatDateTime(identity.last_login_at)}`;
     li.appendChild(detailLine);
 
     list.appendChild(li);
@@ -233,8 +264,8 @@ function renderSessions(sessions) {
     const detailLine = document.createElement('div');
     detailLine.className = 'account-identity-detail';
     detailLine.textContent =
-      `Signed in ${formatTimestamp(session.created_at)} -- last seen ${formatTimestamp(session.last_seen_at)}`
-      + (session.ip ? ` -- ${session.ip}` : '');
+      `Signed in ${formatDate(session.created_at)} — last seen ${formatDateTime(session.last_seen_at)}`
+      + (session.ip ? ` — ${session.ip}` : '');
     li.appendChild(detailLine);
 
     list.appendChild(li);
