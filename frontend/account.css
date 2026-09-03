@@ -4,6 +4,19 @@
    shared .mw-nav block, so this file only carries what's specific to
    this one page. */
 
+/* This page has a lot of dynamically shown/hidden elements (account.js
+   toggles .hidden throughout), and several of the classes below set
+   their own `display` (block/flex/grid) at the same specificity the
+   browser's own default `[hidden] { display: none }` uses -- an
+   author rule beats a user-agent default regardless of specificity, so
+   without this, an element with both a class that sets display AND the
+   hidden attribute stays visible. Same fix admin.css's own [hidden]
+   rule applies, blanket here rather than per-selector (join.css's own
+   approach) because this page has too many such elements to track
+   individually and getting even one wrong is a visible bug, not a
+   cosmetic one. */
+[hidden] { display: none !important; }
+
 .account-wrap {
   max-width: 640px;
   margin: 0 auto;
@@ -284,3 +297,470 @@
   gap: 10px;
   margin-top: 12px;
 }
+
+/* ---- Group headings ---------------------------------------------------
+   One level above .account-title: groups a run of .account-panel
+   sections under a single label ("Radios & troubleshooting", "Play",
+   "Security") so the page reads as a small number of clear areas
+   instead of one long undifferentiated list of panels. Bigger and
+   plainer than .account-title on purpose -- a panel title is a label
+   for what's inside ONE box; this is a label for several. */
+.account-group-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--mw-text-1);
+  margin: 28px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--mw-line-strong);
+}
+.account-group-title:first-of-type {
+  margin-top: 20px;
+}
+
+.account-group-note {
+  margin-bottom: 16px;
+}
+
+.account-panel-subtitle {
+  font-weight: 700;
+  font-size: 0.75rem;
+  color: var(--mw-text-3);
+  margin: 12px 0 4px;
+}
+.account-panel-subtitle:first-child {
+  margin-top: 0;
+}
+
+.account-divider {
+  border: none;
+  border-top: 1px solid var(--mw-raised);
+  margin: 16px 0 12px;
+}
+
+.account-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.account-link-btn {
+  background: none;
+  border: none;
+  color: var(--mw-accent);
+  font-size: 0.75rem;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* A clear-box warning, distinct from a plain error line -- used for the
+   team-switch confirmation and the rotate-key confirmation/result, same
+   visual language join.css's own .join-warning-box uses on the join
+   page for the same purpose (stop the eye, don't blend into the
+   surrounding paragraphs). */
+.account-warning-box {
+  background: var(--mw-accent-deep);
+  border: 1px solid var(--mw-hostile);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 10px 0 12px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #f0c0a8;
+}
+.account-warning-box strong {
+  display: block;
+  color: #ffb088;
+  margin-bottom: 2px;
+}
+/* The one truly unrecoverable moment on this page -- once a rotated key
+   is gone, it is gone. Same sizing bump join.css's own .key-warning-box
+   applies for the identical case on the join page. */
+.account-warning-box-strong {
+  border-width: 2px;
+  padding: 12px 14px;
+  font-size: 0.8125rem;
+}
+.account-warning-box-strong strong {
+  font-size: 0.9375rem;
+}
+
+.account-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.account-confirm-actions button:first-child {
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.account-confirm-actions button:first-child:hover { background: var(--mw-line); }
+.account-confirm-actions button:first-child:disabled { opacity: 0.5; cursor: default; }
+
+/* A one-time value (a rotated API key) -- readonly input plus a Copy
+   button, same shape join.css's own .copy-row uses on the join page. */
+.account-copy-row {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0;
+}
+.account-copy-row input {
+  flex: 1;
+  background: var(--mw-page);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.8125rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  min-width: 0;
+}
+.account-copy-row button {
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.account-copy-row button:hover { background: var(--mw-line); }
+
+/* Every plain-button action across the sections below shares this one
+   look, same as the connect/logout buttons above already do. */
+.account-add-radio-form button,
+#account-status-check-btn,
+#account-checkin-health-btn,
+.account-checkin-name-actions button,
+#account-team-switch-btn,
+#account-rotate-key-btn,
+.account-password-actions button,
+#account-contact-email-submit {
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.account-add-radio-form button:hover,
+#account-status-check-btn:hover,
+#account-checkin-health-btn:hover,
+.account-checkin-name-actions button:hover,
+#account-team-switch-btn:hover,
+#account-rotate-key-btn:hover,
+.account-password-actions button:hover,
+#account-contact-email-submit:hover { background: var(--mw-line); }
+.account-add-radio-form button:disabled,
+#account-status-check-btn:disabled,
+#account-checkin-health-btn:disabled,
+.account-checkin-name-actions button:disabled,
+#account-team-switch-btn:disabled,
+#account-rotate-key-btn:disabled,
+.account-password-actions button:disabled,
+#account-contact-email-submit:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- My radios --------------------------------------------------------
+   Same rhythm join.css's own .radios-list/.radios-item give the
+   identical list on the join page's setup-check panel. */
+.account-radios-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+.account-radios-empty {
+  list-style: none;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+  margin: 0 0 12px;
+}
+.account-radios-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-size: 0.8125rem;
+  color: var(--mw-text-1);
+}
+.account-radios-item span:first-child {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.account-radios-item-detail {
+  color: var(--mw-text-6);
+  font-size: 0.6875rem;
+  margin-right: auto;
+  padding-left: 10px;
+}
+.account-radios-item button {
+  background: #2a1414;
+  color: #f08080;
+  border: 1px solid #663333;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.account-radios-item button:hover { background: #3a1a1a; }
+.account-radios-item button:disabled { opacity: 0.5; cursor: default; }
+
+.account-add-radio-row {
+  display: flex;
+  gap: 10px;
+}
+.account-field-compact { flex: 0 0 140px; }
+.account-field-grow { flex: 1; }
+.account-add-radio-form select {
+  width: 100%;
+  background: var(--mw-page);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.875rem;
+}
+
+/* ---- Troubleshooting / check-in health diagnosis ----------------------
+   Same visual language join.css's own .status-diagnosis-ok/-attention
+   use for the identical /api/mc/status diagnosis on the join page --
+   real prominence (its own bordered block, larger text) rather than
+   reading as just another line of copy. */
+.account-diagnosis {
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin: 4px 0 14px;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  font-weight: 600;
+}
+.account-diagnosis-ok {
+  background: #16240f;
+  border: 1px solid var(--mw-friendly);
+  color: #b8e0a0;
+}
+.account-diagnosis-attention {
+  background: var(--mw-accent-deep);
+  border: 1px solid var(--mw-hostile);
+  color: #f0c0a8;
+}
+
+.account-status-result,
+.account-checkin-health-result {
+  margin-top: 4px;
+}
+
+.account-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  margin: 6px 0 4px;
+}
+.account-table th,
+.account-table td {
+  border: 1px solid var(--mw-line);
+  padding: 5px 8px;
+  text-align: left;
+  color: var(--mw-text-2);
+}
+.account-table thead th {
+  color: var(--mw-text-6);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.625rem;
+  font-weight: 700;
+}
+.account-table td { text-align: center; }
+
+/* ---- Why my check-ins may not be counting ------------------------------ */
+.account-contacts-list,
+.account-unresolved-list {
+  list-style: none;
+  margin: 4px 0 12px;
+  padding: 0;
+}
+.account-contacts-item {
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.account-contacts-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.8125rem;
+  color: var(--mw-text-1);
+}
+.account-contact-status {
+  display: inline-block;
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.account-contact-status-ok {
+  background: var(--mw-accent-wash);
+  color: #b8e0a0;
+  border: 1px solid var(--mw-friendly);
+}
+.account-contact-status-attention {
+  background: var(--mw-accent-deep);
+  color: #f0c0a8;
+  border: 1px solid var(--mw-hostile);
+}
+.account-unresolved-list li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--mw-raised);
+}
+.account-unresolved-list li:last-child { border-bottom: none; }
+
+/* The explicit "these are not attributed to you" disclaimer -- never
+   allowed to blend into the surrounding hint copy, since misreading it
+   is exactly the mistake this whole section exists to prevent. */
+.account-disclaimer {
+  color: var(--mw-text-3);
+  font-style: italic;
+}
+
+/* ---- My check-in name --------------------------------------------------- */
+.account-checkin-name-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.account-checkin-name-actions {
+  display: flex;
+  gap: 8px;
+}
+#account-checkin-name-remove {
+  background: #2a1414;
+  color: #f08080;
+  border: 1px solid #663333;
+}
+#account-checkin-name-remove:hover { background: #3a1a1a; }
+
+/* ---- My stats ------------------------------------------------------------ */
+.account-stats-card {
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.account-stats-card:last-child { margin-bottom: 0; }
+.account-stats-dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  margin: 0;
+}
+.account-stats-dl dt {
+  color: var(--mw-text-5);
+  font-size: 0.75rem;
+}
+.account-stats-dl dd {
+  margin: 0;
+  color: var(--mw-text-1);
+  font-size: 0.8125rem;
+  text-align: right;
+  font-weight: 600;
+}
+
+/* ---- My team -------------------------------------------------------------- */
+.account-team-picker-wrap { margin-top: 10px; }
+.account-team-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.account-team-swatch {
+  --swatch-color: var(--mw-accent);
+  background: var(--mw-page);
+  color: var(--swatch-color);
+  border: 1px solid var(--swatch-color);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.account-team-swatch:hover { background: var(--mw-raised); }
+.account-team-swatch.active { background: var(--swatch-color); color: #0a0a0a; }
+.account-team-swatch:disabled { opacity: 0.4; cursor: default; }
+.account-team-confirm { margin-top: 10px; }
+
+/* ---- My check-in history / honors ---------------------------------------- */
+.account-honors-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.account-honors-empty {
+  list-style: none;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+}
+.account-honors-item {
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.account-honors-item:last-child { margin-bottom: 0; }
+
+/* ---- Sign-in methods: disconnect + last-door note ------------------------- */
+.account-identity-disconnect-btn {
+  margin-top: 6px;
+  background: #2a1414;
+  color: #f08080;
+  border: 1px solid #663333;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.account-identity-disconnect-btn:hover { background: #3a1a1a; }
+.account-identity-disconnect-btn:disabled { opacity: 0.5; cursor: default; }
+.account-identity-lastdoor {
+  color: #f0c0a8;
+}
+
+/* ---- Password / contact email --------------------------------------------- */
+.account-password-form,
+.account-contact-email-form {
+  margin-top: 6px;
+}
+.account-password-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+.account-contact-email-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ---- API key --------------------------------------------------------------- */
+.account-rotate-key-confirm { margin-top: 10px; }
+.account-rotate-key-result { margin-top: 10px; }

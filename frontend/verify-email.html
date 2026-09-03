@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <!-- Applied before any stylesheet paints, so a reader who chose the
+       neon skin never sees a frame of gold first. Deliberately inline
+       and tiny: a fetched script here would block first paint, which is
+       the thing this exists to avoid. Mirrors theme-toggle.js, which
+       owns everything after load. -->
+  <script>
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
+  </script>
+  <title>MeshWars — Confirm Email</title>
+  <!-- Reached only by redirect from GET /auth/contact-email/verify
+       (app/oauth_api.py's contact_email_verify()) -- never a
+       destination anyone links to or is meant to land on directly.
+       noindex, and no canonical/OG/JSON-LD -- there is nothing here
+       worth a search result or a social card. Same reasoning
+       frontend/link.html's own head gives for the same kind of page. -->
+  <meta name="robots" content="noindex">
+
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v= on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
+  <link rel="stylesheet" href="/static/link.css?v=20260903-1" />
+</head>
+<body>
+
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/">Map</a>
+      <a href="/results">Results</a>
+      <a href="/rules">Rules</a>
+      <a href="/docs">Docs</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <a href="/account" id="mw-nav-account">Account</a>
+      <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+      </button>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main class="link-wrap">
+
+    <section class="link-panel">
+      <div class="link-title">Confirm email</div>
+
+      <!-- Filled in by verify-email.js, purely from the ?ok=1/?ok=0
+           query param GET /auth/contact-email/verify's redirect
+           already put there -- no fetch needed, the server already did
+           the work before sending this browser here. -->
+      <div id="verify-email-ok" class="link-summary" hidden>
+        Your contact email address is verified. <a href="/account">Back to your account</a>.
+      </div>
+
+      <div id="verify-email-fail" class="link-hint" hidden>
+        This verification link is invalid or has expired. Set the address again from your <a href="/account">account page</a> and use the newest link it sends.
+      </div>
+    </section>
+
+  </main>
+
+  <script src="/static/verify-email.js?v=20260903-1" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
+  <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
+</body>
+</html>

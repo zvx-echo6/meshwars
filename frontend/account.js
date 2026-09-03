@@ -3,28 +3,47 @@
  *
  * Talks to GET /api/account, GET /api/account/pending, POST
  * /api/account/pending/link, POST /api/account/link-key, POST
- * /api/account/logout[-all], and GET /auth/providers -- all documented
- * in app/account_api.py and app/oauth_api.py. Self-contained, same as
- * every other page script in this codebase: no build step, no shared
- * import from another page's script, with the one exception every page
- * offering sign-in shares -- frontend/signin-email.js, see that
- * module's own header comment for why (same exception
- * frontend/nav-auth.js already is for the nav bar's signed-in state).
+ * /api/account/logout[-all], GET /auth/providers, and the full set of
+ * session-authenticated player/security surfaces this page grew into:
+ * GET/POST/DELETE /api/nodes, POST /api/mc/status, GET
+ * /api/account/checkin-health, GET/POST/DELETE /api/checkin/name,
+ * GET/POST /api/team, GET /api/account/stats, GET /api/account/checkins,
+ * GET /api/account/honors, DELETE /api/account/identity/{provider},
+ * POST/DELETE /api/account/password, POST /api/account/contact-email,
+ * and POST /api/account/rotate-key -- all documented in
+ * app/account_api.py, app/nodes_api.py, app/mc_api.py,
+ * app/checkin_api.py, app/join_api.py, and app/oauth_api.py.
+ * Self-contained, same as every other page script in this codebase: no
+ * build step, no shared import from another page's script, with the
+ * one exception every page offering sign-in shares --
+ * frontend/signin-email.js, see that module's own header comment for
+ * why (same exception frontend/nav-auth.js already is for the nav
+ * bar's signed-in state).
+ *
+ * All of the routes above except the sign-in ones are session-cookie
+ * authenticated with NO X-API-Key header -- see each router's own
+ * "allow_session_fallback" note in app/auth.py. That is the whole
+ * point of surfacing them here rather than sending someone back to
+ * join.html's key-pasting panel: a signed-in visitor never has to
+ * paste their key on this page for anything.
+ *
+ * Every player-scoped section below (radios, troubleshooting,
+ * check-in health, check-in name, team, stats, check-in history,
+ * honors) is gated on session.player_id existing at all -- see
+ * applyPlayerGate(). An account with no linked player sees a plain
+ * explanation and the connect-by-key form instead of any of those
+ * sections erroring out.
  *
  * SECURITY: every dynamic value rendered here (provider labels, masked
- * emails, player name/team, session user-agent/ip, server error text)
- * is set via textContent or an element's .value, never innerHTML --
- * same rule frontend/join.js's own module docstring states for the
- * same reason. The API key entered in the connect-by-key form is sent
- * exactly once, in the request body of POST /api/account/link-key, and
- * is never stored, logged, or echoed back -- same handling
- * frontend/join.js's own module docstring already describes for the
- * SAME key on the join page's status-check panel.
- *
- * This page never displays a secret and never implies one is
- * recoverable: GET /api/account does not return an API key (the server
- * only ever stores a one-way hash of one -- see join.html's own
- * key-warning copy), and nothing here renders one back.
+ * emails, player name/team, session user-agent/ip, server error text,
+ * diagnosis/explanation copy, check-in names) is set via textContent
+ * or an element's .value, never innerHTML -- same rule
+ * frontend/join.js's own module docstring states for the same reason.
+ * The API key entered in the connect-by-key form, and the freshly
+ * rotated key rotate-key returns, are each handled the same way
+ * frontend/join.js's own module docstring describes for the identical
+ * key on the join page: sent/shown exactly once, never stored or
+ * logged, and GET /api/account never returns a key at all.
  */
 
 import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-1';
@@ -52,6 +71,16 @@ const TEAM_COLORS = {
   ORANGE: '#ff9020',
   PINK: '#f01ec0',
 };
+const TEAM_ORDER = Object.keys(TEAM_COLORS);
+
+const PROTOCOL_LABELS = { mt: 'Meshtastic', mc: 'MeshCore' };
+
+// Cached across sections so the page never has to re-fetch a response
+// it already has just to swap one field after a mutation -- same
+// pattern join.js's lastStatusData/teamStatusData follow.
+let lastAccountData = null;
+let lastTeamStatus = null;
+let pendingSwitchTeam = null;
 
 // Date-only, no time of day (year/month/day) -- the same convention
 // frontend/about.js's formatEndsAt() uses. For a fact where only the
@@ -92,6 +121,91 @@ function formatDateTime(ts) {
   }
 }
 
+// Same rounding-to-a-phrase relative time join.js's own copy of this
+// uses for the diagnosis sentence's "last heard from" fact.
+function relativeTimeFromEpoch(ts) {
+  if (!ts) return 'never';
+  const deltaSec = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (deltaSec < 60) return 'just now';
+  const minutes = Math.floor(deltaSec / 60);
+  if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days !== 1 ? 's' : ''} ago`;
+}
+
+// Server-provided next_switch_at (a real unix timestamp, always the
+// end of the current month window in settings.checkin_net_timezone --
+// see GET /api/team's own docstring in app/join_api.py). Pinned to
+// America/Boise rather than the viewer's local zone for the same
+// reason join.js's own copy of this pins it: ts is midnight in that
+// zone, and a viewer west of Mountain time would otherwise see that
+// instant fall a day early.
+function formatSwitchDate(ts) {
+  if (!ts) return 'unknown';
+  try {
+    return new Date(ts * 1000).toLocaleDateString(undefined, {
+      year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Boise',
+    });
+  } catch (e) {
+    return 'unknown';
+  }
+}
+
+// "2026-08" -> "August 2026", for a month_award row's own month key
+// (app/results.py's month_key()).
+function formatMonth(monthKey) {
+  if (!monthKey) return 'unknown';
+  try {
+    const [year, month] = monthKey.split('-').map(Number);
+    return new Date(Date.UTC(year, month - 1, 1)).toLocaleDateString(undefined, {
+      year: 'numeric', month: 'long', timeZone: 'UTC',
+    });
+  } catch (e) {
+    return monthKey;
+  }
+}
+
+function copyToClipboard(text, button) {
+  const original = button.textContent;
+  const revert = () => { button.textContent = original; };
+  navigator.clipboard.writeText(text).then(() => {
+    button.textContent = 'Copied';
+    setTimeout(revert, 1500);
+  }).catch(() => {
+    button.textContent = 'Copy failed';
+    setTimeout(revert, 1500);
+  });
+}
+
+function buildCopyRow(value) {
+  const row = document.createElement('div');
+  row.className = 'account-copy-row';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.readOnly = true;
+  input.value = value;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = 'Copy';
+  btn.addEventListener('click', () => copyToClipboard(value, btn));
+
+  row.appendChild(input);
+  row.appendChild(btn);
+  return row;
+}
+
+function teamLine(team) {
+  const span = document.createElement('span');
+  span.textContent = team;
+  span.style.color = TEAM_COLORS[team] || 'inherit';
+  span.style.fontWeight = '700';
+  return span;
+}
+
 // ---- Sign in (GET /auth/providers) -- signed-out state --------------------
 
 async function renderSignedOut() {
@@ -127,7 +241,35 @@ async function renderSignedOut() {
 
 // ---- Sign-in methods (GET /api/account's own identities array) -----------
 
+function showIdentitiesError(message) {
+  const el = document.getElementById('account-identities-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+async function handleUnlinkIdentity(provider, button) {
+  button.disabled = true;
+  try {
+    const res = await fetch(`/api/account/identity/${encodeURIComponent(provider)}`, { method: 'DELETE' });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      const message = (data && typeof data.error === 'string')
+        ? data.error
+        : 'Something went wrong. Try again in a moment.';
+      showIdentitiesError(message);
+      button.disabled = false;
+      return;
+    }
+    await refreshAccountCore();
+  } catch (err) {
+    showIdentitiesError('Could not reach the server. Check your connection and try again.');
+    button.disabled = false;
+  }
+}
+
 function renderIdentities(identities) {
+  document.getElementById('account-identities-error').hidden = true;
   const list = document.getElementById('account-identities');
   list.replaceChildren();
   if (!identities || identities.length === 0) {
@@ -160,6 +302,25 @@ function renderIdentities(identities) {
     detailLine.textContent =
       `Added ${formatDate(identity.linked_at)} — last used ${formatDateTime(identity.last_login_at)}`;
     li.appendChild(detailLine);
+
+    // can_remove already reflects the server's own last-door count
+    // (see app/account_api.py's _door_counts()) -- a button is only
+    // ever rendered when the backend would actually accept the
+    // request, per this page's own hard rule never to offer one the
+    // server would refuse.
+    if (identity.can_remove) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'account-identity-disconnect-btn';
+      btn.textContent = 'Disconnect';
+      btn.addEventListener('click', () => handleUnlinkIdentity(identity.provider, btn));
+      li.appendChild(btn);
+    } else {
+      const note = document.createElement('div');
+      note.className = 'account-identity-detail account-identity-lastdoor';
+      note.textContent = 'This is your only way to sign in — connect another method or set a password first.';
+      li.appendChild(note);
+    }
 
     list.appendChild(li);
   });
@@ -231,11 +392,29 @@ async function handleConnectSubmit(e) {
     }
     input.value = '';
     renderPlayer(data.player);
+    applyPlayerGate(!!data.player);
+    if (data.player) loadPlayerSections();
   } catch (err) {
     showConnectError('Could not reach the server. Check your connection and try again.');
   } finally {
     submitBtn.disabled = false;
   }
+}
+
+// ---- Player-section gate ---------------------------------------------
+//
+// Everything scoped to a linked player (radios, troubleshooting,
+// check-in health/name, team, stats, check-in history, honors) lives
+// inside #account-player-groups, plus the API key panel down in
+// Security (rotate-key 404s with no player -- see
+// app/account_api.py's POST /api/account/rotate-key docstring). An
+// account with no linked player never sees any of these error out --
+// it sees the same one-line explanation #account-no-player-note
+// already gives, pointing back up at the Player panel's connect form.
+function applyPlayerGate(hasPlayer) {
+  document.getElementById('account-player-groups').hidden = !hasPlayer;
+  document.getElementById('account-no-player-note').hidden = hasPlayer;
+  document.getElementById('account-key-panel').hidden = !hasPlayer;
 }
 
 // ---- Sessions (GET /api/account's own sessions array) ---------------------
@@ -321,6 +500,1101 @@ async function handleLogoutAll() {
   }
 }
 
+// ============================================================================
+// RADIOS (GET/POST /api/nodes, DELETE /api/nodes/{node_ref})
+// ============================================================================
+
+function showRadiosError(message) {
+  const el = document.getElementById('account-radios-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearRadiosError() {
+  const el = document.getElementById('account-radios-error');
+  el.textContent = '';
+  el.hidden = true;
+}
+
+function displayNodeRef(protocol, nodeRef) {
+  return protocol === 'mt' && nodeRef && !nodeRef.startsWith('!') ? `!${nodeRef}` : nodeRef;
+}
+
+function renderRadiosList(radios) {
+  const list = document.getElementById('account-radios-list');
+  list.replaceChildren();
+
+  if (!radios || radios.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'account-radios-empty';
+    li.textContent = 'No radios registered yet.';
+    list.appendChild(li);
+    return;
+  }
+
+  radios.forEach((radio) => {
+    const li = document.createElement('li');
+    li.className = 'account-radios-item';
+
+    const label = document.createElement('span');
+    label.textContent = `${PROTOCOL_LABELS[radio.protocol] || radio.protocol} ${displayNodeRef(radio.protocol, radio.node_ref)}`;
+    li.appendChild(label);
+
+    const detail = document.createElement('span');
+    detail.className = 'account-radios-item-detail';
+    detail.textContent = `bound ${formatDate(radio.bound_at)}`;
+    li.appendChild(detail);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', () => handleRemoveRadio(radio.protocol, radio.node_ref, removeBtn));
+    li.appendChild(removeBtn);
+
+    list.appendChild(li);
+  });
+}
+
+// Shared response handling for the add/remove radio calls -- both
+// routes sit behind the exact same session-cookie authentication.
+// Returns true if the caller should stop (an error was shown already).
+function handleRadiosApiError(res, data) {
+  if (res.status === 409) {
+    // The one conflict this form can hit: someone else already
+    // registered this exact node_ref. Surfaced verbatim -- the server
+    // message already says exactly this -- rather than folded into a
+    // generic failure, per this page's own requirement to make that
+    // case clear rather than a plain error.
+    showRadiosError((data && data.error) || 'That radio is already registered to another player.');
+    return true;
+  }
+  if (res.status === 429) {
+    showRadiosError('Too many changes, too fast. Wait a moment and try again.');
+    return true;
+  }
+  if (!res.ok) {
+    const message = (data && typeof data.error === 'string')
+      ? data.error
+      : 'Something went wrong. Try again in a moment.';
+    showRadiosError(message);
+    return true;
+  }
+  return false;
+}
+
+async function handleRemoveRadio(protocol, nodeRef, button) {
+  clearRadiosError();
+  button.disabled = true;
+  try {
+    const url = `/api/nodes/${encodeURIComponent(nodeRef)}?protocol=${encodeURIComponent(protocol)}`;
+    const res = await fetch(url, { method: 'DELETE' });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (handleRadiosApiError(res, data)) { button.disabled = false; return; }
+    renderRadiosList(data.radios);
+  } catch (err) {
+    showRadiosError('Could not reach the server. Check your connection and try again.');
+    button.disabled = false;
+  }
+}
+
+function setupAddRadioProtocolToggle() {
+  const select = document.getElementById('f-account-add-protocol');
+  const publicKeyField = document.getElementById('account-add-public-key-field');
+  const apply = () => { publicKeyField.hidden = select.value !== 'mt'; };
+  select.addEventListener('change', apply);
+  apply();
+}
+
+async function handleAddRadioSubmit(e) {
+  e.preventDefault();
+  clearRadiosError();
+
+  const protocol = document.getElementById('f-account-add-protocol').value;
+  const nodeRefInput = document.getElementById('f-account-add-node-ref');
+  const nodeRef = nodeRefInput.value.trim();
+  if (!nodeRef) {
+    showRadiosError('Enter the radio’s node ID.');
+    return;
+  }
+  const publicKeyInput = document.getElementById('f-account-add-public-key');
+  const publicKey = protocol === 'mt' ? publicKeyInput.value.trim() : '';
+
+  const body = { protocol, node_ref: nodeRef };
+  if (publicKey) body.public_key = publicKey;
+
+  const submitBtn = document.getElementById('account-add-radio-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/nodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (handleRadiosApiError(res, data)) return;
+    renderRadiosList(data.radios);
+    nodeRefInput.value = '';
+    publicKeyInput.value = '';
+  } catch (err) {
+    showRadiosError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function loadRadios() {
+  try {
+    const res = await fetch('/api/nodes');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderRadiosList(data.radios);
+  } catch (err) {
+    // Quiet -- the add/remove form still works from an empty list; a
+    // background load failure here is not worth its own error banner.
+  }
+}
+
+// ============================================================================
+// TROUBLESHOOTING / SETUP CHECK (POST /api/mc/status)
+// ============================================================================
+
+function buildCountersTable(today, week, labels) {
+  const table = document.createElement('table');
+  table.className = 'account-table';
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  ['', 'Today', 'Last 7 days'].forEach((h) => {
+    const th = document.createElement('th');
+    th.textContent = h;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  labels.forEach(([key, label]) => {
+    const tr = document.createElement('tr');
+    const rowHead = document.createElement('th');
+    rowHead.scope = 'row';
+    rowHead.textContent = label;
+    tr.appendChild(rowHead);
+    [today, week].forEach((row) => {
+      const td = document.createElement('td');
+      td.textContent = String((row && row[key]) ?? 0);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  return table;
+}
+
+const MC_COUNTER_LABELS = [
+  ['accepted', 'Accepted'],
+  ['duplicate', 'Duplicate'],
+  ['out_of_area', 'Out of area'],
+  ['no_repeaters', 'No repeaters heard'],
+  ['bad_coord', 'Bad coordinates'],
+  ['no_contact', 'No contact key'],
+  ['wrong_owner', 'Wrong owner'],
+  ['batches', 'Batches'],
+];
+
+const MT_COUNTER_LABELS = [
+  ['accepted', 'Accepted'],
+  ['duplicate', 'Duplicate'],
+  ['out_of_area', 'Out of area'],
+  ['no_repeaters', 'No feeder heard'],
+  ['bad_coord', 'Bad coordinates'],
+  ['low_precision', 'Low position precision'],
+  ['implausible_speed', 'Implausible speed'],
+];
+
+function buildLabel(text) {
+  const label = document.createElement('div');
+  label.className = 'account-panel-subtitle';
+  label.textContent = text;
+  return label;
+}
+
+function renderStatusResult(data) {
+  const panel = document.getElementById('account-status-result');
+  panel.replaceChildren();
+  panel.hidden = false;
+
+  const radios = Array.isArray(data.radios) ? data.radios : [];
+  const hasMc = radios.some((r) => r.protocol === 'mc');
+  const hasMt = radios.some((r) => r.protocol === 'mt');
+
+  if (hasMc) {
+    const diagnosis = document.createElement('div');
+    const code = data.diagnosis && data.diagnosis.code;
+    diagnosis.className = 'account-diagnosis ' + (code === 'ok' ? 'account-diagnosis-ok' : 'account-diagnosis-attention');
+    diagnosis.textContent = (data.diagnosis && data.diagnosis.message) || '';
+    panel.appendChild(diagnosis);
+
+    panel.appendChild(buildLabel('MeshCore'));
+    const summary = document.createElement('p');
+    summary.className = 'account-hint';
+    summary.textContent = `Last batch ${relativeTimeFromEpoch(data.last_batch_at)}. Squares held: ${data.squares_held}.`;
+    panel.appendChild(summary);
+    panel.appendChild(buildCountersTable(data.today, data.last_7_days, MC_COUNTER_LABELS));
+  }
+
+  if (hasMt && data.mt) {
+    if (hasMc) {
+      const divider = document.createElement('hr');
+      divider.className = 'account-divider';
+      panel.appendChild(divider);
+    }
+    const mt = data.mt;
+    const mtCode = mt.diagnosis && mt.diagnosis.code;
+    const mtDiagnosis = document.createElement('div');
+    mtDiagnosis.className = 'account-diagnosis ' + (mtCode === 'mt_ok' ? 'account-diagnosis-ok' : 'account-diagnosis-attention');
+    mtDiagnosis.textContent = (mt.diagnosis && mt.diagnosis.message) || '';
+    panel.appendChild(mtDiagnosis);
+
+    panel.appendChild(buildLabel('Meshtastic'));
+    const summary = document.createElement('p');
+    summary.className = 'account-hint';
+    summary.textContent = `Last heard ${relativeTimeFromEpoch(mt.last_heard_at)}. Squares held: ${mt.squares_held}.`;
+    panel.appendChild(summary);
+    panel.appendChild(buildCountersTable(mt.today, mt.last_7_days, MT_COUNTER_LABELS));
+  }
+
+  if (!hasMc && !hasMt) {
+    const note = document.createElement('p');
+    note.className = 'account-hint';
+    note.textContent = 'No radios registered yet — add one above, then check again.';
+    panel.appendChild(note);
+  }
+}
+
+function showStatusError(message) {
+  const el = document.getElementById('account-status-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+async function handleStatusCheck() {
+  const btn = document.getElementById('account-status-check-btn');
+  const errEl = document.getElementById('account-status-error');
+  errEl.hidden = true;
+  btn.disabled = true;
+  btn.textContent = 'Checking...';
+  try {
+    const res = await fetch('/api/mc/status', { method: 'POST' });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      const message = (data && typeof data.error === 'string')
+        ? data.error
+        : 'Something went wrong. Try again in a moment.';
+      showStatusError(message);
+      return;
+    }
+    renderStatusResult(data);
+  } catch (err) {
+    showStatusError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Check now';
+  }
+}
+
+// ============================================================================
+// WHY MY CHECK-INS MAY NOT BE COUNTING (GET /api/account/checkin-health)
+// ============================================================================
+
+const CONTACT_STATUS_LABELS = {
+  resolved: 'Resolved',
+  not_in_directory: 'Not in directory',
+  key_ambiguous: 'Key matches more than one entry',
+  name_ambiguous: 'Name shared by more than one radio',
+};
+
+function renderCheckinHealth(data) {
+  const panel = document.getElementById('account-checkin-health-result');
+  panel.replaceChildren();
+  panel.hidden = false;
+
+  const summary = document.createElement('div');
+  summary.className = 'account-diagnosis ' + (data.resolved ? 'account-diagnosis-ok' : 'account-diagnosis-attention');
+  summary.textContent = data.summary || '';
+  panel.appendChild(summary);
+
+  if (data.contacts && data.contacts.length > 0) {
+    panel.appendChild(buildLabel('Your bound MeshCore contacts'));
+    const list = document.createElement('ul');
+    list.className = 'account-contacts-list';
+    data.contacts.forEach((c) => {
+      const li = document.createElement('li');
+      li.className = 'account-contacts-item';
+
+      const top = document.createElement('div');
+      top.className = 'account-contacts-item-top';
+      const ref = document.createElement('span');
+      ref.className = 'account-mono';
+      ref.textContent = c.node_ref;
+      top.appendChild(ref);
+      const status = document.createElement('span');
+      status.className = 'account-contact-status ' + (c.status === 'resolved' ? 'account-contact-status-ok' : 'account-contact-status-attention');
+      status.textContent = CONTACT_STATUS_LABELS[c.status] || c.status;
+      top.appendChild(status);
+      li.appendChild(top);
+
+      if (c.resolved_name) {
+        const nameLine = document.createElement('div');
+        nameLine.className = 'account-hint';
+        nameLine.textContent = `Resolves as: ${c.resolved_name}`;
+        li.appendChild(nameLine);
+      }
+
+      const explanation = document.createElement('p');
+      explanation.className = 'account-hint';
+      explanation.textContent = c.explanation;
+      li.appendChild(explanation);
+
+      list.appendChild(li);
+    });
+    panel.appendChild(list);
+  }
+
+  if (data.binding) {
+    panel.appendChild(buildLabel('Your fallback check-in name'));
+    const b = data.binding;
+    const line = document.createElement('p');
+    line.className = 'account-hint';
+    if (b.registered) {
+      line.textContent = `Registered: "${b.sender_name}" — ${b.active ? 'currently active' : 'not currently in effect'}.`;
+    } else {
+      line.textContent = 'None registered.';
+    }
+    panel.appendChild(line);
+    const explanation = document.createElement('p');
+    explanation.className = 'account-hint';
+    explanation.textContent = b.explanation;
+    panel.appendChild(explanation);
+  }
+
+  if (data.recent_unresolved_names && data.recent_unresolved_names.entries && data.recent_unresolved_names.entries.length > 0) {
+    panel.appendChild(buildLabel('Recent unresolved check-in names'));
+    const note = document.createElement('p');
+    note.className = 'account-hint account-disclaimer';
+    note.textContent = data.recent_unresolved_names.note;
+    panel.appendChild(note);
+
+    const list = document.createElement('ul');
+    list.className = 'account-unresolved-list';
+    data.recent_unresolved_names.entries.forEach((e) => {
+      const li = document.createElement('li');
+      li.className = 'account-hint';
+      li.textContent = `"${e.sender_name}" — last seen ${relativeTimeFromEpoch(e.last_seen)}, ${e.message_count} message${e.message_count === 1 ? '' : 's'}`;
+      list.appendChild(li);
+    });
+    panel.appendChild(list);
+  }
+}
+
+function showCheckinHealthError(message) {
+  const el = document.getElementById('account-checkin-health-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+async function handleCheckinHealthCheck() {
+  const btn = document.getElementById('account-checkin-health-btn');
+  const errEl = document.getElementById('account-checkin-health-error');
+  errEl.hidden = true;
+  btn.disabled = true;
+  btn.textContent = 'Checking...';
+  try {
+    const res = await fetch('/api/account/checkin-health');
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      const message = (data && typeof data.error === 'string')
+        ? data.error
+        : 'Something went wrong. Try again in a moment.';
+      showCheckinHealthError(message);
+      return;
+    }
+    renderCheckinHealth(data);
+  } catch (err) {
+    showCheckinHealthError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Check now';
+  }
+}
+
+// ============================================================================
+// MY CHECK-IN NAME (GET/POST/DELETE /api/checkin/name)
+// ============================================================================
+
+function showCheckinNameError(message) {
+  const el = document.getElementById('account-checkin-name-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearCheckinNameError() {
+  const el = document.getElementById('account-checkin-name-error');
+  el.textContent = '';
+  el.hidden = true;
+}
+
+function renderCheckinNameCurrent(senderName) {
+  const current = document.getElementById('account-checkin-name-current');
+  const removeBtn = document.getElementById('account-checkin-name-remove');
+  const input = document.getElementById('f-account-checkin-name');
+  if (senderName) {
+    current.textContent = `Currently registered: "${senderName}"`;
+    removeBtn.hidden = false;
+    input.value = senderName;
+  } else {
+    current.textContent = 'No fallback name registered.';
+    removeBtn.hidden = true;
+    input.value = '';
+  }
+}
+
+async function loadCheckinName() {
+  try {
+    const res = await fetch('/api/checkin/name');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderCheckinNameCurrent(data.sender_name);
+  } catch (err) {
+    // Quiet -- the form still works from a blank state.
+  }
+}
+
+async function handleCheckinNameSubmit(e) {
+  e.preventDefault();
+  clearCheckinNameError();
+  const input = document.getElementById('f-account-checkin-name');
+  const name = input.value.trim();
+  if (!name) {
+    showCheckinNameError('Enter the name your check-ins post under.');
+    return;
+  }
+  const submitBtn = document.getElementById('account-checkin-name-save');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/checkin/name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sender_name: name }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showCheckinNameError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      return;
+    }
+    renderCheckinNameCurrent(data.sender_name);
+  } catch (err) {
+    showCheckinNameError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function handleCheckinNameRemove() {
+  clearCheckinNameError();
+  const btn = document.getElementById('account-checkin-name-remove');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/checkin/name', { method: 'DELETE' });
+    if (!res.ok) {
+      showCheckinNameError('Something went wrong. Try again in a moment.');
+      return;
+    }
+    renderCheckinNameCurrent(null);
+  } catch (err) {
+    showCheckinNameError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ============================================================================
+// MY STATS (GET /api/account/stats)
+// ============================================================================
+
+function renderBoardCard(protocol, board) {
+  const card = document.createElement('div');
+  card.className = 'account-stats-card';
+
+  const title = document.createElement('div');
+  title.className = 'account-panel-subtitle';
+  title.textContent = PROTOCOL_LABELS[protocol] || protocol;
+  card.appendChild(title);
+
+  const rows = [
+    ['Total points', board.total_points],
+    ['Squares held', board.tiles_held],
+    ['Check-in points', board.checkin_points],
+    ['Explorer points', board.explorer_points],
+    ['Nets checked in', board.nets_checked_in],
+    ['Check-in streak', board.checkin_streak],
+    ['Last check-in', board.last_checkin_net_date || 'never'],
+    ['Last position heard', relativeTimeFromEpoch(board.last_position_ts)],
+  ];
+
+  const dl = document.createElement('dl');
+  dl.className = 'account-stats-dl';
+  rows.forEach(([label, value]) => {
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    dd.textContent = String(value);
+    dl.appendChild(dt);
+    dl.appendChild(dd);
+  });
+  card.appendChild(dl);
+  return card;
+}
+
+async function loadStats() {
+  const errEl = document.getElementById('account-stats-error');
+  const resultEl = document.getElementById('account-stats-result');
+  errEl.hidden = true;
+  try {
+    const res = await fetch('/api/account/stats');
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      errEl.textContent = (data && data.error) || 'Could not load your stats.';
+      errEl.hidden = false;
+      return;
+    }
+    resultEl.replaceChildren();
+    const boards = data.boards || {};
+    ['mc', 'mt'].forEach((protocol) => {
+      if (boards[protocol]) resultEl.appendChild(renderBoardCard(protocol, boards[protocol]));
+    });
+    if (Object.keys(boards).length === 0) {
+      const note = document.createElement('p');
+      note.className = 'account-hint';
+      note.textContent = 'No stats yet.';
+      resultEl.appendChild(note);
+    }
+  } catch (err) {
+    errEl.textContent = 'Could not reach the server. Check your connection and try again.';
+    errEl.hidden = false;
+  }
+}
+
+// ============================================================================
+// MY TEAM (GET/POST /api/team)
+// ============================================================================
+
+function showTeamError(message) {
+  const el = document.getElementById('account-team-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearTeamError() {
+  const el = document.getElementById('account-team-error');
+  el.textContent = '';
+  el.hidden = true;
+}
+
+function closeTeamSwitchPicker() {
+  pendingSwitchTeam = null;
+  document.getElementById('account-team-picker-wrap').hidden = true;
+  document.getElementById('account-team-confirm').hidden = true;
+}
+
+function renderTeamCurrent(team) {
+  document.getElementById('account-team-current').replaceChildren(
+    document.createTextNode('Current team: '),
+    teamLine(team),
+  );
+}
+
+function renderTeamSwitchControl() {
+  const switchBtn = document.getElementById('account-team-switch-btn');
+  const lockedHint = document.getElementById('account-team-locked-hint');
+  if (!lastTeamStatus) return;
+  switchBtn.hidden = false;
+  if (lastTeamStatus.switch_available) {
+    switchBtn.disabled = false;
+    lockedHint.hidden = true;
+  } else {
+    switchBtn.disabled = true;
+    lockedHint.textContent = `You already switched teams this month. You can switch again on ${formatSwitchDate(lastTeamStatus.next_switch_at)}.`;
+    lockedHint.hidden = false;
+  }
+}
+
+function showTeamSwitchConfirm(fromTeam, toTeam) {
+  pendingSwitchTeam = toTeam;
+  const box = document.getElementById('account-team-confirm');
+  const title = document.getElementById('account-team-confirm-title');
+  const body = document.getElementById('account-team-confirm-body');
+  title.textContent = `Confirm switch to ${toTeam}?`;
+  body.textContent = `You keep every point you have earned and your check-in streak. The ground you currently hold stays with ${fromTeam} — it does not come with you. You will not be able to switch teams again until ${formatSwitchDate(lastTeamStatus.next_switch_at)}.`;
+  box.hidden = false;
+}
+
+function buildTeamSwitchPicker(currentTeam) {
+  const wrap = document.getElementById('account-team-picker');
+  wrap.replaceChildren();
+  TEAM_ORDER.forEach((team) => {
+    const swatch = document.createElement('button');
+    swatch.type = 'button';
+    swatch.className = 'account-team-swatch';
+    swatch.style.setProperty('--swatch-color', TEAM_COLORS[team]);
+    swatch.textContent = team;
+    if (team === currentTeam) {
+      swatch.disabled = true;
+      swatch.title = 'Your current team';
+    }
+    swatch.addEventListener('click', () => {
+      wrap.querySelectorAll('.account-team-swatch').forEach((b) => b.classList.remove('active'));
+      swatch.classList.add('active');
+      showTeamSwitchConfirm(currentTeam, team);
+    });
+    wrap.appendChild(swatch);
+  });
+}
+
+function handleTeamSwitchBtnClick() {
+  if (!lastTeamStatus || !lastTeamStatus.switch_available) return;
+  clearTeamError();
+  buildTeamSwitchPicker(lastTeamStatus.team);
+  document.getElementById('account-team-confirm').hidden = true;
+  document.getElementById('account-team-picker-wrap').hidden = false;
+}
+
+async function handleTeamSwitchConfirm() {
+  clearTeamError();
+  if (!pendingSwitchTeam) return;
+  const toTeam = pendingSwitchTeam;
+  const confirmBtn = document.getElementById('account-team-confirm-btn');
+  confirmBtn.disabled = true;
+  try {
+    const res = await fetch('/api/team', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team: toTeam }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showTeamError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      if (res.status === 409 && data && typeof data.next_switch_at === 'number') {
+        lastTeamStatus = Object.assign({}, lastTeamStatus, { switch_available: false, next_switch_at: data.next_switch_at });
+        renderTeamSwitchControl();
+      }
+      closeTeamSwitchPicker();
+      return;
+    }
+    renderTeamCurrent(data.team);
+    if (lastAccountData && lastAccountData.player) {
+      lastAccountData = Object.assign({}, lastAccountData, {
+        player: Object.assign({}, lastAccountData.player, { team: data.team }),
+      });
+      renderPlayer(lastAccountData.player);
+    }
+    lastTeamStatus = { team: data.team, switch_available: false, next_switch_at: data.next_switch_at };
+    closeTeamSwitchPicker();
+    renderTeamSwitchControl();
+    loadStats(); // team-scoped figures elsewhere on the page stay in sync
+  } catch (err) {
+    showTeamError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    confirmBtn.disabled = false;
+  }
+}
+
+async function loadTeamStatus() {
+  try {
+    const res = await fetch('/api/team');
+    if (!res.ok) return;
+    const data = await res.json();
+    lastTeamStatus = data;
+    renderTeamCurrent(data.team);
+    renderTeamSwitchControl();
+  } catch (err) {
+    // Quiet -- the rest of the page still works without this section.
+  }
+}
+
+// ============================================================================
+// MY CHECK-IN HISTORY (GET /api/account/checkins)
+// ============================================================================
+
+async function loadCheckins() {
+  const errEl = document.getElementById('account-checkins-error');
+  const resultEl = document.getElementById('account-checkins-result');
+  errEl.hidden = true;
+  try {
+    const res = await fetch('/api/account/checkins');
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      errEl.textContent = (data && data.error) || 'Could not load your check-in history.';
+      errEl.hidden = false;
+      return;
+    }
+    resultEl.replaceChildren();
+    const checkins = data.checkins || [];
+    if (checkins.length === 0) {
+      const note = document.createElement('p');
+      note.className = 'account-hint';
+      note.textContent = 'No check-ins recorded yet.';
+      resultEl.appendChild(note);
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'account-table';
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['Date', 'Board', 'Points', 'Streak'].forEach((h) => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    checkins.forEach((c) => {
+      const tr = document.createElement('tr');
+      [c.net_date, PROTOCOL_LABELS[c.protocol] || c.protocol, c.points, c.streak ?? '—'].forEach((v) => {
+        const td = document.createElement('td');
+        td.textContent = String(v);
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    resultEl.appendChild(table);
+  } catch (err) {
+    errEl.textContent = 'Could not reach the server. Check your connection and try again.';
+    errEl.hidden = false;
+  }
+}
+
+// ============================================================================
+// MY HONORS (GET /api/account/honors)
+// ============================================================================
+
+async function loadHonors() {
+  const errEl = document.getElementById('account-honors-error');
+  const list = document.getElementById('account-honors-list');
+  errEl.hidden = true;
+  try {
+    const res = await fetch('/api/account/honors');
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      errEl.textContent = (data && data.error) || 'Could not load your honors.';
+      errEl.hidden = false;
+      return;
+    }
+    list.replaceChildren();
+    const honors = data.honors || [];
+    if (honors.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'account-honors-empty';
+      li.textContent = 'No honors yet.';
+      list.appendChild(li);
+      return;
+    }
+    honors.forEach((h) => {
+      const li = document.createElement('li');
+      li.className = 'account-honors-item';
+      const title = document.createElement('div');
+      title.className = 'account-identity-name';
+      const strong = document.createElement('strong');
+      strong.textContent = h.label;
+      title.appendChild(strong);
+      li.appendChild(title);
+      const detail = document.createElement('div');
+      detail.className = 'account-identity-detail';
+      detail.textContent = `${formatMonth(h.month)} — ${PROTOCOL_LABELS[h.protocol] || h.protocol}`
+        + (h.detail ? ` — ${h.detail}` : '');
+      li.appendChild(detail);
+      list.appendChild(li);
+    });
+  } catch (err) {
+    errEl.textContent = 'Could not reach the server. Check your connection and try again.';
+    errEl.hidden = false;
+  }
+}
+
+// ============================================================================
+// SECURITY: password (POST/DELETE /api/account/password)
+// ============================================================================
+
+function showPasswordError(message) {
+  const el = document.getElementById('account-password-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearPasswordMessages() {
+  document.getElementById('account-password-error').hidden = true;
+  document.getElementById('account-password-success').hidden = true;
+}
+
+// Reflects whether this account is even eligible to have a password
+// (a verified email identity, per POST /api/account/password's own
+// docstring in app/account_api.py -- exposed to this page as each
+// identity's own email_verified field, GET /api/account) and, if so,
+// whether one is already set (has_password) -- current-password field,
+// button label, and the remove-password option all follow from that.
+function renderPasswordSection(account) {
+  const hint = document.getElementById('account-password-hint');
+  const form = document.getElementById('account-password-form');
+  const currentField = document.getElementById('account-password-current-field');
+  const newLabel = document.getElementById('account-password-new-label');
+  const removeBtn = document.getElementById('account-password-remove-btn');
+
+  const hasVerifiedEmail = (account.identities || []).some((i) => i.email_verified);
+  if (!hasVerifiedEmail) {
+    hint.textContent = 'Link and verify an email sign-in method (from the join page) before setting a password.';
+    form.hidden = true;
+    return;
+  }
+
+  if (account.has_password) {
+    hint.textContent = 'Change or remove your sign-in password.';
+    currentField.hidden = false;
+    newLabel.textContent = 'New password';
+    // Removing the password is refused by the server if this account
+    // has no OTHER door left -- see app/account_api.py's DELETE
+    // /api/account/password docstring. "Other doors" for THIS account
+    // is exactly identities.length, the same door-counting math
+    // _door_counts() runs server-side (each identity row is one door;
+    // has_password's own door is the one being removed here).
+    removeBtn.hidden = (account.identities || []).length < 1;
+  } else {
+    hint.textContent = 'Set a password so you can sign in with an email address, without needing an OAuth provider.';
+    currentField.hidden = true;
+    newLabel.textContent = 'Password';
+    removeBtn.hidden = true;
+  }
+  form.hidden = false;
+}
+
+async function handlePasswordSubmit(e) {
+  e.preventDefault();
+  clearPasswordMessages();
+
+  const newPasswordInput = document.getElementById('f-account-new-password');
+  const currentPasswordInput = document.getElementById('f-account-current-password');
+  const newPassword = newPasswordInput.value;
+  if (!newPassword) {
+    showPasswordError('Enter a password.');
+    return;
+  }
+
+  const body = { new_password: newPassword };
+  const currentField = document.getElementById('account-password-current-field');
+  if (!currentField.hidden) {
+    if (!currentPasswordInput.value) {
+      showPasswordError('Enter your current password.');
+      return;
+    }
+    body.current_password = currentPasswordInput.value;
+  }
+
+  const submitBtn = document.getElementById('account-password-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/account/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showPasswordError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      return;
+    }
+    newPasswordInput.value = '';
+    currentPasswordInput.value = '';
+    const successEl = document.getElementById('account-password-success');
+    successEl.textContent = 'Password saved.';
+    successEl.hidden = false;
+    await refreshAccountCore();
+  } catch (err) {
+    showPasswordError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function handlePasswordRemove() {
+  clearPasswordMessages();
+  const btn = document.getElementById('account-password-remove-btn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/account/password', { method: 'DELETE' });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showPasswordError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      return;
+    }
+    const successEl = document.getElementById('account-password-success');
+    successEl.textContent = data.warning_last_door
+      ? 'Password removed. This account now has only one way to sign in.'
+      : 'Password removed.';
+    successEl.hidden = false;
+    await refreshAccountCore();
+  } catch (err) {
+    showPasswordError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ============================================================================
+// SECURITY: contact email (POST /api/account/contact-email)
+// ============================================================================
+
+function renderContactEmail(contactEmail) {
+  const current = document.getElementById('account-contact-email-current');
+  if (!contactEmail) {
+    current.textContent = 'No contact email set.';
+    return;
+  }
+  current.textContent = contactEmail.verified
+    ? `${contactEmail.email} — verified.`
+    : `${contactEmail.email} — not verified yet. Check your inbox for the verification link, or save again to resend it.`;
+}
+
+function showContactEmailError(message) {
+  const el = document.getElementById('account-contact-email-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+async function handleContactEmailSubmit(e) {
+  e.preventDefault();
+  const el = document.getElementById('account-contact-email-error');
+  el.hidden = true;
+
+  const input = document.getElementById('f-account-contact-email');
+  const email = input.value.trim();
+  if (!email) {
+    showContactEmailError('Enter an email address.');
+    return;
+  }
+
+  const submitBtn = document.getElementById('account-contact-email-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/account/contact-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (res.status === 404) {
+      showContactEmailError('Email isn’t configured on this deployment, so a contact address can’t be verified.');
+      return;
+    }
+    if (!res.ok) {
+      showContactEmailError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      return;
+    }
+    input.value = '';
+    renderContactEmail({ email: data.email, verified: data.verified });
+  } catch (err) {
+    showContactEmailError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+// ============================================================================
+// SECURITY: API key rotation (POST /api/account/rotate-key)
+// ============================================================================
+
+function showRotateKeyError(message) {
+  const el = document.getElementById('account-rotate-key-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function handleRotateKeyBtnClick() {
+  document.getElementById('account-rotate-key-error').hidden = true;
+  document.getElementById('account-rotate-key-confirm').hidden = false;
+}
+
+function handleRotateKeyCancel() {
+  document.getElementById('account-rotate-key-confirm').hidden = true;
+}
+
+async function handleRotateKeyConfirm() {
+  const errEl = document.getElementById('account-rotate-key-error');
+  errEl.hidden = true;
+  const confirmBtn = document.getElementById('account-rotate-key-confirm-btn');
+  confirmBtn.disabled = true;
+  try {
+    const res = await fetch('/api/account/rotate-key', { method: 'POST' });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showRotateKeyError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      return;
+    }
+    document.getElementById('account-rotate-key-confirm').hidden = true;
+    const resultEl = document.getElementById('account-rotate-key-result');
+    resultEl.replaceChildren();
+
+    const warning = document.createElement('div');
+    warning.className = 'account-warning-box account-warning-box-strong';
+    const strong = document.createElement('strong');
+    strong.textContent = 'Copy this key now — this is the only time it will ever be shown.';
+    warning.appendChild(strong);
+    warning.appendChild(document.createTextNode(
+      ' Closing or reloading this page loses it for good. MeshWars stores only a one-way hash of your key, '
+      + 'never the key itself, so there is no way for anyone, including an admin, to look it back up. The only '
+      + 'fix for a lost key is another rotation, which retires this one too. Your old key stopped working the '
+      + 'instant this one was issued — paste this into MeshMapper’s Settings, then API Endpoints, then API '
+      + 'Key, before you do anything else.',
+    ));
+    resultEl.appendChild(warning);
+    resultEl.appendChild(buildCopyRow(data.key));
+    resultEl.hidden = false;
+  } catch (err) {
+    showRotateKeyError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    confirmBtn.disabled = false;
+  }
+}
+
+// ============================================================================
+// Load every player-scoped section -- called once a linked player is
+// confirmed (loadAccount() on boot, or right after a successful
+// connect-by-key). Each of these is independent and fails quietly on
+// its own (see each load* function above) so one slow or broken
+// section never blocks the rest of the page from populating.
+// ============================================================================
+
+function loadPlayerSections() {
+  loadRadios();
+  loadCheckinName();
+  loadStats();
+  loadTeamStatus();
+  loadCheckins();
+  loadHonors();
+}
+
 // ---- Completing a pending link (GET /api/account/pending + POST
 // /api/account/pending/link) ------------------------------------------
 //
@@ -354,6 +1628,27 @@ async function maybeCompletePendingLink() {
     banner.hidden = false;
   } catch (err) {
     // Offline -- leave it for the next page load to try again.
+  }
+}
+
+// Re-fetches GET /api/account and re-renders every section it alone
+// drives (identities, password eligibility, contact email, sessions) --
+// called after any Security-panel mutation (identity unlink, password
+// set/remove) so those panels can never drift from what the server
+// actually holds. Deliberately does NOT touch player/team/stats/etc.:
+// none of those can be affected by a Security-panel action.
+async function refreshAccountCore() {
+  try {
+    const res = await fetch('/api/account');
+    if (!res.ok) return;
+    const data = await res.json();
+    lastAccountData = data;
+    renderIdentities(data.identities);
+    renderSessions(data.sessions);
+    renderPasswordSection(data);
+    renderContactEmail(data.contact_email);
+  } catch (err) {
+    // Leave whatever was already rendered in place.
   }
 }
 
@@ -394,9 +1689,16 @@ async function loadAccount() {
     // Keep the original response.
   }
 
+  lastAccountData = finalData;
   renderIdentities(finalData.identities);
   renderPlayer(finalData.player);
   renderSessions(finalData.sessions);
+  renderPasswordSection(finalData);
+  renderContactEmail(finalData.contact_email);
+
+  const hasPlayer = !!finalData.player;
+  applyPlayerGate(hasPlayer);
+  if (hasPlayer) loadPlayerSections();
 }
 
 function boot() {
@@ -409,6 +1711,26 @@ function boot() {
     sentEl: document.getElementById('account-signin-email-sent'),
     submitBtn: document.querySelector('#account-signin-email-form .signin-email-submit-btn'),
   });
+
+  setupAddRadioProtocolToggle();
+  document.getElementById('account-add-radio-form').addEventListener('submit', handleAddRadioSubmit);
+  document.getElementById('account-status-check-btn').addEventListener('click', handleStatusCheck);
+  document.getElementById('account-checkin-health-btn').addEventListener('click', handleCheckinHealthCheck);
+  document.getElementById('account-checkin-name-form').addEventListener('submit', handleCheckinNameSubmit);
+  document.getElementById('account-checkin-name-remove').addEventListener('click', handleCheckinNameRemove);
+
+  document.getElementById('account-team-switch-btn').addEventListener('click', handleTeamSwitchBtnClick);
+  document.getElementById('account-team-confirm-btn').addEventListener('click', handleTeamSwitchConfirm);
+  document.getElementById('account-team-cancel-btn').addEventListener('click', closeTeamSwitchPicker);
+
+  document.getElementById('account-password-form').addEventListener('submit', handlePasswordSubmit);
+  document.getElementById('account-password-remove-btn').addEventListener('click', handlePasswordRemove);
+  document.getElementById('account-contact-email-form').addEventListener('submit', handleContactEmailSubmit);
+
+  document.getElementById('account-rotate-key-btn').addEventListener('click', handleRotateKeyBtnClick);
+  document.getElementById('account-rotate-key-cancel-btn').addEventListener('click', handleRotateKeyCancel);
+  document.getElementById('account-rotate-key-confirm-btn').addEventListener('click', handleRotateKeyConfirm);
+
   loadAccount();
 }
 

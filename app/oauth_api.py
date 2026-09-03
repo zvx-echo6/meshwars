@@ -177,6 +177,15 @@ _PENDING_COOKIE_NAME = "mw_pending_token"
 _ACCOUNT_PAGE_PATH = "/account"
 _LINK_PAGE_PATH = "/link"
 _JOIN_PAGE_PATH = "/join"
+# Landing page for GET /auth/contact-email/verify below -- a small,
+# standalone confirmation screen (frontend/verify-email.html), same
+# reasoning as _LINK_PAGE_PATH: the mailed link needs no session to
+# work (a person may click it from a different browser/device than the
+# one they are signed in on), so redirecting straight to /account would
+# just show that page's own sign-in panel with no confirmation at all
+# on a device with no session. ?ok=1/?ok=0 on the query string tells
+# that page which message to show -- see contact_email_verify() below.
+_VERIFY_EMAIL_PAGE_PATH = "/account/verify-email"
 
 
 def _set_flow_cookies(response: Response, *, state: str, code_verifier: str) -> None:
@@ -946,7 +955,7 @@ async def password_start(request: Request) -> JSONResponse:
 # ---- contact-email verification --------------------------------------
 
 @router.get("/auth/contact-email/verify")
-async def contact_email_verify(request: Request) -> JSONResponse:
+async def contact_email_verify(request: Request) -> Response:
     """Redeems a single-use token from app/db.py's
     account_contact_email_token (app/account_api.py's POST
     /api/account/contact-email mails the link this route is reached
@@ -966,10 +975,20 @@ async def contact_email_verify(request: Request) -> JSONResponse:
     session, if any) -- it does not create a session, does not log
     anyone in, and does not touch account_identity. See the case-3
     matching query's own comment above for why that separation matters.
+
+    Sends a real browser to a small confirmation page
+    (_VERIFY_EMAIL_PAGE_PATH) rather than a raw JSON body, the same
+    "old machine-shaped body only on request" treatment
+    oauth_callback/email_callback already give their own callbacks --
+    see _wants_json's own docstring for exactly who ?format=json is
+    for. The outcome (verified or not) travels as a plain ?ok=1/?ok=0
+    query param, never anything sensitive: there is no token, account
+    id, or address on this URL, only the same yes/no this route always
+    computed.
     """
     raw_token = request.query_params.get("token")
     if not raw_token:
-        return JSONResponse({"error": "invalid or expired verification link"}, status_code=400)
+        return _contact_email_verify_response(request, verified=False, status_code=400)
 
     now = int(time.time())
     token_hash = hash_secret(raw_token)
@@ -980,9 +999,7 @@ async def contact_email_verify(request: Request) -> JSONResponse:
             (token_hash,),
         ).fetchone()
         if row is None or row["consumed_at"] is not None or row["expires_at"] <= now:
-            return JSONResponse(
-                {"error": "invalid or expired verification link"}, status_code=400
-            )
+            return _contact_email_verify_response(request, verified=False, status_code=400)
 
         conn.execute(
             "UPDATE account_contact_email_token SET consumed_at = ? WHERE token_hash = ?",
@@ -1007,7 +1024,24 @@ async def contact_email_verify(request: Request) -> JSONResponse:
             )
             verified = True
 
-    return JSONResponse({"verified": verified}, status_code=200)
+    return _contact_email_verify_response(request, verified=verified, status_code=200)
+
+
+def _contact_email_verify_response(request: Request, *, verified: bool, status_code: int) -> Response:
+    """Shapes contact_email_verify()'s outcome for whichever caller
+    asked for it -- see _wants_json's own docstring. The JSON shape and
+    status code are exactly what this route always returned; the
+    redirect shape is new (see contact_email_verify()'s own docstring).
+    """
+    if _wants_json(request):
+        return JSONResponse(
+            {"verified": verified}
+            if status_code == 200
+            else {"error": "invalid or expired verification link"},
+            status_code=status_code,
+        )
+    ok = "1" if verified else "0"
+    return RedirectResponse(f"{_VERIFY_EMAIL_PAGE_PATH}?ok={ok}", status_code=302)
 
 
 @router.get("/auth/{provider}/start")

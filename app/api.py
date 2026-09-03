@@ -1019,6 +1019,16 @@ def mount(app: FastAPI) -> None:
         async def link_page(request: Request):
             return _templated_html_page(request, frontend_dir / "link.html", "link page not bundled")
 
+        # The confirmation screen GET /auth/contact-email/verify
+        # (app/oauth_api.py) redirects a real browser to once it has
+        # redeemed (or failed to redeem) a mailed verification link --
+        # ?ok=1/?ok=0 on the query string, read client-side by
+        # frontend/verify-email.js. Not in the nav; reached only by that
+        # redirect, same as /link above.
+        @app.get("/account/verify-email", response_class=HTMLResponse, include_in_schema=False)
+        async def verify_email_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "verify-email.html", "verify-email page not bundled")
+
         @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
         async def about_page(request: Request):
             return _templated_html_page(request, frontend_dir / "about.html", "about page not bundled")

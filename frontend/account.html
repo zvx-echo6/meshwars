@@ -36,7 +36,7 @@
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260903-2" />
+  <link rel="stylesheet" href="/static/account.css?v=20260903-3" />
 </head>
 <body>
 
@@ -99,12 +99,11 @@
            implicit in the identities list below. -->
       <div id="account-linked-banner" class="account-banner" hidden></div>
 
-      <section class="account-panel">
-        <div class="account-title">Sign-in methods</div>
-        <p class="account-hint">Each of these is an independent way into this same account — add another any time from the join page.</p>
-        <ul id="account-identities" class="account-identities"></ul>
-      </section>
-
+      <!-- ===================================================================
+           PLAYER. First, always -- everything below either depends on a
+           linked player existing (the two gated groups further down) or
+           doesn't care (Security). This is the one panel that decides
+           which of those two states the rest of the page is in. -->
       <section class="account-panel">
         <div class="account-title">Player</div>
         <div id="account-player-linked" hidden>
@@ -125,6 +124,200 @@
         </div>
       </section>
 
+      <!-- Shown only when no player is linked (account-player-unlinked
+           above), in place of the two player-scoped groups below --
+           account.js's applyPlayerGate() toggles this against
+           #account-player-groups as a pair, never both visible at once. -->
+      <p id="account-no-player-note" class="account-hint account-group-note" hidden>
+        Radios, troubleshooting, check-ins, team, and stats appear here once a player is connected above.
+      </p>
+
+      <div id="account-player-groups" hidden>
+
+        <!-- =================================================================
+             RADIOS &amp; TROUBLESHOOTING. The operational cluster: is your
+             gear registered, is it actually reaching MeshWars, and if a
+             MeshCore check-in isn't landing, why not. Ordered as a debug
+             narrative -- see what's registered, run the full diagnostic,
+             drill into check-ins specifically, then the fix for that. -->
+        <h2 class="account-group-title">Radios &amp; troubleshooting</h2>
+
+        <section class="account-panel">
+          <div class="account-title">My radios</div>
+          <p class="account-hint">Every radio bound to your player, on either protocol. Meshtastic radios have to be registered here; MeshCore ones usually bind themselves the first time you wardrive with MeshMapper's Include Contact Key setting on.</p>
+          <ul id="account-radios-list" class="account-radios-list"></ul>
+          <div id="account-radios-error" class="account-error" role="alert" hidden></div>
+          <form id="account-add-radio-form" class="account-add-radio-form" novalidate autocomplete="off">
+            <div class="account-add-radio-row">
+              <label class="account-field account-field-compact">
+                <span>Protocol</span>
+                <select id="f-account-add-protocol">
+                  <option value="mt" selected>Meshtastic</option>
+                  <option value="mc">MeshCore</option>
+                </select>
+              </label>
+              <label class="account-field account-field-grow">
+                <span>Node ID</span>
+                <input type="text" id="f-account-add-node-ref" placeholder="!a1b2c3d4 (Meshtastic) or cddb2304 (MeshCore)" autocomplete="off" />
+              </label>
+            </div>
+            <label class="account-field" id="account-add-public-key-field">
+              <span>Public key (optional)</span>
+              <input type="text" id="f-account-add-public-key" placeholder="64 hex characters — leave blank and we'll fill it in when we see it" autocomplete="off" />
+            </label>
+            <button type="submit" id="account-add-radio-submit">Add radio</button>
+          </form>
+        </section>
+
+        <section class="account-panel">
+          <div class="account-title">Troubleshooting / setup check</div>
+          <p class="account-hint">Checks whether MeshWars is actually receiving anything from your radios, and tells you what's wrong if it isn't. You're signed in, so this runs without needing to paste your API key.</p>
+          <button type="button" id="account-status-check-btn">Check now</button>
+          <div id="account-status-error" class="account-error" role="alert" hidden></div>
+          <div id="account-status-result" class="account-status-result" hidden></div>
+        </section>
+
+        <section class="account-panel">
+          <div class="account-title">Why my check-ins may not be counting</div>
+          <p class="account-hint">Looks at each bound MeshCore contact and says exactly why it does or doesn't resolve to you right now.</p>
+          <button type="button" id="account-checkin-health-btn">Check now</button>
+          <div id="account-checkin-health-error" class="account-error" role="alert" hidden></div>
+          <div id="account-checkin-health-result" class="account-checkin-health-result" hidden></div>
+        </section>
+
+        <section class="account-panel">
+          <div class="account-title">My check-in name</div>
+          <p class="account-hint">A last-resort fallback: if none of your bound contacts resolve automatically, register the exact name your check-ins post under so you keep earning credit while the directory catches up.</p>
+          <p id="account-checkin-name-current" class="account-hint"></p>
+          <div id="account-checkin-name-error" class="account-error" role="alert" hidden></div>
+          <form id="account-checkin-name-form" class="account-checkin-name-form" novalidate autocomplete="off">
+            <label class="account-field account-field-grow">
+              <span>Fallback check-in name</span>
+              <input type="text" id="f-account-checkin-name" autocomplete="off" />
+            </label>
+            <div class="account-checkin-name-actions">
+              <button type="submit" id="account-checkin-name-save">Save</button>
+              <button type="button" id="account-checkin-name-remove" hidden>Remove</button>
+            </div>
+          </form>
+        </section>
+
+        <!-- =================================================================
+             PLAY. The status/payoff cluster -- headline numbers first,
+             then the one dial a player can turn (team), then the two
+             read-only records (history, then honors). -->
+        <h2 class="account-group-title">Play</h2>
+
+        <section class="account-panel">
+          <div class="account-title">My stats</div>
+          <div id="account-stats-error" class="account-error" role="alert" hidden></div>
+          <div id="account-stats-result" class="account-stats-result"></div>
+        </section>
+
+        <section class="account-panel">
+          <div class="account-title">My team</div>
+          <p id="account-team-current" class="account-player-line"></p>
+          <p id="account-team-locked-hint" class="account-hint" hidden></p>
+          <div id="account-team-error" class="account-error" role="alert" hidden></div>
+          <button type="button" id="account-team-switch-btn" hidden>Switch team</button>
+          <div id="account-team-picker-wrap" class="account-team-picker-wrap" hidden>
+            <p class="account-hint">Pick a different team.</p>
+            <div id="account-team-picker" class="account-team-picker"></div>
+            <div id="account-team-confirm" class="account-team-confirm" hidden>
+              <div class="account-warning-box">
+                <strong id="account-team-confirm-title"></strong>
+                <span id="account-team-confirm-body"></span>
+              </div>
+              <div class="account-confirm-actions">
+                <button type="button" id="account-team-confirm-btn">Confirm switch</button>
+                <button type="button" id="account-team-cancel-btn" class="account-link-btn">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="account-panel">
+          <div class="account-title">My check-in history</div>
+          <div id="account-checkins-error" class="account-error" role="alert" hidden></div>
+          <div id="account-checkins-result"></div>
+        </section>
+
+        <section class="account-panel">
+          <div class="account-title">My honors</div>
+          <div id="account-honors-error" class="account-error" role="alert" hidden></div>
+          <ul id="account-honors-list" class="account-honors-list"></ul>
+        </section>
+
+      </div>
+
+      <!-- ===================================================================
+           SECURITY. Account hygiene -- necessary, but the least frequently
+           visited part of this page, so it goes last. Ways in first
+           (sign-in methods, password), then contact email (recovery),
+           then the API key (the machine credential), then sessions (active
+           logins) at the very end, same as before this page grew. -->
+      <h2 class="account-group-title">Security</h2>
+
+      <section class="account-panel">
+        <div class="account-title">Sign-in methods</div>
+        <p class="account-hint">Each of these is an independent way into this same account — add another any time from the join page.</p>
+        <div id="account-identities-error" class="account-error" role="alert" hidden></div>
+        <ul id="account-identities" class="account-identities"></ul>
+      </section>
+
+      <section class="account-panel">
+        <div class="account-title">Password</div>
+        <p id="account-password-hint" class="account-hint"></p>
+        <div id="account-password-error" class="account-error" role="alert" hidden></div>
+        <div id="account-password-success" class="account-hint" hidden></div>
+        <form id="account-password-form" class="account-password-form" novalidate hidden>
+          <label class="account-field" id="account-password-current-field" hidden>
+            <span>Current password</span>
+            <input type="password" id="f-account-current-password" autocomplete="current-password" />
+          </label>
+          <label class="account-field">
+            <span id="account-password-new-label">New password</span>
+            <input type="password" id="f-account-new-password" autocomplete="new-password" />
+          </label>
+          <div class="account-password-actions">
+            <button type="submit" id="account-password-submit">Save</button>
+            <button type="button" id="account-password-remove-btn" hidden>Remove password</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="account-panel">
+        <div class="account-title">Contact email</div>
+        <p class="account-hint">A recovery address MeshWars can reach you at — separate from any sign-in method, and never usable to sign in on its own.</p>
+        <p id="account-contact-email-current" class="account-hint"></p>
+        <div id="account-contact-email-error" class="account-error" role="alert" hidden></div>
+        <form id="account-contact-email-form" class="account-contact-email-form" novalidate autocomplete="off">
+          <label class="account-field account-field-grow">
+            <span>Email</span>
+            <input type="email" id="f-account-contact-email" autocomplete="email" />
+          </label>
+          <button type="submit" id="account-contact-email-submit">Save and send verification link</button>
+        </form>
+      </section>
+
+      <section id="account-key-panel" class="account-panel" hidden>
+        <div class="account-title">API key</div>
+        <p class="account-hint">Rotating your key immediately breaks anything still using the old one — including MeshMapper. You will need to paste the new key into MeshMapper's Settings, then API Endpoints, before wardriving works again.</p>
+        <div id="account-rotate-key-error" class="account-error" role="alert" hidden></div>
+        <button type="button" id="account-rotate-key-btn">Rotate key</button>
+        <div id="account-rotate-key-confirm" class="account-rotate-key-confirm" hidden>
+          <div class="account-warning-box account-warning-box-strong">
+            <strong>This revokes your current key the instant it finishes.</strong>
+            Anything still using it — most likely MeshMapper — stops working immediately, until you paste in the new one below. This cannot be undone.
+          </div>
+          <div class="account-confirm-actions">
+            <button type="button" id="account-rotate-key-confirm-btn">Yes, rotate my key</button>
+            <button type="button" id="account-rotate-key-cancel-btn" class="account-link-btn">Cancel</button>
+          </div>
+        </div>
+        <div id="account-rotate-key-result" class="account-rotate-key-result" hidden></div>
+      </section>
+
       <section class="account-panel">
         <div class="account-title">Sessions</div>
         <p class="account-hint">Every device currently signed in to this account.</p>
@@ -140,7 +333,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260903-2" type="module"></script>
+  <script src="/static/account.js?v=20260903-3" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

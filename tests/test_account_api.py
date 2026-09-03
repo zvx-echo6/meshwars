@@ -199,6 +199,7 @@ def test_get_account_masks_identity_emails(client, db_path):
     assert identity["provider"] == "google"
     assert identity["email"] == "j***@example.com"
     assert "jdoe" not in identity["email"]
+    assert identity["email_verified"] is True
 
 
 # ---- POST /api/account/link-key -------------------------------------------

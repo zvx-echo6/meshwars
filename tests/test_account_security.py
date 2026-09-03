@@ -756,7 +756,7 @@ def test_contact_email_verify_marks_it_verified(client, db_path, monkeypatch):
     link_url = calls[0][1]
     raw_token = link_url.split("token=", 1)[1]
 
-    resp = client.get("/auth/contact-email/verify", params={"token": raw_token})
+    resp = client.get("/auth/contact-email/verify", params={"token": raw_token, "format": "json"})
 
     assert resp.status_code == 200
     assert resp.json()["verified"] is True
@@ -779,7 +779,7 @@ def test_contact_email_verify_stale_link_does_not_verify_a_changed_address(clien
     # Address changed again before the first link was ever clicked.
     client.post("/api/account/contact-email", json={"email": "new@example.com"})
 
-    resp = client.get("/auth/contact-email/verify", params={"token": stale_token})
+    resp = client.get("/auth/contact-email/verify", params={"token": stale_token, "format": "json"})
 
     assert resp.status_code == 200
     assert resp.json()["verified"] is False
@@ -794,7 +794,9 @@ def test_contact_email_verify_stale_link_does_not_verify_a_changed_address(clien
 
 def test_contact_email_verify_unknown_token_is_an_error(client, db_path, monkeypatch):
     _enable_email(monkeypatch)
-    resp = client.get("/auth/contact-email/verify", params={"token": "never-issued"})
+    resp = client.get(
+        "/auth/contact-email/verify", params={"token": "never-issued", "format": "json"}
+    )
     assert resp.status_code == 400
 
 
@@ -809,7 +811,7 @@ def test_contact_email_verify_does_not_require_a_session(client, db_path, monkey
     raw_token = link_url.split("token=", 1)[1]
 
     client.cookies.clear()  # no session at all for the verify request
-    resp = client.get("/auth/contact-email/verify", params={"token": raw_token})
+    resp = client.get("/auth/contact-email/verify", params={"token": raw_token, "format": "json"})
 
     assert resp.status_code == 200
     assert resp.json()["verified"] is True
@@ -833,7 +835,9 @@ def test_verified_contact_email_does_not_auto_link_a_new_provider_identity(clien
     account_id, _ = _login(client, db_path)
     client.post("/api/account/contact-email", json={"email": "shared@example.com"})
     raw_token = calls[0][1].split("token=", 1)[1]
-    verify_resp = client.get("/auth/contact-email/verify", params={"token": raw_token})
+    verify_resp = client.get(
+        "/auth/contact-email/verify", params={"token": raw_token, "format": "json"}
+    )
     assert verify_resp.json()["verified"] is True
 
     conn = sqlite3.connect(db_path)
@@ -851,3 +855,46 @@ def test_verified_contact_email_does_not_auto_link_a_new_provider_identity(clien
 
     assert outcome["case"] == "pending"
     assert outcome.get("account_id") != account_id
+
+
+# =========================================================================
+# GET /auth/contact-email/verify -- the default BROWSER (redirect) shape,
+# as opposed to the `?format=json` coverage above. Same fixtures/helpers;
+# every request here is made WITHOUT format=json and WITH
+# follow_redirects=False, mirroring tests/test_oauth_api.py's own "Part 4"
+# redirect coverage of GET /auth/{provider}/callback.
+# =========================================================================
+
+def test_contact_email_verify_redirect_on_success(client, db_path, monkeypatch):
+    _enable_email(monkeypatch)
+    calls = _stub_send(monkeypatch)
+    _login(client, db_path)
+    client.post("/api/account/contact-email", json={"email": "me@example.com"})
+    raw_token = calls[0][1].split("token=", 1)[1]
+
+    resp = client.get(
+        "/auth/contact-email/verify", params={"token": raw_token}, follow_redirects=False
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/account/verify-email?ok=1"
+
+
+def test_contact_email_verify_redirect_on_unknown_token(client, db_path, monkeypatch):
+    _enable_email(monkeypatch)
+
+    resp = client.get(
+        "/auth/contact-email/verify", params={"token": "never-issued"}, follow_redirects=False
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/account/verify-email?ok=0"
+
+
+def test_contact_email_verify_redirect_on_missing_token(client, db_path, monkeypatch):
+    _enable_email(monkeypatch)
+
+    resp = client.get("/auth/contact-email/verify", follow_redirects=False)
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/account/verify-email?ok=0"

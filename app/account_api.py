@@ -224,7 +224,7 @@ def _door_counts(conn, account_id: int) -> tuple[dict[str, int], bool]:
 
 def _identities_out(conn, account_id: int) -> list[dict]:
     rows = conn.execute(
-        "SELECT provider, email, linked_at, last_login_at "
+        "SELECT provider, email, email_verified, linked_at, last_login_at "
         "  FROM account_identity WHERE account_id = ? ORDER BY linked_at",
         (account_id,),
     ).fetchall()
@@ -234,6 +234,16 @@ def _identities_out(conn, account_id: int) -> list[dict]:
         {
             "provider": r["provider"],
             "email": _mask_email(r["email"]),
+            # Whether THIS identity's address is provider-verified --
+            # never the raw address, same masking reasoning _mask_email()
+            # gives, but the boolean itself is safe to expose as-is. The
+            # one thing this is FOR: POST /api/account/password refuses
+            # to set a password unless at least one identity on the
+            # account has email_verified = 1 (see that route's own
+            # docstring) -- without this field there is no way for a
+            # client to know in advance whether that form should even be
+            # offered, short of submitting it and reading the error.
+            "email_verified": bool(r["email_verified"]),
             "linked_at": r["linked_at"],
             "last_login_at": r["last_login_at"],
             # Removing THIS identity means removing every row that
