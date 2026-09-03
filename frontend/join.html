@@ -60,7 +60,7 @@
       "name": "MeshWars",
       "codeRepository": "https://github.com/zvx-echo6/meshwars",
       "programmingLanguage": "Python",
-      "license": "https://opensource.org/licenses/MIT"
+      "license": "https://www.gnu.org/licenses/agpl-3.0.html"
     }
   }
   </script>
@@ -71,7 +71,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/join.css?v=20260903-1" />
+  <link rel="stylesheet" href="/static/join.css?v=20260903-2" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -206,7 +206,7 @@
                   <span>Find your node (optional)</span>
                   <input type="text" id="f-mc-node-search" placeholder="Type a name to search" autocomplete="off" />
                 </label>
-                <p class="hint">Matched against the <a href="https://mwmesh.com/" target="_blank" rel="noopener noreferrer">mwmesh.com</a> directory this board already uses to resolve check-ins. Don't see your node? <button type="button" class="link-btn" id="mc-node-manual-link">Enter its ID by hand instead.</button></p>
+                <p class="hint">Matched against the same directory this board already uses to resolve check-ins. Don't see your node? <button type="button" class="link-btn" id="mc-node-manual-link">Enter its ID by hand instead.</button></p>
                 <ul class="node-picker-results" id="mc-node-picker-results" hidden></ul>
                 <p class="hint node-picker-status" id="mc-node-picker-status" hidden></p>
               </div>
@@ -317,10 +317,9 @@
              This is the ONE place both protocols' copy lives -- edit the <li>
              text directly below rather than hunting elsewhere on the page.
 
-             Owner TODO: the two Meshtastic steps marked below still need the
-             exact Meshtastic app menu path (Radio Configuration -> Channels,
-             as best understood while writing this) and the FREQ51 wording
-             confirmed before this goes live.
+             Owner TODO: none outstanding -- the Meshtastic steps below now
+             point at FreqMapper's own help site rather than trying to
+             restate its in-app menu paths ourselves.
              ===================================================================== -->
 
         <li class="proto-step-mc">
@@ -383,21 +382,23 @@
              a separate step here -- same reasoning as the MeshCore step
              just above: real information, not a numbered step. -->
         <li class="proto-step-mt" hidden>
-          <p class="join-flow-label">In the Meshtastic app, under Radio Configuration &rarr; LoRa, turn on <strong>OK to MQTT</strong>. Without it no gateway will forward your packets and MeshWars will never see you.</p>
+          <p class="join-flow-label">Install <a href="https://help.freqmapper.net/" target="_blank" rel="noopener noreferrer">FreqMapper</a> -- iOS through its TestFlight beta, Android from the APK at <a href="https://dev.freqmapper.net" target="_blank" rel="noopener noreferrer">dev.freqmapper.net</a>. This is a separate app from Meshtastic; registering your node above does not install it for you.</p>
         </li>
 
         <li class="proto-step-mt" hidden>
-          <p class="join-flow-label">Under Radio Configuration &rarr; Position, make sure GPS is enabled and your node is broadcasting its position.</p>
+          <p class="join-flow-label">Enroll in a mapping region using an enrollment key from a region administrator -- see <a href="https://help.freqmapper.net/join-a-mapping-region/" target="_blank" rel="noopener noreferrer">FreqMapper's enrollment guide</a> for how to get one.</p>
         </li>
 
         <li class="proto-step-mt" hidden>
-          <!-- Owner TODO: confirm this is the right screen/menu path. -->
-          <p class="join-flow-label">Under Channels, on your primary channel, set position precision to full. If it is reduced, your position gets rounded off and you will paint the wrong square, or none at all.</p>
+          <p class="join-flow-label">In FreqMapper's Radio tab, connect your Meshtastic radio over Bluetooth and let it fully sync before applying the enrollment key.</p>
+        </li>
+
+        <li class="proto-step-mt join-step-critical" hidden>
+          <p><strong>Set up the shared wardriving channel</strong> once your key is applied and the radio shows connected -- FreqMapper adds this on an open secondary channel slot without touching any channel you already have.</p>
         </li>
 
         <li class="proto-step-mt" hidden>
-          <!-- Owner TODO: confirm the FREQ51 wording/gateway name is still correct. -->
-          <p class="join-flow-label">Make sure you are on FREQ51, so a gateway that feeds meshview can actually hear you.</p>
+          <p class="join-flow-label">Before your first trip, confirm FreqMapper shows both your radio and your location as ready -- see <a href="https://help.freqmapper.net/first-mapping-trip/" target="_blank" rel="noopener noreferrer">FreqMapper's first-mapping-trip guide</a>. Full setup details for both platforms are on FreqMapper's own <a href="https://help.freqmapper.net/getting-started/" target="_blank" rel="noopener noreferrer">Getting Started</a> page.</p>
         </li>
 
       </ol>
@@ -419,9 +420,9 @@
       </div>
 
       <div id="working-check-mt" class="protocol-block" hidden>
-        <p>Nothing is pushed to MeshWars at all. MeshWars polls meshview every 45 seconds and picks you up whenever your node broadcasts a position that a feeder hears — there is no session to start or batch to send.</p>
-        <p>Squares are only claimed where a feeder hears your node's position. If you're somewhere with no feeder coverage, your position is never reported to meshview in the first place, so nothing gets claimed — that is normal, not a fault.</p>
-        <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last picked up your node from meshview, how many squares you hold, and what is wrong if anything is.</p>
+        <p>Nothing is pushed to MeshWars at all. MeshWars reads coverage from FreqMapper and picks up your node whenever it's heard somewhere FreqMapper covers — there is no session to start or batch to send.</p>
+        <p>Squares are only claimed inside that coverage. Outside it, a correctly configured radio paints nothing and nothing will tell you why — that's a coverage gap, not a fault, and it's the first thing to check if you've followed every setup step and still see no movement. See the <a href="/about">About page</a> for where the game currently reaches.</p>
+        <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last picked up your node, how many squares you hold, and what is wrong if anything is.</p>
         <p>Lost your key? Nothing on a Meshtastic radio or in the Meshtastic app ever stores it &mdash; ask an operator for a new one.</p>
       </div>
     </section>
@@ -433,14 +434,14 @@
       <!-- Protocol-aware, same toggle as the join-flow steps above
            (join.js's setupProtocolToggle()) -- MeshCore's app pushes to
            us, so "receiving from your app" is honest for it, but nothing
-           is ever sent to us from a Meshtastic node; we pull from
-           meshview instead, so that wording would be false for it. Each
-           also ends with where to find a lost key -- MeshCore's lives in
-           MeshMapper and can be read back; Meshtastic has no such
-           fallback, so that copy is honest about needing an operator
+           is ever sent to us from a Meshtastic node; we read coverage
+           from FreqMapper instead, so that wording would be false for it.
+           Each also ends with where to find a lost key -- MeshCore's
+           lives in MeshMapper and can be read back; Meshtastic has no
+           such fallback, so that copy is honest about needing an operator
            instead, never a pointer to MeshMapper it doesn't run. -->
       <p id="status-hint-mc" class="hint">Paste your API key to see whether MeshWars is receiving anything from your app. Lost it? It's saved in MeshMapper under Settings &rarr; API Endpoints &rarr; API Key.</p>
-      <p id="status-hint-mt" class="hint" hidden>Paste your API key to see when MeshWars last picked up your node from meshview, how many squares you hold, and what is wrong if anything is — nothing is sent to us directly. Lost it? Nothing on your radio ever stored it — ask an operator for a new one.</p>
+      <p id="status-hint-mt" class="hint" hidden>Paste your API key to see when MeshWars last picked up your node, how many squares you hold, and what is wrong if anything is — nothing is sent to us directly. Lost it? Nothing on your radio ever stored it — ask an operator for a new one.</p>
 
       <form id="status-form" novalidate autocomplete="off">
         <div id="status-error" class="join-error" role="alert" hidden></div>
@@ -558,7 +559,7 @@
                 <span>Find your node</span>
                 <input type="text" id="f-add-mc-node-search" placeholder="Type a name to search" autocomplete="off" />
               </label>
-              <p class="hint">Matched against the <a href="https://mwmesh.com/" target="_blank" rel="noopener noreferrer">mwmesh.com</a> directory this board already uses to resolve check-ins. Don't see your node? <button type="button" class="link-btn" id="add-mc-node-manual-link">Enter its ID by hand instead.</button></p>
+              <p class="hint">Matched against the same directory this board already uses to resolve check-ins. Don't see your node? <button type="button" class="link-btn" id="add-mc-node-manual-link">Enter its ID by hand instead.</button></p>
               <ul class="node-picker-results" id="add-mc-node-picker-results" hidden></ul>
               <p class="hint node-picker-status" id="add-mc-node-picker-status" hidden></p>
             </div>
@@ -598,8 +599,8 @@
              steered toward setting one. -->
         <details id="checkin-name-section" class="checkin-name-section" hidden>
           <summary>Advanced: MeshCore check-in name isn't matching?</summary>
-          <p class="hint">Most players never need this. It only matters if your net check-ins aren't being credited because your radio's public key isn't yet in the <a href="https://mwmesh.com/" target="_blank" rel="noopener noreferrer">mwmesh.com</a> directory MeshWars checks first. If your contact already resolves there, setting a name here does nothing for you.</p>
-          <p class="hint">Type the exact name your radio posts under in the weekly-net channel (matching ignores case, nothing else).</p>
+          <p class="hint">Most players never need this. It only matters if your net check-ins aren't being credited because your radio's public key isn't yet in the directory MeshWars checks first. If your contact already resolves there, setting a name here does nothing for you.</p>
+          <p class="hint">Type the exact name your radio posts under in your net's own channel (matching ignores case, nothing else).</p>
           <div id="checkin-name-current" class="checkin-name-current" hidden>
             <span id="checkin-name-current-text"></span>
             <button type="button" id="checkin-name-remove">Remove</button>
@@ -618,7 +619,7 @@
 
     <section class="join-panel join-play-area">
       <div class="join-panel-title">Where it's played</div>
-      <p>MeshWars is currently scoped for the western US and Texas. If you'd like to join the fun or need help, please reach out to malice in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a>.</p>
+      <p>MeshWars is currently scoped for the western US and Texas. See the <a href="/about">About page</a> for which mesh communities are currently playing, and how to reach an operator if you'd like to join or need help.</p>
       <div id="play-area-map" role="img" aria-label="Map of the MeshWars play area"></div>
       <p class="mw-play-area-note">The outline is the live play area, read from the server &mdash; pings outside it are not scored. <a href="/">Open the board</a>.</p>
     </section>

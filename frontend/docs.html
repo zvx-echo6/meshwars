@@ -60,7 +60,7 @@
       "name": "MeshWars",
       "codeRepository": "https://github.com/zvx-echo6/meshwars",
       "programmingLanguage": "Python",
-      "license": "https://opensource.org/licenses/MIT"
+      "license": "https://www.gnu.org/licenses/agpl-3.0.html"
     }
   }
   </script>
@@ -155,7 +155,7 @@
 
         <section id="setup-meshcore">
           <h2>Setting up MeshCore</h2>
-          <p>MeshCore players don't send anything to MeshWars directly. Instead, <a href="https://meshmapper.net" target="_blank" rel="noopener noreferrer">MeshMapper</a> -- the wardriving app MeshCore players already use to map repeater coverage -- forwards a copy of what it collects to MeshWars. This does not replace MeshMapper or change what it does for you; your coverage data, points and leaderboard standing there are unaffected.</p>
+          <p>MeshCore players don't send anything to MeshWars directly. Instead, <a href="https://meshmapper.net" target="_blank" rel="noopener noreferrer">MeshMapper</a> -- the wardriving app MeshCore players already use to map repeater coverage -- forwards a copy of what it collects to MeshWars. This does not replace MeshMapper or change what it does for you; your coverage data, points and leaderboard standing there are unaffected. This works anywhere MeshMapper works -- MeshCore painting on MeshWars isn't limited to any particular community.</p>
           <p>On the join page, with MeshCore selected, you can optionally search for your node up front so it's bound to your account from the moment you register:</p>
           <figure class="docs-figure">
             <img src="/static/assets/docs/meshcore-find-node.png" alt="The optional 'Find your node' search box on the MeshCore setup block, matched against the mwmesh.com directory." loading="lazy" />
@@ -181,19 +181,21 @@
 
         <section id="setup-meshtastic">
           <h2>Setting up Meshtastic</h2>
-          <p>Meshtastic works the other way around from MeshCore: nothing is ever pushed to MeshWars. Instead MeshWars polls a public meshview instance and picks up your node whenever it broadcasts a position that a gateway feeder hears. There is no session to start and no batch to send -- your radio just needs to be configured correctly and left broadcasting.</p>
-          <p>On the join page, with Meshtastic selected, register your node ID (found by searching, or entered by hand) and optionally its public key -- the key is what lets MeshWars keep following your radio if its node ID ever changes. Then, on the radio itself:</p>
+          <p>Meshtastic works the other way around from MeshCore: nothing is ever pushed to MeshWars directly. Instead, <a href="https://help.freqmapper.net/" target="_blank" rel="noopener noreferrer">FreqMapper</a> -- a separate Meshtastic coverage-mapping app -- verifies where your radio is actually heard, and MeshWars reads that coverage to paint your square. There is no MeshWars session or batch here; your radio just needs to be enrolled and mapping through FreqMapper. Registering with MeshWars (below) and setting up FreqMapper are two separate things -- both are required.</p>
+          <p>On the join page, with Meshtastic selected, register your node ID (found by searching, or entered by hand) and optionally its public key -- the key is what lets MeshWars keep following your radio if its node ID ever changes. Then, to actually get mapped, set up FreqMapper itself:</p>
           <ol class="rules-list">
-            <li>Under Radio Configuration &rarr; LoRa, turn on <strong>OK to MQTT</strong>. Without it, no gateway will forward your packets and MeshWars will never see you.</li>
-            <li>Under Radio Configuration &rarr; Position, make sure GPS is enabled and your node is broadcasting its position.</li>
-            <li>Under Channels, on your primary channel, set position precision to full. If it's reduced, your position gets rounded off and you'll paint the wrong square, or none at all -- see <a href="#trouble-wrong-square">Troubleshooting</a>.</li>
-            <li>Make sure you're on FREQ51, so a gateway that feeds meshview can actually hear you.</li>
+            <li>Install FreqMapper -- iOS through its TestFlight beta, Android from the APK at <a href="https://dev.freqmapper.net" target="_blank" rel="noopener noreferrer">dev.freqmapper.net</a>.</li>
+            <li>Enroll in a mapping region using an enrollment key from a region administrator. See <a href="https://help.freqmapper.net/join-a-mapping-region/" target="_blank" rel="noopener noreferrer">FreqMapper's enrollment guide</a> for how to get one and what a stale or already-used key looks like.</li>
+            <li>In the app's Radio tab, connect your Meshtastic radio over Bluetooth and let it fully sync before applying the enrollment key.</li>
+            <li><strong>Set up the shared wardriving channel</strong> once your key is applied and the radio shows connected. FreqMapper adds this on an open secondary channel slot without touching any channel you already have -- do this and the rest of your setup is otherwise unaffected.</li>
+            <li>Before your first trip, confirm the app shows both your radio and your location as ready. See <a href="https://help.freqmapper.net/first-mapping-trip/" target="_blank" rel="noopener noreferrer">FreqMapper's first-mapping-trip guide</a> for everything it checks.</li>
           </ol>
+          <p>Full setup instructions, including iPhone and Android screenshots, live on FreqMapper's own help site -- start at <a href="https://help.freqmapper.net/getting-started/" target="_blank" rel="noopener noreferrer">Getting Started</a>.</p>
           <figure class="docs-figure">
             <img src="/static/assets/docs/meshtastic-setup-steps.png" alt="The Meshtastic node picker on the join page: find your node search, manual node-ID entry, and the optional public-key field." loading="lazy" />
             <figcaption>Registering a Meshtastic node on the join page.</figcaption>
           </figure>
-          <p>A Meshtastic node cannot self-bind the way a MeshCore contact can -- the packets MeshWars reads carry nothing that points back to you, so registering it here is the only way it ever gets attached to your account.</p>
+          <p>A Meshtastic node cannot self-bind the way a MeshCore contact can -- the coverage data MeshWars reads carries nothing that points back to you, so registering it here is the only way it ever gets attached to your account.</p>
         </section>
 
         <section id="account">
@@ -253,14 +255,14 @@
           </figure>
 
           <h3 id="account-checkin-name">The check-in name fallback</h3>
-          <p>Net check-ins are matched to a player automatically: on Meshtastic by your registered node ID, on MeshCore by your registered contact, which the <a href="https://mwmesh.com/" target="_blank" rel="noopener noreferrer">mwmesh.com</a> directory resolves to whatever name your radio currently posts under. Most players never need to touch anything here.</p>
-          <p>If your MeshCore contact isn't in that directory yet, your check-ins can't be matched that way, and there's a last-resort fallback under "Advanced: MeshCore check-in name isn't matching?" in the setup-check panel: type the exact name your radio posts under in the weekly-net channel (matching ignores case, nothing else), and MeshWars will match check-ins against that name instead. Setting a name here does nothing if your contact already resolves through the directory.</p>
+          <p>Net check-ins are matched to a player automatically: on Meshtastic by your registered node ID, on MeshCore by your registered contact, which your net's own directory resolves to whatever name your radio currently posts under. Most players never need to touch anything here.</p>
+          <p>If your MeshCore contact isn't in that directory yet, your check-ins can't be matched that way, and there's a last-resort fallback under "Advanced: MeshCore check-in name isn't matching?" in the setup-check panel: type the exact name your radio posts under in your net's own channel (matching ignores case, nothing else), and MeshWars will match check-ins against that name instead. Setting a name here does nothing if your contact already resolves through the directory.</p>
 
           <h3 id="account-lost-key">A lost key</h3>
           <p>Your API key is shown exactly once, at registration -- MeshWars stores only a one-way hash of it, so nobody, including an operator, can ever look the raw value back up.</p>
           <ul class="rules-list">
             <li><strong>MeshCore:</strong> your key is still sitting in MeshMapper. Open Settings, then API Endpoints, and read it back out of the API Key field.</li>
-            <li><strong>Meshtastic:</strong> nothing on the radio or in the app ever stores your key. Ask an operator for a new one in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a>.</li>
+            <li><strong>Meshtastic:</strong> nothing on the radio or in the app ever stores your key. Ask an operator for a new one -- see the <a href="/about">About page</a> for how to reach the community running your net.</li>
           </ul>
           <p>A brand new key doesn't disturb your account, your points, your team, or any radio you already have registered -- it's only a new way in.</p>
         </section>
@@ -363,7 +365,7 @@
             <dd>
               <p>Start with the setup check: paste your key into the panel at the bottom of <a href="/join">the join page</a> and press Check. It tells you when MeshWars last heard from you and, if something's wrong, what.</p>
               <p><strong>MeshCore:</strong> confirm a wardriving session is actually running in MeshMapper -- nothing is sent between sessions -- and that Custom API Endpoint is toggled on with the right URL and your key saved.</p>
-              <p><strong>Meshtastic:</strong> there's no session to start here. Confirm OK to MQTT is on (Radio Configuration &rarr; LoRa) and your node is actually broadcasting a position (Radio Configuration &rarr; Position). If either is off, nothing ever leaves your radio for a gateway to pick up.</p>
+              <p><strong>Meshtastic:</strong> there's no MeshWars session to start here. Confirm FreqMapper shows your radio synced and enrolled with the shared wardriving channel set up, and that you've actually started a mapping trip in the app -- see <a href="https://help.freqmapper.net/first-mapping-trip/" target="_blank" rel="noopener noreferrer">FreqMapper's first-mapping-trip guide</a>. If FreqMapper looks right and you're still seeing nothing on MeshWars, confirm your node ID is registered on <a href="/join">the join page</a> -- an unregistered node has nothing to attach a square to.</p>
             </dd>
 
             <dt id="trouble-no-repeaters">It says no repeaters heard</dt>
@@ -390,12 +392,12 @@
 
             <dt id="trouble-checkin-not-counted">My check-in did not count</dt>
             <dd>
-              <p>A check-in only counts if it resolves to a registered player. On Meshtastic that means your registered node ID; on MeshCore it means your registered contact resolves through the mwmesh.com directory, or you've set a check-in fallback name that matches exactly what your radio posts under (see <a href="#account-checkin-name">The check-in name fallback</a>). It also has to land inside the net window -- Wednesdays, 17:00 to 23:59 Boise time -- posting before or after that window doesn't count, and posting more than once in one net only ever credits the first.</p>
+              <p>A check-in only counts if an operator has configured a net for your mesh community in the first place, and it resolves to a registered player. On Meshtastic that means your registered node ID. On MeshCore it means your registered contact resolves through your net's own directory, or you've set a check-in fallback name that matches exactly what your radio posts under (see <a href="#account-checkin-name">The check-in name fallback</a>). It also has to land inside your net's own window -- posting before or after it doesn't count, and posting more than once in one net only ever credits the first. Check the local net's published channel and times; see the <a href="/about">About page</a> for which communities currently have one configured.</p>
             </dd>
 
             <dt id="trouble-wrong-square">I am painting the wrong square</dt>
             <dd>
-              <p>This is almost always a Meshtastic position-precision setting, not a MeshWars bug -- MeshCore has no equivalent setting to get wrong. Squares are about 300 meters across; if your channel's position precision is set to anything less than full (or the step that says "within 182 meters"), your reported position can land in the wrong square, or be too imprecise to count at all. Open Channels on your primary channel and set position precision to full.</p>
+              <p>This is almost always a phone location-permission setting in FreqMapper, not a MeshWars bug -- MeshCore has no equivalent setting to get wrong. Squares are about 300 meters across, and FreqMapper's own setup requires precise (not approximate) location permission to place a mapping test accurately -- check that under your phone's location settings for the app.</p>
             </dd>
           </dl>
         </section>

@@ -60,7 +60,7 @@
       "name": "MeshWars",
       "codeRepository": "https://github.com/zvx-echo6/meshwars",
       "programmingLanguage": "Python",
-      "license": "https://opensource.org/licenses/MIT"
+      "license": "https://www.gnu.org/licenses/agpl-3.0.html"
     }
   }
   </script>
@@ -176,11 +176,11 @@
       <div class="protocol-cards">
         <div class="protocol-card protocol-card-live">
           <div class="protocol-card-title">MeshCore <span class="protocol-live-badge">Live</span></div>
-          <p>Playable now. Your position comes from the MeshMapper wardriving app, which forwards a copy of your wardrive to MeshWars.</p>
+          <p>Playable anywhere MeshMapper works. Your position comes from the MeshMapper wardriving app, which forwards a copy of your wardrive to MeshWars.</p>
         </div>
         <div class="protocol-card protocol-card-live">
-          <div class="protocol-card-title">Meshtastic <span class="protocol-live-badge">Live</span></div>
-          <p>The same seven-team, registered-player, grid-square game as MeshCore. Register your node ID on the join page to play; squares are then claimed wherever your node's broadcast position is heard by an MQTT feeder.</p>
+          <div class="protocol-card-title">Meshtastic <span class="protocol-live-badge">Live</span> &mdash; in one community so far</div>
+          <p>The same seven-team, registered-player, grid-square game as MeshCore, but painting depends on FreqMapper's coverage, which is rolling out community by community. Register your node ID on the join page to play; squares are then claimed wherever your node's broadcast position falls inside FreqMapper's current coverage. See the Links below for exactly where that is right now.</p>
         </div>
       </div>
     </section>
@@ -199,8 +199,16 @@
 
     <section class="landing-panel">
       <div class="landing-panel-title">Links</div>
-      <p>The mesh communities MeshWars is played on, and the projects it's built with.</p>
+      <p><strong>This is the current list of where MeshWars is actually playable.</strong> The docs, rules and join pages describe how coverage works without naming a community directly, and point back here for what's live right now &mdash; so this list, not those pages, is the one to check for the current answer. The rest are the open source projects MeshWars is built with.</p>
       <ul class="landing-links">
+        <li>
+          <a href="https://freq51.net" target="_blank" rel="noopener noreferrer">FREQ51 &mdash; Intermountain Mesh</a>
+          <span class="landing-link-desc">Meshtastic: the one community FreqMapper currently covers, for both painting and net check-ins.</span>
+        </li>
+        <li>
+          <a href="https://mwmesh.com" target="_blank" rel="noopener noreferrer">Mountain West Mesh</a>
+          <span class="landing-link-desc">MeshCore: a community with a net configured for check-ins, and the directory both check-in identity and the join page's node picker draw from. MeshCore painting itself works anywhere MeshMapper does, not just here.</span>
+        </li>
         <li>
           <a href="https://meshtastic.org" target="_blank" rel="noopener noreferrer">Meshtastic</a>
           <span class="landing-link-desc">The open source mesh radio project the Meshtastic board is built on.</span>
@@ -214,20 +222,16 @@
           <span class="landing-link-desc">The wardriving app that sends your position to MeshWars.</span>
         </li>
         <li>
+          <a href="https://help.freqmapper.net/" target="_blank" rel="noopener noreferrer">FreqMapper</a>
+          <span class="landing-link-desc">The Meshtastic coverage-mapping app the Meshtastic board is painted from -- its help site covers installing it, enrolling in a mapping region, and your first mapping trip.</span>
+        </li>
+        <li>
           <a href="https://meshview.freq51.net" target="_blank" rel="noopener noreferrer">MeshView</a>
-          <span class="landing-link-desc">The public Meshtastic packet data the Meshtastic board is built from.</span>
-        </li>
-        <li>
-          <a href="https://freq51.net" target="_blank" rel="noopener noreferrer">FREQ51 — The Intermountain Mesh Meshtastic community</a>
-          <span class="landing-link-desc">The Meshtastic community MeshWars is played in.</span>
-        </li>
-        <li>
-          <a href="https://mwmesh.com" target="_blank" rel="noopener noreferrer">Mountain West Mesh — MeshCore community</a>
-          <span class="landing-link-desc">The MeshCore community MeshWars is played in, and the directory both check-in identity and the join page's node picker draw from.</span>
+          <span class="landing-link-desc">Where Meshtastic check-ins and node identity are resolved from -- not what paints the Meshtastic board; that's FreqMapper.</span>
         </li>
         <li>
           <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">GitHub</a>
-          <span class="landing-link-desc">MeshWars is open source. This is the source code running the site, not a related project.</span>
+          <span class="landing-link-desc">MeshWars is free software under the GNU Affero General Public License v3. This is the complete source code running this site &mdash; not a related project.</span>
         </li>
       </ul>
     </section>

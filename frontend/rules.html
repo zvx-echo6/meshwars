@@ -60,7 +60,7 @@
       "name": "MeshWars",
       "codeRepository": "https://github.com/zvx-echo6/meshwars",
       "programmingLanguage": "Python",
-      "license": "https://opensource.org/licenses/MIT"
+      "license": "https://www.gnu.org/licenses/agpl-3.0.html"
     }
   }
   </script>
@@ -182,17 +182,17 @@
 
         <section id="net">
           <h2>The weekly net</h2>
-          <p>There is a net every Wednesday evening, 17:00 to 23:59 Boise time. Checking in during that window earns your team points on top of any ground you hold.</p>
+          <p>Each mesh community that plays MeshWars runs its own net, on its own schedule and its own channel. Checking in during your net's window earns your team points on top of any ground you hold. <strong>A net only counts once an operator has configured it</strong> &mdash; posting on a channel nobody has set up as a net earns nothing, however net-like it looks. See the <a href="/about">about page</a> for which communities currently have one configured.</p>
           <table class="rules-table">
             <tbody>
-              <tr><th>When</th><td>Wednesdays, 17:00&ndash;23:59 America/Boise</td></tr>
+              <tr><th>When</th><td>set per community &mdash; check your local net's published day and hours</td></tr>
               <tr><th>Base value</th><td>25 points</td></tr>
               <tr><th>How often</th><td>once per net, per player</td></tr>
-              <tr><th>On MeshCore</th><td>post in the <code>#weekly-net</code> channel</td></tr>
-              <tr><th>On Meshtastic</th><td>send a message containing <code>#freq51</code></td></tr>
+              <tr><th>On MeshCore</th><td>post in your community's net channel</td></tr>
+              <tr><th>On Meshtastic</th><td>send a message containing your community's net hashtag</td></tr>
             </tbody>
           </table>
-          <p>Posting five times earns once, the same as everyone else. A message before 17:00 or after midnight does not count &mdash; the window is the window.</p>
+          <p>Posting five times earns once, the same as everyone else. A message outside your net's window does not count &mdash; the window is the window.</p>
           <p>This is a genuine way to play rather than a consolation prize. Points land in the same team total as squares, so a night on the net contributes whether or not you ever leave the house.</p>
         </section>
 
@@ -211,7 +211,7 @@
             </tbody>
           </table>
           <p>Miss a net and you start again at 25.</p>
-          <p><strong>A week where the net does not happen at all costs you nothing.</strong> A Wednesday only counts as a net if somebody checked in. If everyone skips a holiday week, nobody's run breaks.</p>
+          <p><strong>A week where the net does not happen at all costs you nothing.</strong> Your net's day only counts as a net if somebody checked in. If everyone skips a holiday week, nobody's run breaks.</p>
           <p><strong>Your streak survives a season boundary.</strong> The points it earned reset with everything else, but the run itself is a record of showing up, not territory. Streaks are counted per board &mdash; a MeshCore run and a Meshtastic run are separate.</p>
         </section>
 
@@ -256,7 +256,7 @@
 
           <h3>The weekly rotation</h3>
           <p>Summits and every park with a real, mapped boundary are always live. Landmarks, and the small parks whose mapped boundary doesn't fill a whole square, rotate instead: only some of them are live in any given week, chosen the same way for every player, with a minimum spacing between live picks so a dense downtown can't be farmed by visiting one block. A park with no boundary on file isn't treated as small for rotation, even though it scores like one &mdash; the game doesn't actually know its size, so it stays always active instead of guessing, the same as a summit.</p>
-          <p>The rotation turns over on the same Wednesday reset as the net and everything else &mdash; one clock for the whole game. A landmark that's live this week may not be next week, and that's deliberate: the point is to keep sending you somewhere new, not to hand out a fixed list once and let it go stale.</p>
+          <p>The rotation turns over on the same weekly reset as the net and everything else &mdash; one clock for the whole game. A landmark that's live this week may not be next week, and that's deliberate: the point is to keep sending you somewhere new, not to hand out a fixed list once and let it go stale.</p>
         </section>
 
         <section id="months">
@@ -338,10 +338,10 @@
           <table class="rules-table rules-table-compare">
             <thead><tr><th></th><th>MeshCore</th><th>Meshtastic</th></tr></thead>
             <tbody>
-              <tr><th>How position arrives</th><td>pushed &mdash; MeshMapper forwards a copy of your wardrive</td><td>pulled &mdash; MeshWars polls a public meshview instance</td></tr>
+              <tr><th>How position arrives</th><td>pushed &mdash; MeshMapper forwards a copy of your wardrive</td><td>pulled &mdash; MeshWars reads coverage from FreqMapper</td></tr>
               <tr><th>What earns points</th><td>how many repeaters <em>you heard</em></td><td>how many MQTT feeders <em>heard you</em></td></tr>
               <tr><th>Registering</th><td>binds itself on your first wardrive</td><td>you add the node ID yourself</td></tr>
-              <tr><th>Net check-in</th><td><code>#weekly-net</code> channel</td><td>any message containing <code>#freq51</code></td></tr>
+              <tr><th>Net check-in</th><td>your community's net channel</td><td>your community's net hashtag</td></tr>
               <tr><th>Position precision</th><td>no setting to get wrong</td><td>must be good to ~180 m or the ping is refused</td></tr>
               <tr><th>Going too fast</th><td>over ~100 mph is labelled airborne; the square still counts</td><td>over ~200 mph is refused outright; nothing is labelled airborne</td></tr>
             </tbody>
