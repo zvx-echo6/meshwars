@@ -966,20 +966,6 @@ function renderStatusResult(data) {
   clearRadiosError();
   renderRadiosList(data.radios);
   document.getElementById('status-radios').hidden = false;
-
-  // The check-in fallback-name control only ever means anything for a
-  // player who actually has a MeshCore radio -- see
-  // #checkin-name-section's comment in join.html for why this is an
-  // exception path, gated on hasMc rather than shown to everyone.
-  // Re-evaluated on every status check (including the ones
-  // applyRadiosUpdate() re-runs after an add/remove), so adding a first
-  // MeshCore radio and then re-checking status reveals it without a
-  // page reload, and removing one hides it again.
-  const checkinNameSection = document.getElementById('checkin-name-section');
-  if (checkinNameSection) {
-    checkinNameSection.hidden = !hasMc;
-    if (hasMc) loadCheckinName();
-  }
 }
 
 // Every add/remove call (POST/DELETE /api/nodes) returns only
@@ -1010,149 +996,6 @@ function applyRadiosUpdate(radios) {
     return;
   }
   renderStatusResult(Object.assign({}, lastStatusData, { radios }));
-}
-
-// ---- MeshCore check-in fallback name (advanced, key-authenticated) -------
-//
-// GET/POST/DELETE /api/checkin/name (app/checkin_api.py) -- a
-// last-resort path for a MeshCore player whose public key isn't in the
-// mwmesh.com directory app/checkin.py's identity bridge checks first
-// (roughly 4 in 10 of today's bound contacts, per that module's own
-// docstring), so their net check-ins can't be resolved from their
-// contact automatically. Only ever wired up/shown once renderStatusResult()
-// has confirmed the player has a MeshCore radio -- see the hasMc check
-// there and #checkin-name-section's own comment in join.html for why
-// this is an exception path, not a normal one.
-//
-// Reads the key fresh from #f-status-key on every call, same reasoning
-// as the radio management functions below: there is exactly one place
-// this key lives on the page, and every authenticated call reads it
-// from there rather than caching it anywhere else.
-
-function showCheckinNameError(message) {
-  const el = document.getElementById('checkin-name-error');
-  if (!el) return;
-  el.textContent = message;
-  el.hidden = false;
-}
-
-function clearCheckinNameError() {
-  const el = document.getElementById('checkin-name-error');
-  if (!el) return;
-  el.textContent = '';
-  el.hidden = true;
-}
-
-// Toggles between the "nothing set" state (just the form) and the
-// "something set" state (the current name + Remove button, form still
-// there underneath for changing it) -- sender_name is null in the
-// former case, a string in the latter, matching GET/POST/DELETE
-// /api/checkin/name's own {sender_name: ...} response shape exactly.
-function renderCheckinNameCurrent(senderName) {
-  const current = document.getElementById('checkin-name-current');
-  const currentText = document.getElementById('checkin-name-current-text');
-  const input = document.getElementById('f-checkin-name');
-  if (!current || !currentText) return;
-  if (senderName) {
-    currentText.textContent = `Currently set: ${senderName}`;
-    current.hidden = false;
-    if (input) input.value = '';
-  } else {
-    current.hidden = true;
-  }
-}
-
-// Runs once, right after renderStatusResult() reveals the section for
-// a MeshCore player -- fills in whatever is already set (or nothing)
-// without waiting for the player to open the <details> first. Quiet on
-// failure: this is an advanced, optional control, not worth a visible
-// error for a background fetch nobody asked for directly.
-async function loadCheckinName() {
-  const key = statusKeyValue();
-  if (!key) return;
-  try {
-    const res = await fetch('/api/checkin/name', { headers: { 'X-API-Key': key } });
-    if (!res.ok) return;
-    const data = await res.json();
-    renderCheckinNameCurrent(data && data.sender_name);
-  } catch (err) {
-    // Leave whatever was last rendered -- see comment above.
-  }
-}
-
-async function handleCheckinNameSubmit(e) {
-  e.preventDefault();
-  clearCheckinNameError();
-
-  const key = statusKeyValue();
-  if (!key) {
-    showCheckinNameError('Enter your API key above first.');
-    return;
-  }
-
-  const input = document.getElementById('f-checkin-name');
-  const name = input.value.trim();
-  if (!name) {
-    showCheckinNameError('Enter the name your radio posts under in the weekly-net channel.');
-    return;
-  }
-
-  const submitBtn = document.getElementById('checkin-name-submit');
-  submitBtn.disabled = true;
-  try {
-    const res = await fetch('/api/checkin/name', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
-      body: JSON.stringify({ sender_name: name }),
-    });
-    let data = null;
-    try { data = await res.json(); } catch (err) { data = null; }
-    if (!res.ok) {
-      const message = (data && typeof data.error === 'string')
-        ? data.error
-        : 'Something went wrong. Try again in a moment.';
-      showCheckinNameError(message);
-      return;
-    }
-    renderCheckinNameCurrent(data.sender_name);
-  } catch (err) {
-    showCheckinNameError('Could not reach the server. Check your connection and try again.');
-  } finally {
-    submitBtn.disabled = false;
-  }
-}
-
-async function handleCheckinNameRemove() {
-  clearCheckinNameError();
-
-  const key = statusKeyValue();
-  if (!key) {
-    showCheckinNameError('Enter your API key above first.');
-    return;
-  }
-
-  const removeBtn = document.getElementById('checkin-name-remove');
-  removeBtn.disabled = true;
-  try {
-    const res = await fetch('/api/checkin/name', {
-      method: 'DELETE',
-      headers: { 'X-API-Key': key },
-    });
-    let data = null;
-    try { data = await res.json(); } catch (err) { data = null; }
-    if (!res.ok) {
-      const message = (data && typeof data.error === 'string')
-        ? data.error
-        : 'Something went wrong. Try again in a moment.';
-      showCheckinNameError(message);
-      return;
-    }
-    renderCheckinNameCurrent(null);
-  } catch (err) {
-    showCheckinNameError('Could not reach the server. Check your connection and try again.');
-  } finally {
-    removeBtn.disabled = false;
-  }
 }
 
 // ---- Radio management (GET/POST/DELETE /api/nodes) -----------------------
@@ -1685,8 +1528,6 @@ function boot() {
   });
   document.getElementById('status-form').addEventListener('submit', handleStatusSubmit);
   document.getElementById('add-radio-form').addEventListener('submit', handleAddRadioSubmit);
-  document.getElementById('checkin-name-form').addEventListener('submit', handleCheckinNameSubmit);
-  document.getElementById('checkin-name-remove').addEventListener('click', handleCheckinNameRemove);
   document.getElementById('status-team-switch-btn').addEventListener('click', handleTeamSwitchBtnClick);
   document.getElementById('status-team-confirm-btn').addEventListener('click', handleTeamSwitchConfirm);
   document.getElementById('status-team-cancel-btn').addEventListener('click', closeTeamSwitchPicker);

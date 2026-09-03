@@ -15,8 +15,11 @@ local helpers rather than reaching into a sibling mc_api test file.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -157,14 +160,40 @@ def _month_award(path: str, month: str, protocol: str, award: str, *,
     conn.close()
 
 
-def _binding(path: str, player_id: int, sender_name: str) -> None:
+def _net(path: str, *, weekday: int, start_hour: int = 0, end_hour: int = 23,
+          timezone: str = "America/Boise", start_date: str = "2000-01-01",
+          protocol: str = "mc", kind: str = "corescope", enabled: int = 1) -> int:
+    """A checkin_net row -- see app/db.py's own comment for the columns.
+    Defaults to a full-day (0-23) window so checkin.most_recent_mc_net_date()
+    always resolves to "today, local to `timezone`" regardless of what
+    wall-clock time a test actually runs at -- see _today_mc_net_date()
+    below, which computes the exact same date the same way, for how
+    tests pair this up deterministically without mocking time.
+    """
     conn = sqlite3.connect(path)
-    conn.execute(
-        "INSERT INTO mc_checkin_binding(sender_name, player_id, bound_at) VALUES (?,?,?)",
-        (sender_name, player_id, NOW),
+    cur = conn.execute(
+        "INSERT INTO checkin_net(label, protocol, kind, connector_url, channel, hashtag, "
+        "weekday, start_hour, end_hour, timezone, start_date, enabled, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("Test Net", protocol, kind, "http://example.test", "general", "",
+         weekday, start_hour, end_hour, timezone, start_date, enabled, NOW),
     )
     conn.commit()
+    net_id = cur.lastrowid
     conn.close()
+    return net_id
+
+
+def _today_mc_net_date(timezone: str = "America/Boise") -> tuple[int, str]:
+    """(weekday, net_date) for "right now," local to `timezone` -- the
+    same pair a full-day _net() row above needs to make
+    checkin.most_recent_mc_net_date() resolve to today deterministically,
+    computed the identical way that function itself does (weekday() and
+    .date().isoformat() off a tz-aware "now"), so a test never has to
+    mock time to exercise the credited/not-yet-credited states.
+    """
+    now_local = datetime.now(ZoneInfo(timezone))
+    return now_local.weekday(), now_local.date().isoformat()
 
 
 def _unresolved(path: str, net_date: str, sender_name: str, *,
@@ -359,25 +388,70 @@ def test_checkins_empty_when_player_has_none(client, db_path):
 
 
 # ---- GET /api/account/checkin-health ---------------------------------------
+#
+# The headline (`state`/`summary`/`resolved`) is now derived from
+# whether this player was actually CREDITED for the most recent
+# MeshCore net (mc_checkin_award, matched against
+# checkin.most_recent_mc_net_date()'s schedule-derived date) -- not
+# from whether a contact merely resolves in the directory. That is
+# exactly the distinction test_checkin_health_resolving_but_uncredited_
+# reports_state_2 below exists to pin down: it is the regression Matt
+# hit (hundreds of check-ins, nobody credited, page said everything was
+# fine) and the one state the OLD binding-based "resolved" computation
+# could never express. `contacts` (per-contact detail) is unchanged in
+# shape from before and still exercised the same way as always.
+#
+# The retired last-resort fallback-name feature (mc_checkin_binding,
+# `binding` in the old response) is gone -- see app/checkin_api.py's
+# and app/checkin.py's module docstrings. There is no `_binding()`
+# helper or `binding` key anywhere below anymore.
 
-def test_checkin_health_contact_resolves_cleanly(client, db_path):
+def test_checkin_health_credited_recently_reports_state_1(client, db_path):
     account_id, _ = _login(client, db_path)
     player_id = _make_player(db_path, account_id=account_id)
     _bind_node(db_path, player_id, "aaaa1111")
+    weekday, today = _today_mc_net_date()
+    _net(db_path, weekday=weekday)
+    season_id = _season(db_path, "mc")
+    _checkin(db_path, season_id, player_id, today, points=25.0)
     client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
 
     body = client.get("/api/account/checkin-health").json()
 
-    assert len(body["contacts"]) == 1
-    contact = body["contacts"][0]
-    assert contact["status"] == "resolved"
-    assert contact["resolved_name"] == "Clean Radio"
-    assert contact["match_count"] == 1
-    assert contact["explanation"]
+    assert body["state"] == "credited"
     assert body["resolved"] is True
+    assert body["most_recent_net_date"] == today
+    assert today in body["summary"]
+    assert "25" in body["summary"]
 
 
-def test_checkin_health_contact_not_in_directory(client, db_path):
+def test_checkin_health_resolving_but_uncredited_reports_state_2(client, db_path):
+    # THE regression: a contact that resolves through the directory
+    # bridge used to be enough, on its own, to report "resolved" --
+    # even with zero actual awards. This is the case that has to
+    # change: resolving is necessary but not sufficient.
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    _bind_node(db_path, player_id, "aaaa1111")
+    weekday, today = _today_mc_net_date()
+    _net(db_path, weekday=weekday)
+    season_id = _season(db_path, "mc")
+    # An OLDER award exists -- proves this isn't merely "never
+    # credited," it's specifically "not credited for the MOST RECENT
+    # net," which is the state that used to be inexpressible.
+    _checkin(db_path, season_id, player_id, "2020-01-01", points=10.0)
+    client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
+
+    body = client.get("/api/account/checkin-health").json()
+
+    assert body["state"] == "resolving_uncredited"
+    assert body["resolved"] is False
+    assert "Clean Radio" in body["summary"]
+    assert today in body["summary"]
+    assert body["contacts"][0]["status"] == "resolved"
+
+
+def test_checkin_health_contact_absent_reports_state_3_names_node_ref(client, db_path):
     account_id, _ = _login(client, db_path)
     player_id = _make_player(db_path, account_id=account_id)
     _bind_node(db_path, player_id, "deadbeef")
@@ -388,7 +462,9 @@ def test_checkin_health_contact_not_in_directory(client, db_path):
     contact = body["contacts"][0]
     assert contact["status"] == "not_in_directory"
     assert contact["resolved_name"] is None
+    assert body["state"] == "not_in_directory"
     assert body["resolved"] is False
+    assert "deadbeef" in body["summary"]
 
 
 def test_checkin_health_contact_key_ambiguous(client, db_path):
@@ -407,7 +483,9 @@ def test_checkin_health_contact_key_ambiguous(client, db_path):
     assert contact["status"] == "key_ambiguous"
     assert contact["match_count"] == 2
     assert contact["resolved_name"] is None
+    assert body["state"] == "key_ambiguous"
     assert body["resolved"] is False
+    assert "operator" in body["summary"].lower()
 
 
 def test_checkin_health_contact_name_ambiguous(client, db_path):
@@ -427,59 +505,11 @@ def test_checkin_health_contact_name_ambiguous(client, db_path):
     assert contact["status"] == "name_ambiguous"
     assert contact["resolved_name"] == "Repeater"
     assert contact["match_count"] == 1
+    assert body["state"] == "name_ambiguous"
     assert body["resolved"] is False
 
 
-def test_checkin_health_resolves_only_via_binding(client, db_path):
-    account_id, _ = _login(client, db_path)
-    player_id = _make_player(db_path, account_id=account_id)
-    _bind_node(db_path, player_id, "deadbeef")  # never shown up in the directory
-    _binding(db_path, player_id, "fallbackname")
-    client.app.state.checkin_poller = FakePoller([])
-
-    body = client.get("/api/account/checkin-health").json()
-
-    assert body["contacts"][0]["status"] == "not_in_directory"
-    assert body["binding"]["registered"] is True
-    assert body["binding"]["sender_name"] == "fallbackname"
-    assert body["binding"]["active"] is True
-    assert body["resolved"] is True
-
-
-def test_checkin_health_binding_inactive_when_superseded_by_key_match(client, db_path):
-    account_id, _ = _login(client, db_path)
-    player_id = _make_player(db_path, account_id=account_id)
-    _bind_node(db_path, player_id, "aaaa1111")
-    _binding(db_path, player_id, "unused fallback")
-    client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
-
-    body = client.get("/api/account/checkin-health").json()
-
-    assert body["binding"]["registered"] is True
-    assert body["binding"]["active"] is False
-    assert "superseded" in body["binding"]["explanation"].lower() or \
-        "not needed" in body["binding"]["explanation"].lower() or \
-        "not currently in effect" in body["binding"]["explanation"].lower()
-
-
-def test_checkin_health_binding_collision_is_refused(client, db_path):
-    account_id, _ = _login(client, db_path)
-    player_id = _make_player(db_path, account_id=account_id, display_name="Claimant")
-    other_id = _make_player(db_path, display_name="DirectoryOwner")
-    _bind_node(db_path, other_id, "aaaa1111")
-    # Claimant registers a fallback name that the directory already
-    # resolves for a DIFFERENT player via the key-based bridge.
-    _binding(db_path, player_id, "clean radio")
-    client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
-
-    body = client.get("/api/account/checkin-health").json()
-
-    assert body["binding"]["registered"] is True
-    assert body["binding"]["active"] is False
-    assert body["resolved"] is False
-
-
-def test_checkin_health_nothing_at_all(client, db_path):
+def test_checkin_health_nothing_bound_reports_state_6(client, db_path):
     account_id, _ = _login(client, db_path)
     _make_player(db_path, account_id=account_id)
     client.app.state.checkin_poller = FakePoller([])
@@ -487,18 +517,47 @@ def test_checkin_health_nothing_at_all(client, db_path):
     body = client.get("/api/account/checkin-health").json()
 
     assert body["contacts"] == []
-    assert body["binding"]["registered"] is False
-    assert body["binding"]["active"] is False
+    assert body["state"] == "nothing_bound"
     assert body["resolved"] is False
     assert "no meshcore contact" in body["summary"].lower()
+    assert "confirm my node" in body["summary"].lower()
+    assert "binding" not in body
+
+
+def test_checkin_health_never_leaks_another_players_contact_or_name(client, db_path):
+    # A previous commit (a39eab3) already removed a leak of this shape
+    # (checkin_unresolved_sender, a table keyed by name rather than
+    # player). This pins down the equally important, never-regressed
+    # half: the response must also never surface a DIFFERENT player's
+    # own bound contact or resolved name, even though the poller's
+    # directory snapshot legitimately contains both players' radios.
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id, display_name="Me")
+    other_id = _make_player(db_path, display_name="NotMe")
+    _bind_node(db_path, player_id, "aaaa1111")
+    _bind_node(db_path, other_id, "bbbb2222")
+    client.app.state.checkin_poller = FakePoller([
+        _node("My Radio", "aaaa1111ffffffff"),
+        _node("Someone Else's Radio", "bbbb2222ffffffff"),
+    ])
+
+    body = client.get("/api/account/checkin-health").json()
+
+    assert len(body["contacts"]) == 1
+    assert body["contacts"][0]["node_ref"] == "aaaa1111"
+    raw = json.dumps(body)
+    assert "bbbb2222" not in raw
+    assert "Someone Else's Radio" not in raw
 
 
 def test_checkin_health_does_not_leak_recent_unresolved_names(client, db_path):
     # checkin_unresolved_sender is keyed by NAME, not by player -- every
     # live, actively-posting unclaimed name on it is a ready-made target
-    # for POST /api/checkin/name (no proof of possession required). That
-    # signal stays admin-only (see app/admin_ops.py); a player's own
-    # checkin-health response must never surface it.
+    # for anyone claiming it. That signal stays admin-only (see
+    # app/admin_ops.py); a player's own checkin-health response must
+    # never surface it, and the retired POST /api/checkin/name (no
+    # proof of possession required) that used to make an unclaimed name
+    # exploitable is gone entirely -- see this file's own header.
     account_id, _ = _login(client, db_path)
     _make_player(db_path, account_id=account_id)
     _unresolved(db_path, "2026-08-26", "MysteryPerson", last_seen=NOW - 3600)
@@ -507,6 +566,9 @@ def test_checkin_health_does_not_leak_recent_unresolved_names(client, db_path):
     body = client.get("/api/account/checkin-health").json()
 
     assert "recent_unresolved_names" not in body
+    raw = json.dumps(body)
+    assert "MysteryPerson" not in raw
+    assert "AncientName" not in raw
 
 
 def test_checkin_health_with_no_poller_degrades_to_empty_directory(client, db_path):

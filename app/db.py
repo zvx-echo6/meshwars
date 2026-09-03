@@ -592,30 +592,19 @@ CREATE TABLE IF NOT EXISTS repeater_identity (
 -- is the only reason an entry would need to go in MIGRATIONS instead.
 -- ---------------------------------------------------------------------
 
--- Explicit MeshCore display-name -> player binding. This is the
--- LAST-RESORT fallback in app/checkin.py's identity resolution for
--- MeshCore check-ins -- the primary, normal-case path resolves a
--- player's already-bound radio contact (player_node, protocol='mc',
--- however it got bound: MeshMapper's wardriving auto-bind, typed into
--- POST /api/nodes by hand, or picked from app/checkin_api.py's
--- directory picker -- all three write the identical row shape and this
--- table plays no part in any of them) through the live.mwmesh.com
--- public-key directory automatically. A row here only matters for a
--- player whose public key has never shown up in that directory at all
--- -- key-based resolution wins wherever it produces an answer, so a
--- binding here is IGNORED, not consulted, the moment the bridge
--- resolves that player some other way. See app/checkin.py's module
--- docstring for the full priority story.
---
--- Same first-claim-wins conflict semantics as player_node's radio
--- binding, but keyed on a free-text display name instead of an 8-hex
--- node reference -- player_node.node_ref is validated as exactly that
--- (app/node_ref.py) and a MeshCore display name has no fixed shape at
--- all, so it cannot live in that table. UNIQUE on player_id (which
--- player_node does NOT have on player_id) because unlike radios -- a
--- player can own several -- a player has at most one checked-in name
--- here; app/checkin_api.py's POST is "set", not "add", enforced by
--- this constraint.
+-- RETIRED, no longer read or written by anything. Used to hold an
+-- explicit MeshCore display-name -> player binding, the LAST-RESORT
+-- fallback in app/checkin.py's identity resolution for a player whose
+-- radio contact had never shown up in the live.mwmesh.com directory --
+-- a player typed the name their radio posted under, in place of the
+-- key-anchored proof every other path here has. Retired once node
+-- confirmation (app/checkin_api.py's POST /api/checkin/confirm/accept)
+-- shipped: a live re-advertised proof of possession is strictly
+-- stronger than a typed name for exactly the players who needed this
+-- table, and it had zero rows bound on preview at retirement. Left in
+-- place, empty, per this codebase's no-drop convention (see MIGRATIONS
+-- below) rather than dropped -- production's contents were never
+-- checked and are out of scope for that decision.
 CREATE TABLE IF NOT EXISTS mc_checkin_binding (
     sender_name  TEXT NOT NULL,
     player_id    INTEGER NOT NULL UNIQUE,
@@ -664,11 +653,11 @@ CREATE TABLE IF NOT EXISTS mc_checkin_seen_message (
 -- Net check-ins, take two: DB-backed nets, admin-editable at runtime
 -- with no restart, supporting MULTIPLE nets across MULTIPLE connector
 -- instances -- see app/checkin.py's module docstring for the full
--- design. mc_checkin_binding/mc_checkin_award above are unchanged and
--- still the identity-registration and award tables; only "what nets
--- exist, on what schedule, against what upstream" and "what settled
--- message ids has the poller already looked at" move into the
--- database here.
+-- design. mc_checkin_award above is unchanged and still the one award
+-- table (mc_checkin_binding, also above, is retired -- see its own
+-- comment); only "what nets exist, on what schedule, against what
+-- upstream" and "what settled message ids has the poller already
+-- looked at" move into the database here.
 --
 -- One row per net. Connector + window + channel-or-hashtag together,
 -- deliberately: a net without a connector cannot be polled, and a
@@ -911,6 +900,79 @@ CREATE TABLE IF NOT EXISTS checkin_node_name (
     changed_at    INTEGER,
     previous_name TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (connector, node_ref)
+);
+
+-- ---------------------------------------------------------------------
+-- Node confirmation (app/checkin_api.py's POST/GET/DELETE
+-- /api/checkin/confirm/*): a THIRD way to arrive at a player_node
+-- binding, alongside typing an 8-hex node_ref by hand and MeshMapper's
+-- wardriving auto-bind (see player_node's own comment above) -- but
+-- the only one of the three that PROVES possession rather than merely
+-- asserting it. A MeshCore channel message carries no per-sender key
+-- (see app/checkin.py's module docstring), so a bare display name --
+-- typed into a picker, or (the now-retired approach) registered
+-- outright as a fallback identity, see mc_checkin_binding's own
+-- comment above -- is only ever as trustworthy as whoever typed it:
+-- anyone who knows (or guesses) another player's display name can
+-- claim their check-ins. Confirmation closes that gap for players
+-- willing to do it: make the SPECIFIC radio advertise during a short
+-- window, and bind whichever public key showed a FRESH advert under
+-- that name, not merely a name match against a directory that could
+-- already be stale by up to checkin_config.directory_refresh_seconds.
+--
+-- One row per player -- PRIMARY KEY (player_id), not a surrogate id --
+-- because a player can only ever be mid-confirmation for one radio at
+-- a time; opening a second window (a retry, a different node, a typo
+-- fixed) is an upsert that silently replaces whatever window was
+-- already open -- "set, not add" semantics, expressed as the primary
+-- key here since this table has no other natural key.
+--
+-- typed_name is stored RAW, exactly as the player typed it -- never
+-- normalized at write time -- because normalize_sender_name() is a
+-- lossy fold (case only, by design -- see that function's own
+-- docstring), and every comparison against it happens at READ time
+-- instead, so there is only ever one place in the codebase that
+-- decides what "the same name" means.
+--
+-- baseline is a JSON object, public_key -> last-heard epoch seconds,
+-- captured by a fresh ON-DEMAND directory scan (app/checkin.py's
+-- confirm_scan_all_connectors -- NEVER CheckinPoller's own 15-minute-
+-- cached directory, which could not see a fresh advert inside a
+-- 5-minute confirmation window at all) the MOMENT the window opens.
+-- A node already broadcasting under this name before the window
+-- opened is not proof of anything -- it could have been heard hours
+-- ago -- so the baseline exists to let GET /api/checkin/confirm/status
+-- tell "was already advertising" apart from "just advertised, right
+-- now, because the player is holding the button." A public key absent
+-- from this snapshot (the common case -- that node has never posted
+-- under this exact name before) needs no stored epoch to compare
+-- against at all; one that IS present needs its last-heard time to
+-- have moved forward since the snapshot was taken. Stored as JSON
+-- rather than a second table (one row per baseline entry) because it
+-- is read and written as a single unit, once per window and once per
+-- status poll, never queried by public_key on its own -- a join for
+-- that would cost more than it would ever save.
+--
+-- last_scan_at throttles GET /api/checkin/confirm/status to at most
+-- one upstream re-scan every few seconds (app/checkin_api.py) rather
+-- than one per poll -- a browser polling this endpoint for up to five
+-- minutes straight must never turn into a request storm against every
+-- configured MeshCore connector. DEFAULT 0 so a freshly opened window
+-- (whose baseline scan just happened) is immediately due for its
+-- first re-scan rather than waiting out the throttle a second time.
+--
+-- Brand new table, no existing deployed shape to ALTER, so CREATE
+-- TABLE IF NOT EXISTS here is sufficient on its own -- same reasoning
+-- as repeater_observation/mc_checkin_award above: there is no
+-- existing, already-deployed shape, which is the only reason an entry
+-- would need to go in MIGRATIONS instead.
+CREATE TABLE IF NOT EXISTS mc_node_confirmation (
+    player_id     INTEGER PRIMARY KEY,
+    typed_name    TEXT NOT NULL,
+    opened_at     INTEGER NOT NULL,
+    expires_at    INTEGER NOT NULL,
+    baseline      TEXT NOT NULL,
+    last_scan_at  INTEGER NOT NULL DEFAULT 0
 );
 
 -- ---------------------------------------------------------------------
@@ -1634,10 +1696,10 @@ MIGRATIONS = [
     # Net check-ins (app/checkin.py) add a second, separate figure to a
     # team's season standing -- mc_season_team_tally already exists in
     # production holding only `tiles`, so the new column has to be an
-    # ALTER, unlike mc_checkin_binding/mc_checkin_award/
-    # mc_checkin_seen_message above (those are brand new tables, so
-    # CREATE TABLE IF NOT EXISTS in SCHEMA already covers them). Kept as
-    # its own column rather than folded into `tiles` so a closed
+    # ALTER, unlike mc_checkin_award/mc_checkin_seen_message above
+    # (those are brand new tables, so CREATE TABLE IF NOT EXISTS in
+    # SCHEMA already covers them). Kept as its own column rather than
+    # folded into `tiles` so a closed
     # season's history can still show where a team's combined total
     # came from -- see mc_scoring.team_totals() for the combined figure
     # itself, which is what decides the winner.

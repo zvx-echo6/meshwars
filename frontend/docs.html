@@ -200,7 +200,7 @@
 
         <section id="account">
           <h2>Your account</h2>
-          <p>Everything below lives in one place: the setup-check panel near the bottom of <a href="/join">the join page</a>. Paste your API key and press Check to unlock it -- the same panel handles checking your status, reading your diagnostics, adding or removing radios, switching teams, and (MeshCore only) setting a check-in fallback name.</p>
+          <p>Everything below lives in one place: the setup-check panel near the bottom of <a href="/join">the join page</a>. Paste your API key and press Check to unlock it -- the same panel handles checking your status, reading your diagnostics, adding or removing radios, switching teams, and (MeshCore only) confirming a node that isn't matching on its own.</p>
 
           <h3 id="account-check">Checking your setup</h3>
           <p>Once your key checks out, you'll see your name and team, and -- for each protocol you have a radio registered on -- when MeshWars last heard from you and a plain-language diagnosis of what, if anything, is wrong.</p>
@@ -254,9 +254,10 @@
             <figcaption>Locked after a switch, with the exact date it reopens.</figcaption>
           </figure>
 
-          <h3 id="account-checkin-name">The check-in name fallback</h3>
+          <h3 id="account-checkin-name">Confirm my node</h3>
           <p>Net check-ins are matched to a player automatically: on Meshtastic by your registered node ID, on MeshCore by your registered contact, which your net's own directory resolves to whatever name your radio currently posts under. Most players never need to touch anything here.</p>
-          <p>If your MeshCore contact isn't in that directory yet, your check-ins can't be matched that way, and there's a last-resort fallback under "Advanced: MeshCore check-in name isn't matching?" in the setup-check panel: type the exact name your radio posts under in your net's own channel (matching ignores case, nothing else), and MeshWars will match check-ins against that name instead. Setting a name here does nothing if your contact already resolves through the directory.</p>
+          <p>If your MeshCore contact isn't in that directory yet, your check-ins can't be matched that way. "Confirm my node" in the Radios &amp; troubleshooting panel proves a radio is yours directly, without waiting on the directory to catch up: type the name your radio currently shows on the mesh and press Confirm my node, then go trigger an advert on that same radio (most MeshCore devices send one from a long-press of the side button, or a "Send Advert" / "Flood Advert" menu item). MeshWars watches the mesh for five minutes and shows you every node it heard advertising under that name -- pick yours from the list, and we bind its public key to your account. From then on your check-ins match on that key, not the name, so a later name change on the radio won't break it again.</p>
+          <p>A radio already bound to somebody else's account can't be claimed this way -- if you see that error, it means the radio is already registered, most likely to whoever owns it.</p>
 
           <h3 id="account-lost-key">A lost key</h3>
           <p>Your API key is shown exactly once, at registration -- MeshWars stores only a one-way hash of it, so nobody, including an operator, can ever look the raw value back up.</p>
@@ -392,7 +393,7 @@
 
             <dt id="trouble-checkin-not-counted">My check-in did not count</dt>
             <dd>
-              <p>A check-in only counts if an operator has configured a net for your mesh community in the first place, and it resolves to a registered player. On Meshtastic that means your registered node ID. On MeshCore it means your registered contact resolves through your net's own directory, or you've set a check-in fallback name that matches exactly what your radio posts under (see <a href="#account-checkin-name">The check-in name fallback</a>). It also has to land inside your net's own window -- posting before or after it doesn't count, and posting more than once in one net only ever credits the first. Check the local net's published channel and times; see the <a href="/about">About page</a> for which communities currently have one configured.</p>
+              <p>A check-in only counts if an operator has configured a net for your mesh community in the first place, and it resolves to a registered player. On Meshtastic that means your registered node ID. On MeshCore it means your registered contact resolves through your net's own directory, or you've confirmed the radio directly (see <a href="#account-checkin-name">Confirm my node</a>). It also has to land inside your net's own window -- posting before or after it doesn't count, and posting more than once in one net only ever credits the first. Check the local net's published channel and times; see the <a href="/about">About page</a> for which communities currently have one configured.</p>
             </dd>
 
             <dt id="trouble-wrong-square">I am painting the wrong square</dt>

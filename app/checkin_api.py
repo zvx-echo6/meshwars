@@ -1,26 +1,23 @@
 """FastAPI router for the player-facing halves of net check-ins
-(app/checkin.py) that need a human on the other end: registering the
-last-resort fallback name, and two PUBLIC node pickers (MeshCore and
-Meshtastic) so a person can pick a radio by name instead of typing an
-8-hex reference by hand on either protocol.
+(app/checkin.py) that need a human on the other end: two PUBLIC node
+pickers (MeshCore and Meshtastic) so a person can pick a radio by name
+instead of typing an 8-hex reference by hand on either protocol, and
+node confirmation, which proves a player actually holds a specific
+radio.
+
+(This module used to also carry the last-resort fallback-name routes,
+GET/POST/DELETE /api/checkin/name -- a player typing the display name
+their radio posts under, as the identity source of last resort when
+the public-key directory bridge had nothing for them. Retired: it had
+zero rows bound on preview, node confirmation below is strictly
+stronger proof for exactly the players who needed it, and a typed name
+carried none of the impersonation resistance a key-anchored match
+does. mc_checkin_binding, the table it read/wrote, is left in place
+per this codebase's no-drop convention -- see its own comment in
+app/db.py -- but nothing reads it anymore.)
 
 Two different trust levels in this one module, and they must not be
 confused with each other:
-
-- The fallback-name routes (GET/POST/DELETE /api/checkin/name) are
-  key-authenticated exactly like app/nodes_api.py's radio management
-  routes: no session, no cookie, the player's existing API key (from
-  /api/join) is the only credential, in the X-API-Key header, never the
-  URL or body. Authenticated through app/auth.py's
-  require_api_key_principal() -- the same short-TTL-cached
-  request.app.state.mc_ingestor.authenticate() lookup and the same
-  two-tier (address, then key) rate limiting app/nodes_api.py already
-  established, wired up as require_checkin_principal below. Its
-  pre-auth address limiter is the one exception to "independent budget
-  per site" app/auth.py's own docstring calls out: it's the SAME
-  _addr_rate_limiter instance the two public pickers below call
-  directly, exactly as this module's original hand-rolled version
-  already shared one dict between both.
 
 - The two node-picker routes (GET /api/checkin/mc/nodes,
   GET /api/checkin/mt/nodes) are deliberately PUBLIC -- no key at all.
@@ -48,21 +45,48 @@ unchanged. Picking an entry from either list here is just a friendlier
 way to arrive at the exact same node_ref that typing it in by hand, or
 (MeshCore only) MeshMapper's wardriving auto-bind, would have produced
 -- app/checkin.py's identity resolution does not know or care which of
-the three ever happened.
+the three ever happened -- EXCEPT for node confirmation below, which is
+the one case where this module DOES bind a radio itself.
+
+- Node confirmation (POST /api/checkin/confirm/start, GET .../status,
+  POST .../accept, DELETE /api/checkin/confirm) is key/session-
+  authenticated exactly like the public pickers' address tier plus a
+  per-key tier layered on top -- same require_checkin_principal
+  dependency the retired fallback-name routes used to share, same
+  reasoning (a person proving their own radio is a session-worthy
+  action, not a public one). Unlike every other route in this module,
+  POST .../accept DOES write to player_node directly, with the SAME
+  first-claim-wins conflict check POST /api/nodes uses
+  (app/nodes_api.py) -- see that
+  route's own docstring below for why this is a deliberate, narrow
+  exception rather than a second bind path drifting out of sync with
+  the first: confirmation is a stronger proof of ownership than
+  anything POST /api/nodes itself can check (a typed node_ref alone
+  proves nothing), so it earns the right to bind on its own rather
+  than merely handing the player a node_ref to paste into that route
+  by hand. The actual proof-of-possession mechanics -- what a
+  "confirmation window" is, why its baseline snapshot can never come
+  from CheckinPoller's cache, what counts as a fresh advert -- live in
+  app/db.py's mc_node_confirmation comment and app/checkin.py's
+  confirm_scan_connector/confirm_scan_all_connectors; this module's own
+  job is just the HTTP surface: validate input, open/read/close a
+  window, and perform the one write once a live re-scan has verified
+  the claim.
 """
 from __future__ import annotations
 
+import json
 import time
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
-from .checkin import companion_directory_entries, mt_roster_entries
+from .checkin import companion_directory_entries, confirm_scan_all_connectors, mt_roster_entries
 from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
-from .node_ref import normalize_sender_name
+from .node_ref import normalize_public_key, normalize_sender_name
 
 router = APIRouter()
 
@@ -110,112 +134,13 @@ require_checkin_principal = require_api_key_principal(
     pre_auth_limiter=_addr_rate_limiter,
     post_auth_limiter=_key_rate_limiter,
     # A logged-in browser session is just as good a credential as this
-    # player's own key for managing their own fallback check-in name --
-    # a person acting through the site, not a machine posting a batch.
+    # player's own key for the node-confirmation routes below -- a
+    # person acting through the site, not a machine posting a batch.
     # See app/auth.py's module docstring ("opt-in") for why this is one
     # of the four sites that ask for it and app/api.py's POST
     # /api/mc/ingest is the one that doesn't.
     allow_session_fallback=True,
 )
-
-
-# ---- last-resort fallback name (key-authenticated) ------------------------
-
-
-@router.get("/api/checkin/name")
-async def get_checkin_name(
-    request: Request, principal: Principal = Depends(require_checkin_principal)
-) -> JSONResponse:
-    player_id = principal.player_id
-    conn = connect()
-    try:
-        row = conn.execute(
-            "SELECT sender_name, bound_at FROM mc_checkin_binding WHERE player_id = ?",
-            (player_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if row is None:
-        return JSONResponse({"sender_name": None}, status_code=200)
-    return JSONResponse(
-        {"sender_name": row["sender_name"], "bound_at": row["bound_at"]}, status_code=200
-    )
-
-
-@router.post("/api/checkin/name")
-async def set_checkin_name(
-    request: Request, principal: Principal = Depends(require_checkin_principal)
-) -> JSONResponse:
-    """Set (not add) the caller's last-resort fallback check-in name.
-
-    This binding is only ever consulted by app/checkin.py when the
-    public-key directory bridge has nothing for this player -- see that
-    module's docstring. Registering one does not affect a player the
-    bridge already resolves; it exists for the player it doesn't.
-    """
-    player_id = principal.player_id
-
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad request"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "bad request"}, status_code=400)
-
-    name = normalize_sender_name(body.get("sender_name"))
-    if name is None:
-        return JSONResponse({"error": "sender_name is required"}, status_code=400)
-
-    now = int(time.time())
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute(
-            "SELECT player_id FROM mc_checkin_binding WHERE sender_name = ?", (name,)
-        ).fetchone()
-        if existing is not None and existing["player_id"] != player_id:
-            conn.execute("ROLLBACK")
-            return JSONResponse(
-                {"error": "that name is already registered to another player"},
-                status_code=409,
-            )
-        # Set semantics, not add: mc_checkin_binding.player_id is
-        # UNIQUE, so a player has at most one fallback name. Re-posting
-        # a different name moves the caller's own binding rather than
-        # creating a second one -- delete-then-insert, since the
-        # PRIMARY KEY (sender_name) can change between calls for the
-        # same player and there is nothing to ON CONFLICT against by
-        # player_id alone.
-        conn.execute("DELETE FROM mc_checkin_binding WHERE player_id = ?", (player_id,))
-        conn.execute(
-            "INSERT INTO mc_checkin_binding(sender_name, player_id, bound_at) VALUES (?, ?, ?)",
-            (name, player_id, now),
-        )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
-    return JSONResponse({"sender_name": name, "bound_at": now}, status_code=200)
-
-
-@router.delete("/api/checkin/name")
-async def delete_checkin_name(
-    request: Request, principal: Principal = Depends(require_checkin_principal)
-) -> JSONResponse:
-    player_id = principal.player_id
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM mc_checkin_binding WHERE player_id = ?", (player_id,))
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
-    return JSONResponse({"sender_name": None}, status_code=200)
 
 
 # ---- node pickers (PUBLIC, address rate-limited) ---------------------------
@@ -300,3 +225,335 @@ async def mt_roster_picker(request: Request) -> JSONResponse:
     finally:
         conn.close()
     return JSONResponse({"nodes": nodes}, status_code=200)
+
+
+# ---- node confirmation (key-authenticated, binds a radio) -----------------
+#
+# See this module's own docstring for why this group -- unlike every
+# other route above -- is allowed to write to player_node directly, and
+# app/db.py's mc_node_confirmation comment / app/checkin.py's
+# confirm_scan_connector/confirm_scan_all_connectors for the actual
+# proof-of-possession mechanics. What's left here is purely the HTTP
+# surface: validate input, open/read/close exactly one window per
+# player, and perform the one write once a live re-scan has verified
+# the claim.
+
+_CONFIRM_WINDOW_SECONDS = 300  # 5 minutes -- long enough to walk to a radio and key it on, short enough that a stale window can't sit open indefinitely
+_CONFIRM_SCAN_THROTTLE_SECONDS = 8  # see _scan_cache below
+
+# player_id -> most recent confirm_scan_all_connectors() result (a list
+# of {public_key, name, role, last_heard_epoch} dicts, already exact-
+# name-filtered -- see that function's own docstring). Populated on
+# every LIVE scan (start, and status/accept when the throttle below
+# lets one through) and served back out, unchanged, on a status poll
+# that arrives inside the throttle window -- see confirm_status.
+#
+# Deliberately in-memory, not a table -- same reasoning
+# CheckinPoller.last_poll_at/last_poll_error give for their own in-
+# process state (app/checkin.py): this is a short-lived liveness
+# signal (a window lives at most _CONFIRM_WINDOW_SECONDS) with a cheap,
+# well-defined fallback if it's ever missing after a process restart --
+# the very next scan (never more than _CONFIRM_SCAN_THROTTLE_SECONDS
+# away) repopulates it. Popped whenever a player's window closes
+# (expires, is cancelled, or is consumed by a successful accept) so
+# this dict never grows past the number of players CURRENTLY mid-
+# confirmation.
+_scan_cache: dict[int, list[dict]] = {}
+
+
+def _fresh_candidates(raw: list[dict], baseline: dict) -> list[dict]:
+    """Filter an already exact-name-matched scan (confirm_scan_
+    all_connectors' output) down to the entries that count as PROOF for
+    this window -- see app/db.py's mc_node_confirmation comment for why
+    a bare name match is not enough on its own. A public key absent
+    from `baseline` is a candidate outright (never posted under this
+    name before the window opened); one present in it is a candidate
+    only if it has been heard MORE RECENTLY since -- a node that was
+    already advertising before the window opened, and hasn't been
+    heard again since, proves nothing about who is holding it right
+    now. `baseline`'s values and a raw entry's last_heard_epoch are
+    both treated as 0 ("never heard") wherever they're missing/None, so
+    a merely-absent timestamp can never look like it moved forward.
+    """
+    out = []
+    for node in raw:
+        current = node["last_heard_epoch"] if isinstance(node["last_heard_epoch"], int) else 0
+        base = baseline.get(node["public_key"])
+        if base is None or current > base:
+            out.append(node)
+    return out
+
+
+def _claimed_node_refs(conn, node_refs: set[str]) -> set[str]:
+    """Which of `node_refs` are already in player_node under protocol
+    'mc', for ANY player -- app/checkin_api.py's confirm/status uses
+    this to set each candidate's already_claimed flag so the UI can
+    grey out a node someone else already owns, without this route
+    itself ever refusing to SHOW it (that refusal belongs to accept's
+    own conflict check, below, at the moment someone actually tries to
+    claim it).
+    """
+    if not node_refs:
+        return set()
+    placeholders = ",".join("?" for _ in node_refs)
+    rows = conn.execute(
+        f"SELECT node_ref FROM player_node WHERE protocol = 'mc' AND node_ref IN ({placeholders})",
+        tuple(node_refs),
+    ).fetchall()
+    return {r["node_ref"] for r in rows}
+
+
+@router.post("/api/checkin/confirm/start")
+async def confirm_start(
+    request: Request, principal: Principal = Depends(require_checkin_principal)
+) -> JSONResponse:
+    """Open (or replace) this player's confirmation window for `name`.
+
+    Takes the baseline snapshot -- an on-demand, uncached scan of every
+    configured MeshCore-family connector (app/checkin.py's
+    confirm_scan_all_connectors; see that function and app/db.py's
+    mc_node_confirmation comment for why this can never be
+    CheckinPoller's cached directory) -- RIGHT NOW, before responding,
+    so the window's five minutes start counting from a snapshot the
+    player has not yet had a chance to act on. Set, not add:
+    mc_node_confirmation.player_id is the primary key, so opening a
+    second window (a retry, a different node, a typo fixed) silently
+    replaces whatever window was already open rather than erroring or
+    stacking.
+    """
+    player_id = principal.player_id
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    name = body.get("name")
+    if normalize_sender_name(name) is None:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+
+    conn = connect()
+    try:
+        raw = await confirm_scan_all_connectors(conn, name)
+        baseline = {
+            n["public_key"]: (n["last_heard_epoch"] if isinstance(n["last_heard_epoch"], int) else 0)
+            for n in raw
+        }
+
+        now = int(time.time())
+        expires_at = now + _CONFIRM_WINDOW_SECONDS
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Delete-then-insert: the PRIMARY KEY (player_id) can't be
+            # ON CONFLICT'd against a *different* row's data cleanly,
+            # and a player has at most one open window regardless.
+            conn.execute("DELETE FROM mc_node_confirmation WHERE player_id = ?", (player_id,))
+            conn.execute(
+                "INSERT INTO mc_node_confirmation"
+                "(player_id, typed_name, opened_at, expires_at, baseline, last_scan_at) "
+                "VALUES (?, ?, ?, ?, ?, 0)",
+                (player_id, name, now, expires_at, json.dumps(baseline)),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+    _scan_cache.pop(player_id, None)  # stale from any previous window -- see _scan_cache's own comment
+
+    return JSONResponse(
+        {"expires_at": expires_at, "window_seconds": _CONFIRM_WINDOW_SECONDS, "baseline_count": len(baseline)},
+        status_code=200,
+    )
+
+
+@router.get("/api/checkin/confirm/status")
+async def confirm_status(
+    request: Request, principal: Principal = Depends(require_checkin_principal)
+) -> JSONResponse:
+    """Poll this player's open confirmation window for a fresh advert.
+
+    Re-scans on every call the caller isn't throttled on (see
+    _scan_cache's own comment for why a THROTTLED call is answered from
+    the previous scan instead of skipped outright -- a player mid-
+    window still gets an answer every poll, just not always a freshly
+    fetched one) -- a browser polling this every couple of seconds for
+    up to five minutes must never turn into a request storm against
+    every configured connector.
+    """
+    player_id = principal.player_id
+    now = int(time.time())
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT typed_name, expires_at, baseline, last_scan_at "
+            "  FROM mc_node_confirmation WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()
+
+        if row is None:
+            return JSONResponse({"state": "none"}, status_code=200)
+
+        if now >= row["expires_at"]:
+            conn.execute("DELETE FROM mc_node_confirmation WHERE player_id = ?", (player_id,))
+            _scan_cache.pop(player_id, None)
+            return JSONResponse({"state": "none"}, status_code=200)
+
+        typed_name = row["typed_name"]
+        expires_at = row["expires_at"]
+        baseline = json.loads(row["baseline"])
+
+        if now - row["last_scan_at"] < _CONFIRM_SCAN_THROTTLE_SECONDS:
+            raw = _scan_cache.get(player_id, [])
+        else:
+            raw = await confirm_scan_all_connectors(conn, typed_name)
+            _scan_cache[player_id] = raw
+            conn.execute(
+                "UPDATE mc_node_confirmation SET last_scan_at = ? WHERE player_id = ?", (now, player_id)
+            )
+
+        candidates = _fresh_candidates(raw, baseline)
+        claimed = _claimed_node_refs(conn, {c["public_key"][:8] for c in candidates})
+
+        out_candidates = [
+            {
+                "public_key": c["public_key"],
+                "node_ref": c["public_key"][:8],
+                "name": c["name"],
+                "role": c["role"],
+                "last_heard": c["last_heard_epoch"],
+                "already_claimed": c["public_key"][:8] in claimed,
+            }
+            for c in candidates
+        ]
+    finally:
+        conn.close()
+
+    return JSONResponse(
+        {
+            "state": "found" if out_candidates else "waiting",
+            "expires_at": expires_at,
+            "candidates": out_candidates,
+        },
+        status_code=200,
+    )
+
+
+@router.post("/api/checkin/confirm/accept")
+async def confirm_accept(
+    request: Request, principal: Principal = Depends(require_checkin_principal)
+) -> JSONResponse:
+    """Bind the radio at `public_key` to the caller, IF a live re-scan
+    still finds it among the current window's candidates.
+
+    Never trusts the client's word that a key was offered by GET
+    .../status -- an accept request is re-verified against a fresh
+    confirm_scan_all_connectors() call here, under this player's own
+    typed_name and baseline, the same way GET .../status computes
+    candidates itself. Once verified, the bind honours the SAME first-
+    claim-wins conflict check POST /api/nodes uses (app/nodes_api.py,
+    protocol='mc'): a node already claimed by someone else refuses with
+    409 and binds nothing; already bound to the CALLER is treated as
+    success, not an error (a retried request, a second click); a fresh
+    bind consumes the window (deleted) so it can't be replayed against
+    a second key.
+    """
+    player_id = principal.player_id
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    public_key = normalize_public_key(body.get("public_key"))
+    if public_key is None:
+        return JSONResponse(
+            {"error": "public_key is required and must be 64 hex characters"}, status_code=400
+        )
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT typed_name, expires_at, baseline FROM mc_node_confirmation WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()
+        now = int(time.time())
+        if row is None or now >= row["expires_at"]:
+            if row is not None:
+                conn.execute("DELETE FROM mc_node_confirmation WHERE player_id = ?", (player_id,))
+                _scan_cache.pop(player_id, None)
+            return JSONResponse(
+                {"error": "no open confirmation window -- start one first"}, status_code=409
+            )
+
+        raw = await confirm_scan_all_connectors(conn, row["typed_name"])
+        baseline = json.loads(row["baseline"])
+        candidates = _fresh_candidates(raw, baseline)
+
+        if not any(c["public_key"] == public_key for c in candidates):
+            return JSONResponse(
+                {"error": "that key is not a current confirmation candidate"}, status_code=400
+            )
+
+        node_ref = public_key[:8]
+        bound_at = int(time.time())
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Same check-then-act first-claim-wins pattern as POST
+            # /api/nodes (app/nodes_api.py, around lines 224-244) --
+            # see that route's own comment for why a look-first check
+            # beats letting player_node's (protocol, node_ref) PRIMARY
+            # KEY raise on a cross-player conflict.
+            existing = conn.execute(
+                "SELECT player_id FROM player_node WHERE protocol = 'mc' AND node_ref = ?",
+                (node_ref,),
+            ).fetchone()
+            if existing is not None and existing["player_id"] != player_id:
+                conn.execute("ROLLBACK")
+                return JSONResponse(
+                    {"error": "that node is already registered to another player"},
+                    status_code=409,
+                )
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+                    "VALUES ('mc', ?, ?, ?, ?)",
+                    (node_ref, player_id, bound_at, public_key),
+                )
+            # Already bound to the caller, or freshly bound just now --
+            # either way the window is consumed: it did its job.
+            conn.execute("DELETE FROM mc_node_confirmation WHERE player_id = ?", (player_id,))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+    _scan_cache.pop(player_id, None)
+    return JSONResponse({"node_ref": node_ref}, status_code=200)
+
+
+@router.delete("/api/checkin/confirm")
+async def confirm_cancel(
+    request: Request, principal: Principal = Depends(require_checkin_principal)
+) -> JSONResponse:
+    """Cancel this player's open confirmation window, if any.
+    Always-succeeds: calling this with no window open is not an error,
+    just a no-op.
+    """
+    player_id = principal.player_id
+    conn = connect()
+    try:
+        conn.execute("DELETE FROM mc_node_confirmation WHERE player_id = ?", (player_id,))
+    finally:
+        conn.close()
+    _scan_cache.pop(player_id, None)
+    return JSONResponse({"state": "none"}, status_code=200)

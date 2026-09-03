@@ -54,71 +54,80 @@ asymmetry is intentional and correct, not something to unify:
   -- MeshCore channel messages are encrypted to a shared channel key,
   not signed per sender, so there is no public key to read off a
   message itself. Identity resolution for a MeshCore check-in is
-  therefore two paths, KEY-BASED FIRST, in this priority order:
+  therefore KEY-BASED, full stop -- one resolution mechanism, the
+  public-key directory bridge, fed by two different ways a radio can
+  arrive in player_node:
 
-    1. The public-key directory bridge (_build_directory_bridge below,
-       used by _resolve_mc_identities): resolves a player's ALREADY-
-       BOUND MeshCore radio contact -- player_node, protocol='mc', the
-       first 8 hex characters of that radio's public key -- through a
-       CoreScope instance's node directory (/api/nodes), which carries
-       both a display name and the full public key for every node it
-       has seen. If that contact's 8-hex prefix matches exactly one
-       directory entry, that entry's name is trusted as the player's
-       check-in identity. This is the normal case and needs no separate
-       check-in registration step: it works identically whether the
-       contact got into player_node via MeshMapper's wardriving
-       auto-bind (app/mc_ingest.py) or a player typing it into
-       POST /api/nodes by hand (app/nodes_api.py) -- both write the
-       exact same row shape, and this bridge reads player_node, not
-       whichever path wrote it.
+    The public-key directory bridge (_build_directory_bridge below,
+    used by _resolve_mc_identities): resolves a player's ALREADY-BOUND
+    MeshCore radio contact -- player_node, protocol='mc', the first 8
+    hex characters of that radio's public key -- through a CoreScope
+    instance's node directory (/api/nodes), which carries both a
+    display name and the full public key for every node it has seen.
+    If that contact's 8-hex prefix matches exactly one directory entry,
+    that entry's name is trusted as the player's check-in identity.
+    This needs no separate check-in registration step: it works
+    identically no matter how the contact got into player_node --
 
-       Which directory: THIS net's own connector's cached directory
-       first, and only if the contact is absent from it, the UNION of
-       every OTHER connector currently being polled (CheckinPoller's
-       _resolve_mc_identities below) -- a player's radio is most likely
-       to show up in the directory of the net they actually attend, but
-       a second connector having already seen the same public key
-       should still resolve them rather than force a duplicate
-       fallback-name registration. The fallback only WIDENS where this
-       looks; it applies the exact same ambiguity refusals described
-       below to whatever set it is consulting, so widening the search
-       can never turn an ambiguous match into a confident one.
+      - MeshMapper's wardriving auto-bind (app/mc_ingest.py) or a
+        player typing it into POST /api/nodes by hand
+        (app/nodes_api.py), the two ways every OTHER radio type on this
+        site gets bound too; or
+      - node confirmation (app/checkin_api.py's POST
+        /api/checkin/confirm/accept), MeshCore-only and strictly
+        stronger than either: it makes the SPECIFIC radio advertise
+        live during a short window and binds whichever public key
+        showed a FRESH advert under the typed name, proving present
+        possession rather than merely asserting a name or a node_ref
+        (see app/db.py's mc_node_confirmation comment for the full
+        mechanics). It exists because a MeshCore channel message
+        carries no per-sender key, so nothing else in this identity
+        model can prove who is really holding a given radio right now.
 
-       Why this is trusted automatically, when a bare name match would
-       not be: the join is anchored on a public key MeshWars already
-       knows independently of anything a check-in message claims.
-       Someone who renames their OWN node to impersonate a player's
-       display name shows up in the directory as a second, DIFFERENT
-       public key under that name -- their contact was never bound to
-       the real player, so their messages resolve to nobody. An
-       attacker cannot make their own node's contact resolve to someone
-       else's public key; they can only ever make their own node's NAME
-       collide with someone else's, and resolution here never starts
-       from the name. Starting from the name instead of the key is
-       exactly what would make that attack work; starting from the key
-       is why it doesn't.
+    All three write the exact same player_node row shape, and this
+    bridge reads player_node, not whichever path wrote it -- so however
+    a contact got bound, it resolves through this bridge the same way,
+    with no second, weaker identity path standing behind it. (An
+    earlier version of this feature had one: a last-resort,
+    self-declared mc_checkin_binding row a player could type in for a
+    contact the bridge found nothing for. Retired -- it carried none of
+    the impersonation resistance described below, and node confirmation
+    above is strictly stronger proof for exactly the players who needed
+    it. mc_checkin_binding itself is left in place per this codebase's
+    no-drop convention -- see its own comment in app/db.py -- but
+    nothing reads it anymore.)
 
-    2. A last-resort, self-declared mc_checkin_binding row
-       (app/checkin_api.py), used ONLY for a player the bridge above
-       found nothing for -- a public key that has never shown up in any
-       connector's directory at all (true for roughly 4 in 10 of
-       today's real bound contacts on the original single connector)
-       has no way to be resolved key-first,
-       so those players have to supply the name directly. Key-based
-       resolution wins wherever it produces an answer: if a player's
-       contact DOES resolve through the bridge, any fallback name they
-       also registered is ignored outright, never consulted, let alone
-       allowed to override it -- a self-declared name is strictly less
-       trustworthy than a key-anchored match, precisely because it
-       carries none of the impersonation resistance described above.
+    Which directory: THIS net's own connector's cached directory
+    first, and only if the contact is absent from it, the UNION of
+    every OTHER connector currently being polled (CheckinPoller's
+    _resolve_mc_identities below) -- a player's radio is most likely
+    to show up in the directory of the net they actually attend, but
+    a second connector having already seen the same public key
+    should still resolve them. This cross-connector pass only WIDENS
+    where the bridge looks; it applies the exact same ambiguity
+    refusals described below to whatever set it is consulting, so
+    widening the search can never turn an ambiguous match into a
+    confident one.
 
-    Both paths refuse rather than guess on ambiguity -- see
+    Why this is trusted automatically, when a bare name match would
+    not be: the join is anchored on a public key MeshWars already
+    knows independently of anything a check-in message claims.
+    Someone who renames their OWN node to impersonate a player's
+    display name shows up in the directory as a second, DIFFERENT
+    public key under that name -- their contact was never bound to
+    the real player, so their messages resolve to nobody. An
+    attacker cannot make their own node's contact resolve to someone
+    else's public key; they can only ever make their own node's NAME
+    collide with someone else's, and resolution here never starts
+    from the name. Starting from the name instead of the key is
+    exactly what would make that attack work; starting from the key
+    is why it doesn't.
+
+    Refuses rather than guesses on ambiguity -- see
     _build_directory_bridge and _resolve_mc_identities below for the
     specific cases (a contact matching more than one public key; a name
-    shared by more than one public key anywhere in the directory; a
-    fallback name that collides with a name the bridge already produced
-    for someone else) and why every one of them is a skip-and-log,
-    never a pick-one.
+    shared by more than one public key anywhere in the directory) and
+    why every one of them is a skip-and-log, never a pick-one.
 
 - Meshtastic: GET {connector_url}/api/packets?portnum=1 on a meshview
   instance -- app/ingest.py's shared client already polls the DEFAULT
@@ -160,7 +169,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -171,7 +180,7 @@ from .config import settings
 from .db import WriteSession, connect
 from .mc_api import active_season
 from .meshview_client import MeshviewClient
-from .node_ref import format_node_ref, normalize_sender_name
+from .node_ref import format_node_ref, normalize_public_key, normalize_sender_name
 
 log = logging.getLogger("checkin")
 
@@ -270,6 +279,72 @@ def net_date_for_net(net, ts: int) -> str | None:
     if not start_date or net_date < start_date:
         return None
     return net_date
+
+
+def most_recent_mc_net_date(conn, now: int | None = None) -> str | None:
+    """The most recent local net date (YYYY-MM-DD) that any currently
+    enabled MeshCore-family net (checkin_net, protocol='mc' -- both
+    KIND_CORESCOPE and KIND_BEACON) has already reached the end of, as
+    of `now` (real current time if omitted).
+
+    Deliberately computed from checkin_net's own schedule columns
+    (weekday/start_hour/end_hour/timezone/start_date) rather than from
+    mc_checkin_award's own MAX(net_date). That distinction is the whole
+    point of app/account_api.py's checkin-health endpoint calling this
+    instead: award data answers "when did someone last get credited,"
+    which is exactly the question that goes silently wrong on the one
+    night that matters -- a net that ran and produced zero credited
+    check-ins (a directory outage, every attending player's contact
+    going stale at once) would make mc_checkin_award's own idea of
+    "most recent" quietly point at an OLDER night that did succeed,
+    hiding the very failure this function exists to help surface.
+    Schedule truth doesn't have that failure mode: a net's weekday and
+    hours say when it ran regardless of whether anyone was credited on
+    it.
+
+    For each enabled net, walks backward from `now`, local to that
+    net's own timezone, to the most recent date matching its weekday
+    whose window has already opened (today counts once the window has
+    started, even if still in progress -- same "currently inside the
+    window" moment net_date_for_net itself credits a message against).
+    Across every enabled net, the LATEST such date wins (plain string
+    comparison, since YYYY-MM-DD sorts correctly) -- a deployment with
+    more than one MeshCore net on different weekdays reports on
+    whichever one most recently closed its window, not a fixed one of
+    them. A net whose start_date blocks `now`'s local date entirely
+    (see net_date_for_net's own docstring for what an empty start_date
+    means) is skipped for that comparison the same way it would refuse
+    to award on it.
+
+    None if no enabled MeshCore-family net exists at all, or every one
+    of them is start_date-blocked as of `now`.
+    """
+    if now is None:
+        now = int(time.time())
+    rows = conn.execute(
+        "SELECT weekday, start_hour, end_hour, timezone, start_date FROM checkin_net "
+        " WHERE enabled = 1 AND protocol = ?",
+        (MC_PROTOCOL,),
+    ).fetchall()
+
+    best: str | None = None
+    for net in rows:
+        start_date = net["start_date"]
+        if not start_date:
+            continue  # blocks all, same convention net_date_for_net uses
+        local_now = datetime.fromtimestamp(now, tz=ZoneInfo(net["timezone"]))
+        days_back = (local_now.weekday() - net["weekday"]) % 7
+        if days_back == 0 and local_now.hour < net["start_hour"]:
+            # Today IS the right weekday, but the window has not opened
+            # yet -- the most recently COMPLETED occurrence is a full
+            # week earlier, not today (today hasn't happened yet).
+            days_back = 7
+        candidate = (local_now - timedelta(days=days_back)).date().isoformat()
+        if candidate < start_date:
+            continue
+        if best is None or candidate > best:
+            best = candidate
+    return best
 
 
 def load_checkin_config(conn) -> dict:
@@ -598,9 +673,9 @@ def _mark_seen(conn, connector: str, packet_id: str, seen_at: int) -> None:
 
     A message whose sender simply did not resolve to a REGISTERED PLAYER
     is the one outcome that is NOT settled and must not be passed here
-    -- that depends on the directory bridge, mc_checkin_binding, or
-    player_node, all of which change independently of the message
-    itself, so it is left for a later poll to retry instead. See
+    -- that depends on the directory bridge and player_node, both of
+    which change independently of the message itself, so it is left
+    for a later poll to retry instead. See
     _process_mc_message and _process_mt_packet for exactly where each of
     these branches lands.
     """
@@ -741,6 +816,31 @@ class CoreScopeClient:
         worked while quietly returning the default page.
         """
         data = await self._get("/api/nodes", {"limit": limit})
+        if not isinstance(data, dict):
+            return []
+        nodes = data.get("nodes")
+        return nodes if isinstance(nodes, list) else []
+
+    async def fetch_directory_search(self, name: str, limit: int) -> list[dict]:
+        """Single on-demand, name-filtered directory fetch: GET
+        /api/nodes?search=<name>&limit=<limit>. A deliberately separate
+        method from fetch_directory() above rather than an optional
+        argument on it, because the two back completely different
+        callers with different freshness needs -- fetch_directory()
+        feeds CheckinPoller's directory cache
+        (config['directory_refresh_seconds'], 15 minutes by default);
+        this feeds app/checkin.py's confirm_scan_connector(), which
+        app/checkin_api.py's node-confirmation flow calls on-demand,
+        every few seconds, for up to a 5-minute window. That flow must
+        NEVER go through CheckinPoller's cache -- a fresh advert could
+        not be seen until long after the confirmation window already
+        closed. `search` is confirmed to be a SUBSTRING match upstream
+        (querying "abc" also returns "abcdef"), so this only handles
+        the HTTP round trip -- callers re-filter to an exact
+        normalize_sender_name() match themselves (see
+        confirm_scan_connector below).
+        """
+        data = await self._get("/api/nodes", {"search": name, "limit": limit})
         if not isinstance(data, dict):
             return []
         nodes = data.get("nodes")
@@ -932,33 +1032,182 @@ class BeaconClient:
                 break
         return out[:limit]
 
+    async def fetch_directory_search(self, name: str, limit: int) -> list[dict]:
+        """Single on-demand, name-filtered directory fetch: GET
+        /api/v1/nodes?name=<name>&limit=<limit> -- Beacon's OWN name
+        filter (confirmed working; `search` is silently ignored on
+        this API, unlike CoreScope). Same role as
+        CoreScopeClient.fetch_directory_search above -- see that
+        method's docstring for why this must never back
+        fetch_directory()'s cache-fed caller -- but deliberately a
+        single page, no cursor-follow: unlike fetch_directory()'s full-
+        directory sync, a typed node name is never going to have more
+        matches than one page can hold, and iatas/lastHeard are read
+        straight off each raw item here (unlike fetch_directory()'s
+        name/public_key-only shape), since that is exactly the
+        freshness signal app/checkin.py's confirm_scan_connector needs
+        and fetch_directory() has never had a reason to keep.
+        """
+        data = await self._get("/api/v1/nodes", {"name": name, "limit": limit})
+        if not isinstance(data, dict):
+            return []
+        items = data.get("items")
+        return items if isinstance(items, list) else []
 
-# ---- MeshCore: identity resolution -------------------------------------
+
+# ---- MeshCore: node confirmation (app/checkin_api.py's ------------------
+# POST/GET/DELETE /api/checkin/confirm/*) -----------------------------
+#
+# Support code for proving possession of a specific radio, as opposed to
+# merely asserting a name -- see app/db.py's mc_node_confirmation comment
+# for the full motivation and the shape of what gets stored. The one
+# thing every function below shares: a fetch through here is ALWAYS an
+# on-demand, name-filtered, uncached round trip -- never
+# CheckinPoller's own directory_snapshot/_refresh_mc_directory_if_stale,
+# which is fine (good, even) for identity resolution on a message that
+# already arrived, but useless for "is this radio transmitting RIGHT
+# NOW" inside a five-minute window that cache's own refresh interval
+# comfortably outlives.
+
+_CONFIRM_SEARCH_LIMIT = 50
 
 
-def _load_mc_manual_bindings(conn) -> dict[str, int]:
-    """normalized sender_name -> player_id, from the explicit
-    mc_checkin_binding table (app/checkin_api.py) -- the LAST-RESORT
-    fallback, for a player whose bound contact has never shown up in the
-    live.mwmesh.com directory at all, so _build_directory_bridge has
-    nothing to resolve them through. See _resolve_mc_identities below
-    for how this is merged with the bridge -- key-based resolution wins
-    wherever it produces an answer, so a row here is ignored outright
-    for any player the bridge already resolved.
+def _mc_node_last_heard_epoch(kind: str, node: dict) -> int | None:
+    """Epoch seconds a single raw directory node (CoreScope or Beacon
+    shape, whichever `kind` says) was last heard, or None if neither
+    shape yields one -- confirm_scan_connector() below treats None as
+    "never heard," not "just now," so a node with no usable timestamp
+    can never look like a fresh advert by accident.
 
-    Only non-disabled players are eligible, same filter every other
-    attribution path in this app applies at read time (see
-    app/ingest.py's _load_registered_players) -- a disabled player's
-    binding row still exists (admin disable deletes nothing) but stops
-    matching here the moment they're disabled. sender_name is already
-    stored normalized (checkin_api.py normalizes before insert), so no
-    re-normalization is needed on the way back out.
+    CoreScope: `last_heard`, falling back to `last_seen`, both ISO-8601
+    UTC strings parsed by _parse_iso_ts (same parser
+    companion_directory_entries' upstream data already goes through
+    elsewhere in this module).
+
+    Beacon: max(iatas[].lastHeard), epoch MILLISECONDS -- Beacon's node
+    objects carry no top-level timestamp at all (see BeaconClient's own
+    class docstring); `iatas` absent or empty means None, not zero.
+    Beacon's top-level `stale` boolean is deliberately never read here
+    -- it is a ~24-hour staleness threshold, useless for telling a
+    30-second-old advert apart from a 20-hour-old one, which is exactly
+    the distinction a confirmation window needs.
+    """
+    if kind == KIND_BEACON:
+        iatas = node.get("iatas")
+        if not isinstance(iatas, list) or not iatas:
+            return None
+        values = [
+            i.get("lastHeard") for i in iatas
+            if isinstance(i, dict) and isinstance(i.get("lastHeard"), (int, float))
+        ]
+        if not values:
+            return None
+        return int(max(values) // 1000)
+    ts = _parse_iso_ts(node.get("last_heard"))
+    if ts is None:
+        ts = _parse_iso_ts(node.get("last_seen"))
+    return ts
+
+
+async def confirm_scan_connector(kind: str, connector_url: str, name: str) -> list[dict]:
+    """One on-demand, name-filtered directory fetch against a single
+    MeshCore-family connector, normalized to {public_key, name, role,
+    last_heard_epoch} -- the shape app/checkin_api.py's confirmation
+    endpoints and mc_node_confirmation.baseline both key off. See this
+    section's header comment for why this is never CheckinPoller's
+    cached directory.
+
+    A single, short-lived client, unlike CheckinPoller's pooled
+    _mc_client_for -- confirmation is a low-frequency, human-driven
+    flow (open a window, poll status every few seconds, for at most
+    five minutes), never CheckinPoller's steady 30-second cycle, so
+    there is no steady-state connection worth keeping open between
+    calls the way CheckinPoller's own pooling is.  Tolerant of a down
+    connector the same way CheckinPoller already is: a failed request
+    logs and returns an empty list rather than raising, so one bad
+    connector can never take out every OTHER connector's chance to find
+    the node (see confirm_scan_all_connectors below, which unions this
+    across every configured connector).
+
+    Filtering is substring on the upstream side (see
+    CoreScopeClient.fetch_directory_search /
+    BeaconClient.fetch_directory_search) -- re-filtered here to an
+    EXACT normalize_sender_name() match, so a search for "bob" can
+    never surface "bobby" as a candidate. A node whose public key
+    doesn't validate as a real 64-hex key (node_ref.py's
+    normalize_public_key) is dropped rather than passed through --
+    nothing downstream of this function can do anything useful with a
+    key it can't derive a node_ref from.
+    """
+    target = normalize_sender_name(name)
+    if target is None:
+        return []
+
+    client: CoreScopeClient | BeaconClient
+    client = BeaconClient(connector_url) if kind == KIND_BEACON else CoreScopeClient(connector_url)
+    try:
+        raw = await client.fetch_directory_search(name, _CONFIRM_SEARCH_LIMIT)
+    except Exception:
+        log.warning("checkin: confirm scan failed for connector %s (%s)", connector_url, kind)
+        raw = []
+    finally:
+        await client.aclose()
+
+    out: list[dict] = []
+    for node in raw:
+        if not isinstance(node, dict):
+            continue
+        node_name = node.get("name")
+        if not isinstance(node_name, str) or normalize_sender_name(node_name) != target:
+            continue  # substring match upstream -- see fetch_directory_search docstrings
+        raw_pubkey = node.get("publicKey") if kind == KIND_BEACON else node.get("public_key")
+        public_key = normalize_public_key(raw_pubkey)
+        if public_key is None:
+            continue
+        role = node.get("nodeTypeName") if kind == KIND_BEACON else node.get("role")
+        out.append({
+            "public_key": public_key,
+            "name": node_name,
+            "role": role,
+            "last_heard_epoch": _mc_node_last_heard_epoch(kind, node),
+        })
+    return out
+
+
+async def confirm_scan_all_connectors(conn, name: str) -> list[dict]:
+    """confirm_scan_connector() above, unioned across every distinct
+    (kind, connector_url) among this deployment's MeshCore-family
+    checkin_net rows -- regardless of whether that net's OWN weekly
+    window is open right now. Confirmation has to work any day, not
+    just net night: it is proving who owns a radio, not earning a
+    check-in, and app/checkin_api.py's endpoints never look at a net's
+    weekday/start_hour/end_hour at all.
+
+    Distinct on (kind, connector_url), not on net id -- the same
+    "share by connector, not by net" idea CheckinPoller's own
+    _mc_client_for pooling already relies on: two nets configured
+    against the same CoreScope or Beacon instance (different channels)
+    would otherwise scan the identical directory twice for nothing.
+    Every connector is scanned concurrently (asyncio.gather) so a
+    deployment with several configured connectors doesn't pay for them
+    one at a time inside a status poll a browser is waiting on.
     """
     rows = conn.execute(
-        "SELECT b.sender_name, b.player_id FROM mc_checkin_binding b "
-        "JOIN player p ON p.player_id = b.player_id WHERE p.disabled_at IS NULL"
+        "SELECT DISTINCT kind, connector_url FROM checkin_net WHERE kind IN (?, ?)",
+        (KIND_CORESCOPE, KIND_BEACON),
     ).fetchall()
-    return {r["sender_name"]: r["player_id"] for r in rows}
+    if not rows:
+        return []
+    results = await asyncio.gather(
+        *[confirm_scan_connector(r["kind"], r["connector_url"], name) for r in rows]
+    )
+    out: list[dict] = []
+    for r in results:
+        out.extend(r)
+    return out
+
+
+# ---- MeshCore: identity resolution -------------------------------------
 
 
 def _record_node_name(conn, connector: str, node_ref: str, player_id: int, name: str, now: int) -> None:
@@ -1109,9 +1358,9 @@ def _build_directory_bridge(
 
     A wrong attribution here is worse than a missed point, so every one
     of the skips above is a no-op for that player (they simply don't
-    resolve through the bridge this cycle -- an explicit
-    mc_checkin_binding registration, or a later unambiguous directory
-    state, still works), never a best-effort pick.
+    resolve through the bridge this cycle -- a later unambiguous
+    directory state, or a node-confirmation redo, still works), never a
+    best-effort pick.
 
     `connector`/`now`: when given, every contact this bridge resolves is
     also passed to _record_node_name against `connector` -- see that
@@ -1169,107 +1418,57 @@ def _resolve_mc_identities(
     primary_connector: str | None = None,
 ) -> dict[str, int]:
     """normalized sender name -> player_id, the single map
-    _process_mc_message actually looks a check-in sender up in --
-    combines the key-based directory bridge (_build_directory_bridge)
-    with the last-resort fallback (_load_mc_manual_bindings), applying
-    the priority the module docstring describes: key-based resolution
-    wins wherever it produces an answer.
+    _process_mc_message actually looks a check-in sender up in -- the
+    key-based directory bridge (_build_directory_bridge), widened
+    across every currently-polled connector. There is no second,
+    weaker identity source layered underneath this one anymore -- see
+    the module docstring's MeshCore section for why a bare typed name
+    was retired rather than kept as a fallback.
 
     `primary_directory` is the feed's OWN connector's cached directory
     (see CheckinPoller._poll_mc_feed); `other_directories` is every
     OTHER connector's cached directory currently being polled this
-    cycle, consulted only as a fallback -- see the module docstring's
-    "which directory" note under the MeshCore identity section. Both
-    passes run through the exact same _build_directory_bridge, so both
-    apply its ambiguity refusals identically; the only difference
-    between them is which directory entries are on the table, and the
-    primary pass's answers win over the fallback pass's on any
-    remaining overlap (a player whose contact resolves on their own
-    net's connector is never second-guessed by a match found elsewhere).
-    A single connector (the common case today) makes other_directories
-    empty and this collapses to exactly the original one-directory
-    behavior.
-
-    Three things follow from the priority order, all enforced here
-    rather than left to caller discipline:
-
-    - A fallback row for a player the bridge already resolved is
-      dropped outright, never merely low-priority -- that player's
-      checked-in identity is whatever the bridge says, full stop, and
-      their fallback registration (if any) is inert while that holds.
-    - A fallback NAME that happens to equal a name the bridge already
-      produced for a DIFFERENT player is also dropped, logged as a
-      collision -- the bridge's claim on that exact name wins, and the
-      fallback claimant earns nothing under it (the same "refuse rather
-      than guess" rule _build_directory_bridge applies to directory-wide
-      duplicates, extended to cover a self-declared name colliding with
-      a key-anchored one).
-    - The primary connector's bridge always wins over the OTHER
-      connectors' fallback bridge on any remaining name collision
-      between the two, for the same reason: the primary pass is more
-      specific to the net actually being polled, so it is treated as
-      the more trustworthy of the two key-based answers rather than an
-      arbitrary tiebreak.
-
-    A directory-wide ambiguous name (_build_directory_bridge already
-    refuses to put those in the bridge at all) is not separately
-    special-cased for the fallback path here: if a fallback name is
-    ambiguous in the directory, it was never a candidate to appear as a
-    bridge value in the first place, so the collision check above cannot
-    catch it -- but nothing stops two DIFFERENT fallback registrations
-    from claiming visually distinct names that happen to collide with an
-    ambiguous directory name; that is out of scope for a self-declared
-    name that was never checked against the directory to begin with, and
-    mc_checkin_binding's own PRIMARY KEY already prevents two players
-    from registering the identical fallback string.
+    cycle, consulted only to WIDEN the search -- see the module
+    docstring's "which directory" note under the MeshCore identity
+    section. Both passes run through the exact same
+    _build_directory_bridge, so both apply its ambiguity refusals
+    identically; the only difference between them is which directory
+    entries are on the table, and the primary pass's answers win over
+    the cross-connector pass's on any remaining overlap (a player whose
+    contact resolves on their own net's connector is never second-
+    guessed by a match found elsewhere). A single connector (the common
+    case today) makes other_directories empty and this collapses to
+    exactly the original one-directory behavior.
 
     `primary_connector`, when given, is passed through to
-    _build_directory_bridge's PRIMARY-pass call only (never the fallback
-    pass) so it can record each resolved contact's current directory name
-    (checkin_node_name, app/db.py) against a single, unambiguous
-    connector -- see that function's own docstring for why the fallback
-    pass, built from a union across other connectors, never does this.
+    _build_directory_bridge's PRIMARY-pass call only (never the cross-
+    connector pass) so it can record each resolved contact's current
+    directory name (checkin_node_name, app/db.py) against a single,
+    unambiguous connector -- see that function's own docstring for why
+    the cross-connector pass, built from a union across other
+    connectors, never does this.
     """
     now = int(time.time())
     primary_bridge = _build_directory_bridge(conn, primary_directory, connector=primary_connector, now=now)
     if other_directories:
-        fallback_nodes = [node for nodes in other_directories for node in nodes]
-        fallback_bridge = _build_directory_bridge(conn, fallback_nodes)
+        other_nodes = [node for nodes in other_directories for node in nodes]
+        other_bridge = _build_directory_bridge(conn, other_nodes)
     else:
-        fallback_bridge = {}
-    # Primary wins any remaining overlap -- see the docstring's third
-    # bullet above.
-    for name, fallback_player_id in fallback_bridge.items():
+        other_bridge = {}
+    # Primary wins any remaining overlap -- see the docstring above.
+    for name, other_player_id in other_bridge.items():
         primary_player_id = primary_bridge.get(name)
-        if primary_player_id is not None and primary_player_id != fallback_player_id:
+        if primary_player_id is not None and primary_player_id != other_player_id:
             log.warning(
                 "checkin: mc name %r resolves to player %d on the primary "
-                "connector's bridge and player %d on the fallback bridge -- "
-                "keeping the primary connector's player %d, discarding the "
-                "fallback's player %d", name, primary_player_id,
-                fallback_player_id, primary_player_id, fallback_player_id,
+                "connector's bridge and player %d on another connector's "
+                "bridge -- keeping the primary connector's player %d, "
+                "discarding the other's player %d", name, primary_player_id,
+                other_player_id, primary_player_id, other_player_id,
             )
-    bridge = dict(fallback_bridge)
+    bridge = dict(other_bridge)
     bridge.update(primary_bridge)
-    manual = _load_mc_manual_bindings(conn)
-    bridge_player_ids = set(bridge.values())
-
-    resolved: dict[str, int] = {}
-    for name, player_id in manual.items():
-        if player_id in bridge_player_ids:
-            continue  # key-based already answered for this player
-        if name in bridge:
-            log.warning(
-                "checkin: fallback name %r for player %d collides with a "
-                "name the directory bridge already resolved for another "
-                "player -- refusing the fallback", name, player_id,
-            )
-            continue
-        resolved[name] = player_id
-
-    # Overlay the bridge last so it wins any remaining name collision.
-    resolved.update(bridge)
-    return resolved
+    return bridge
 
 
 def companion_directory_entries(directory_nodes: list[dict]) -> list[dict]:
@@ -1711,12 +1910,11 @@ class CheckinPoller:
             self._mc_directory_fetched_at[connector_url] = now
         elif connector_url not in self._mc_directory:
             # No cache to fall back on yet for THIS connector -- its
-            # directory bridge is simply unavailable this cycle. An
-            # explicit mc_checkin_binding registration still works
-            # regardless; this only affects the auto-resolved path, and
-            # only for nets on this one connector (see
-            # _resolve_mc_identities' fallback for how other connectors'
-            # caches can still cover a player this one can't).
+            # directory bridge is simply unavailable this cycle. Only
+            # nets on this one connector are affected (see
+            # _resolve_mc_identities' cross-connector widening for how
+            # other connectors' caches can still cover a player this
+            # one can't).
             log.warning(
                 "checkin: mc directory fetch failed for %s and no cached copy yet",
                 connector_url,
@@ -1869,8 +2067,8 @@ class CheckinPoller:
                 # this one can change without the message changing. The
                 # sender may be someone who simply is not playing -- or
                 # a real player whose bound contact has not reached the
-                # directory yet, or who has not registered their
-                # fallback name yet.
+                # directory yet, or whose radio is posting under a name
+                # that does not match what it confirmed/wardrove under.
                 #
                 # Recorded here, not settled -- this is purely a
                 # visibility log for an operator (checkin_unresolved_sender,

@@ -43,7 +43,7 @@
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260903-3" />
+  <link rel="stylesheet" href="/static/account.css?v=20260903-5" />
 </head>
 <body>
 
@@ -146,7 +146,8 @@
              gear registered, is it actually reaching MeshWars, and if a
              MeshCore check-in isn't landing, why not. Ordered as a debug
              narrative -- see what's registered, run the full diagnostic,
-             drill into check-ins specifically, then the fix for that. -->
+             confirm a node by name if one isn't binding on its own, then
+             drill into check-ins specifically for the fix. -->
         <h2 class="account-group-title">Radios &amp; troubleshooting</h2>
 
         <section class="account-panel">
@@ -184,29 +185,47 @@
           <div id="account-status-result" class="account-status-result" hidden></div>
         </section>
 
+        <!-- MeshCore channel messages carry no per-sender key, so
+             matching a check-in to a player has to go by the name a
+             radio posts under -- and that drifts from the directory
+             name a wardrive originally recorded. This replaces the old
+             typed fallback-name form: the player types the name their
+             radio is CURRENTLY showing on the mesh, triggers a live
+             advert, and confirms which candidate is theirs before we
+             bind its public key -- proof of live possession, not a
+             name someone once typed in. See app/checkin_api.py's own
+             "node confirmation" section for the start/status/accept/
+             cancel cycle this drives. -->
+        <section class="account-panel">
+          <div class="account-title">Confirm my node</div>
+          <p class="account-hint">Type the name your radio currently shows on the mesh, press the button below, then trigger an advert on that radio. We watch the mesh for it for a few minutes and let you confirm which node is yours before we bind it to your account.</p>
+
+          <div id="account-checkin-confirm-error" class="account-error" role="alert" hidden></div>
+
+          <form id="account-checkin-confirm-start-form" class="account-checkin-confirm-form" novalidate autocomplete="off">
+            <label class="account-field account-field-grow">
+              <span>Node name</span>
+              <input type="text" id="f-account-checkin-confirm-name" autocomplete="off" />
+            </label>
+            <button type="submit" id="account-checkin-confirm-start-btn">Confirm my node</button>
+          </form>
+
+          <!-- Everything past the idle form (waiting/candidates/bound/
+               expired) is rendered here by account.js's own
+               applyCheckinConfirmStatus() state machine, same pattern
+               #account-status-result and #account-checkin-health-result
+               already use elsewhere on this page -- one result well,
+               fully re-drawn per state rather than several separately
+               hidden/shown blocks. -->
+          <div id="account-checkin-confirm-result" class="account-checkin-confirm-result" hidden></div>
+        </section>
+
         <section class="account-panel">
           <div class="account-title">Why my check-ins may not be counting</div>
           <p class="account-hint">Looks at each bound MeshCore contact and says exactly why it does or doesn't resolve to you right now.</p>
           <button type="button" id="account-checkin-health-btn">Check now</button>
           <div id="account-checkin-health-error" class="account-error" role="alert" hidden></div>
           <div id="account-checkin-health-result" class="account-checkin-health-result" hidden></div>
-        </section>
-
-        <section class="account-panel">
-          <div class="account-title">My check-in name</div>
-          <p class="account-hint">A last-resort fallback: if none of your bound contacts resolve automatically, register the exact name your check-ins post under so you keep earning credit while the directory catches up.</p>
-          <p id="account-checkin-name-current" class="account-hint"></p>
-          <div id="account-checkin-name-error" class="account-error" role="alert" hidden></div>
-          <form id="account-checkin-name-form" class="account-checkin-name-form" novalidate autocomplete="off">
-            <label class="account-field account-field-grow">
-              <span>Fallback check-in name</span>
-              <input type="text" id="f-account-checkin-name" autocomplete="off" />
-            </label>
-            <div class="account-checkin-name-actions">
-              <button type="submit" id="account-checkin-name-save">Save</button>
-              <button type="button" id="account-checkin-name-remove" hidden>Remove</button>
-            </div>
-          </form>
         </section>
 
         <!-- =================================================================
@@ -340,7 +359,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260903-3" type="module"></script>
+  <script src="/static/account.js?v=20260903-5" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

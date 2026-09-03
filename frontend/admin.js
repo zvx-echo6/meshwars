@@ -213,19 +213,13 @@ function renderAttention(list) {
           const node = document.getElementById('player-' + a.player_id);
           if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }));
-        if (a.kind === 'checkin_unreachable') {
-          const name = el('input', { placeholder: 'name their check-ins appear under' });
-          row.appendChild(name);
-          row.appendChild(btn('Register', '', async (b) => {
-            b.disabled = true;
-            try {
-              await post('/api/admin/checkin/binding',
-                { player_id: a.player_id, sender_name: name.value });
-              setStatus('Registered check-in name for ' + a.player, false);
-              await loadOverview();
-            } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
-          }));
-        }
+        // checkin_unreachable used to offer an inline "Register" box here
+        // that called POST /api/admin/checkin/binding to hand-set a
+        // fallback check-in name. That route is gone -- the fix now is
+        // node confirmation on the player's own account page (see the
+        // group's remediation text above), or the operator adding/
+        // removing the radio directly via "Add radio" in the player
+        // panel, reached with the "Open" button just above.
         body.appendChild(row);
       });
       wrap.appendChild(body);

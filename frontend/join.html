@@ -71,7 +71,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/join.css?v=20260903-2" />
+  <link rel="stylesheet" href="/static/join.css?v=20260903-3" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -581,39 +581,6 @@
 
           <button type="submit" id="add-radio-submit">Add radio</button>
         </form>
-
-        <!-- MeshCore check-in fallback name -- last-resort, key-authenticated
-             (GET/POST/DELETE /api/checkin/name, app/checkin_api.py) for a
-             player whose public key isn't in the mwmesh.com directory
-             app/checkin.py's identity bridge checks first (true for
-             roughly 4 in 10 of today's bound MeshCore contacts, per that
-             module's own docstring) -- without it, THOSE players' net
-             check-ins can't be resolved from their contact at all.
-             Whether a player's contact resolves fine has nothing to do
-             with whether they have a MeshCore radio registered at all, but
-             this control is useless to show before that -- join.js's
-             renderStatusResult() only unhides it once the status check
-             confirms hasMc, and native <details> keeps it collapsed even
-             then: this is an exception path, not a normal step, and
-             someone whose contact already resolves should never feel
-             steered toward setting one. -->
-        <details id="checkin-name-section" class="checkin-name-section" hidden>
-          <summary>Advanced: MeshCore check-in name isn't matching?</summary>
-          <p class="hint">Most players never need this. It only matters if your net check-ins aren't being credited because your radio's public key isn't yet in the directory MeshWars checks first. If your contact already resolves there, setting a name here does nothing for you.</p>
-          <p class="hint">Type the exact name your radio posts under in your net's own channel (matching ignores case, nothing else).</p>
-          <div id="checkin-name-current" class="checkin-name-current" hidden>
-            <span id="checkin-name-current-text"></span>
-            <button type="button" id="checkin-name-remove">Remove</button>
-          </div>
-          <div id="checkin-name-error" class="join-error" role="alert" hidden></div>
-          <form id="checkin-name-form" class="checkin-name-form" novalidate autocomplete="off">
-            <label class="join-field">
-              <span>Check-in sender name</span>
-              <input type="text" id="f-checkin-name" autocomplete="off" />
-            </label>
-            <button type="submit" id="checkin-name-submit">Save</button>
-          </form>
-        </details>
       </div>
     </section>
 
@@ -630,7 +597,7 @@
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
   <script src="/static/play-area-map.js?v=20260827-1"></script>
-  <script src="/static/join.js?v=20260903-1" type="module"></script>
+  <script src="/static/join.js?v=20260903-2" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

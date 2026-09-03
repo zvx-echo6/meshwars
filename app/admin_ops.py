@@ -10,10 +10,15 @@ supporting was the one person who could not look.
 Everything here follows from that. `overview` computes what is wrong
 rather than listing what exists, so an operator reads a short list of
 problems instead of scrolling a long list of players hoping to spot one.
-The actions are the four things that previously meant running Python
+The actions are the three things that previously meant running Python
 inside the container: extending a season, awarding a missed check-in,
-freezing a month, and registering a fallback net name for somebody whose
-radio the directory has never seen.
+and freezing a month. (A fourth action used to live here -- registering
+a fallback net name for somebody whose radio the directory had never
+seen -- but that whole mechanism was retired in favor of node
+confirmation on the player's own account page, so it was removed rather
+than kept as a route that silently did nothing. An operator can still
+act directly on a player's radios via app/admin_api.py's add/remove
+routes.)
 
 Read routes here are diagnostic and safe. The write routes are not, and
 each one says in its own docstring what it can break.
@@ -150,7 +155,11 @@ def _attention(conn, directory: list[dict]) -> list[dict]:
     # A player whose contact has never appeared in the mwmesh directory
     # cannot be resolved from a net message, so they can never earn a
     # check-in no matter how many they post -- and nothing anywhere told
-    # anyone. The fallback is a hand-registered sender name.
+    # anyone. The fix used to be a hand-registered fallback sender name
+    # (mc_checkin_binding); that mechanism is retired, so the only path
+    # left is node confirmation actually getting the radio INTO the
+    # directory (or, failing that, an operator wiring the radio in by
+    # hand -- see the remediation text below).
     if directory:
         keys = {str(n.get("public_key", "")).lower()[:8] for n in directory}
         bound = {}
@@ -160,16 +169,18 @@ def _attention(conn, directory: list[dict]) -> list[dict]:
             " WHERE pn.protocol = 'mc' AND p.disabled_at IS NULL"
         ):
             bound.setdefault(r["player_id"], []).append(r["node_ref"])
-        fallbacks = {r[0] for r in conn.execute("SELECT DISTINCT player_id FROM mc_checkin_binding")}
         for pid, refs in bound.items():
-            if pid in fallbacks or any(ref in keys for ref in refs):
+            if any(ref in keys for ref in refs):
                 continue
             p = players.get(pid)
             if p:
                 add(p, "checkin_unreachable",
                     "MeshCore radio has never appeared in the mwmesh directory",
                     "They can wardrive normally but can never earn a net check-in. "
-                    "Register the name their check-ins appear under, below.", "warn")
+                    "Have them use \"Confirm my node\" on their account page -- type "
+                    "the name the radio shows on the mesh, trigger an advert on it, "
+                    "and confirm the candidate. If that keeps failing, you can add "
+                    "or remove their radios directly.", "warn")
 
     # ---- check-in name drift, MeshCore only ---------------------------
     # A player's check-in identity is a NAME match against the directory
@@ -210,8 +221,9 @@ def _attention(conn, directory: list[dict]) -> list[dict]:
             "Check-ins are matched by name, so that radio's old binding stopped "
             "matching the moment its name changed -- any other bound radio this "
             "player has is unaffected. Nothing to do once its new name starts "
-            "resolving again on its own -- confirm it has, or have them register "
-            "a fallback name if it hasn't.", "warn")
+            "resolving again on its own -- confirm it has, or if it hasn't, have "
+            "them re-run \"Confirm my node\" on their account page with the new "
+            "name.", "warn")
 
     order = {"bad": 0, "warn": 1, "info": 2}
     out.sort(key=lambda e: (order.get(e["severity"], 3), e["player"].lower()))
@@ -512,50 +524,14 @@ async def admin_checkin_award(request: Request):
                          "points": points, "streak": streak})
 
 
-@router.post("/api/admin/checkin/binding")
-async def admin_checkin_binding(request: Request):
-    """Register the name a player's check-ins appear under.
-
-    Only needed for a MeshCore player whose radio has never shown up in
-    the mwmesh directory -- there is no public key to match them on, so
-    the name is all there is. The poller ignores this for anyone the
-    directory CAN resolve, so adding one for the wrong person achieves
-    nothing rather than stealing their check-ins.
-
-    Send an empty name to remove one.
-    """
-    guard = _api_guard(request)
-    if guard is not None:
-        return guard
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad request"}, status_code=400)
-    player_id = body.get("player_id")
-    name = (body.get("sender_name") or "").strip()
-    if not isinstance(player_id, int):
-        return JSONResponse({"error": "player_id is required"}, status_code=400)
-
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        if not name:
-            conn.execute("DELETE FROM mc_checkin_binding WHERE player_id = ?", (player_id,))
-            conn.execute("COMMIT")
-            return JSONResponse({"player_id": player_id, "sender_name": None})
-        normalized = normalize_sender_name(name)
-        if normalized is None:
-            conn.execute("ROLLBACK")
-            return JSONResponse({"error": "that name normalizes to nothing"}, status_code=400)
-        conn.execute("DELETE FROM mc_checkin_binding WHERE player_id = ?", (player_id,))
-        conn.execute(
-            "INSERT OR REPLACE INTO mc_checkin_binding(sender_name, player_id) VALUES (?, ?)",
-            (normalized, player_id))
-        conn.execute("COMMIT")
-    finally:
-        conn.close()
-    log.info("admin: check-in fallback name %r -> player %d", normalized, player_id)
-    return JSONResponse({"player_id": player_id, "sender_name": normalized})
+# The fallback check-in name feature (POST /api/admin/checkin/binding,
+# which used to INSERT/DELETE mc_checkin_binding rows) was retired --
+# players now prove a radio via node confirmation on their account page
+# instead (app/checkin_api.py's /api/checkin/confirm/* routes). The
+# table itself is still declared in app/db.py but nothing reads it any
+# more, app/checkin.py included, so this route was deleted rather than
+# left in place: it would have kept returning 200 while silently doing
+# nothing, which is worse than a 404 an operator notices immediately.
 
 
 # ---- check-in nets (app/checkin.py's CheckinPoller, app/db.py's checkin_net) --

@@ -62,16 +62,18 @@ def normalize_public_key(raw: object) -> str | None:
 
 def normalize_sender_name(raw: object) -> str | None:
     """Canonical form of a MeshCore check-in sender/display name, for
-    matching against both app/checkin.py's explicit mc_checkin_binding
-    table and its public-key directory bridge. Lives here (rather than
-    in app/checkin.py itself) for the same reason normalize_node_ref
-    does: app/checkin_api.py (the binding endpoint) and app/checkin.py
-    (the poller that matches incoming messages) both need this, and a
-    table whose primary key is a literal string compare on the name
-    must never have two independent ideas of what "the same name" means
-    -- and this module has no imports of its own, so it is a safe place
-    for both of those (and anything else that ever needs it) to share
-    it without risking an import cycle.
+    matching against app/checkin.py's public-key directory bridge (the
+    ONLY identity-resolution path left -- see that module's docstring)
+    and, separately, against a player's own typed_name in node
+    confirmation (app/db.py's mc_node_confirmation, app/checkin_api.py's
+    POST /api/checkin/confirm/*). Lives here (rather than in
+    app/checkin.py itself) for the same reason normalize_node_ref does:
+    app/checkin_api.py and app/checkin.py both need this, and every
+    comparison against a display name across this codebase must share
+    one idea of what "the same name" means -- and this module has no
+    imports of its own, so it is a safe place for both of those (and
+    anything else that ever needs it) to share it without risking an
+    import cycle.
 
     Strips leading/trailing whitespace and folds case -- nothing else.
     Real MeshCore hardware sends names with trailing spaces and with

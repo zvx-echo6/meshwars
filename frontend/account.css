@@ -436,7 +436,8 @@
 .account-add-radio-form button,
 #account-status-check-btn,
 #account-checkin-health-btn,
-.account-checkin-name-actions button,
+#account-checkin-confirm-start-btn,
+.account-checkin-confirm-btn,
 #account-team-switch-btn,
 #account-rotate-key-btn,
 .account-password-actions button,
@@ -453,7 +454,8 @@
 .account-add-radio-form button:hover,
 #account-status-check-btn:hover,
 #account-checkin-health-btn:hover,
-.account-checkin-name-actions button:hover,
+#account-checkin-confirm-start-btn:hover,
+.account-checkin-confirm-btn:hover,
 #account-team-switch-btn:hover,
 #account-rotate-key-btn:hover,
 .account-password-actions button:hover,
@@ -461,7 +463,8 @@
 .account-add-radio-form button:disabled,
 #account-status-check-btn:disabled,
 #account-checkin-health-btn:disabled,
-.account-checkin-name-actions button:disabled,
+#account-checkin-confirm-start-btn:disabled,
+.account-checkin-confirm-btn:disabled,
 #account-team-switch-btn:disabled,
 #account-rotate-key-btn:disabled,
 .account-password-actions button:disabled,
@@ -623,23 +626,66 @@
   color: #f0c0a8;
   border: 1px solid var(--mw-hostile);
 }
-/* ---- My check-in name --------------------------------------------------- */
-.account-checkin-name-form {
+/* ---- Confirm my node -------------------------------------------------------
+   Replaces the old typed fallback-name form's ".account-checkin-name-*"
+   rules (removed) -- .account-checkin-confirm-form keeps that same
+   idle-state layout (a growing label next to a submit button), but
+   everything past submission (waiting/candidates found/bound/expired)
+   is rendered by account.js into .account-checkin-confirm-result, same
+   "one result well, fully re-drawn per state" pattern
+   .account-status-result / .account-checkin-health-result already use
+   above -- so it needs no state-specific hidden/shown rules of its own. */
+.account-checkin-confirm-form {
   display: flex;
   align-items: flex-end;
   gap: 10px;
   flex-wrap: wrap;
 }
-.account-checkin-name-actions {
+.account-checkin-confirm-result {
+  margin-top: 10px;
+}
+.account-checkin-confirm-countdown {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--mw-accent);
+  margin: 8px 0;
+}
+.account-checkin-candidates-list {
+  list-style: none;
+  margin: 8px 0 12px;
+  padding: 0;
+}
+.account-checkin-candidate-item {
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.account-checkin-candidate-item:last-child { margin-bottom: 0; }
+.account-checkin-candidate-item button { margin-top: 6px; }
+.account-checkin-candidate-top {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.8125rem;
+  color: var(--mw-text-1);
+  font-weight: 600;
 }
-#account-checkin-name-remove {
-  background: #2a1414;
-  color: #f08080;
-  border: 1px solid #663333;
+/* The one candidate that can't be picked -- deliberately flat rather
+   than sharing .account-checkin-confirm-btn's accent-bordered look, so
+   it never reads as an available action even before a viewer notices
+   the disabled cursor. */
+.account-checkin-candidate-claimed {
+  background: var(--mw-page);
+  color: var(--mw-text-6);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.8125rem;
+  cursor: default;
 }
-#account-checkin-name-remove:hover { background: #3a1a1a; }
 
 /* ---- My stats ------------------------------------------------------------ */
 .account-stats-card {

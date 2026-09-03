@@ -6,9 +6,11 @@
  * /api/account/logout[-all], GET /auth/providers, and the full set of
  * session-authenticated player/security surfaces this page grew into:
  * GET/POST/DELETE /api/nodes, POST /api/mc/status, GET
- * /api/account/checkin-health, GET/POST/DELETE /api/checkin/name,
- * GET/POST /api/team, GET /api/account/stats, GET /api/account/checkins,
- * GET /api/account/honors, DELETE /api/account/identity/{provider},
+ * /api/account/checkin-health, POST /api/checkin/confirm/start, GET
+ * /api/checkin/confirm/status, POST /api/checkin/confirm/accept,
+ * DELETE /api/checkin/confirm, GET/POST /api/team, GET
+ * /api/account/stats, GET /api/account/checkins, GET
+ * /api/account/honors, DELETE /api/account/identity/{provider},
  * POST/DELETE /api/account/password, POST /api/account/contact-email,
  * and POST /api/account/rotate-key -- all documented in
  * app/account_api.py, app/nodes_api.py, app/mc_api.py,
@@ -28,7 +30,7 @@
  * paste their key on this page for anything.
  *
  * Every player-scoped section below (radios, troubleshooting,
- * check-in health, check-in name, team, stats, check-in history,
+ * check-in health, confirm-my-node, team, stats, check-in history,
  * honors) is gated on session.player_id existing at all -- see
  * applyPlayerGate(). An account with no linked player sees a plain
  * explanation and the connect-by-key form instead of any of those
@@ -36,8 +38,8 @@
  *
  * SECURITY: every dynamic value rendered here (provider labels, masked
  * emails, player name/team, session user-agent/ip, server error text,
- * diagnosis/explanation copy, check-in names) is set via textContent
- * or an element's .value, never innerHTML -- same rule
+ * diagnosis/explanation copy, confirm-my-node candidate names) is set
+ * via textContent or an element's .value, never innerHTML -- same rule
  * frontend/join.js's own module docstring states for the same reason.
  * The API key entered in the connect-by-key form, and the freshly
  * rotated key rotate-key returns, are each handled the same way
@@ -812,13 +814,24 @@ const CONTACT_STATUS_LABELS = {
   name_ambiguous: 'Name shared by more than one radio',
 };
 
+// data.state is the headline app/account_api.py's _diagnose_checkin_health()
+// computed: 'credited' (an award actually exists for the most recent net --
+// the ONLY state that's really "fine") plus five attention states, each
+// with data.summary already written as one concrete next step. This
+// function's job is just to lay that headline out and, underneath it,
+// list this player's own bound contacts (data.contacts, unchanged shape)
+// for anyone who wants the per-radio detail behind the headline -- it does
+// not re-derive "is this okay," that decision already happened server-side
+// against real award data, not against anything this function could infer
+// from contacts alone (see this endpoint's own docstring for why that
+// used to be the bug).
 function renderCheckinHealth(data) {
   const panel = document.getElementById('account-checkin-health-result');
   panel.replaceChildren();
   panel.hidden = false;
 
   const summary = document.createElement('div');
-  summary.className = 'account-diagnosis ' + (data.resolved ? 'account-diagnosis-ok' : 'account-diagnosis-attention');
+  summary.className = 'account-diagnosis ' + (data.state === 'credited' ? 'account-diagnosis-ok' : 'account-diagnosis-attention');
   summary.textContent = data.summary || '';
   panel.appendChild(summary);
 
@@ -858,23 +871,6 @@ function renderCheckinHealth(data) {
     });
     panel.appendChild(list);
   }
-
-  if (data.binding) {
-    panel.appendChild(buildLabel('Your fallback check-in name'));
-    const b = data.binding;
-    const line = document.createElement('p');
-    line.className = 'account-hint';
-    if (b.registered) {
-      line.textContent = `Registered: "${b.sender_name}" — ${b.active ? 'currently active' : 'not currently in effect'}.`;
-    } else {
-      line.textContent = 'None registered.';
-    }
-    panel.appendChild(line);
-    const explanation = document.createElement('p');
-    explanation.className = 'account-hint';
-    explanation.textContent = b.explanation;
-    panel.appendChild(explanation);
-  }
 }
 
 function showCheckinHealthError(message) {
@@ -910,93 +906,386 @@ async function handleCheckinHealthCheck() {
 }
 
 // ============================================================================
-// MY CHECK-IN NAME (GET/POST/DELETE /api/checkin/name)
+// CONFIRM MY NODE (POST /api/checkin/confirm/start, GET .../status,
+// POST .../accept, DELETE /api/checkin/confirm)
 // ============================================================================
+//
+// Replaces the old typed fallback-name form (GET/POST/DELETE
+// /api/checkin/name, retired -- nobody had one registered, so there
+// was no migration to carry forward). That form let a player type
+// whatever name they believed their radio posted under, which quietly
+// went stale the moment a radio's on-mesh name drifted from it. This
+// instead re-scans the mesh live: the player types the name their
+// radio shows RIGHT NOW, triggers an advert, and picks their node out
+// of whatever adverts arrive during a five-minute window -- proof of
+// live possession, not a typed guess. Full mechanics (the baseline
+// snapshot, why a bare name match isn't enough proof on its own, the
+// first-claim-wins bind) live in app/checkin_api.py's node-
+// confirmation section; this is purely the client side of that state
+// machine: idle -> waiting -> (candidates found) -> bound, with
+// cancel/expire dropping back to idle from any point past start.
 
-function showCheckinNameError(message) {
-  const el = document.getElementById('account-checkin-name-error');
+// Server throttles its own upstream scan to one per 8s (see
+// app/checkin_api.py's _scan_cache comment) -- polling every 5s here
+// is safely inside that, so a poll never goes to waste but also never
+// pushes on a scan that's about to be answered from cache anyway.
+const CHECKIN_CONFIRM_POLL_MS = 5000;
+
+// Two independent timers, both cleared together by
+// stopCheckinConfirmPolling() -- the 5s one re-fetches status, the 1s
+// one only redraws the on-screen countdown between fetches so it
+// doesn't visibly stall between polls.
+let checkinConfirmPollTimer = null;
+let checkinConfirmCountdownTimer = null;
+// epoch seconds of the currently open window, or null when none is
+// open -- doubles as "are we actively watching" (tickCheckinConfirm
+// Countdown and the 'none' branch of applyCheckinConfirmStatus both
+// read it) so there's no separate boolean to keep in sync with it.
+let checkinConfirmExpiresAt = null;
+
+function showCheckinConfirmError(message) {
+  const el = document.getElementById('account-checkin-confirm-error');
   el.textContent = message;
   el.hidden = false;
 }
 
-function clearCheckinNameError() {
-  const el = document.getElementById('account-checkin-name-error');
+function clearCheckinConfirmError() {
+  const el = document.getElementById('account-checkin-confirm-error');
   el.textContent = '';
   el.hidden = true;
 }
 
-function renderCheckinNameCurrent(senderName) {
-  const current = document.getElementById('account-checkin-name-current');
-  const removeBtn = document.getElementById('account-checkin-name-remove');
-  const input = document.getElementById('f-account-checkin-name');
-  if (senderName) {
-    current.textContent = `Currently registered: "${senderName}"`;
-    removeBtn.hidden = false;
-    input.value = senderName;
-  } else {
-    current.textContent = 'No fallback name registered.';
-    removeBtn.hidden = true;
-    input.value = '';
-  }
+function stopCheckinConfirmPolling() {
+  if (checkinConfirmPollTimer) { clearInterval(checkinConfirmPollTimer); checkinConfirmPollTimer = null; }
+  if (checkinConfirmCountdownTimer) { clearInterval(checkinConfirmCountdownTimer); checkinConfirmCountdownTimer = null; }
 }
 
-async function loadCheckinName() {
-  try {
-    const res = await fetch('/api/checkin/name');
-    if (!res.ok) return;
-    const data = await res.json();
-    renderCheckinNameCurrent(data.sender_name);
-  } catch (err) {
-    // Quiet -- the form still works from a blank state.
-  }
+// mm:ss, not the day/hour/minute granularity frontend/mc.js's own
+// formatCountdown() uses -- that one's built for season-length
+// windows; this window is five minutes, so seconds matter.
+function formatCheckinConfirmCountdown(secondsRemaining) {
+  const clamped = Math.max(0, secondsRemaining);
+  const mins = Math.floor(clamped / 60);
+  const secs = clamped % 60;
+  return `${mins}:${String(secs).padStart(2, '0')}`;
 }
 
-async function handleCheckinNameSubmit(e) {
-  e.preventDefault();
-  clearCheckinNameError();
-  const input = document.getElementById('f-account-checkin-name');
-  const name = input.value.trim();
-  if (!name) {
-    showCheckinNameError('Enter the name your check-ins post under.');
+function tickCheckinConfirmCountdown() {
+  const el = document.getElementById('account-checkin-confirm-countdown');
+  if (!el || !checkinConfirmExpiresAt) return;
+  const remaining = checkinConfirmExpiresAt - Math.floor(Date.now() / 1000);
+  if (remaining <= 0) {
+    // Don't wait for the next 5s poll to say so -- the clock reaching
+    // zero is itself proof the window closed.
+    renderCheckinConfirmExpired();
     return;
   }
-  const submitBtn = document.getElementById('account-checkin-name-save');
-  submitBtn.disabled = true;
+  el.textContent = `Window closes in ${formatCheckinConfirmCountdown(remaining)}`;
+}
+
+// Starts both timers together -- called once, right after start()
+// succeeds or when loadCheckinConfirmStatus() finds a window already
+// open from a previous page load. Guards against a double-start (e.g.
+// a resumed page load racing a fresh submit) by clearing first.
+function startCheckinConfirmWatching() {
+  stopCheckinConfirmPolling();
+  checkinConfirmPollTimer = setInterval(pollCheckinConfirmStatus, CHECKIN_CONFIRM_POLL_MS);
+  checkinConfirmCountdownTimer = setInterval(tickCheckinConfirmCountdown, 1000);
+}
+
+function renderCheckinConfirmIdle() {
+  stopCheckinConfirmPolling();
+  checkinConfirmExpiresAt = null;
+  document.getElementById('account-checkin-confirm-start-form').hidden = false;
+  const result = document.getElementById('account-checkin-confirm-result');
+  result.replaceChildren();
+  result.hidden = true;
+}
+
+function renderCheckinConfirmWaiting(data) {
+  document.getElementById('account-checkin-confirm-start-form').hidden = true;
+  checkinConfirmExpiresAt = data.expires_at;
+
+  const result = document.getElementById('account-checkin-confirm-result');
+  result.replaceChildren();
+  result.hidden = false;
+
+  const instructions = document.createElement('p');
+  instructions.className = 'account-hint';
+  instructions.textContent = 'Trigger an advert on that radio now -- most MeshCore devices send one from a long-press of the side button, or a "Send Advert" / "Flood Advert" menu item.';
+  result.appendChild(instructions);
+
+  if (data.baseline_count > 0) {
+    // Other nodes were already posting under this exact name before
+    // this window opened -- none of THEM count as proof (see this
+    // section's own header comment), but the player should still
+    // expect to see more than just their own node show up below.
+    const baselineNote = document.createElement('p');
+    baselineNote.className = 'account-hint';
+    baselineNote.textContent = `${data.baseline_count} other node${data.baseline_count !== 1 ? 's' : ''} on the mesh already carr${data.baseline_count !== 1 ? 'y' : 'ies'} that name -- expect more than one candidate below once yours adverts.`;
+    result.appendChild(baselineNote);
+  }
+
+  const countdown = document.createElement('p');
+  countdown.id = 'account-checkin-confirm-countdown';
+  countdown.className = 'account-checkin-confirm-countdown';
+  result.appendChild(countdown);
+  tickCheckinConfirmCountdown();
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'account-link-btn';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', handleCheckinConfirmCancel);
+  result.appendChild(cancelBtn);
+}
+
+function renderCheckinConfirmCandidates(data) {
+  document.getElementById('account-checkin-confirm-start-form').hidden = true;
+  checkinConfirmExpiresAt = data.expires_at;
+
+  const result = document.getElementById('account-checkin-confirm-result');
+  result.replaceChildren();
+  result.hidden = false;
+
+  const prompt = document.createElement('p');
+  prompt.className = 'account-hint';
+  prompt.textContent = 'We heard the following nodes adverting under that name. Pick yours:';
+  result.appendChild(prompt);
+
+  const countdown = document.createElement('p');
+  countdown.id = 'account-checkin-confirm-countdown';
+  countdown.className = 'account-checkin-confirm-countdown';
+  result.appendChild(countdown);
+  tickCheckinConfirmCountdown();
+
+  const list = document.createElement('ul');
+  list.className = 'account-checkin-candidates-list';
+  (data.candidates || []).forEach((cand) => {
+    const li = document.createElement('li');
+    li.className = 'account-checkin-candidate-item';
+
+    const top = document.createElement('div');
+    top.className = 'account-checkin-candidate-top';
+    const name = document.createElement('span');
+    name.textContent = cand.name;
+    top.appendChild(name);
+    const role = document.createElement('span');
+    role.className = 'account-hint';
+    role.textContent = cand.role || '';
+    top.appendChild(role);
+    li.appendChild(top);
+
+    const detail = document.createElement('p');
+    detail.className = 'account-hint';
+    const shortKey = cand.public_key ? `${cand.public_key.slice(0, 8)}…${cand.public_key.slice(-4)}` : 'unknown key';
+    detail.textContent = `${cand.node_ref} · ${shortKey} · heard ${relativeTimeFromEpoch(cand.last_heard)}`;
+    li.appendChild(detail);
+
+    const claimBtn = document.createElement('button');
+    claimBtn.type = 'button';
+    if (cand.already_claimed) {
+      // Visibly disabled and labelled, not just left off the list --
+      // the player still needs to see it was heard, and understand why
+      // it's not clickable, rather than wonder if their node is
+      // missing entirely.
+      claimBtn.textContent = 'Already registered to someone else';
+      claimBtn.disabled = true;
+      claimBtn.className = 'account-checkin-candidate-claimed';
+    } else {
+      claimBtn.textContent = 'This is mine';
+      claimBtn.className = 'account-checkin-confirm-btn';
+      claimBtn.addEventListener('click', () => handleCheckinConfirmAccept(cand.public_key, claimBtn));
+    }
+    li.appendChild(claimBtn);
+
+    list.appendChild(li);
+  });
+  result.appendChild(list);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'account-link-btn';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', handleCheckinConfirmCancel);
+  result.appendChild(cancelBtn);
+}
+
+function renderCheckinConfirmBound(nodeRef) {
+  stopCheckinConfirmPolling();
+  checkinConfirmExpiresAt = null;
+  document.getElementById('account-checkin-confirm-start-form').hidden = true;
+
+  const result = document.getElementById('account-checkin-confirm-result');
+  result.replaceChildren();
+  result.hidden = false;
+
+  const done = document.createElement('div');
+  done.className = 'account-diagnosis account-diagnosis-ok';
+  done.textContent = `Bound to ${nodeRef}. Check-ins from that node now count toward you.`;
+  result.appendChild(done);
+
+  const again = document.createElement('button');
+  again.type = 'button';
+  again.className = 'account-link-btn';
+  again.textContent = 'Confirm another node';
+  again.addEventListener('click', renderCheckinConfirmIdle);
+  result.appendChild(again);
+}
+
+function renderCheckinConfirmExpired() {
+  stopCheckinConfirmPolling();
+  checkinConfirmExpiresAt = null;
+  document.getElementById('account-checkin-confirm-start-form').hidden = true;
+
+  const result = document.getElementById('account-checkin-confirm-result');
+  result.replaceChildren();
+  result.hidden = false;
+
+  const msg = document.createElement('p');
+  msg.className = 'account-hint';
+  msg.textContent = 'That confirmation window closed without a match. Start again below.';
+  result.appendChild(msg);
+
+  const again = document.createElement('button');
+  again.type = 'button';
+  again.className = 'account-checkin-confirm-btn';
+  again.textContent = 'Start again';
+  again.addEventListener('click', renderCheckinConfirmIdle);
+  result.appendChild(again);
+}
+
+// Shared by the initial page-load resume (loadCheckinConfirmStatus)
+// and every 5s poll (pollCheckinConfirmStatus) -- both just hand their
+// fetched status here and let it pick the render function.
+function applyCheckinConfirmStatus(data) {
+  if (data.state === 'waiting') {
+    renderCheckinConfirmWaiting(data);
+  } else if (data.state === 'found') {
+    renderCheckinConfirmCandidates(data);
+  } else if (checkinConfirmExpiresAt) {
+    // 'none', but we were watching a window a moment ago -- it closed
+    // (expired server-side) between polls without an accept. A bare
+    // 'none' with nothing previously open (the very first status check
+    // on page load) is just "idle," not "expired," so that case is
+    // handled separately by loadCheckinConfirmStatus rather than here.
+    renderCheckinConfirmExpired();
+  }
+}
+
+async function pollCheckinConfirmStatus() {
   try {
-    const res = await fetch('/api/checkin/name', {
+    const res = await fetch('/api/checkin/confirm/status');
+    if (!res.ok) return; // transient failure -- next poll retries; don't tear down mid-advert over one bad response
+    const data = await res.json();
+    applyCheckinConfirmStatus(data);
+  } catch (err) {
+    // Quiet, same reasoning -- a single network hiccup should not
+    // interrupt someone mid-advert.
+  }
+}
+
+// Run once on page load so a reload mid-window resumes watching
+// instead of silently dropping back to a blank idle form while the
+// window is still open server-side.
+async function loadCheckinConfirmStatus() {
+  try {
+    const res = await fetch('/api/checkin/confirm/status');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.state === 'waiting' || data.state === 'found') {
+      applyCheckinConfirmStatus(data);
+      startCheckinConfirmWatching();
+    }
+    // 'none' -- nothing to resume; the idle form is already what
+    // account.html renders by default.
+  } catch (err) {
+    // Quiet -- same as loadRadios(): the idle form still works even if
+    // this background check fails.
+  }
+}
+
+async function handleCheckinConfirmStart(e) {
+  e.preventDefault();
+  clearCheckinConfirmError();
+  const input = document.getElementById('f-account-checkin-confirm-name');
+  const name = input.value.trim();
+  if (!name) {
+    showCheckinConfirmError('Enter the name your radio shows on the mesh.');
+    return;
+  }
+  const btn = document.getElementById('account-checkin-confirm-start-btn');
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  try {
+    const res = await fetch('/api/checkin/confirm/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sender_name: name }),
+      body: JSON.stringify({ name }),
     });
     let data = null;
     try { data = await res.json(); } catch (err) { data = null; }
     if (!res.ok) {
-      showCheckinNameError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      showCheckinConfirmError((data && data.error) || 'Something went wrong. Try again in a moment.');
       return;
     }
-    renderCheckinNameCurrent(data.sender_name);
+    renderCheckinConfirmWaiting(data);
+    startCheckinConfirmWatching();
   } catch (err) {
-    showCheckinNameError('Could not reach the server. Check your connection and try again.');
+    showCheckinConfirmError('Could not reach the server. Check your connection and try again.');
   } finally {
-    submitBtn.disabled = false;
+    btn.disabled = false;
+    btn.textContent = 'Confirm my node';
   }
 }
 
-async function handleCheckinNameRemove() {
-  clearCheckinNameError();
-  const btn = document.getElementById('account-checkin-name-remove');
-  btn.disabled = true;
+async function handleCheckinConfirmCancel() {
+  clearCheckinConfirmError();
   try {
-    const res = await fetch('/api/checkin/name', { method: 'DELETE' });
-    if (!res.ok) {
-      showCheckinNameError('Something went wrong. Try again in a moment.');
+    await fetch('/api/checkin/confirm', { method: 'DELETE' });
+  } catch (err) {
+    // Quiet -- the window expires server-side on its own timer even if
+    // this DELETE never lands, so a failed cancel request here is not
+    // worth surfacing; the UI already drops back to idle below.
+  }
+  renderCheckinConfirmIdle();
+}
+
+async function handleCheckinConfirmAccept(publicKey, button) {
+  clearCheckinConfirmError();
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = 'Binding...';
+  try {
+    const res = await fetch('/api/checkin/confirm/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_key: publicKey }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (res.status === 409) {
+      // The one conflict this can hit: someone else already claimed
+      // this exact node. Surfaced verbatim -- the server message
+      // already says exactly this plainly -- rather than a generic
+      // failure, so it reads as an expected outcome, not an error.
+      showCheckinConfirmError((data && data.error) || 'That node is already registered to another player.');
+      button.disabled = false;
+      button.textContent = original;
       return;
     }
-    renderCheckinNameCurrent(null);
+    if (!res.ok) {
+      showCheckinConfirmError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      button.disabled = false;
+      button.textContent = original;
+      return;
+    }
+    renderCheckinConfirmBound(data.node_ref);
+    loadRadios(); // refresh so the newly bound radio appears above without a page reload
   } catch (err) {
-    showCheckinNameError('Could not reach the server. Check your connection and try again.');
-  } finally {
-    btn.disabled = false;
+    showCheckinConfirmError('Could not reach the server. Check your connection and try again.');
+    button.disabled = false;
+    button.textContent = original;
   }
 }
 
@@ -1566,7 +1855,7 @@ async function handleRotateKeyConfirm() {
 
 function loadPlayerSections() {
   loadRadios();
-  loadCheckinName();
+  loadCheckinConfirmStatus();
   loadStats();
   loadTeamStatus();
   loadCheckins();
@@ -1694,8 +1983,7 @@ function boot() {
   document.getElementById('account-add-radio-form').addEventListener('submit', handleAddRadioSubmit);
   document.getElementById('account-status-check-btn').addEventListener('click', handleStatusCheck);
   document.getElementById('account-checkin-health-btn').addEventListener('click', handleCheckinHealthCheck);
-  document.getElementById('account-checkin-name-form').addEventListener('submit', handleCheckinNameSubmit);
-  document.getElementById('account-checkin-name-remove').addEventListener('click', handleCheckinNameRemove);
+  document.getElementById('account-checkin-confirm-start-form').addEventListener('submit', handleCheckinConfirmStart);
 
   document.getElementById('account-team-switch-btn').addEventListener('click', handleTeamSwitchBtnClick);
   document.getElementById('account-team-confirm-btn').addEventListener('click', handleTeamSwitchConfirm);

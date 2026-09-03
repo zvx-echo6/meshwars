@@ -1060,23 +1060,24 @@ async def account_checkins(
 # is no catch-all "unknown" bucket to hide behind.
 _CONTACT_EXPLANATIONS = {
     "resolved": (
-        "This contact resolves automatically. Check-ins it posts under "
-        "this name are credited with nothing further needed from you."
+        "This contact's key resolves to a name in the check-in "
+        "directory, so a message it posts under that exact name is "
+        "eligible to be credited. See the headline diagnosis above for "
+        "whether it actually has been."
     ),
     "not_in_directory": (
         "This contact's key has never shown up in the check-in directory, "
         "so it cannot be matched to a name yet. In MeshMapper, check "
         "Settings, API Endpoints, Include Contact Key is turned on, and "
         "wardrive with it a little -- the directory picks new radios up "
-        "on its own once they've been heard. Registering a fallback name "
-        "below will credit you in the meantime."
+        "on its own once they've been heard. Or use the Confirm my node "
+        "section above to prove this specific radio is yours right now."
     ),
     "key_ambiguous": (
         "This contact's key prefix currently matches more than one entry "
         "in the directory, so it is refused rather than guessed at -- a "
-        "wrong credit is worse than a missed one. This is usually "
-        "temporary and clears as the directory updates; if it does not "
-        "clear, this is worth flagging to an operator."
+        "wrong credit is worse than a missed one. This is not something "
+        "you can fix yourself -- flag it to an operator."
     ),
     "name_ambiguous": (
         "This contact resolves to a display name that more than one "
@@ -1120,69 +1121,119 @@ def _checkin_contacts_status(conn, player_id: int, directory: list[dict]) -> lis
     return out
 
 
-def _checkin_binding_status(conn, player_id: int, directory: list[dict]) -> dict:
-    """Whether this player has a self-declared check-in name
-    (mc_checkin_binding) registered, and whether it is actually the
-    thing crediting them right now, or sitting inert behind a key
-    match. Reuses _build_directory_bridge() (the real key-based pass)
-    and _resolve_mc_identities() (the real key-wins-over-fallback
-    priority rule -- see that function's own docstring) instead of
-    re-deriving either. Neither call has any side effect here: both
-    only write to checkin_node_name when given a `connector`, which
-    this never passes.
+def _fmt_points(points) -> str:
+    """`10.0` -> "10", `12.5` -> "12.5" -- mc_checkin_award.points is a
+    REAL column so every value round-trips through here as a float,
+    but a whole-number award (the overwhelming common case: checkin_
+    config.points plus an integer streak bonus) should read as a plain
+    integer in player-facing text, not "10.0".
     """
-    from .checkin import _build_directory_bridge, _resolve_mc_identities
+    return f"{points:g}"
 
-    row = conn.execute(
-        "SELECT sender_name FROM mc_checkin_binding WHERE player_id = ?",
-        (player_id,),
-    ).fetchone()
-    if row is None:
-        return {
-            "registered": False,
-            "sender_name": None,
-            "active": False,
-            "explanation": (
-                "You have not registered a fallback check-in name. If none of "
-                "your bound contacts resolve automatically (see above), "
-                "register the exact name your check-ins post under so you "
-                "keep earning credit while the directory catches up."
-            ),
-        }
 
-    sender_name = row["sender_name"]
-    bridge = _build_directory_bridge(conn, directory)
-    if player_id in bridge.values():
-        return {
-            "registered": True,
-            "sender_name": sender_name,
-            "active": False,
-            "explanation": (
-                "Not currently in effect -- one of your bound contacts already "
-                "resolves through the directory, so this fallback name isn't needed."
-            ),
-        }
+def _diagnose_checkin_health(
+    contacts: list[dict], most_recent_net_date: str | None, credited_points,
+) -> tuple[str, str]:
+    """The headline (state, summary) for GET /api/account/checkin-health,
+    computed from REALITY -- whether this player was actually credited
+    -- not from whether something merely LOOKS bindable. See this
+    endpoint's own docstring for why that distinction is the entire
+    point of this function existing: the previous version of this
+    panel inferred "resolved" from contact/binding status alone and
+    could report a player as fine while every one of their check-ins
+    went uncredited.
 
-    resolved = _resolve_mc_identities(conn, directory, other_directories=[])
-    if resolved.get(sender_name) == player_id:
-        return {
-            "registered": True,
-            "sender_name": sender_name,
-            "active": True,
-            "explanation": "This fallback name is what is currently crediting your check-ins.",
-        }
+    `credited_points` is the player's mc_checkin_award.points for
+    `most_recent_net_date` if that exact row exists, else None -- the
+    caller has already done the one query this decision actually turns
+    on. `contacts` is _checkin_contacts_status()'s output (this
+    player's own bound MeshCore radios only -- never another player's
+    name or contact, see this endpoint's own docstring on that).
 
-    return {
-        "registered": True,
-        "sender_name": sender_name,
-        "active": False,
-        "explanation": (
-            "Not currently in effect -- this name collides with a name the "
-            "directory already resolves for someone else, so it is being "
-            "refused rather than risk crediting the wrong person. Register a "
-            "more distinctive fallback name instead."
-        ),
-    }
+    Six states, priority order, each ending in one concrete next step
+    that only ever points at something this same page renders (My
+    radios, Confirm my node, both ABOVE this panel in
+    frontend/account.html -- see that file for why):
+
+    1. credited: an award exists for the most recent net date. Nothing
+       else matters once this is true -- report it and stop.
+    2. resolving_uncredited: no contact is credited yet, at least one
+       resolves in the directory. THE state this function exists to be
+       able to say -- a resolving contact used to read as "fine" no
+       matter what mc_checkin_award said. Directory resolution is
+       necessary for a check-in to land but never sufficient (the
+       radio still has to actually post under that exact name during
+       the window), so this is reported as a real problem, not
+       downgraded to "everything's fine."
+    3. not_in_directory: no contact resolves or is ambiguous, but at
+       least one is bound and simply hasn't shown up in the directory.
+    4. name_ambiguous: a bound contact's display name collides with
+       another radio in the directory.
+    5. key_ambiguous: a bound contact's key prefix collides with
+       another directory entry -- not fixable by the player at all.
+    6. nothing_bound: no MeshCore contact bound at all.
+
+    A player can be in more than one of 3/4/5 at once with several
+    bound radios; priority order picks the single most actionable one
+    to lead with, same "refuse rather than guess" spirit as
+    checkin._build_directory_bridge()'s own ambiguity handling -- this
+    just orders outcomes instead of refusing one.
+    """
+    if credited_points is not None:
+        return "credited", (
+            f"You were credited {_fmt_points(credited_points)} point(s) for the "
+            f"{most_recent_net_date} net. No further action needed."
+        )
+
+    date_text = most_recent_net_date or "the most recent net"
+
+    resolved = [c for c in contacts if c["status"] == "resolved"]
+    if resolved:
+        names = sorted({c["resolved_name"] for c in resolved if c["resolved_name"]})
+        names_text = " and ".join(names) if len(names) <= 1 else (
+            ", ".join(names[:-1]) + f", and {names[-1]}"
+        )
+        return "resolving_uncredited", (
+            f"Your radio is in the directory as {names_text}, but you were not "
+            f"credited on {date_text}. Check-ins only count when the radio posts "
+            "under exactly that name -- so either set the radio back to that "
+            "name, or confirm the radio that actually posts, using the Confirm "
+            "my node section above."
+        )
+
+    not_in_directory = [c for c in contacts if c["status"] == "not_in_directory"]
+    if not_in_directory:
+        refs = ", ".join(c["node_ref"] for c in not_in_directory)
+        return "not_in_directory", (
+            f"Your bound radio(s) ({refs}) have not shown up in the check-in "
+            "directory yet, so they cannot be matched to a name -- advertising "
+            "is what puts a radio in the directory. If one of these isn't the "
+            "radio you actually use, remove it in My radios above; otherwise, "
+            "wardrive it, or use the Confirm my node section above to prove "
+            "which one is yours right now."
+        )
+
+    name_ambiguous = [c for c in contacts if c["status"] == "name_ambiguous"]
+    if name_ambiguous:
+        return "name_ambiguous", (
+            "Your radio's display name in the check-in directory is currently "
+            "shared by another radio, so check-ins under it are refused rather "
+            "than risk crediting the wrong person. Rename the companion node to "
+            "something nobody else's radio is using."
+        )
+
+    key_ambiguous = [c for c in contacts if c["status"] == "key_ambiguous"]
+    if key_ambiguous:
+        return "key_ambiguous", (
+            "Your radio's key currently matches more than one entry in the "
+            "check-in directory. This is not something you can fix yourself -- "
+            "flag it to an operator."
+        )
+
+    return "nothing_bound", (
+        "You have no MeshCore contact bound, so you cannot earn MeshCore net "
+        "check-ins yet. Use the Confirm my node section above to get started."
+    )
 
 
 @router.get("/api/account/checkin-health")
@@ -1193,9 +1244,32 @@ async def account_checkin_health(
 
     Gives a player the same diagnosis app/admin_ops.py's overview
     already gives an operator about them (checkin_unreachable,
-    checkin_name_changed) -- but self-serve, and per-contact rather
-    than a single flag, since a player can have more than one bound
-    MeshCore radio in more than one resolution state at once.
+    checkin_name_changed) -- but self-serve.
+
+    The headline (`state`/`summary`) is derived from whether this
+    player was actually CREDITED for the most recent MeshCore net, not
+    from whether a contact merely looks bindable -- see
+    _diagnose_checkin_health()'s own docstring for exactly why that
+    distinction matters: a bound contact resolving in the directory is
+    necessary for a check-in to land, but it is not sufficient, and the
+    previous version of this endpoint conflated the two, reporting a
+    player as fine while every one of their check-ins credited nobody.
+    checkin.most_recent_mc_net_date() answers "when did a MeshCore net
+    most recently run" straight off checkin_net's own schedule, not off
+    mc_checkin_award -- see that function's own docstring for why
+    asking the award table "when was the most recent net" would hide
+    exactly the failure this endpoint exists to catch (a net that ran
+    and credited nobody at all).
+
+    `contacts` (per-contact detail, unchanged shape from before) is
+    kept alongside the headline because it's still useful once a player
+    knows THAT something's wrong -- it's just no longer what decides
+    whether something's wrong. It can never contain anyone else's
+    contact or sender name: `_checkin_contacts_status` reads only
+    player_node rows already bound to THIS player_id, and nothing here
+    reads the operator-only unresolved-sender log a name any bound or
+    unbound caller could later claim -- that stays admin-only, see
+    app/admin_ops.py.
 
     Reads the check-in poller's own cached directory
     (request.app.state.checkin_poller.directory_snapshot(), the
@@ -1210,43 +1284,35 @@ async def account_checkin_health(
     if session.player_id is None:
         return _no_linked_player_error()
 
+    from .checkin import most_recent_mc_net_date
+
     poller = getattr(request.app.state, "checkin_poller", None)
     directory = poller.directory_snapshot() if poller is not None else []
 
     conn = connect()
     try:
         contacts = _checkin_contacts_status(conn, session.player_id, directory)
-        binding = _checkin_binding_status(conn, session.player_id, directory)
+        most_recent_net_date = most_recent_mc_net_date(conn)
+        credited_points = None
+        if most_recent_net_date is not None:
+            row = conn.execute(
+                "SELECT points FROM mc_checkin_award "
+                " WHERE player_id = ? AND protocol = ? AND net_date = ?",
+                (session.player_id, MC_PROTOCOL, most_recent_net_date),
+            ).fetchone()
+            credited_points = row["points"] if row is not None else None
     finally:
         conn.close()
 
-    resolved_overall = any(c["status"] == "resolved" for c in contacts) or binding["active"]
-    if resolved_overall:
-        summary = (
-            "At least one of your bound contacts or your fallback name is "
-            "currently crediting your check-ins."
-        )
-    elif not contacts and not binding["registered"]:
-        summary = (
-            "You have no MeshCore contact bound and no fallback name "
-            "registered, so you cannot earn MeshCore net check-ins yet. "
-            "Binding a radio usually happens on its own the first time you "
-            "wardrive with MeshMapper's Include Contact Key setting on, or "
-            "you can register the exact name your check-ins post under below."
-        )
-    else:
-        summary = (
-            "Nothing is currently crediting your MeshCore check-ins. See the "
-            "detail on each contact below, or register a fallback name with "
-            "the exact name your radio posts under."
-        )
+    state, summary = _diagnose_checkin_health(contacts, most_recent_net_date, credited_points)
 
     return JSONResponse(
         {
-            "resolved": resolved_overall,
+            "resolved": state == "credited",
+            "state": state,
             "summary": summary,
+            "most_recent_net_date": most_recent_net_date,
             "contacts": contacts,
-            "binding": binding,
         },
         status_code=200,
     )
