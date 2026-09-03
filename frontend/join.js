@@ -31,7 +31,7 @@
  * stay that way.
  */
 
-import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-1';
+import { fetchProviders, renderProviderButtons, setupEmailSignInForm, setupPasswordSignInForm } from './signin-email.js?v=20260903-2';
 
 // Same roster/colors as frontend/mc.js -- duplicated rather than
 // imported, since this page must stay self-contained and load
@@ -1467,8 +1467,8 @@ function setupStatusKeyToggle() {
 // one is never rendered as a button that would 404 the moment someone
 // clicked it -- and the whole panel starts `hidden` in join.html and
 // is only revealed once there is something worth showing (a real
-// provider, or an auth_error to report), so an all-disabled deployment
-// never flashes an empty "Sign in" box at all.
+// provider, an auth_error to report, or password sign-in, which is
+// always worth showing -- see below).
 const AUTH_ERROR_MESSAGES = {
   provider_declined: 'Sign-in was cancelled.',
   invalid_session: 'That sign-in attempt expired or was already used. Try again.',
@@ -1480,6 +1480,7 @@ async function setupSignIn() {
   const wrap = document.getElementById('signin-providers');
   const errEl = document.getElementById('signin-error');
   const emailForm = document.getElementById('signin-email-form');
+  const magicLinkBtn = document.getElementById('signin-magic-link-btn');
   if (!panel || !wrap) return;
 
   // A failed sign-in attempt (GET /auth/{provider}/callback -- see
@@ -1496,9 +1497,22 @@ async function setupSignIn() {
 
   const hasEmail = providers.some((p) => p.name === 'email');
   renderProviderButtons(providers.filter((p) => p.name !== 'email'), wrap);
-  if (emailForm) emailForm.hidden = !hasEmail;
 
-  if (providers.length > 0 || errorCode) panel.hidden = false;
+  // The email <form> now always has something to offer -- password
+  // sign-in (#signin-password-group), which is never gated by GET
+  // /auth/providers at all (see frontend/signin-email.js's own header
+  // comment) -- so unlike before, it is no longer hidden when magic-link
+  // email itself isn't configured. Only the magic-link button is gated
+  // on `hasEmail`, same as it always was.
+  if (emailForm) emailForm.hidden = false;
+  if (magicLinkBtn) magicLinkBtn.hidden = !hasEmail;
+
+  // Password sign-in (above) is unconditional, so this panel now always
+  // has something worth showing -- unlike the old
+  // `providers.length > 0 || errorCode` check this replaces, which
+  // could leave it hidden on a deployment with no OAuth provider and no
+  // SMTP configured.
+  panel.hidden = false;
 }
 
 function boot() {
@@ -1524,7 +1538,13 @@ function boot() {
     input: document.getElementById('f-signin-email'),
     errorEl: document.getElementById('signin-email-error'),
     sentEl: document.getElementById('signin-email-sent'),
-    submitBtn: document.querySelector('#signin-email-form .signin-email-submit-btn'),
+    submitBtn: document.getElementById('signin-magic-link-btn'),
+  });
+  setupPasswordSignInForm(document.getElementById('signin-email-form'), {
+    emailInput: document.getElementById('f-signin-email'),
+    passwordInput: document.getElementById('f-signin-password'),
+    errorEl: document.getElementById('signin-email-error'),
+    submitBtn: document.getElementById('signin-password-btn'),
   });
   document.getElementById('status-form').addEventListener('submit', handleStatusSubmit);
   document.getElementById('add-radio-form').addEventListener('submit', handleAddRadioSubmit);

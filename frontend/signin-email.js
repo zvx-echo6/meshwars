@@ -26,7 +26,29 @@
 // app/oauth_api.py's own "email sign-in" section comment). It instead
 // reveals the caller's own email form (address field + submit), which
 // this module wires up once via setupEmailSignInForm().
+//
+// Password sign-in (POST /auth/password/start, app/oauth_api.py's
+// "the fifth door" section) shares that same email field rather than
+// asking for the address twice -- setupPasswordSignInForm() below adds
+// a password input and a second submit button to the SAME <form>
+// element setupEmailSignInForm() already owns, so both handlers listen
+// on one 'submit' event and use `event.submitter` to tell which button
+// was actually pressed. Unlike every entry GET /auth/providers can
+// list, password sign-in is core application code -- there is no
+// provider_enabled()-style gate for it in app/oauth.py and no SMTP
+// dependency the way magic-link email has, so PASSWORD_SIGNIN_AVAILABLE
+// below is a constant, not something derived from that endpoint. Only
+// join.js and account.js wire it in -- frontend/link.js's "already have
+// an account" panel deliberately does NOT, because POST
+// /auth/password/start only ever authenticates an existing account and
+// never links a pending identity onto it (see that route's own
+// docstring), which is the entire reason that panel exists.
 // =====================================================================
+
+// See this file's own header comment above for why password sign-in,
+// unlike every provider GET /auth/providers can list, is never
+// conditionally hidden.
+export const PASSWORD_SIGNIN_AVAILABLE = true;
 
 // GET /auth/providers (app/oauth_api.py's list_providers()) -- only
 // ever lists a provider that is actually configured
@@ -77,12 +99,23 @@ export function renderProviderButtons(providers, wrap) {
 // TEAM_COLORS' duplication comment gives for keeping each page
 // independently correct, just applied to element wiring instead of a
 // data table.
+//
+// On join.html and account.html this form also carries
+// setupPasswordSignInForm()'s password field and submit button (see
+// this file's own header comment) -- the `event.submitter !== submitBtn`
+// guard below is what keeps a password-button click from also running
+// the magic-link request. link.html never adds that second button, so
+// there `event.submitter` is always this form's one submit button (or
+// undefined, on a browser old enough to not populate it at all -- the
+// guard is skipped entirely in that case, same as before this field
+// existed).
 export function setupEmailSignInForm(form, els) {
   if (!form) return;
   const { input, errorEl, sentEl, submitBtn } = els;
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (e.submitter && submitBtn && e.submitter !== submitBtn) return;
     if (errorEl) errorEl.hidden = true;
     if (sentEl) sentEl.hidden = true;
 
@@ -134,6 +167,121 @@ export function setupEmailSignInForm(form, els) {
       }
     } finally {
       if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+}
+
+// Wires the submit handler for password sign-in (POST
+// /auth/password/start) -- the second action on the same <form>
+// setupEmailSignInForm() already owns, see this file's own header
+// comment for why the two share one email field and one 'submit'
+// event instead of being two separate forms.
+//
+// `els.emailInput` is the SAME element passed to setupEmailSignInForm's
+// `input` for this form -- read here, never written (only the password
+// field is cleared on success), so a person who mistypes their password
+// doesn't lose the address they already typed.
+//
+// A failed attempt (bad credentials, no password set on the account, or
+// simply no such account) all come back as the exact same 401 body from
+// the server -- see app/oauth_api.py's password_start() docstring for
+// why that ambiguity is deliberate. The copy shown here preserves it:
+// there is deliberately no separate "no account" / "no password set" /
+// "wrong password" message.
+export function setupPasswordSignInForm(form, els) {
+  if (!form) return;
+  const { emailInput, passwordInput, errorEl, submitBtn } = els;
+  if (!passwordInput || !submitBtn) return;
+
+  // Per the HTML spec, pressing Enter in ANY field submits a form via
+  // its "default button" -- the FIRST submit button in tree order --
+  // regardless of which field has focus. Without this, finishing a
+  // password and hitting Enter would fire the magic-link button beside
+  // it instead (the first button on this form), not this one. Calling
+  // requestSubmit(submitBtn) dispatches a real 'submit' event with
+  // event.submitter set to this button, so the guard in
+  // setupEmailSignInForm's handler (and the one below) route it
+  // correctly, the same as an actual click on this button would.
+  passwordInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (typeof form.requestSubmit === 'function') {
+      form.requestSubmit(submitBtn);
+    } else {
+      submitBtn.click();
+    }
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (e.submitter && e.submitter !== submitBtn) return;
+    if (errorEl) errorEl.hidden = true;
+
+    const email = (emailInput.value || '').trim();
+    if (!email) {
+      if (errorEl) {
+        errorEl.textContent = 'Enter your email address.';
+        errorEl.hidden = false;
+      }
+      return;
+    }
+    const password = passwordInput.value;
+    if (!password) {
+      if (errorEl) {
+        errorEl.textContent = 'Enter your password.';
+        errorEl.hidden = false;
+      }
+      return;
+    }
+
+    submitBtn.disabled = true;
+    try {
+      const res = await fetch('/auth/password/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+
+      if (res.status === 429) {
+        if (errorEl) {
+          errorEl.textContent = 'Too many attempts. Wait a moment and try again.';
+          errorEl.hidden = false;
+        }
+        return;
+      }
+      if (!res.ok) {
+        // Covers the 401 "invalid email or password" (bad credentials,
+        // no password set, or no such account -- all indistinguishable
+        // by design, see this function's own header comment) and the
+        // 400 shape-validation cases, with the SAME copy for all of
+        // them: no case here may ever hint at which one happened.
+        if (errorEl) {
+          errorEl.textContent = 'Incorrect email or password.';
+          errorEl.hidden = false;
+        }
+        return;
+      }
+
+      // Success: POST /auth/password/start already set the session
+      // cookie on this response (create_session + set_session_cookie --
+      // see that route's own docstring), exactly like oauth_callback and
+      // email_callback do for their own "login" case. Those two land a
+      // completed sign-in on /account (RedirectResponse(_ACCOUNT_PAGE_PATH)
+      // -- see _respond_to_callback_outcome's own docstring); a full
+      // navigation there is the same landing spot for this door too,
+      // rather than inventing a different one -- and it's correct
+      // whether this form was reached from join.html, or was already on
+      // /account itself (account.html), where it just re-loads the page
+      // into its now-signed-in state.
+      passwordInput.value = '';
+      window.location.assign('/account');
+    } catch (err) {
+      if (errorEl) {
+        errorEl.textContent = 'Could not reach the server. Check your connection and try again.';
+        errorEl.hidden = false;
+      }
+    } finally {
+      submitBtn.disabled = false;
     }
   });
 }

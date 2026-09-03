@@ -126,7 +126,8 @@
   font-size: 0.6875rem;
 }
 
-.signin-email-form input[type="email"] {
+.signin-email-form input[type="email"],
+.signin-email-form input[type="password"] {
   width: 100%;
   background: var(--mw-page);
   color: var(--mw-text-1);
@@ -135,7 +136,8 @@
   padding: 8px 10px;
   font-size: 0.875rem;
 }
-.signin-email-form input[type="email"]:focus {
+.signin-email-form input[type="email"]:focus,
+.signin-email-form input[type="password"]:focus {
   outline: none;
   border-color: var(--mw-accent);
 }
@@ -158,6 +160,32 @@
   font-size: 0.6875rem;
   color: var(--mw-text-6);
   margin: 8px 0 0;
+}
+
+/* ---- Password sign-in (POST /auth/password/start) ------------------------
+   A SECOND action on the same #account-signin-email-form as the
+   magic-link button above it, sharing that form's one email field --
+   see account.html's own comment on #account-signin-password-group for
+   why this isn't a separate form. Same shape join.css defines for its
+   own #signin-password-group, duplicated here for the same reason
+   .signin-providers/.signin-provider-btn above already are. */
+.signin-password-group {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--mw-line);
+}
+.signin-password-group label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 0.75rem;
+  color: var(--mw-text-5);
+}
+.signin-password-group label > span {
+  display: block;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.6875rem;
 }
 
 /* ---- Sign-in methods list -------------------------------------------- */

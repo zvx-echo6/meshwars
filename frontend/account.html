@@ -43,7 +43,7 @@
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260903-7" />
+  <link rel="stylesheet" href="/static/account.css?v=20260903-8" />
 </head>
 <body>
 
@@ -78,7 +78,14 @@
          here either -- including email sign-in (#account-signin-email-form
          below), the same address-field-and-submit form join.html's
          #signin-email-form and link.html's #link-email-form use, wired
-         up via the shared frontend/signin-email.js. -->
+         up via the shared frontend/signin-email.js.
+
+         Password sign-in (POST /auth/password/start) is a SECOND
+         action on that same form, sharing its one email field --
+         #account-signin-password-group below. Unlike every provider
+         above and unlike email sign-in itself, it is never gated by
+         GET /auth/providers (see frontend/signin-email.js's own header
+         comment for why), so it's always shown here. -->
     <section id="account-signed-out" class="account-panel" hidden>
       <div class="account-title">Sign in</div>
       <p class="account-hint">Sign in to see your connected sign-in methods, your linked player, and your active sessions.</p>
@@ -90,8 +97,16 @@
           <span>Email</span>
           <input type="email" id="f-account-signin-email" autocomplete="email" required />
         </label>
-        <button type="submit" class="signin-email-submit-btn">Email me a sign-in link</button>
+        <button type="submit" id="account-signin-magic-link-btn" class="signin-email-submit-btn" hidden>Email me a sign-in link</button>
         <p id="account-signin-email-sent" class="signin-email-sent" hidden>If that address can sign in, a link is on its way — check your inbox.</p>
+
+        <div id="account-signin-password-group" class="signin-password-group">
+          <label>
+            <span>Password</span>
+            <input type="password" id="f-account-signin-password" autocomplete="current-password" />
+          </label>
+          <button type="submit" id="account-signin-password-btn" class="signin-email-submit-btn">Sign in with password</button>
+        </div>
       </form>
 
       <p id="account-signin-none" class="account-hint" hidden>No sign-in method is enabled on this deployment yet.</p>
@@ -380,7 +395,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260903-7" type="module"></script>
+  <script src="/static/account.js?v=20260903-8" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

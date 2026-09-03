@@ -71,7 +71,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/join.css?v=20260903-3" />
+  <link rel="stylesheet" href="/static/join.css?v=20260903-4" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -122,7 +122,16 @@
          form, but there is no GET /auth/email/start redirect to build a
          plain link to (POST /auth/email/start, a JSON endpoint, is a
          different shape entirely -- see app/oauth_api.py's own
-         "email sign-in" section comment). -->
+         "email sign-in" section comment).
+
+         Password sign-in (POST /auth/password/start) is a SECOND action
+         on that SAME form, sharing its one email field rather than
+         asking for the address twice -- #signin-password-group below.
+         Unlike every provider above and unlike email sign-in itself, it
+         is never gated by GET /auth/providers (that response has no
+         "password" entry at all -- see frontend/signin-email.js's own
+         header comment for why), so it's always shown here and its own
+         submit button is never hidden by setupSignIn(). -->
     <section id="signin-panel" class="join-panel" hidden>
       <div class="join-panel-title">Sign in</div>
       <p class="hint">Signing in links your play across devices and lets you manage your account from one place — it's separate from registering a radio below, and you can do either first.</p>
@@ -135,8 +144,16 @@
           <span>Email</span>
           <input type="email" id="f-signin-email" autocomplete="email" required />
         </label>
-        <button type="submit" class="signin-email-submit-btn">Email me a sign-in link</button>
+        <button type="submit" id="signin-magic-link-btn" class="signin-email-submit-btn" hidden>Email me a sign-in link</button>
         <p id="signin-email-sent" class="signin-email-sent" hidden>If that address can sign in, a link is on its way — check your inbox.</p>
+
+        <div id="signin-password-group" class="signin-password-group">
+          <label>
+            <span>Password</span>
+            <input type="password" id="f-signin-password" autocomplete="current-password" />
+          </label>
+          <button type="submit" id="signin-password-btn" class="signin-email-submit-btn">Sign in with password</button>
+        </div>
       </form>
     </section>
 
@@ -597,7 +614,7 @@
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
   <script src="/static/play-area-map.js?v=20260827-1"></script>
-  <script src="/static/join.js?v=20260903-2" type="module"></script>
+  <script src="/static/join.js?v=20260903-3" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

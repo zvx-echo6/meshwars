@@ -48,7 +48,13 @@
  * logged, and GET /api/account never returns a key at all.
  */
 
-import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-1';
+import {
+  fetchProviders,
+  renderProviderButtons,
+  setupEmailSignInForm,
+  setupPasswordSignInForm,
+  PASSWORD_SIGNIN_AVAILABLE,
+} from './signin-email.js?v=20260903-2';
 
 // No local PROVIDER_LABELS map here -- app/oauth.py's PROVIDER_LABELS
 // is the single source of truth, and every API response this page
@@ -211,6 +217,7 @@ async function renderSignedOut() {
   const wrap = document.getElementById('account-signin-providers');
   const noneEl = document.getElementById('account-signin-none');
   const emailForm = document.getElementById('account-signin-email-form');
+  const magicLinkBtn = document.getElementById('account-signin-magic-link-btn');
 
   const providers = await fetchProviders();
 
@@ -223,18 +230,30 @@ async function renderSignedOut() {
   const hasEmail = providers.some((p) => p.name === 'email');
   const linkableProviders = providers.filter((p) => p.name !== 'email');
 
-  if (providers.length === 0) {
+  if (providers.length === 0 && !PASSWORD_SIGNIN_AVAILABLE) {
     // Truly nothing configured anywhere -- see this deployment's own
     // GET /auth/providers. Left as `providers`, not `linkableProviders`,
     // so an email-only deployment (nothing here to render, but email
     // sign-in IS reachable from /join or /link) never shows this
     // page's "no sign-in method enabled" hint when one genuinely is.
+    // PASSWORD_SIGNIN_AVAILABLE is a constant `true` (see
+    // frontend/signin-email.js's own header comment for why), so this
+    // branch can no longer actually run -- left correct rather than
+    // deleted, in case that ever stops being true.
     noneEl.hidden = false;
     if (emailForm) emailForm.hidden = true;
     return;
   }
+  noneEl.hidden = true;
   renderProviderButtons(linkableProviders, wrap);
-  if (emailForm) emailForm.hidden = !hasEmail;
+
+  // The email <form> now always has something to offer -- password
+  // sign-in (#account-signin-password-group), which is never gated by
+  // GET /auth/providers -- so unlike before, it is no longer hidden
+  // when magic-link email itself isn't configured. Only the magic-link
+  // button is gated on `hasEmail`, same as it always was.
+  if (emailForm) emailForm.hidden = false;
+  if (magicLinkBtn) magicLinkBtn.hidden = !hasEmail;
 }
 
 // ---- Sign-in methods (GET /api/account's own identities array) -----------
@@ -2084,7 +2103,13 @@ function boot() {
     input: document.getElementById('f-account-signin-email'),
     errorEl: document.getElementById('account-signin-email-error'),
     sentEl: document.getElementById('account-signin-email-sent'),
-    submitBtn: document.querySelector('#account-signin-email-form .signin-email-submit-btn'),
+    submitBtn: document.getElementById('account-signin-magic-link-btn'),
+  });
+  setupPasswordSignInForm(document.getElementById('account-signin-email-form'), {
+    emailInput: document.getElementById('f-account-signin-email'),
+    passwordInput: document.getElementById('f-account-signin-password'),
+    errorEl: document.getElementById('account-signin-email-error'),
+    submitBtn: document.getElementById('account-signin-password-btn'),
   });
 
   setupAddRadioProtocolToggle();

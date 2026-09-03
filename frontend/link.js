@@ -35,7 +35,17 @@
  * frontend/join.js's own module docstring states for the same reason.
  */
 
-import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-1';
+// Deliberately does NOT import setupPasswordSignInForm -- unlike
+// frontend/join.js and frontend/account.js, this page's "already have
+// an account" panel exists specifically to LINK the pending identity
+// onto whichever account the visitor signs into (resolve_oauth_callback
+// cases 2/3), and POST /auth/password/start never does that (see that
+// route's own "the fifth door" section comment in app/oauth_api.py --
+// it only ever authenticates an existing account, and never touches
+// account_identity/account_pending_identity at all). Offering password
+// sign-in here would silently leave the pending identity unclaimed,
+// so it stays limited to the two doors that actually resolve it.
+import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-2';
 
 function showError(message) {
   const el = document.getElementById('link-error');

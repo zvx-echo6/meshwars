@@ -584,6 +584,29 @@ def test_password_start_backoff_resets_on_success(client, db_path, monkeypatch):
     assert "dev@example.com" not in oauth_api_module._password_backoff._state
 
 
+def test_password_start_works_even_when_no_providers_are_configured(client, db_path):
+    """frontend/signin-email.js's PASSWORD_SIGNIN_AVAILABLE is a
+    hardcoded `true`, never derived from GET /auth/providers, on the
+    strength of exactly this: unlike every OAuth provider (needs a
+    client id/secret) or magic-link email (needs SMTP settings), this
+    door has no provider_enabled()-style gate at all -- see
+    list_providers()'s own docstring in app/oauth_api.py, which never
+    appends a "password" entry to that response under any
+    configuration. Confirms both halves of that assumption on a bare,
+    fully-unconfigured deployment: the list really is empty, and
+    password sign-in works anyway.
+    """
+    providers_resp = client.get("/auth/providers")
+    assert providers_resp.status_code == 200
+    assert providers_resp.json() == {"providers": []}
+
+    _identity_and_password(db_path, email="dev@example.com", password="a-real-password")
+    resp = client.post("/auth/password/start", json={"email": "dev@example.com", "password": "a-real-password"})
+    assert resp.status_code == 200
+    assert resp.json()["result"] == "login"
+    assert SESSION_COOKIE_NAME in resp.cookies
+
+
 # =========================================================================
 # GET /api/account -- extended shape
 # =========================================================================
