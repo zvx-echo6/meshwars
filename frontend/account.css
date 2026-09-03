@@ -634,8 +634,38 @@
    is rendered by account.js into .account-checkin-confirm-result, same
    "one result well, fully re-drawn per state" pattern
    .account-status-result / .account-checkin-health-result already use
-   above -- so it needs no state-specific hidden/shown rules of its own. */
+   above -- so it needs no state-specific hidden/shown rules of its own.
+
+   One form covering both protocols now (see frontend/account.html's
+   own comment on this section for why): .account-checkin-confirm-form
+   stacks its two rows vertically -- the "Radio type" dropdown first,
+   on its own line, so that choice reads as made BEFORE the fields
+   below it react to it -- and .account-checkin-confirm-fields-row
+   carries the growing-label-next-to-button layout the single row used
+   to have, unchanged in look, just demoted to an inner row rather than
+   the whole form. account.js toggles #account-checkin-confirm-name-
+   field's `hidden` property (never inline display -- see this file's
+   own [hidden] rule near the top of this file) when Meshtastic is
+   selected, since that
+   protocol needs no typed name at all. */
 .account-checkin-confirm-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.account-checkin-confirm-protocol-field {
+  max-width: 220px;
+}
+.account-checkin-confirm-protocol-field select {
+  width: 100%;
+  background: var(--mw-page);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.875rem;
+}
+.account-checkin-confirm-fields-row {
   display: flex;
   align-items: flex-end;
   gap: 10px;
@@ -649,6 +679,19 @@
   font-weight: 700;
   color: var(--mw-accent);
   margin: 8px 0;
+}
+/* The issued Meshtastic broadcast code -- reuses .account-copy-row's
+   input+Copy-button look (the API-key/join-link pattern this page
+   already uses elsewhere) so it reads as something to copy, not just
+   to read, and is sized up from that shared style's default since this
+   is the one thing on the page a player has to get exactly right by
+   eye or by paste. */
+.account-checkin-confirm-code-row input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-align: center;
 }
 .account-checkin-candidates-list {
   list-style: none;

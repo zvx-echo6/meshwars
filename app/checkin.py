@@ -168,6 +168,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 from datetime import datetime, timedelta
 from urllib.parse import quote
@@ -1205,6 +1206,238 @@ async def confirm_scan_all_connectors(conn, name: str) -> list[dict]:
     for r in results:
         out.extend(r)
     return out
+
+
+# ---- Meshtastic: node confirmation (app/checkin_api.py's ----------------
+# POST/GET/DELETE /api/checkin/confirm/*, protocol='mt') -------------------
+#
+# The Meshtastic counterpart to the MeshCore section above -- same job
+# (prove a player is really holding a specific radio before binding it),
+# same five-minute window, but the OPPOSITE identity problem, and a
+# correspondingly simpler proof. MeshCore channel messages carry no
+# per-sender key, only a free-text name that could already be shared or
+# stale, so that flow has to broadcast the player's OWN chosen name and
+# tell a genuinely fresh advert apart from one that was already on the
+# mesh (the baseline/_fresh_candidates machinery above). Meshtastic
+# packets carry a real sender node id on every message -- the thing
+# that's missing here is not identity, it's PROOF that a specific
+# person, right now, controls a specific radio. That proof is a short,
+# high-entropy, freshly-generated CODE (never a name the player already
+# had) the player is asked to broadcast: nothing on the mesh could have
+# posted that exact text before this window opened, so any message
+# containing it is unambiguous proof the sender radio is under this
+# player's control -- no baseline snapshot, no "was it already
+# advertising" comparison, needed at all. See app/db.py's
+# mt_node_confirmation comment for the full contrast.
+
+# No 0/O or 1/l/I -- both pairs are visually near-identical in most UI
+# fonts and on a phone screen a player is squinting at while standing
+# next to a radio; dropping them costs a small, irrelevant amount of
+# entropy (32 candidates per character instead of 36) in exchange for a
+# code nobody mistypes because they can't tell two characters apart.
+_MT_CONFIRM_CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+_MT_CONFIRM_CODE_LENGTH = 7
+_MT_CONFIRM_CODE_PREFIX = "mw-"
+_MT_CONFIRM_CODE_GEN_ATTEMPTS = 20  # see issue_unique_mt_confirm_code -- a safety rail, not an expected ceiling
+
+
+def _generate_mt_confirm_code() -> str:
+    """One candidate code, e.g. "mw-3h7fpk4" -- `secrets.choice`, never
+    `random`, because this is a capability token (whoever broadcasts it
+    proves control of a radio and gets it bound to their account), not
+    a cosmetic id; `random`'s Mersenne Twister is not safe for anything
+    that has to resist being guessed.
+    """
+    body = "".join(secrets.choice(_MT_CONFIRM_CODE_ALPHABET) for _ in range(_MT_CONFIRM_CODE_LENGTH))
+    return f"{_MT_CONFIRM_CODE_PREFIX}{body}"
+
+
+def issue_unique_mt_confirm_code(conn) -> str:
+    """A fresh code guaranteed unused by any OTHER row currently in
+    mt_node_confirmation -- open window or an expired one this player's
+    own confirm_status/confirm_accept hasn't gotten around to cleaning
+    up yet (see app/checkin_api.py: both delete a row the moment they
+    notice it's expired, but nothing sweeps the table proactively, so a
+    stale row can sit there for a while). Collision odds at this
+    alphabet/length (32^7, ~34 billion) are already astronomically low
+    -- this loop exists as a correctness backstop, not because a
+    collision is expected in practice, the same reasoning
+    mc_node_confirmation.code's own UNIQUE constraint gives for being a
+    backstop rather than the primary mechanism.
+
+    Callers are expected to hold this connection's write lock (BEGIN
+    IMMEDIATE) across both this call and the INSERT that consumes its
+    result, the same way app/checkin_api.py's confirm_start already
+    wraps its MeshCore delete-then-insert -- SQLite serializes writers
+    on one file, so nothing else can steal a code between the check
+    here and that INSERT as long as both happen inside one transaction.
+    """
+    for _ in range(_MT_CONFIRM_CODE_GEN_ATTEMPTS):
+        code = _generate_mt_confirm_code()
+        exists = conn.execute("SELECT 1 FROM mt_node_confirmation WHERE code = ?", (code,)).fetchone()
+        if exists is None:
+            return code
+    # Should be unreachable at this alphabet/length -- see docstring.
+    raise RuntimeError("could not generate a unique Meshtastic confirmation code")
+
+
+async def mt_confirm_scan_connector(kind: str, connector_url: str, code: str, conn) -> list[dict]:
+    """One on-demand scan of a single Meshtastic-family connector
+    (KIND_MESHVIEW or KIND_MQTT) for any message containing `code`,
+    normalized to {node_ref, node_id, last_heard_epoch} -- `name` is
+    filled in afterwards by mt_confirm_scan_all_connectors, which is
+    the one place that can look it up once, across every connector's
+    matches together, rather than once per connector here.
+
+    Deliberately NOT CheckinPoller's steady 30-second poll cycle, for
+    the same reason confirm_scan_connector (MeshCore, above) is not
+    CheckinPoller's cached directory: that cycle applies a net's own
+    window and hashtag before a message is ever kept, and neither
+    constraint has anything to do with node confirmation, which has to
+    work at any moment regardless of whether any net's window happens
+    to be open. For KIND_MESHVIEW this means a fresh, short-lived
+    MeshviewClient (mirroring CoreScopeClient/BeaconClient's own
+    single-request-then-close style above, not CheckinPoller's pooled,
+    reused one) calling packets(portnum=1) -- the same upstream call
+    _poll_mt_connector makes, just with no window/hashtag filtering
+    applied to what comes back. For KIND_MQTT there is no upstream call
+    at all: mqtt_message_buffer already holds every currently-buffered
+    message for this connector regardless of any net's window (see
+    _fetch_mqtt_messages's own docstring for why), so this is a plain
+    read of the same rows through the connection the caller already
+    holds.
+
+    Tolerant of a down connector the same way every other client in
+    this module is: a failed request logs and returns an empty list
+    rather than raising, so one bad connector can never take out every
+    OTHER connector's chance to find the code (see
+    mt_confirm_scan_all_connectors, which unions this across every
+    configured connector).
+
+    Matching is case-insensitive substring, on the code INCLUDING its
+    "mw-" prefix, against the raw message text -- deliberately not
+    anchored to the whole message, since a player may type it in a
+    sentence ("here's my code mw-3h7fpk4 fkey") rather than send it
+    bare. Multiple matching messages from the same node_ref keep only
+    the one with the LATEST timestamp -- a player retrying after a
+    typo, or a mesh redelivering the same text, must never look like
+    two different candidates.
+    """
+    target = code.strip().lower()
+    if not target:
+        return []
+
+    raw_msgs: list[tuple[object, object, object]] = []  # (sender_id, text, ts)
+    if kind == KIND_MQTT:
+        rows = conn.execute(
+            "SELECT from_node, text, ts FROM mqtt_message_buffer WHERE connector = ?",
+            (connector_url,),
+        ).fetchall()
+        raw_msgs = [(r["from_node"], r["text"], r["ts"]) for r in rows]
+    else:
+        client = MeshviewClient(base_url=connector_url)
+        try:
+            packets = await client.packets(portnum=1, limit=100)
+        except Exception:
+            log.warning("checkin: mt confirm scan failed for connector %s", connector_url)
+            packets = []
+        finally:
+            await client.aclose()
+        for pkt in packets:
+            if not isinstance(pkt, dict):
+                continue
+            import_us = pkt.get("import_time_us")
+            ts = int(import_us / 1_000_000) if isinstance(import_us, (int, float)) else None
+            raw_msgs.append((pkt.get("from_node_id"), pkt.get("payload"), ts))
+
+    # Local import: see _process_mt_packet's own comment below for why
+    # this has to be deferred rather than a top-level import (app/api.py
+    # -> app/checkin_api.py -> app/checkin.py -> app/ingest.py ->
+    # app/api.py would otherwise close a cycle) -- reused as-is, per
+    # this module's own docstring, rather than reimplemented.
+    from .ingest import _bare_node_ref
+
+    matches: dict[str, dict] = {}
+    for sender_id, text, ts in raw_msgs:
+        if not isinstance(sender_id, int) or not isinstance(text, str):
+            continue
+        if target not in text.lower():
+            continue
+        node_ref = _bare_node_ref(sender_id)
+        heard = ts if isinstance(ts, int) else None
+        current = matches.get(node_ref)
+        if current is None or (heard is not None and (current["last_heard_epoch"] is None or heard > current["last_heard_epoch"])):
+            matches[node_ref] = {"node_ref": node_ref, "node_id": sender_id, "last_heard_epoch": heard}
+    return list(matches.values())
+
+
+async def mt_confirm_scan_all_connectors(conn, code: str) -> list[dict]:
+    """mt_confirm_scan_connector() above, unioned across every distinct
+    (kind, connector_url) among this deployment's Meshtastic-family
+    checkin_net rows (KIND_MESHVIEW, KIND_MQTT) -- regardless of
+    whether any of those nets' own weekly windows are open right now,
+    for the same reason confirm_scan_all_connectors (MeshCore) scans
+    regardless of net window: this is proving who holds a radio, not
+    earning a check-in.
+
+    Distinct on (kind, connector_url), not on net id -- same "share by
+    connector, not by net" reasoning confirm_scan_all_connectors and
+    CheckinPoller's own client pooling already rely on. Every connector
+    is scanned concurrently (asyncio.gather), same as the MeshCore
+    version.
+
+    Merges connector-level results by node_ref, keeping whichever match
+    has the latest last_heard_epoch -- the same node could plausibly
+    show up via more than one connector (e.g. a meshview instance and
+    an MQTT broker both hearing the same broadcast), and only one
+    candidate per physical radio should ever reach a player.
+
+    `name`, absent from mt_confirm_scan_connector's own output, is
+    filled in here as a single bulk node_seen lookup (season_id,
+    node_id) against the currently active Meshtastic season -- the same
+    roster app/checkin.py's mt_roster_entries() and
+    _load_mt_registered_players() already read, just narrowed to the
+    handful of node ids this scan actually matched, rather than the
+    whole roster. None (not '', not omitted) when no active season
+    exists or a matched node_id has never appeared in node_seen at
+    all -- a player's radio genuinely can be unrecognized here (it has
+    never sent a position/telemetry packet meshview logged a name
+    for), and the confirmation flow does not need a name to work, only
+    to display one when it has one.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT kind, connector_url FROM checkin_net WHERE kind IN (?, ?)",
+        (KIND_MESHVIEW, KIND_MQTT),
+    ).fetchall()
+    if not rows:
+        return []
+    scan_results = await asyncio.gather(
+        *[mt_confirm_scan_connector(r["kind"], r["connector_url"], code, conn) for r in rows]
+    )
+
+    merged: dict[str, dict] = {}
+    for r in scan_results:
+        for m in r:
+            current = merged.get(m["node_ref"])
+            if current is None or (m["last_heard_epoch"] is not None and (current["last_heard_epoch"] is None or m["last_heard_epoch"] > current["last_heard_epoch"])):
+                merged[m["node_ref"]] = m
+
+    if merged:
+        season = active_season(conn, MT_PROTOCOL)
+        if season:
+            node_id_by_ref = {m["node_ref"]: m["node_id"] for m in merged.values()}
+            placeholders = ",".join("?" for _ in node_id_by_ref)
+            name_rows = conn.execute(
+                f"SELECT node_id, name FROM node_seen WHERE season_id = ? AND node_id IN ({placeholders})",
+                (season["id"], *node_id_by_ref.values()),
+            ).fetchall()
+            name_by_node_id = {r["node_id"]: r["name"] for r in name_rows}
+            for ref, node_id in node_id_by_ref.items():
+                merged[ref]["name"] = name_by_node_id.get(node_id)
+        else:
+            for m in merged.values():
+                m["name"] = None
+    return list(merged.values())
 
 
 # ---- MeshCore: identity resolution -------------------------------------

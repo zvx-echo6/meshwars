@@ -915,16 +915,34 @@ async function handleCheckinHealthCheck() {
 // was no migration to carry forward). That form let a player type
 // whatever name they believed their radio posted under, which quietly
 // went stale the moment a radio's on-mesh name drifted from it. This
-// instead re-scans the mesh live: the player types the name their
-// radio shows RIGHT NOW, triggers an advert, and picks their node out
-// of whatever adverts arrive during a five-minute window -- proof of
-// live possession, not a typed guess. Full mechanics (the baseline
-// snapshot, why a bare name match isn't enough proof on its own, the
-// first-claim-wins bind) live in app/checkin_api.py's node-
-// confirmation section; this is purely the client side of that state
-// machine: idle -> waiting -> (candidates found) -> bound, with
-// cancel/expire dropping back to idle from any point past start.
-
+// instead proves possession live, right now, on whichever protocol the
+// player picks from the "Radio type" dropdown (see frontend/
+// account.html's own comment on this section) -- ONE form, ONE
+// button, the dropdown the only thing that changes what pressing it
+// does:
+//
+//   - MeshCore: the player types the name their radio shows RIGHT NOW,
+//     triggers an advert, and picks their node out of whatever adverts
+//     arrive during a five-minute window -- proof of live possession,
+//     not a typed guess. Full mechanics (the baseline snapshot, why a
+//     bare name match isn't enough proof on its own) live in
+//     app/checkin_api.py's node-confirmation section and app/db.py's
+//     mc_node_confirmation comment.
+//   - Meshtastic: no name to type at all -- the button issues a short,
+//     one-time broadcast CODE (app/checkin.py's Meshtastic node-
+//     confirmation section), the player sends that exact text on their
+//     mesh, and MeshWars watches for whichever node id it arrived
+//     from. The code itself is the proof; there's nothing to compare
+//     it against.
+//
+// Both protocols share every state past submission -- idle -> waiting
+// -> (candidates found) -> bound, with cancel/expire dropping back to
+// idle from any point past start -- and every timer/poll/teardown
+// mechanism below. Only the render functions branch on `data.protocol`
+// (as reported by GET .../status, and by the start response) to draw
+// the protocol-specific parts: MeshCore's advert instructions and
+// public-key/role candidate details, versus Meshtastic's issued code
+// and node-id candidate details.
 // Server throttles its own upstream scan to one per 8s (see
 // app/checkin_api.py's _scan_cache comment) -- polling every 5s here
 // is safely inside that, so a poll never goes to waste but also never
@@ -958,6 +976,21 @@ function clearCheckinConfirmError() {
 function stopCheckinConfirmPolling() {
   if (checkinConfirmPollTimer) { clearInterval(checkinConfirmPollTimer); checkinConfirmPollTimer = null; }
   if (checkinConfirmCountdownTimer) { clearInterval(checkinConfirmCountdownTimer); checkinConfirmCountdownTimer = null; }
+}
+
+// Same pattern setupAddRadioProtocolToggle() already uses for the "My
+// radios" form's own protocol select -- toggle a field's `hidden`
+// property off the dropdown's current value, both on 'change' and once
+// up front so the idle form starts consistent with whatever option is
+// marked `selected` in the HTML. Meshtastic needs no typed name at all
+// (see this section's header comment), so that's the one field this
+// toggles; nothing else in the form depends on the protocol choice.
+function setupCheckinConfirmProtocolToggle() {
+  const select = document.getElementById('f-account-checkin-confirm-protocol');
+  const nameField = document.getElementById('account-checkin-confirm-name-field');
+  const apply = () => { nameField.hidden = select.value === 'mt'; };
+  select.addEventListener('change', apply);
+  apply();
 }
 
 // mm:ss, not the day/hour/minute granularity frontend/mc.js's own
@@ -996,6 +1029,11 @@ function startCheckinConfirmWatching() {
 function renderCheckinConfirmIdle() {
   stopCheckinConfirmPolling();
   checkinConfirmExpiresAt = null;
+  // Re-showing the whole form (dropdown included) is what makes the
+  // "Radio type" choice changeable again -- see frontend/account.html's
+  // own comment on this section for why there's no separate disabled
+  // state to manage: the dropdown is simply unreachable, hidden inside
+  // this same form, for as long as a window is open past this point.
   document.getElementById('account-checkin-confirm-start-form').hidden = false;
   const result = document.getElementById('account-checkin-confirm-result');
   result.replaceChildren();
@@ -1010,20 +1048,44 @@ function renderCheckinConfirmWaiting(data) {
   result.replaceChildren();
   result.hidden = false;
 
-  const instructions = document.createElement('p');
-  instructions.className = 'account-hint';
-  instructions.textContent = 'Trigger an advert on that radio now -- most MeshCore devices send one from a long-press of the side button, or a "Send Advert" / "Flood Advert" menu item.';
-  result.appendChild(instructions);
+  if (data.protocol === 'mt') {
+    // GET .../status now echoes the issued code back (app/checkin_api.py's
+    // confirm_status docstring: it's about to go out in the clear on an
+    // open mesh anyway, and status is already scoped to the caller's own
+    // window), so a page reload mid-window recovers it here exactly the
+    // same way it recovers everything else about this window -- no
+    // separate client-side cache to keep in sync, and no "we lost the
+    // code" dead end to design around.
+    //
+    // Prominent and copyable, per this section's own design: sized
+    // up (.account-checkin-confirm-code-row) from the same
+    // input+Copy-button look buildCopyRow() already gives the
+    // API key and join link elsewhere on this page, so a player can
+    // read it at a glance or copy it without retyping by hand.
+    const codeRow = buildCopyRow(data.code);
+    codeRow.classList.add('account-checkin-confirm-code-row');
+    result.appendChild(codeRow);
 
-  if (data.baseline_count > 0) {
-    // Other nodes were already posting under this exact name before
-    // this window opened -- none of THEM count as proof (see this
-    // section's own header comment), but the player should still
-    // expect to see more than just their own node show up below.
-    const baselineNote = document.createElement('p');
-    baselineNote.className = 'account-hint';
-    baselineNote.textContent = `${data.baseline_count} other node${data.baseline_count !== 1 ? 's' : ''} on the mesh already carr${data.baseline_count !== 1 ? 'y' : 'ies'} that name -- expect more than one candidate below once yours adverts.`;
-    result.appendChild(baselineNote);
+    const instructions = document.createElement('p');
+    instructions.className = 'account-hint';
+    instructions.textContent = 'Send that exact text as a message on your mesh now -- any channel, and it can be part of a longer sentence. We watch for it and show you which node it came from below.';
+    result.appendChild(instructions);
+  } else {
+    const instructions = document.createElement('p');
+    instructions.className = 'account-hint';
+    instructions.textContent = 'Trigger an advert on that radio now -- most MeshCore devices send one from a long-press of the side button, or a "Send Advert" / "Flood Advert" menu item.';
+    result.appendChild(instructions);
+
+    if (data.baseline_count > 0) {
+      // Other nodes were already posting under this exact name before
+      // this window opened -- none of THEM count as proof (see this
+      // section's own header comment), but the player should still
+      // expect to see more than just their own node show up below.
+      const baselineNote = document.createElement('p');
+      baselineNote.className = 'account-hint';
+      baselineNote.textContent = `${data.baseline_count} other node${data.baseline_count !== 1 ? 's' : ''} on the mesh already carr${data.baseline_count !== 1 ? 'y' : 'ies'} that name -- expect more than one candidate below once yours adverts.`;
+      result.appendChild(baselineNote);
+    }
   }
 
   const countdown = document.createElement('p');
@@ -1048,9 +1110,13 @@ function renderCheckinConfirmCandidates(data) {
   result.replaceChildren();
   result.hidden = false;
 
+  const isMt = data.protocol === 'mt';
+
   const prompt = document.createElement('p');
   prompt.className = 'account-hint';
-  prompt.textContent = 'We heard the following nodes adverting under that name. Pick yours:';
+  prompt.textContent = isMt
+    ? 'We heard the following nodes send that code. Pick yours:'
+    : 'We heard the following nodes adverting under that name. Pick yours:';
   result.appendChild(prompt);
 
   const countdown = document.createElement('p');
@@ -1068,18 +1134,31 @@ function renderCheckinConfirmCandidates(data) {
     const top = document.createElement('div');
     top.className = 'account-checkin-candidate-top';
     const name = document.createElement('span');
-    name.textContent = cand.name;
+    // Meshtastic candidates carry a name only when node_seen already
+    // recognizes that node id (app/checkin.py's
+    // mt_confirm_scan_all_connectors) -- fall back to the node_ref
+    // itself rather than showing a blank label.
+    name.textContent = isMt ? (cand.name || cand.node_ref) : cand.name;
     top.appendChild(name);
-    const role = document.createElement('span');
-    role.className = 'account-hint';
-    role.textContent = cand.role || '';
-    top.appendChild(role);
+    if (!isMt) {
+      // No role concept on the Meshtastic side (mt_confirm_scan_all_
+      // connectors carries no such field) -- MeshCore-only, same as
+      // the public-key detail below.
+      const role = document.createElement('span');
+      role.className = 'account-hint';
+      role.textContent = cand.role || '';
+      top.appendChild(role);
+    }
     li.appendChild(top);
 
     const detail = document.createElement('p');
     detail.className = 'account-hint';
-    const shortKey = cand.public_key ? `${cand.public_key.slice(0, 8)}…${cand.public_key.slice(-4)}` : 'unknown key';
-    detail.textContent = `${cand.node_ref} · ${shortKey} · heard ${relativeTimeFromEpoch(cand.last_heard)}`;
+    if (isMt) {
+      detail.textContent = `${cand.node_ref} · heard ${relativeTimeFromEpoch(cand.last_heard)}`;
+    } else {
+      const shortKey = cand.public_key ? `${cand.public_key.slice(0, 8)}…${cand.public_key.slice(-4)}` : 'unknown key';
+      detail.textContent = `${cand.node_ref} · ${shortKey} · heard ${relativeTimeFromEpoch(cand.last_heard)}`;
+    }
     li.appendChild(detail);
 
     const claimBtn = document.createElement('button');
@@ -1095,7 +1174,13 @@ function renderCheckinConfirmCandidates(data) {
     } else {
       claimBtn.textContent = 'This is mine';
       claimBtn.className = 'account-checkin-confirm-btn';
-      claimBtn.addEventListener('click', () => handleCheckinConfirmAccept(cand.public_key, claimBtn));
+      // Which identifier to send back on accept differs by protocol
+      // (app/checkin_api.py's confirm_accept: `public_key` for mc,
+      // `node_ref` for mt) -- handleCheckinConfirmAccept takes both
+      // the protocol and the identifier so it never has to guess which
+      // shape a candidate came in.
+      const identifier = isMt ? cand.node_ref : cand.public_key;
+      claimBtn.addEventListener('click', () => handleCheckinConfirmAccept(data.protocol, identifier, claimBtn));
     }
     li.appendChild(claimBtn);
 
@@ -1208,12 +1293,23 @@ async function loadCheckinConfirmStatus() {
 async function handleCheckinConfirmStart(e) {
   e.preventDefault();
   clearCheckinConfirmError();
-  const input = document.getElementById('f-account-checkin-confirm-name');
-  const name = input.value.trim();
-  if (!name) {
-    showCheckinConfirmError('Enter the name your radio shows on the mesh.');
-    return;
+
+  const protocol = document.getElementById('f-account-checkin-confirm-protocol').value;
+  const body = { protocol };
+
+  // MeshCore needs the typed name; Meshtastic needs nothing from the
+  // player at all -- the server issues the code (see this section's
+  // header comment).
+  if (protocol === 'mc') {
+    const input = document.getElementById('f-account-checkin-confirm-name');
+    const name = input.value.trim();
+    if (!name) {
+      showCheckinConfirmError('Enter the name your radio shows on the mesh.');
+      return;
+    }
+    body.name = name;
   }
+
   const btn = document.getElementById('account-checkin-confirm-start-btn');
   btn.disabled = true;
   btn.textContent = 'Starting...';
@@ -1221,7 +1317,7 @@ async function handleCheckinConfirmStart(e) {
     const res = await fetch('/api/checkin/confirm/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(body),
     });
     let data = null;
     try { data = await res.json(); } catch (err) { data = null; }
@@ -1229,6 +1325,12 @@ async function handleCheckinConfirmStart(e) {
       showCheckinConfirmError((data && data.error) || 'Something went wrong. Try again in a moment.');
       return;
     }
+    // The response shape already carries `protocol` (the server
+    // default is 'mc' if omitted, but we always send it explicitly
+    // above) and, for 'mt', `code` -- renderCheckinConfirmWaiting reads
+    // both straight off `data`, so it stays in sync with whichever
+    // window the server actually opened, the same as a resumed
+    // status poll after a reload.
     renderCheckinConfirmWaiting(data);
     startCheckinConfirmWatching();
   } catch (err) {
@@ -1251,16 +1353,22 @@ async function handleCheckinConfirmCancel() {
   renderCheckinConfirmIdle();
 }
 
-async function handleCheckinConfirmAccept(publicKey, button) {
+async function handleCheckinConfirmAccept(protocol, identifier, button) {
   clearCheckinConfirmError();
   button.disabled = true;
   const original = button.textContent;
   button.textContent = 'Binding...';
+  // Which body field the server expects differs by protocol
+  // (app/checkin_api.py's confirm_accept: `public_key` for mc,
+  // `node_ref` for mt) -- `identifier` is whichever value
+  // renderCheckinConfirmCandidates already picked off the matching
+  // candidate for this protocol.
+  const body = protocol === 'mt' ? { node_ref: identifier } : { public_key: identifier };
   try {
     const res = await fetch('/api/checkin/confirm/accept', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ public_key: publicKey }),
+      body: JSON.stringify(body),
     });
     let data = null;
     try { data = await res.json(); } catch (err) { data = null; }
@@ -1983,6 +2091,7 @@ function boot() {
   document.getElementById('account-add-radio-form').addEventListener('submit', handleAddRadioSubmit);
   document.getElementById('account-status-check-btn').addEventListener('click', handleStatusCheck);
   document.getElementById('account-checkin-health-btn').addEventListener('click', handleCheckinHealthCheck);
+  setupCheckinConfirmProtocolToggle();
   document.getElementById('account-checkin-confirm-start-form').addEventListener('submit', handleCheckinConfirmStart);
 
   document.getElementById('account-team-switch-btn').addEventListener('click', handleTeamSwitchBtnClick);

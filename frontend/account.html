@@ -43,7 +43,7 @@
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260903-5" />
+  <link rel="stylesheet" href="/static/account.css?v=20260903-7" />
 </head>
 <body>
 
@@ -177,37 +177,49 @@
           </form>
         </section>
 
-        <section class="account-panel">
-          <div class="account-title">Troubleshooting / setup check</div>
-          <p class="account-hint">Checks whether MeshWars is actually receiving anything from your radios, and tells you what's wrong if it isn't. You're signed in, so this runs without needing to paste your API key.</p>
-          <button type="button" id="account-status-check-btn">Check now</button>
-          <div id="account-status-error" class="account-error" role="alert" hidden></div>
-          <div id="account-status-result" class="account-status-result" hidden></div>
-        </section>
+        <!-- Directly below My radios, not several sections away --
+             confirming a node is how you add one, so it belongs next
+             to the list it feeds (account.js's renderCheckinConfirm
+             Bound() calls loadRadios() on a successful bind, and this
+             adjacency is what makes that refresh actually visible to
+             the player without them hunting for it).
 
-        <!-- MeshCore channel messages carry no per-sender key, so
-             matching a check-in to a player has to go by the name a
-             radio posts under -- and that drifts from the directory
-             name a wardrive originally recorded. This replaces the old
-             typed fallback-name form: the player types the name their
-             radio is CURRENTLY showing on the mesh, triggers a live
-             advert, and confirms which candidate is theirs before we
-             bind its public key -- proof of live possession, not a
-             name someone once typed in. See app/checkin_api.py's own
-             "node confirmation" section for the start/status/accept/
-             cancel cycle this drives. -->
+             One form, one button, covering BOTH protocols -- the
+             "Radio type" dropdown is the only thing that changes what
+             the button does and which fields show; there are
+             deliberately not two competing forms here. MeshCore
+             channel messages carry no per-sender key, so proving a
+             MeshCore radio goes by broadcasting a fresh ADVERT under a
+             name the player types (see app/checkin.py's MeshCore
+             node-confirmation section for why a bare name isn't
+             enough proof on its own). Meshtastic packets DO carry a
+             real sender node id, so proving a Meshtastic radio instead
+             goes by broadcasting a short one-time CODE this page
+             issues -- no name needed, no advert needed, just that
+             exact text sent once. See app/checkin_api.py's own "node
+             confirmation" section for the start/status/accept/cancel
+             cycle both protocols share underneath this one form. -->
         <section class="account-panel">
           <div class="account-title">Confirm my node</div>
-          <p class="account-hint">Type the name your radio currently shows on the mesh, press the button below, then trigger an advert on that radio. We watch the mesh for it for a few minutes and let you confirm which node is yours before we bind it to your account.</p>
+          <p class="account-hint">Proves a specific radio is really yours before we bind it to your account. Pick your radio type, then follow the instructions below.</p>
 
           <div id="account-checkin-confirm-error" class="account-error" role="alert" hidden></div>
 
           <form id="account-checkin-confirm-start-form" class="account-checkin-confirm-form" novalidate autocomplete="off">
-            <label class="account-field account-field-grow">
-              <span>Node name</span>
-              <input type="text" id="f-account-checkin-confirm-name" autocomplete="off" />
+            <label class="account-field account-checkin-confirm-protocol-field">
+              <span>Radio type</span>
+              <select id="f-account-checkin-confirm-protocol">
+                <option value="mc" selected>MeshCore</option>
+                <option value="mt">Meshtastic</option>
+              </select>
             </label>
-            <button type="submit" id="account-checkin-confirm-start-btn">Confirm my node</button>
+            <div class="account-checkin-confirm-fields-row">
+              <label class="account-field account-field-grow" id="account-checkin-confirm-name-field">
+                <span>Node name</span>
+                <input type="text" id="f-account-checkin-confirm-name" autocomplete="off" />
+              </label>
+              <button type="submit" id="account-checkin-confirm-start-btn">Confirm my node</button>
+            </div>
           </form>
 
           <!-- Everything past the idle form (waiting/candidates/bound/
@@ -216,8 +228,17 @@
                #account-status-result and #account-checkin-health-result
                already use elsewhere on this page -- one result well,
                fully re-drawn per state rather than several separately
-               hidden/shown blocks. -->
+               hidden/shown blocks. Both protocols share this same
+               well; only what gets drawn into it differs. -->
           <div id="account-checkin-confirm-result" class="account-checkin-confirm-result" hidden></div>
+        </section>
+
+        <section class="account-panel">
+          <div class="account-title">Troubleshooting / setup check</div>
+          <p class="account-hint">Checks whether MeshWars is actually receiving anything from your radios, and tells you what's wrong if it isn't. You're signed in, so this runs without needing to paste your API key.</p>
+          <button type="button" id="account-status-check-btn">Check now</button>
+          <div id="account-status-error" class="account-error" role="alert" hidden></div>
+          <div id="account-status-result" class="account-status-result" hidden></div>
         </section>
 
         <section class="account-panel">
@@ -359,7 +380,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260903-5" type="module"></script>
+  <script src="/static/account.js?v=20260903-7" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

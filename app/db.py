@@ -975,6 +975,65 @@ CREATE TABLE IF NOT EXISTS mc_node_confirmation (
     last_scan_at  INTEGER NOT NULL DEFAULT 0
 );
 
+-- Meshtastic's counterpart to mc_node_confirmation above -- same job
+-- (prove a player is really holding a specific radio, right now, before
+-- binding it), same five-minute window/throttle shape, but a
+-- deliberately SIMPLER proof than MeshCore's needs, because the two
+-- protocols hand this feature opposite problems:
+--
+-- MeshCore channel messages carry no per-sender key, only a free-text
+-- display name that could already be shared or drifted -- so
+-- mc_node_confirmation has to snapshot a BASELINE (every node already
+-- posting under the typed name, and when it was last heard) and only
+-- trust a public key whose last-heard time moves PAST that baseline
+-- during the window (app/checkin.py's _fresh_candidates). A bare name
+-- match proves nothing on its own; only a fresh advert during the
+-- window does.
+--
+-- Meshtastic packets carry a real sender node id on every message, and
+-- the "name" here is not a persistent on-mesh identity at all -- it is
+-- a short code (see app/checkin.py's Meshtastic node-confirmation
+-- section) generated fresh, with `secrets`, the instant this window
+-- opens, and unique among every other currently-open mt confirmation
+-- window. Nothing on the mesh could have posted that exact text before
+-- this row existed, so there is no baseline to snapshot and no
+-- "already advertising before the window opened" case to guard
+-- against the way MeshCore's does -- a message containing the code, by
+-- construction, can only have been sent by someone who read the code
+-- off THIS window after it opened. That is what lets this table skip
+-- mc_node_confirmation's `baseline` column entirely rather than
+-- storing an empty/unused one: the code IS the proof, not a comparison
+-- against a prior snapshot.
+--
+-- code is UNIQUE across every row (open or not-yet-cleaned-up expired)
+-- so that a fresh advert-style collision between two players' windows
+-- can never happen -- app/checkin.py's issue_unique_mt_confirm_code()
+-- is what enforces that at generation time, retrying on the vanishingly
+-- rare chance of a collision; this column-level UNIQUE constraint is
+-- the backstop, not the primary mechanism.
+--
+-- One row per player -- PRIMARY KEY (player_id), same "set, not add"
+-- semantics mc_node_confirmation's own comment explains: opening a
+-- second window (a retry, a different radio) silently replaces
+-- whatever window was already open. app/checkin_api.py additionally
+-- clears the OTHER protocol's table (mc_node_confirmation) whenever a
+-- window opens here, and vice versa -- a player has at most one open
+-- confirmation window, mc or mt, never both at once, which is what
+-- lets GET /api/checkin/confirm/status report a single unambiguous
+-- `protocol` for whichever window is open.
+--
+-- last_scan_at is the same per-player throttle mc_node_confirmation's
+-- own column is -- see that table's comment -- reused so a browser
+-- polling status for up to five minutes straight can never turn into a
+-- request storm against every configured Meshtastic connector either.
+CREATE TABLE IF NOT EXISTS mt_node_confirmation (
+    player_id     INTEGER PRIMARY KEY,
+    code          TEXT NOT NULL UNIQUE,
+    opened_at     INTEGER NOT NULL,
+    expires_at    INTEGER NOT NULL,
+    last_scan_at  INTEGER NOT NULL DEFAULT 0
+);
+
 -- ---------------------------------------------------------------------
 -- Monthly results (app/results.py). A six-month season leaves five
 -- months with nothing to show, so each calendar month closes with its

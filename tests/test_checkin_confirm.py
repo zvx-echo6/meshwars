@@ -63,6 +63,12 @@ NAME = "Tester Radio"
 PUBKEY = "a1" * 32  # 64 lowercase hex chars -- passes node_ref.py's normalize_public_key
 OTHER_PUBKEY = "b2" * 32
 
+# ---- Meshtastic node-confirmation fixtures --------------------------------
+MT_CONNECTOR_URL = "https://meshview.test"
+MQTT_CONNECTOR_URL = "mqtt://broker.test:1883"
+MT_NODE_ID = 0xA1B2C3D4
+MT_NODE_REF = f"{MT_NODE_ID:08x}"  # app/ingest.py's _bare_node_ref format -- see app/checkin.py's own reuse of it
+
 
 def _init_schema(path: str) -> None:
     conn = sqlite3.connect(path)
@@ -204,6 +210,86 @@ def _make_corescope_net(path: str, connector_url: str = CONNECTOR_URL) -> None:
         "VALUES (?, 'mc', 'corescope', ?, 'general', '', 2, 18, 20, 'America/Boise', "
         "        '2026-01-01', 1, ?)",
         ("Test Net", connector_url, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _make_meshview_net(path: str, connector_url: str = MT_CONNECTOR_URL) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO checkin_net"
+        "(label, protocol, kind, connector_url, channel, hashtag, weekday, start_hour, "
+        " end_hour, timezone, start_date, enabled, created_at) "
+        "VALUES (?, 'mt', 'meshview', ?, '', '#test', 2, 18, 20, 'America/Boise', "
+        "        '2026-01-01', 1, ?)",
+        ("Test MT Net", connector_url, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _make_mqtt_net(path: str, connector_url: str = MQTT_CONNECTOR_URL) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO checkin_net"
+        "(label, protocol, kind, connector_url, channel, hashtag, weekday, start_hour, "
+        " end_hour, timezone, start_date, enabled, created_at) "
+        "VALUES (?, 'mt', 'mqtt', ?, '', '#test', 2, 18, 20, 'America/Boise', "
+        "        '2026-01-01', 1, ?)",
+        ("Test MQTT Net", connector_url, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+
+class _FakeMeshviewClient:
+    """Stands in for app.meshview_client.MeshviewClient the same way
+    tests/test_ingest_integrity_gates.py's own FakeMeshviewClient
+    already does elsewhere in this suite -- a plain duck-typed fake,
+    not an httpx-level mock, since app/checkin.py's
+    mt_confirm_scan_connector constructs a MeshviewClient directly
+    (mirroring CoreScopeClient/BeaconClient's own construction inside
+    confirm_scan_connector) rather than accepting an injected one, so
+    the class itself (not its transport) is what tests monkeypatch --
+    see checkin_module.MeshviewClient below. Only packets()/aclose()
+    are ever called by mt_confirm_scan_connector.
+
+    `calls` counts packets() invocations -- what
+    test_mt_scan_throttle_skips_upstream_refetch_within_window uses to
+    prove the throttle actually skipped a re-fetch, the same role
+    CoreScopeClient's mock handler's own `calls` list plays for the
+    MeshCore throttle test above.
+    """
+
+    def __init__(self, items: list[dict] | None = None):
+        self.items = items if items is not None else []
+        self.calls = 0
+
+    async def packets(self, portnum: int, limit: int = 100) -> list[dict]:
+        self.calls += 1
+        return list(self.items)
+
+    async def aclose(self) -> None:
+        pass
+
+
+def _mt_packet(node_id: int, text: str, ts: int) -> dict:
+    """One meshview /api/packets-shaped text-message record -- the
+    exact fields mt_confirm_scan_connector (app/checkin.py) reads:
+    from_node_id (sender), payload (raw text), import_time_us
+    (microseconds, the same unit _process_mt_packet already divides
+    down elsewhere in that module).
+    """
+    return {"from_node_id": node_id, "payload": text, "import_time_us": ts * 1_000_000}
+
+
+def _expire_mt_window(path: str, player_id: int) -> None:
+    """mt_node_confirmation counterpart of _expire_window below."""
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "UPDATE mt_node_confirmation SET expires_at = ? WHERE player_id = ?",
+        (int(time.time()) - 1, player_id),
     )
     conn.commit()
     conn.close()
@@ -465,6 +551,333 @@ def test_scan_throttle_skips_upstream_refetch_within_window(client, db_path, mon
     assert second_status.status_code == 200
     assert len(calls) == 2
     assert second_status.json() == first_status.json()
+
+
+# ============================================================================
+# Meshtastic node confirmation (protocol='mt') -- proof by broadcast code,
+# not by advert. See app/checkin.py's Meshtastic node-confirmation section
+# header for why this needs no baseline/freshness comparison the way the
+# MeshCore tests above do: the code itself is the proof, since nothing on
+# the mesh could have posted it before this window existed.
+# ============================================================================
+
+# ---- start issues a unique code -------------------------------------------
+
+def test_mt_start_issues_code(client, db_path):
+    _make_meshview_net(db_path)
+    _login(client, db_path)
+
+    resp = client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["protocol"] == "mt"
+    assert body["window_seconds"] == 300
+    assert body["expires_at"] > int(time.time())
+    code = body["code"]
+    assert code.startswith("mw-")
+    assert len(code) == len("mw-") + 7
+    # No ambiguous characters -- see app/checkin.py's
+    # _MT_CONFIRM_CODE_ALPHABET comment.
+    for ch in code[3:]:
+        assert ch not in "0oO1lI"
+
+
+def test_mt_status_returns_same_code_as_start(client, db_path):
+    """GET .../status must echo back the SAME code POST .../start
+    issued, so a page reload mid-window can recover it (see
+    frontend/account.js's renderCheckinConfirmWaiting, which now reads
+    `code` off the status response instead of caching it client-side).
+    A fresh status call with no intervening scan activity still has to
+    return it -- it's read straight off mt_node_confirmation's own row,
+    not something that depends on a scan having run.
+    """
+    _make_meshview_net(db_path)
+    _login(client, db_path)
+
+    start_body = client.post("/api/checkin/confirm/start", json={"protocol": "mt"}).json()
+    code = start_body["code"]
+
+    status_body = client.get("/api/checkin/confirm/status").json()
+    assert status_body["protocol"] == "mt"
+    assert status_body["code"] == code
+
+
+def test_mc_status_never_includes_code(client, db_path, monkeypatch):
+    """An open MeshCore window has no code at all -- see
+    app/checkin_api.py's confirm_status docstring: only an `mt` window's
+    status response carries a `code` key, and it must never appear on
+    an `mc` one.
+    """
+    _make_corescope_net(db_path)
+    _login(client, db_path)
+
+    state = {"nodes": [_node()]}
+    calls: list[str] = []
+    _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+
+    assert client.post("/api/checkin/confirm/start", json={"name": NAME}).status_code == 200
+
+    status_body = client.get("/api/checkin/confirm/status").json()
+    assert status_body["protocol"] == "mc"
+    assert "code" not in status_body
+
+
+def test_mt_code_generation_retries_on_collision(db_path):
+    """issue_unique_mt_confirm_code() must never hand out a code that
+    collides with one already sitting in mt_node_confirmation -- stub
+    the generator to return a taken code first, then a fresh one, and
+    confirm the taken one is skipped rather than raising a UNIQUE
+    constraint error at INSERT time later.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO mt_node_confirmation(player_id, code, opened_at, expires_at, last_scan_at) "
+        "VALUES (?, ?, ?, ?, 0)",
+        (999, "mw-alreadyused", NOW, NOW + 300),
+    )
+    conn.commit()
+
+    calls = {"n": 0}
+
+    def fake_gen():
+        calls["n"] += 1
+        return "mw-alreadyused" if calls["n"] == 1 else "mw-freshcode99"
+
+    import app.checkin as checkin_module_local
+    orig = checkin_module_local._generate_mt_confirm_code
+    checkin_module_local._generate_mt_confirm_code = fake_gen
+    try:
+        code = checkin_module_local.issue_unique_mt_confirm_code(conn)
+    finally:
+        checkin_module_local._generate_mt_confirm_code = orig
+    conn.close()
+
+    assert code == "mw-freshcode99"
+    assert calls["n"] == 2
+
+
+# ---- a message carrying the code surfaces its sender as a candidate ------
+
+def test_mt_message_with_code_surfaces_candidate(client, db_path, monkeypatch):
+    _make_meshview_net(db_path)
+    _login(client, db_path)
+    fake = _FakeMeshviewClient()
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: fake)
+
+    start_resp = client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    code = start_resp.json()["code"]
+
+    fake.items = [_mt_packet(MT_NODE_ID, f"here you go: {code}", NOW)]
+
+    status_resp = client.get("/api/checkin/confirm/status")
+    assert status_resp.status_code == 200
+    body = status_resp.json()
+    assert body["protocol"] == "mt"
+    assert body["state"] == "found"
+    assert len(body["candidates"]) == 1
+    cand = body["candidates"][0]
+    assert cand["node_ref"] == MT_NODE_REF
+    assert cand["node_id"] == MT_NODE_ID
+    assert cand["already_claimed"] is False
+
+
+# ---- a message without the code never becomes a candidate ----------------
+
+def test_mt_message_without_code_not_a_candidate(client, db_path, monkeypatch):
+    _make_meshview_net(db_path)
+    _login(client, db_path)
+    fake = _FakeMeshviewClient()
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: fake)
+
+    client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    fake.items = [_mt_packet(MT_NODE_ID, "just chatting on the mesh, nothing here", NOW)]
+
+    status_resp = client.get("/api/checkin/confirm/status")
+    body = status_resp.json()
+    assert body["state"] == "waiting"
+    assert body["candidates"] == []
+
+
+# ---- matching is case-insensitive and tolerant of surrounding text -------
+
+def test_mt_code_match_is_case_insensitive_and_embedded_in_sentence(client, db_path, monkeypatch):
+    _make_meshview_net(db_path)
+    _login(client, db_path)
+    fake = _FakeMeshviewClient()
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: fake)
+
+    start_resp = client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    code = start_resp.json()["code"]
+
+    # Upper-cased and buried in a sentence -- a player is expected to
+    # type this into a normal message, not send the bare code alone.
+    fake.items = [_mt_packet(MT_NODE_ID, f"hey mesh, confirming with {code.upper()} ok thanks!", NOW)]
+
+    status_resp = client.get("/api/checkin/confirm/status")
+    body = status_resp.json()
+    assert body["state"] == "found"
+    assert body["candidates"][0]["node_ref"] == MT_NODE_REF
+
+
+# ---- an mqtt-kind connector is scanned the same way ------------------------
+
+def test_mt_mqtt_connector_message_with_code_surfaces_candidate(client, db_path):
+    """mqtt_message_buffer is read directly (no MeshviewClient involved
+    at all) -- see mt_confirm_scan_connector's own KIND_MQTT branch.
+    """
+    _make_mqtt_net(db_path)
+    _login(client, db_path)
+
+    start_resp = client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    code = start_resp.json()["code"]
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO mqtt_message_buffer"
+        "(connector, packet_id, from_node, channel_name, text, ts, received_at) "
+        "VALUES (?, ?, ?, '', ?, ?, ?)",
+        (MQTT_CONNECTOR_URL, "42", MT_NODE_ID, f"broadcasting {code} now", NOW, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+    status_resp = client.get("/api/checkin/confirm/status")
+    body = status_resp.json()
+    assert body["state"] == "found"
+    assert body["candidates"][0]["node_ref"] == MT_NODE_REF
+
+
+# ---- accept binds player_node correctly, protocol='mt' --------------------
+
+def test_mt_accept_binds_player_node_with_correct_node_ref(client, db_path, monkeypatch):
+    _make_meshview_net(db_path)
+    player_id = _login(client, db_path)
+    fake = _FakeMeshviewClient()
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: fake)
+
+    start_resp = client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    code = start_resp.json()["code"]
+    fake.items = [_mt_packet(MT_NODE_ID, f"my code: {code}", NOW)]
+
+    accept_resp = client.post("/api/checkin/confirm/accept", json={"node_ref": MT_NODE_REF})
+    assert accept_resp.status_code == 200
+    assert accept_resp.json() == {"node_ref": MT_NODE_REF}
+
+    row = _player_node_row(db_path, MT_NODE_REF)
+    assert row is not None
+    assert row["protocol"] == "mt"
+    assert row["player_id"] == player_id
+    assert row["public_key"] is None  # Meshtastic confirmation proves a node id, never a key
+
+    # Accepting consumes the window.
+    assert client.get("/api/checkin/confirm/status").json() == {"state": "none"}
+
+
+# ---- accept refuses a node that isn't a current candidate -----------------
+
+def test_mt_accept_refuses_node_not_a_current_candidate(client, db_path, monkeypatch):
+    _make_meshview_net(db_path)
+    _login(client, db_path)
+    fake = _FakeMeshviewClient()
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: fake)
+
+    client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    # fake.items stays empty -- nobody ever broadcast the code.
+
+    resp = client.post("/api/checkin/confirm/accept", json={"node_ref": MT_NODE_REF})
+    assert resp.status_code == 400
+    assert _player_node_row(db_path, MT_NODE_REF) is None
+
+
+# ---- accept refuses a node already claimed by another player --------------
+
+def test_mt_accept_refuses_node_already_claimed_by_another_player(client, db_path, monkeypatch):
+    _make_meshview_net(db_path)
+    other_player_id = _make_player(db_path, display_name="Other MT", team="BLUE")
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+        "VALUES ('mt', ?, ?, ?, NULL)",
+        (MT_NODE_REF, other_player_id, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+    player_id = _login(client, db_path)
+    assert player_id != other_player_id
+    fake = _FakeMeshviewClient()
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: fake)
+
+    start_resp = client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    code = start_resp.json()["code"]
+    fake.items = [_mt_packet(MT_NODE_ID, code, NOW)]
+
+    resp = client.post("/api/checkin/confirm/accept", json={"node_ref": MT_NODE_REF})
+    assert resp.status_code == 409
+
+    row = _player_node_row(db_path, MT_NODE_REF)
+    assert row["player_id"] == other_player_id  # unchanged -- not rebound to the caller
+
+
+# ---- expired window ---------------------------------------------------------
+
+def test_mt_expired_window_status_none_and_accept_409(client, db_path, monkeypatch):
+    _make_meshview_net(db_path)
+    player_id = _login(client, db_path)
+    fake = _FakeMeshviewClient()
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: fake)
+
+    client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    _expire_mt_window(db_path, player_id)
+
+    status_body = client.get("/api/checkin/confirm/status").json()
+    assert status_body == {"state": "none"}
+
+    accept_resp = client.post("/api/checkin/confirm/accept", json={"node_ref": MT_NODE_REF})
+    assert accept_resp.status_code == 409
+
+
+# ---- the scan throttle does not re-fetch upstream --------------------------
+
+def test_mt_scan_throttle_skips_upstream_refetch_within_window(client, db_path, monkeypatch):
+    _make_meshview_net(db_path)
+    _login(client, db_path)
+    fake = _FakeMeshviewClient()
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: fake)
+
+    # start() never scans for mt -- no baseline needed, see
+    # app/checkin.py's Meshtastic node-confirmation section header.
+    start_resp = client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    assert start_resp.status_code == 200
+    assert fake.calls == 0
+
+    first_status = client.get("/api/checkin/confirm/status")
+    assert first_status.status_code == 200
+    assert fake.calls == 1  # not throttled -- last_scan_at was still 0
+
+    second_status = client.get("/api/checkin/confirm/status")
+    assert second_status.status_code == 200
+    assert fake.calls == 1
+    assert second_status.json() == first_status.json()
+
+
+# ---- starting one protocol's window retires the other's -------------------
+
+def test_mt_start_clears_any_open_mc_window(client, db_path, monkeypatch):
+    _make_corescope_net(db_path)
+    _make_meshview_net(db_path)
+    _login(client, db_path)
+
+    state = {"nodes": [_node()]}
+    calls: list[str] = []
+    _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+    assert client.post("/api/checkin/confirm/start", json={"protocol": "mc", "name": NAME}).status_code == 200
+    assert client.get("/api/checkin/confirm/status").json()["protocol"] == "mc"
+
+    assert client.post("/api/checkin/confirm/start", json={"protocol": "mt"}).status_code == 200
+    status_body = client.get("/api/checkin/confirm/status").json()
+    assert status_body["protocol"] == "mt"
 
 
 # ---- retired: GET/POST/DELETE /api/checkin/name --------------------------
