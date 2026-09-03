@@ -367,6 +367,16 @@ function renderPlayerDetail(p) {
   }));
   d.appendChild(teamRow);
 
+  // Account link (player.account_id, app/db.py) -- read-only status
+  // here; the action that clears it lives in the danger zone below,
+  // next to the other operator-only, someone-else-loses-something
+  // actions, not here next to the reversible team change above.
+  d.appendChild(el('div', { className: 'adm-sub-title', text: 'Account' }));
+  d.appendChild(el('p', {
+    className: 'adm-hint',
+    text: p.account_id ? ('Linked to account ' + p.account_id + '.') : 'Not linked to an account.',
+  }));
+
   d.appendChild(el('div', { className: 'adm-sub-title', text: 'Radios' }));
   if (!p.radios || !p.radios.length) {
     d.appendChild(el('p', { className: 'adm-hint', text: 'None bound.' }));
@@ -458,6 +468,34 @@ function renderPlayerDetail(p) {
     } catch (e) { setStatus('Failed: ' + e.message, true); }
     b.disabled = false;
   }));
+  if (p.account_id) {
+    // Player-facing account release does not exist anywhere in this
+    // app on purpose (see app/account_api.py's module docstring) -- a
+    // player can claim a key-only player onto their account via
+    // link-key, but can never let go of one themselves. This is the
+    // only door that clears player.account_id, which is why it only
+    // appears at all when there is a link to release. Same typed-name
+    // confirmation this page already uses for node removal above
+    // (line ~291) and for reissue/delete below -- one consistent
+    // interaction for "this takes something away from someone", not a
+    // second style borrowed from the account page's own confirm step.
+    zone.appendChild(btn('Release account link', 'adm-btn-danger', async (b) => {
+      const typed = window.prompt(
+        p.display_name + ' keeps every radio, key, check-in, and point they have earned.\n' +
+        'This only disconnects account ' + p.account_id + ' from them -- afterward, ' +
+        'whoever holds their API key can link a fresh account onto this player.\n\n' +
+        'Type ' + p.display_name + ' to confirm.'
+      );
+      if (!typed) return;
+      b.disabled = true;
+      try {
+        await post('/api/admin/player/unlink-account',
+          { player_id: p.player_id, display_name: typed });
+        setStatus('Released ' + p.display_name + ' from its account', false);
+        await refreshAll();
+      } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+    }));
+  }
   zone.appendChild(btn('Delete player', 'adm-btn-danger', async (b) => {
     const typed = window.prompt('Deleting removes them and everything they earned.\n\nType ' + p.display_name + ' to confirm.');
     if (!typed) return;

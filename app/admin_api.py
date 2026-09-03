@@ -25,7 +25,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import settings
-from .db import connect
+from .db import WriteSession, connect
 from .mc_ingest import hash_secret
 from .node_ref import normalize_node_ref, normalize_public_key
 
@@ -99,7 +99,7 @@ async def admin_players(request: Request):
     conn = connect()
     try:
         players = conn.execute(
-            "SELECT player_id, display_name, team, created_at, disabled_at "
+            "SELECT player_id, display_name, team, created_at, disabled_at, account_id "
             "  FROM player ORDER BY player_id"
         ).fetchall()
         out = []
@@ -121,6 +121,13 @@ async def admin_players(request: Request):
                 "created_at": p["created_at"],
                 "disabled": p["disabled_at"] is not None,
                 "disabled_at": p["disabled_at"],
+                # None for a player nobody has claimed yet. Not the
+                # account's identities/email -- just enough for the
+                # admin panel to show "linked" vs. "not linked" and to
+                # pass this same id back to
+                # POST /api/admin/player/unlink-account below when an
+                # operator needs to release a mis-linked account.
+                "account_id": p["account_id"],
                 "radios": [
                     {"protocol": r["protocol"], "node_ref": r["node_ref"], "bound_at": r["bound_at"]}
                     for r in radios
@@ -835,6 +842,116 @@ async def admin_player_reissue(request: Request):
         "issued_at": now,
         "revoked_count": revoked_count,
     }
+
+
+@router.post("/api/admin/player/unlink-account")
+async def admin_player_unlink_account(request: Request):
+    """Release a player's account link, operator-only.
+
+    This is the ONLY place in the whole application that can clear
+    player.account_id -- see app/account_api.py's link_key() for how it
+    gets set, and its own module docstring for why nothing there ever
+    offers to unset it: a player can claim a key-only player onto their
+    account, but never release one, by design. Once a link is wrong
+    (an account holder linked the wrong key, or two people share a
+    radio and the key ended up claimed by the wrong side), nothing
+    short of an operator clearing it by hand can free that player back
+    up -- there is no self-service path and there must not be one.
+
+    Same player_id + matching display_name confirmation guard as
+    delete/reissue/node-remove above, for the same reason: this acts on
+    a player on someone else's behalf (the account holder isn't the
+    one making this request), so a stale or mistyped player_id must not
+    be able to silently rip the wrong person's account away from them.
+
+    Deliberately narrow: this clears player.account_id and writes one
+    account_link_event row, nothing else. Every one of the player's own
+    eighteen player-keyed tables -- radios, keys, check-in awards, month
+    awards, points, tile ownership and history -- is untouched, so the
+    player keeps everything it ever earned and simply becomes claimable
+    again by whoever holds its API key (the same POST
+    /api/account/link-key path that claimed it the first time). This is
+    a release, not a delete: nobody's progress is at stake here, only
+    which account (if any) that progress is currently attached to.
+
+    Mirrors link_key()'s own account_link_event write: same table, same
+    detail format ('player_id=<n>'), 'player_unlinked' as the kind
+    link_key()'s 'player_linked' pairs with (see app/db.py's
+    account_link_event schema comment, which already lists
+    'player_unlinked' among the kinds this table expects), and actor
+    'operator' -- the value account_link_event's own column comment and
+    /api/admin/player/team's player_team_change rows already use for
+    every operator-initiated write in this app, not the player-facing
+    'user' link_key() itself writes.
+    """
+    guard = _api_guard(request)
+    if guard is not None:
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    player_id = body.get("player_id") if isinstance(body, dict) else None
+    display_name = body.get("display_name") if isinstance(body, dict) else None
+    if not isinstance(player_id, int) or isinstance(player_id, bool):
+        return JSONResponse({"error": "player_id is required"}, status_code=400)
+    if not isinstance(display_name, str) or not display_name:
+        return JSONResponse({"error": "display_name is required"}, status_code=400)
+
+    now = int(time.time())
+    # WriteSession (app/db.py), not the manual connect()/BEGIN IMMEDIATE
+    # pairing the rest of this file uses -- same primitive
+    # app/account_api.py's link_key() holds for its own conflict-check-
+    # then-write, and for the same reason: the "is this player linked,
+    # and to which account" read below and the UPDATE/INSERT that acts
+    # on it must be atomic against a second concurrent request (another
+    # release, or a link-key racing in) for the same player, not two
+    # separate round trips a race could land between.
+    async with WriteSession() as conn:
+        row = conn.execute(
+            "SELECT display_name, account_id FROM player WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()
+        if row is None:
+            return JSONResponse({"error": "player not found"}, status_code=404)
+        if row["display_name"] != display_name:
+            return JSONResponse(
+                {"error": "display name does not match"}, status_code=409
+            )
+
+        account_id = row["account_id"]
+        if account_id is None:
+            # Not a silent no-op success -- an operator who thinks they
+            # just released a link should be told when there was none
+            # to release, the same way link_key()'s own conflict
+            # responses are specific rather than a generic failure.
+            return JSONResponse(
+                {"error": "player is not linked to any account"}, status_code=409
+            )
+
+        conn.execute(
+            "UPDATE player SET account_id = NULL WHERE player_id = ?", (player_id,)
+        )
+        conn.execute(
+            "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+            "VALUES (?, 'player_unlinked', ?, 'operator', ?)",
+            (account_id, f"player_id={player_id}", now),
+        )
+
+    log.info(
+        "admin: released player %d (%s) from account %d",
+        player_id, display_name, account_id,
+    )
+    return JSONResponse(
+        {
+            "player_id": player_id,
+            "display_name": display_name,
+            "account_id": account_id,
+            "unlinked": True,
+        },
+        status_code=200,
+    )
 
 
 # ---- public API clients ------------------------------------------------
