@@ -35,21 +35,7 @@
  * frontend/join.js's own module docstring states for the same reason.
  */
 
-// Same small "fetch the enabled provider list, render one link per
-// entry" shape join.js's setupSignIn() carries -- duplicated rather
-// than imported, same reasoning as TEAM_COLORS' own duplication comment
-// in join.js: every page here has to stay loadable and correct on its
-// own.
-async function fetchEnabledProviders() {
-  try {
-    const res = await fetch('/auth/providers');
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data && data.providers) ? data.providers : [];
-  } catch (err) {
-    return [];
-  }
-}
+import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-1';
 
 function showError(message) {
   const el = document.getElementById('link-error');
@@ -123,7 +109,7 @@ async function loadPending() {
 
   contentEl.hidden = false;
 
-  const allProviders = await fetchEnabledProviders();
+  const allProviders = await fetchProviders();
   // Never offer the SAME provider that produced this pending identity
   // as an "existing method" choice -- retrying it just re-authenticates
   // the identical (provider, subject) pair, which cannot resolve any
@@ -134,10 +120,10 @@ async function loadPending() {
   const otherProviders = allProviders.filter((p) => p.name !== pending.provider);
 
   // "email" is never rendered into #link-existing-providers as a plain
-  // link -- same reason join.js's setupSignIn() pulls it out of its own
-  // provider loop (there is no GET /auth/email/start redirect to point
-  // one at). It instead reveals #link-email-form, this page's own
-  // sibling of that same form.
+  // link -- see frontend/signin-email.js's own header comment (there is
+  // no GET /auth/email/start redirect to point one at). It instead
+  // reveals #link-email-form, this page's own sibling of that same
+  // form.
   const hasEmail = otherProviders.some((p) => p.name === 'email');
   const linkableProviders = otherProviders.filter((p) => p.name !== 'email');
   if (emailForm) emailForm.hidden = !hasEmail;
@@ -149,86 +135,18 @@ async function loadPending() {
     note.textContent = 'No other sign-in method is enabled yet — create a new account instead.';
     existingWrap.appendChild(note);
   } else {
-    linkableProviders.forEach((p) => {
-      const link = document.createElement('a');
-      link.className = 'signin-provider-btn';
-      link.href = `/auth/${encodeURIComponent(p.name)}/start`;
-      link.textContent = `Sign in with ${p.label}`;
-      existingWrap.appendChild(link);
-    });
-  }
-}
-
-// Same shape as join.js's handleSigninEmailSubmit() -- duplicated
-// rather than imported, same reasoning as fetchEnabledProviders' own
-// duplication comment above: this page has to stay loadable and
-// correct entirely on its own. Always answered with the SAME
-// confirmation regardless of whether the address has an account or the
-// mail actually went out -- see app/oauth_api.py's email_start()
-// docstring for why.
-async function handleLinkEmailSubmit(e) {
-  e.preventDefault();
-  const input = document.getElementById('f-link-email');
-  const errEl = document.getElementById('link-email-error');
-  const sentEl = document.getElementById('link-email-sent');
-  const btn = document.querySelector('#link-email-form .signin-email-submit-btn');
-  if (errEl) errEl.hidden = true;
-  if (sentEl) sentEl.hidden = true;
-
-  const email = input.value.trim();
-  if (!email) {
-    if (errEl) {
-      errEl.textContent = 'Enter your email address.';
-      errEl.hidden = false;
-    }
-    return;
-  }
-
-  if (btn) btn.disabled = true;
-  try {
-    const res = await fetch('/auth/email/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    });
-
-    if (res.status === 429) {
-      if (errEl) {
-        errEl.textContent = 'Too many attempts. Wait a moment and try again.';
-        errEl.hidden = false;
-      }
-      return;
-    }
-    if (res.status === 400) {
-      if (errEl) {
-        errEl.textContent = 'Enter a valid email address.';
-        errEl.hidden = false;
-      }
-      return;
-    }
-    if (!res.ok) {
-      if (errEl) {
-        errEl.textContent = 'Something went wrong. Try again in a moment.';
-        errEl.hidden = false;
-      }
-      return;
-    }
-
-    if (sentEl) sentEl.hidden = false;
-    input.value = '';
-  } catch (err) {
-    if (errEl) {
-      errEl.textContent = 'Could not reach the server. Check your connection and try again.';
-      errEl.hidden = false;
-    }
-  } finally {
-    if (btn) btn.disabled = false;
+    renderProviderButtons(linkableProviders, existingWrap);
   }
 }
 
 function boot() {
   document.getElementById('link-create-btn').addEventListener('click', handleCreateClick);
-  document.getElementById('link-email-form').addEventListener('submit', handleLinkEmailSubmit);
+  setupEmailSignInForm(document.getElementById('link-email-form'), {
+    input: document.getElementById('f-link-email'),
+    errorEl: document.getElementById('link-email-error'),
+    sentEl: document.getElementById('link-email-sent'),
+    submitBtn: document.querySelector('#link-email-form .signin-email-submit-btn'),
+  });
   loadPending();
 }
 

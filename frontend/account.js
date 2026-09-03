@@ -6,7 +6,10 @@
  * /api/account/logout[-all], and GET /auth/providers -- all documented
  * in app/account_api.py and app/oauth_api.py. Self-contained, same as
  * every other page script in this codebase: no build step, no shared
- * import from another page's script.
+ * import from another page's script, with the one exception every page
+ * offering sign-in shares -- frontend/signin-email.js, see that
+ * module's own header comment for why (same exception
+ * frontend/nav-auth.js already is for the nav bar's signed-in state).
  *
  * SECURITY: every dynamic value rendered here (provider labels, masked
  * emails, player name/team, session user-agent/ip, server error text)
@@ -23,6 +26,8 @@
  * only ever stores a one-way hash of one -- see join.html's own
  * key-warning copy), and nothing here renders one back.
  */
+
+import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-1';
 
 // Duplicated from app/oauth.py's PROVIDER_LABELS -- same reasoning as
 // TEAM_COLORS' own duplication comment in join.js: this page has to
@@ -93,29 +98,19 @@ async function renderSignedOut() {
   document.getElementById('account-signed-out').hidden = false;
   const wrap = document.getElementById('account-signin-providers');
   const noneEl = document.getElementById('account-signin-none');
+  const emailForm = document.getElementById('account-signin-email-form');
 
-  let providers = [];
-  try {
-    const res = await fetch('/auth/providers');
-    if (res.ok) {
-      const data = await res.json();
-      providers = Array.isArray(data && data.providers) ? data.providers : [];
-    }
-  } catch (err) {
-    providers = [];
-  }
+  const providers = await fetchProviders();
 
-  // "email" is deliberately left out of this particular list: unlike
-  // every OAuth provider here, there is no GET /auth/email/start
-  // redirect to point a plain link at (POST /auth/email/start is a
-  // JSON endpoint -- see app/oauth_api.py's own "email sign-in" section
-  // comment) -- it needs the address-field-and-submit form
-  // frontend/join.js's #signin-email-form and frontend/link.js's
-  // #link-email-form carry, which this signed-out welcome state does
-  // not offer today.
+  // "email" is rendered as its own address-field-and-submit form
+  // (#account-signin-email-form below), not a plain provider link --
+  // see frontend/signin-email.js's own header comment for why (there
+  // is no GET /auth/email/start redirect to point one at). Same
+  // component frontend/join.js's #signin-email-form and
+  // frontend/link.js's #link-email-form use.
+  const hasEmail = providers.some((p) => p.name === 'email');
   const linkableProviders = providers.filter((p) => p.name !== 'email');
 
-  wrap.replaceChildren();
   if (providers.length === 0) {
     // Truly nothing configured anywhere -- see this deployment's own
     // GET /auth/providers. Left as `providers`, not `linkableProviders`,
@@ -123,15 +118,11 @@ async function renderSignedOut() {
     // sign-in IS reachable from /join or /link) never shows this
     // page's "no sign-in method enabled" hint when one genuinely is.
     noneEl.hidden = false;
+    if (emailForm) emailForm.hidden = true;
     return;
   }
-  linkableProviders.forEach((p) => {
-    const link = document.createElement('a');
-    link.className = 'signin-provider-btn';
-    link.href = `/auth/${encodeURIComponent(p.name)}/start`;
-    link.textContent = `Sign in with ${p.label || providerLabel(p.name)}`;
-    wrap.appendChild(link);
-  });
+  renderProviderButtons(linkableProviders, wrap);
+  if (emailForm) emailForm.hidden = !hasEmail;
 }
 
 // ---- Sign-in methods (GET /api/account's own identities array) -----------
@@ -412,6 +403,12 @@ function boot() {
   document.getElementById('account-connect-form').addEventListener('submit', handleConnectSubmit);
   document.getElementById('account-logout-btn').addEventListener('click', handleLogout);
   document.getElementById('account-logout-all-btn').addEventListener('click', handleLogoutAll);
+  setupEmailSignInForm(document.getElementById('account-signin-email-form'), {
+    input: document.getElementById('f-account-signin-email'),
+    errorEl: document.getElementById('account-signin-email-error'),
+    sentEl: document.getElementById('account-signin-email-sent'),
+    submitBtn: document.querySelector('#account-signin-email-form .signin-email-submit-btn'),
+  });
   loadAccount();
 }
 

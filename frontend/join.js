@@ -31,6 +31,8 @@
  * stay that way.
  */
 
+import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-1';
+
 // Same roster/colors as frontend/mc.js -- duplicated rather than
 // imported, since this page must stay self-contained and load
 // independently of the board view.
@@ -1611,30 +1613,19 @@ function setupStatusKeyToggle() {
 // own comment in join.html for why the two are independent and can be
 // done in either order.
 //
-// Duplicates the small "fetch the provider list, render a button per
-// entry" shape frontend/link.js and frontend/account.js also carry --
-// same reasoning as TEAM_COLORS' own duplication comment further up
-// this file: every page here has to stay loadable and correct entirely
-// on its own.
+// The "fetch the provider list, render a button per entry, reveal the
+// email form" shape itself now lives in frontend/signin-email.js --
+// shared with frontend/link.js and frontend/account.js, see that
+// module's own header comment for why this one piece is not
+// duplicated per page the way TEAM_COLORS above is.
 //
-// Each enabled provider becomes a plain <a href="/auth/{name}/start">
-// -- that route is itself a GET redirect (app/oauth_api.py), so no
-// click handler is needed here at all, only the decision of which
-// providers to render. GET /auth/providers only ever lists a provider
-// that is actually configured (app/oauth.py's provider_enabled()), so
-// an unconfigured one is never rendered as a button that would 404 the
-// moment someone clicked it -- and the whole panel starts `hidden` in
-// join.html and is only revealed once there is something worth
-// showing (a real provider, or an auth_error to report), so an
-// all-disabled deployment never flashes an empty "Sign in" box at all.
-//
-// "email" is the one entry in that list that is NOT rendered as a
-// plain link -- there is no GET /auth/email/start redirect to point
-// one at (POST /auth/email/start is a JSON endpoint -- see
-// app/oauth_api.py's own "email sign-in" section comment). It instead
-// just reveals #signin-email-form, the address-field-and-submit sibling
-// already sitting in join.html, hidden until this function decides
-// it's actually configured.
+// GET /auth/providers only ever lists a provider that is actually
+// configured (app/oauth.py's provider_enabled()), so an unconfigured
+// one is never rendered as a button that would 404 the moment someone
+// clicked it -- and the whole panel starts `hidden` in join.html and
+// is only revealed once there is something worth showing (a real
+// provider, or an auth_error to report), so an all-disabled deployment
+// never flashes an empty "Sign in" box at all.
 const AUTH_ERROR_MESSAGES = {
   provider_declined: 'Sign-in was cancelled.',
   invalid_session: 'That sign-in attempt expired or was already used. Try again.',
@@ -1658,99 +1649,13 @@ async function setupSignIn() {
     errEl.hidden = false;
   }
 
-  let providers = [];
-  try {
-    const res = await fetch('/auth/providers');
-    if (res.ok) {
-      const data = await res.json();
-      providers = Array.isArray(data && data.providers) ? data.providers : [];
-    }
-  } catch (err) {
-    providers = [];
-  }
+  const providers = await fetchProviders();
 
-  wrap.replaceChildren();
-  let hasEmail = false;
-  providers.forEach((p) => {
-    if (p.name === 'email') {
-      hasEmail = true;
-      return;
-    }
-    const link = document.createElement('a');
-    link.className = 'signin-provider-btn';
-    link.href = `/auth/${encodeURIComponent(p.name)}/start`;
-    link.textContent = `Sign in with ${p.label}`;
-    wrap.appendChild(link);
-  });
+  const hasEmail = providers.some((p) => p.name === 'email');
+  renderProviderButtons(providers.filter((p) => p.name !== 'email'), wrap);
   if (emailForm) emailForm.hidden = !hasEmail;
 
   if (providers.length > 0 || errorCode) panel.hidden = false;
-}
-
-// POST /auth/email/start, always answered with the SAME confirmation
-// message regardless of whether the address has an account or the mail
-// actually went out -- see app/oauth_api.py's email_start() docstring
-// for why: this response must never be an account-enumeration oracle.
-// The only distinct outcomes handled here (rate limited, malformed
-// address) are about the REQUEST, not about whether the address exists.
-async function handleSigninEmailSubmit(e) {
-  e.preventDefault();
-  const input = document.getElementById('f-signin-email');
-  const errEl = document.getElementById('signin-email-error');
-  const sentEl = document.getElementById('signin-email-sent');
-  const btn = document.querySelector('#signin-email-form .signin-email-submit-btn');
-  if (errEl) errEl.hidden = true;
-  if (sentEl) sentEl.hidden = true;
-
-  const email = input.value.trim();
-  if (!email) {
-    if (errEl) {
-      errEl.textContent = 'Enter your email address.';
-      errEl.hidden = false;
-    }
-    return;
-  }
-
-  if (btn) btn.disabled = true;
-  try {
-    const res = await fetch('/auth/email/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    });
-
-    if (res.status === 429) {
-      if (errEl) {
-        errEl.textContent = 'Too many attempts. Wait a moment and try again.';
-        errEl.hidden = false;
-      }
-      return;
-    }
-    if (res.status === 400) {
-      if (errEl) {
-        errEl.textContent = 'Enter a valid email address.';
-        errEl.hidden = false;
-      }
-      return;
-    }
-    if (!res.ok) {
-      if (errEl) {
-        errEl.textContent = 'Something went wrong. Try again in a moment.';
-        errEl.hidden = false;
-      }
-      return;
-    }
-
-    if (sentEl) sentEl.hidden = false;
-    input.value = '';
-  } catch (err) {
-    if (errEl) {
-      errEl.textContent = 'Could not reach the server. Check your connection and try again.';
-      errEl.hidden = false;
-    }
-  } finally {
-    if (btn) btn.disabled = false;
-  }
 }
 
 function boot() {
@@ -1772,7 +1677,12 @@ function boot() {
   setupStatusKeyToggle();
   setupEndpointCopy();
   document.getElementById('join-submit').addEventListener('click', handleJoinClick);
-  document.getElementById('signin-email-form').addEventListener('submit', handleSigninEmailSubmit);
+  setupEmailSignInForm(document.getElementById('signin-email-form'), {
+    input: document.getElementById('f-signin-email'),
+    errorEl: document.getElementById('signin-email-error'),
+    sentEl: document.getElementById('signin-email-sent'),
+    submitBtn: document.querySelector('#signin-email-form .signin-email-submit-btn'),
+  });
   document.getElementById('status-form').addEventListener('submit', handleStatusSubmit);
   document.getElementById('add-radio-form').addEventListener('submit', handleAddRadioSubmit);
   document.getElementById('checkin-name-form').addEventListener('submit', handleCheckinNameSubmit);

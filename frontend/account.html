@@ -36,7 +36,7 @@
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260903-1" />
+  <link rel="stylesheet" href="/static/account.css?v=20260903-2" />
 </head>
 <body>
 
@@ -68,11 +68,25 @@
          Offers the same sign-in-with-provider component join.html's
          #signin-panel uses, sourced the same way from GET
          /auth/providers, so an unconfigured provider is never shown
-         here either. -->
+         here either -- including email sign-in (#account-signin-email-form
+         below), the same address-field-and-submit form join.html's
+         #signin-email-form and link.html's #link-email-form use, wired
+         up via the shared frontend/signin-email.js. -->
     <section id="account-signed-out" class="account-panel" hidden>
       <div class="account-title">Sign in</div>
       <p class="account-hint">Sign in to see your connected sign-in methods, your linked player, and your active sessions.</p>
       <div id="account-signin-providers" class="signin-providers"></div>
+
+      <form id="account-signin-email-form" class="signin-email-form" novalidate hidden>
+        <div id="account-signin-email-error" class="account-error" role="alert" hidden></div>
+        <label>
+          <span>Email</span>
+          <input type="email" id="f-account-signin-email" autocomplete="email" required />
+        </label>
+        <button type="submit" class="signin-email-submit-btn">Email me a sign-in link</button>
+        <p id="account-signin-email-sent" class="signin-email-sent" hidden>If that address can sign in, a link is on its way — check your inbox.</p>
+      </form>
+
       <p id="account-signin-none" class="account-hint" hidden>No sign-in method is enabled on this deployment yet.</p>
     </section>
 
@@ -126,7 +140,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260903-1" type="module"></script>
+  <script src="/static/account.js?v=20260903-2" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>
