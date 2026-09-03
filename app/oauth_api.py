@@ -108,6 +108,7 @@ above it.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 import sqlite3
@@ -129,6 +130,7 @@ from .email_login import (
     send_magic_link_email,
 )
 from .mc_ingest import hash_secret
+from .password_login import PasswordHash, verify_password
 from .oauth import (
     PROVIDERS,
     PROVIDER_LABELS,
@@ -442,6 +444,29 @@ def resolve_oauth_callback(
     # merge tool that doesn't exist yet, a provider that changes whose
     # email is verified) -- and when it does, picking one silently would
     # be a guess this code has no business making.
+    #
+    # CRITICAL, NON-NEGOTIABLE: this query reads ONLY account_identity's
+    # own email/email_verified columns -- it must NEVER also match
+    # against account.contact_email (app/db.py's MIGRATIONS entry for
+    # that column). contact_email is a plain, user-editable "where can
+    # we reach you" field (app/account_api.py's POST
+    # /api/account/contact-email) that anyone can type in and change at
+    # will, with NO proof of control required beyond clicking a
+    # verification link that only ever flips a boolean, never grants
+    # sign-in. If this auto-link match were ever widened to include it,
+    # setting your contact email to a VICTIM's address (which requires
+    # no access to that inbox at all until the verify step, and even
+    # after verifying only proves the setter once received a link at
+    # it) would let the next OAuth/email login carrying that same
+    # address silently auto-link onto the victim's account -- a real
+    # account-takeover path, not a hypothetical one. account_identity's
+    # own email_verified is fundamentally different: it is a PROVIDER's
+    # own assertion (an OAuth consent screen, or this app's own
+    # magic-link proof of control), never something the account holder
+    # sets by hand. If a future change "fixes" this to also search
+    # contact_email -- because it looks like an oversight that a
+    # person's own listed contact address doesn't help them auto-link
+    # -- that is the bug this comment exists to prevent.
     if identity.email_verified and identity.email:
         matches = conn.execute(
             "SELECT DISTINCT account_id FROM account_identity"
@@ -705,6 +730,284 @@ async def email_callback(request: Request) -> Response:
         )
 
     return await _respond_to_callback_outcome(request, outcome=outcome, identity=identity, now=now)
+
+
+# ---- password sign-in (the fifth door) -----------------------------------
+#
+# POST /auth/password/start authenticates an EXISTING account by email +
+# password -- app/password_login.py's hashlib.scrypt verify against
+# app/db.py's account_password row. Deliberately NOT built on top of
+# resolve_oauth_callback()/ProviderIdentity the way email sign-in above
+# is: that decision tree can CREATE an account (case 4's pending flow)
+# or LINK a new identity onto one (cases 2/3) -- a password sign-in
+# attempt must never do either. It only ever succeeds against an
+# account that already exists, that already holds a set password, and
+# it never writes account_identity or account_pending_identity at all.
+#
+# "email + password" resolves to an account the same way case 3 above
+# does: find the account(s) whose account_identity holds this email
+# VERIFIED (any provider -- Google, GitHub, magic-link email,
+# whichever the account happens to have). Ambiguous (more than one
+# account) is treated as "no such account" here too, the same
+# unwilling-to-guess posture case 3 already takes -- see that query's
+# own comment for why. account.contact_email is never consulted for
+# this lookup either, for the exact same account-takeover reasoning
+# that comment gives.
+#
+# ---- indistinguishable failure, and why a dummy hash runs even then ------
+#
+# "no such account", "that account has no password set", and "wrong
+# password" all return the exact same 401 body -- revealing any of
+# those three separately would hand an attacker a free account-
+# existence/config oracle. The response BODY is easy to make identical;
+# response TIMING is the harder half of the same leak (a real
+# scrypt verify takes measurably longer than an early return), so
+# _dummy_scrypt_verify() below burns a comparable amount of CPU on
+# every path that skips the real one, keeping the three failure modes
+# close in wall-clock time as well as in body.
+_password_start_ip_limiter = new_rate_limit_bucket()
+_password_start_addr_limiter = new_rate_limit_bucket()
+
+_BACKOFF_MAX_TRACKED = 10000
+
+
+class _PasswordBackoff:
+    """Escalating lockout per TARGET address for POST
+    /auth/password/start, layered ON TOP OF (not instead of) the flat
+    per-address window limiter above -- a flat window alone lets an
+    attacker spend the whole budget in a burst at the start of every
+    window, forever, at a steady rate; this instead makes each
+    successive failure against the SAME address cost more wall-clock
+    time than the last, degrading a sustained guessing campaign much
+    faster than a flat window does on its own. Same bounded-dict
+    eviction shape app/auth.py's own _BoundedHits uses, for the same
+    reason (an attacker flooding distinct addresses can't grow this
+    without bound).
+
+    Backoff resets to nothing on the next SUCCESSFUL sign-in for that
+    address (record_success) -- a real password owner who mistypes it
+    twice and then gets it right is not still penalized for the misses.
+    """
+
+    def __init__(self, max_tracked: int = _BACKOFF_MAX_TRACKED) -> None:
+        self._state: dict[str, tuple[int, float]] = {}  # key -> (fail_count, locked_until monotonic)
+        self._max_tracked = max_tracked
+
+    def locked(self, key: str) -> bool:
+        entry = self._state.get(key)
+        if entry is None:
+            return False
+        _, locked_until = entry
+        return time.monotonic() < locked_until
+
+    def record_failure(self, key: str) -> None:
+        if len(self._state) >= self._max_tracked:
+            now = time.monotonic()
+            stale = [k for k, (_, until) in self._state.items() if until <= now]
+            for k in stale:
+                del self._state[k]
+            if len(self._state) >= self._max_tracked:
+                self._state.clear()
+
+        fail_count, _ = self._state.get(key, (0, 0.0))
+        fail_count += 1
+        backoff = min(
+            settings.account_password_backoff_base_seconds
+            * (settings.account_password_backoff_factor ** (fail_count - 1)),
+            settings.account_password_backoff_max_seconds,
+        )
+        self._state[key] = (fail_count, time.monotonic() + backoff)
+
+    def record_success(self, key: str) -> None:
+        self._state.pop(key, None)
+
+
+_password_backoff = _PasswordBackoff()
+
+# Fixed dummy salt/params for the timing-equalizing hash below -- never
+# used to hash or verify a real password, only to burn roughly the same
+# CPU a real verify_password() call would, on whichever failure path
+# never reaches one (see this section's own "indistinguishable failure"
+# comment above).
+_DUMMY_SCRYPT_SALT = b"\x00" * 16
+
+
+def _dummy_scrypt_verify() -> None:
+    hashlib.scrypt(
+        b"dummy",
+        salt=_DUMMY_SCRYPT_SALT,
+        n=settings.account_password_scrypt_n,
+        r=settings.account_password_scrypt_r,
+        p=settings.account_password_scrypt_p,
+        dklen=settings.account_password_scrypt_dklen,
+    )
+
+
+_PASSWORD_START_FAILURE_BODY = {"error": "invalid email or password"}
+
+
+@router.post("/auth/password/start")
+async def password_start(request: Request) -> JSONResponse:
+    """Sign in with email + password. Authenticates an EXISTING account
+    ONLY -- see this section's own module comment above for the full
+    "never create, never link, never run the pending-identity decision
+    tree" contract. On success, issues a session exactly like every
+    other door (create_session + set_session_cookie), the same as
+    oauth_callback/email_callback's "login" case.
+    """
+    ip = get_client_ip(request)
+    if _password_start_ip_limiter.limited(
+        ip,
+        limit=settings.account_password_start_ip_rate_limit_attempts,
+        window=settings.account_password_start_ip_rate_limit_window_seconds,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    raw_email = body.get("email") if isinstance(body, dict) else None
+    raw_password = body.get("password") if isinstance(body, dict) else None
+    if not isinstance(raw_email, str) or not raw_email or not isinstance(raw_password, str) or not raw_password:
+        return JSONResponse({"error": "email and password are required"}, status_code=400)
+
+    email = normalize_email(raw_email)
+    if not looks_like_email(email):
+        # Shape problem only -- same "not an enumeration risk" posture
+        # POST /auth/email/start's own docstring gives its identical
+        # 400 case.
+        return JSONResponse({"error": "invalid email address"}, status_code=400)
+
+    if _password_start_addr_limiter.limited(
+        email,
+        limit=settings.account_password_start_address_rate_limit_attempts,
+        window=settings.account_password_start_address_rate_limit_window_seconds,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    if _password_backoff.locked(email):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    conn = connect()
+    try:
+        # Same ambiguity handling as case 3 of resolve_oauth_callback:
+        # exactly one matching account required, never a guess between
+        # several.
+        matches = conn.execute(
+            "SELECT DISTINCT account_id FROM account_identity"
+            " WHERE email_verified = 1 AND LOWER(email) = LOWER(?)",
+            (email,),
+        ).fetchall()
+        account_id: int | None = None
+        stored: PasswordHash | None = None
+        if len(matches) == 1:
+            candidate_id = matches[0]["account_id"]
+            row = conn.execute(
+                "SELECT salt, n, r, p, dklen, hash FROM account_password WHERE account_id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if row is not None:
+                account_id = candidate_id
+                stored = PasswordHash(
+                    salt=row["salt"], n=row["n"], r=row["r"], p=row["p"], dklen=row["dklen"],
+                    derived_key=row["hash"],
+                )
+    finally:
+        conn.close()
+
+    if account_id is None or stored is None:
+        # "no such account" or "no password set" -- see this section's
+        # own comment for why the dummy verify runs here too.
+        _dummy_scrypt_verify()
+        _password_backoff.record_failure(email)
+        return JSONResponse(_PASSWORD_START_FAILURE_BODY, status_code=401)
+
+    if not verify_password(raw_password, stored):
+        _password_backoff.record_failure(email)
+        return JSONResponse(_PASSWORD_START_FAILURE_BODY, status_code=401)
+
+    _password_backoff.record_success(email)
+
+    now = int(time.time())
+    async with WriteSession() as write_conn:
+        write_conn.execute(
+            "UPDATE account SET last_login_at = ? WHERE account_id = ?", (now, account_id)
+        )
+
+    raw_session_token = await create_session(
+        account_id, user_agent=request.headers.get("user-agent"), ip=ip
+    )
+    resp = JSONResponse({"result": "login", "account_id": account_id}, status_code=200)
+    set_session_cookie(resp, raw_session_token)
+    return resp
+
+
+# ---- contact-email verification --------------------------------------
+
+@router.get("/auth/contact-email/verify")
+async def contact_email_verify(request: Request) -> JSONResponse:
+    """Redeems a single-use token from app/db.py's
+    account_contact_email_token (app/account_api.py's POST
+    /api/account/contact-email mails the link this route is reached
+    from) -- marks account.contact_email_verified_at, but ONLY if the
+    account's CURRENT contact_email still matches the address this
+    specific token was issued for (see that table's own comment for
+    why: an abandoned link for an address that was since changed again
+    must never verify whatever address happens to be set later).
+
+    Deliberately does not require a session -- the mailed link is the
+    only proof needed, the same as GET /auth/email/callback, and a
+    person may well be clicking it from a different browser/device than
+    the one they are signed in on.
+
+    This route only ever flips a boolean on the caller's OWN account
+    (resolved from the token's own account_id, never the request's
+    session, if any) -- it does not create a session, does not log
+    anyone in, and does not touch account_identity. See the case-3
+    matching query's own comment above for why that separation matters.
+    """
+    raw_token = request.query_params.get("token")
+    if not raw_token:
+        return JSONResponse({"error": "invalid or expired verification link"}, status_code=400)
+
+    now = int(time.time())
+    token_hash = hash_secret(raw_token)
+    async with WriteSession() as conn:
+        row = conn.execute(
+            "SELECT account_id, email, expires_at, consumed_at "
+            "  FROM account_contact_email_token WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if row is None or row["consumed_at"] is not None or row["expires_at"] <= now:
+            return JSONResponse(
+                {"error": "invalid or expired verification link"}, status_code=400
+            )
+
+        conn.execute(
+            "UPDATE account_contact_email_token SET consumed_at = ? WHERE token_hash = ?",
+            (now, token_hash),
+        )
+        cutoff = now - _SWEEP_GRACE_SECONDS
+        conn.execute(
+            "DELETE FROM account_contact_email_token "
+            "WHERE expires_at < ? OR (consumed_at IS NOT NULL AND consumed_at < ?)",
+            (cutoff, cutoff),
+        )
+
+        current = conn.execute(
+            "SELECT contact_email FROM account WHERE account_id = ?", (row["account_id"],)
+        ).fetchone()
+        verified = False
+        current_email = current["contact_email"] if current is not None else None
+        if current_email is not None and current_email.lower() == row["email"].lower():
+            conn.execute(
+                "UPDATE account SET contact_email_verified_at = ? WHERE account_id = ?",
+                (now, row["account_id"]),
+            )
+            verified = True
+
+    return JSONResponse({"verified": verified}, status_code=200)
 
 
 @router.get("/auth/{provider}/start")
