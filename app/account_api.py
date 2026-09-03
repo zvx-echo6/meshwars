@@ -353,12 +353,14 @@ def _sessions_out(conn, account_id: int, *, current_token_hash: str) -> list[dic
     """Active (not revoked, not expired) sessions on this account --
     never returns token_hash itself, only enough for a person to
     recognise which of their own sessions is which (see
-    account_session's own comment in app/db.py for why user_agent/ip
-    exist at all: recognition, not a security control).
+    account_session's own comment in app/db.py for why device_label
+    exists at all -- recognition, not a security control -- and why
+    there is no `ip` field here anymore: it is no longer stored at
+    all, not just no longer returned).
     """
     now = int(time.time())
     rows = conn.execute(
-        "SELECT token_hash, created_at, last_seen_at, user_agent, ip "
+        "SELECT token_hash, created_at, last_seen_at, device_label "
         "  FROM account_session "
         " WHERE account_id = ? AND revoked_at IS NULL AND expires_at > ? "
         " ORDER BY last_seen_at DESC",
@@ -368,8 +370,7 @@ def _sessions_out(conn, account_id: int, *, current_token_hash: str) -> list[dic
         {
             "created_at": r["created_at"],
             "last_seen_at": r["last_seen_at"],
-            "user_agent": r["user_agent"],
-            "ip": r["ip"],
+            "device_label": r["device_label"],
             "current": r["token_hash"] == current_token_hash,
         }
         for r in rows

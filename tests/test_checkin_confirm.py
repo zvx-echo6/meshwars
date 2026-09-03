@@ -196,7 +196,7 @@ def _login(client: TestClient, db_path: str) -> int:
     """
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id)
-    raw_token = _run(create_session(account_id, user_agent="pytest-agent", ip="203.0.113.5"))
+    raw_token = _run(create_session(account_id, device_label="Firefox on Windows"))
     client.cookies.set(SESSION_COOKIE_NAME, raw_token)
     return player_id
 

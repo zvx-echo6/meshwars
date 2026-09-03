@@ -107,7 +107,7 @@ def _make_player(path: str, *, account_id=None, display_name="Tester", team="RED
 def _login(client: TestClient, db_path: str, *, account_id: int | None = None) -> tuple[int, str]:
     if account_id is None:
         account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent="pytest-agent", ip="203.0.113.5"))
+    raw_token = _run(create_session(account_id, device_label="Firefox on Windows"))
     client.cookies.set(SESSION_COOKIE_NAME, raw_token)
     return account_id, raw_token
 

@@ -125,7 +125,7 @@ def _login(client: TestClient, db_path: str) -> str:
     subsequent requests. Returns the raw token (unused by most callers,
     kept for symmetry with tests/test_account_api.py's own _login)."""
     account_id = _account(db_path)
-    raw_token = _run(create_session(account_id, user_agent="pytest-agent", ip="203.0.113.5"))
+    raw_token = _run(create_session(account_id, device_label="Firefox on Windows"))
     client.cookies.set(SESSION_COOKIE_NAME, raw_token)
     return raw_token
 

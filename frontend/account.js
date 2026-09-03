@@ -452,9 +452,17 @@ function renderSessions(sessions) {
 
     const topLine = document.createElement('div');
     topLine.className = 'account-session-top';
-    const uaSpan = document.createElement('span');
-    uaSpan.textContent = session.user_agent || 'Unknown device';
-    topLine.appendChild(uaSpan);
+    const labelSpan = document.createElement('span');
+    // device_label is a short "<Browser> on <OS>" string produced
+    // server-side by app/device_label.py -- never a raw User-Agent
+    // (fingerprinting risk) and never an IP address (not stored at
+    // all anymore; see account_session's own comment in app/db.py).
+    // textContent, not innerHTML: this value is attacker-influenced
+    // (derived from a request header) and must never be parsed as
+    // markup, the same reasoning every other dynamic value on this
+    // page already follows.
+    labelSpan.textContent = session.device_label || 'Unknown device';
+    topLine.appendChild(labelSpan);
     if (session.current) {
       const tag = document.createElement('span');
       tag.className = 'account-session-current-tag';
@@ -465,9 +473,11 @@ function renderSessions(sessions) {
 
     const detailLine = document.createElement('div');
     detailLine.className = 'account-identity-detail';
+    // No IP address to append anymore -- created/last-seen timestamps
+    // plus the device label above are enough to tell one session from
+    // another without keeping an address around.
     detailLine.textContent =
-      `Signed in ${formatDate(session.created_at)} — last seen ${formatDateTime(session.last_seen_at)}`
-      + (session.ip ? ` — ${session.ip}` : '');
+      `Signed in ${formatDate(session.created_at)} — last seen ${formatDateTime(session.last_seen_at)}`;
     li.appendChild(detailLine);
 
     list.appendChild(li);

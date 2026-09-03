@@ -144,6 +144,7 @@ from .oauth import (
     get_provider,
     provider_enabled,
 )
+from .device_label import device_label_from_user_agent
 from .sessions import (
     SESSION_COOKIE_NAME,
     SessionPrincipal,
@@ -945,7 +946,7 @@ async def password_start(request: Request) -> JSONResponse:
         )
 
     raw_session_token = await create_session(
-        account_id, user_agent=request.headers.get("user-agent"), ip=ip
+        account_id, device_label=device_label_from_user_agent(request.headers.get("user-agent"))
     )
     resp = JSONResponse({"result": "login", "account_id": account_id}, status_code=200)
     set_session_cookie(resp, raw_session_token)
@@ -1162,7 +1163,7 @@ async def _respond_to_callback_outcome(
         resp = RedirectResponse(_ACCOUNT_PAGE_PATH, status_code=302)
     if outcome["case"] in ("login", "auto_linked"):
         raw_session_token = await create_session(
-            account_id, user_agent=request.headers.get("user-agent"), ip=get_client_ip(request)
+            account_id, device_label=device_label_from_user_agent(request.headers.get("user-agent"))
         )
         set_session_cookie(resp, raw_session_token)
     return resp
@@ -1485,7 +1486,7 @@ async def pending_create(request: Request) -> JSONResponse:
         )
 
     raw_session_token = await create_session(
-        account_id, user_agent=request.headers.get("user-agent"), ip=ip
+        account_id, device_label=device_label_from_user_agent(request.headers.get("user-agent"))
     )
     resp = JSONResponse({"result": "created", "account_id": account_id}, status_code=200)
     set_session_cookie(resp, raw_session_token)

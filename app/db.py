@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import settings
+from .device_label import device_label_from_user_agent
 
 log = logging.getLogger("db")
 
@@ -1439,13 +1440,32 @@ CREATE INDEX IF NOT EXISTS idx_account_identity_account ON account_identity(acco
 -- on the very next request, rather than waiting out its natural
 -- sliding expiry.
 --
--- user_agent/ip are NOT security controls -- nothing here pins a
--- session to either one, and nothing rejects a request whose address
--- moved (a phone changing towers mid-session is normal, not suspect).
--- They exist purely so app/account_api.py's GET /api/account can show
+-- device_label is NOT a security control -- nothing here pins a
+-- session to it, and nothing rejects a request whose device changed.
+-- It exists purely so app/account_api.py's GET /api/account can show
 -- a person a recognisable list of their own active sessions ("Chrome
--- on 100.x.x.x, last seen 3 minutes ago") so they can tell which ones
+-- on Windows, last seen 3 minutes ago") so they can tell which ones
 -- are actually theirs before deciding to revoke one.
+--
+-- This table used to also carry `ip`, the raw client IP address, and
+-- `user_agent`, the full raw User-Agent header -- both stored
+-- indefinitely, with no sweep anywhere in this codebase (unlike, say,
+-- account_pending_identity's expires_at-driven cleanup below). Matt's
+-- privacy-hardening call: an IP address is a real-world tracking
+-- identifier with no feature depending on it (see app/sessions.py's
+-- create_session() -- nothing here ever pinned a session to an
+-- address, and app/client_ip.py's get_client_ip() already serves every
+-- actual need for a request's address, in-memory, for rate limiting,
+-- entirely separately from this table), so it is not stored at all --
+-- not truncated, not hashed, not geolocated. A raw User-Agent string is
+-- a fingerprint (exact browser/engine/OS build numbers narrow a device
+-- down to a small set of people); app/device_label.py reduces it to a
+-- short "<Browser> on <OS>" label instead, which is all the Sessions
+-- panel's own purpose (recognise-your-own-session, revoke-a-stranger's)
+-- ever needed. See db.py's _migrate_session_privacy() below for how
+-- existing rows -- not just future ones -- were cleaned when this
+-- landed: an already-stored IP address does not get to linger just
+-- because it predates the column's removal.
 CREATE TABLE IF NOT EXISTS account_session (
     token_hash    TEXT PRIMARY KEY,
     account_id    INTEGER NOT NULL,
@@ -1453,8 +1473,7 @@ CREATE TABLE IF NOT EXISTS account_session (
     expires_at    INTEGER NOT NULL,
     last_seen_at  INTEGER NOT NULL,
     revoked_at    INTEGER,
-    user_agent    TEXT,
-    ip            TEXT
+    device_label  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_account_session_account ON account_session(account_id);
 
@@ -2022,6 +2041,69 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_session_privacy(conn: sqlite3.Connection) -> None:
+    """One-time cleanup for account_session's privacy-hardening pass --
+    see that table's own SCHEMA comment above for the decision this
+    implements. Called from init_db() itself (see the call site's own
+    comment for why this cannot be a plain MIGRATIONS entry).
+
+    Gate: PRAGMA table_info tells us directly whether this database
+    still carries the old `ip` column. If it does not -- either because
+    this database was created fresh under the current SCHEMA (which
+    never had `ip` at all), or because a previous boot already ran this
+    function to completion -- there is nothing to do, and every later
+    boot after the first migrated one is a true no-op rather than a
+    re-run of the (non-idempotent) label reduction below.
+    """
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(account_session)")}
+    if "ip" not in cols:
+        return  # nothing to migrate -- fresh install, or already done
+
+    log.info("account_session privacy migration: starting (reducing user_agent to device labels, clearing ip)")
+
+    # Reduce every existing row's raw User-Agent to its short device
+    # label BEFORE the column is renamed below, so the UPDATE below
+    # still addresses it by its original name. Matt's intent here was
+    # explicit: today's already-stored raw strings must not linger just
+    # because they predate this change -- a migration that only alters
+    # future INSERTs would leave every historical row exactly as
+    # identifying as before.
+    rows = conn.execute("SELECT token_hash, user_agent FROM account_session").fetchall()
+    for row in rows:
+        label = device_label_from_user_agent(row["user_agent"])
+        conn.execute(
+            "UPDATE account_session SET user_agent = ? WHERE token_hash = ?",
+            (label, row["token_hash"]),
+        )
+
+    # user_agent -> device_label: a rename, not a new column, since
+    # every row above was just rewritten to already hold a label, not a
+    # raw UA -- the column's CONTENTS changed meaning, so its name
+    # should too, matching this codebase's general preference for
+    # naming a column for exactly what it holds. ALTER TABLE ... RENAME
+    # COLUMN has been supported since SQLite 3.25 (2018); this
+    # deployment runs 3.45.1 (checked via sqlite3.sqlite_version at
+    # development time), well past that floor.
+    conn.execute("ALTER TABLE account_session RENAME COLUMN user_agent TO device_label")
+
+    # ip: physically DROPPED, not blanked. SQLite's ALTER TABLE ... DROP
+    # COLUMN has been supported since 3.35 (2021), and this deployment's
+    # 3.45.1 comfortably clears that floor; `ip` is a plain nullable
+    # TEXT column with no index, foreign key, or CHECK constraint
+    # referencing it (idx_account_session_account is keyed on
+    # account_id only), which is exactly the shape SQLite's DROP COLUMN
+    # handles as a metadata-only change, no table rebuild required. An
+    # UPDATE ... SET ip = NULL was considered instead and rejected:
+    # Matt's decision was "not stored," full stop, and a column that
+    # still exists -- still enumerated by `SELECT *`, still visible in
+    # every future PRAGMA table_info -- is a standing invitation for a
+    # future change to start writing to it again "since it's already
+    # there." Dropping it removes that temptation along with the data.
+    conn.execute("ALTER TABLE account_session DROP COLUMN ip")
+
+    log.info("account_session privacy migration: complete (%d row(s) reduced, ip column dropped)", len(rows))
+
+
 def init_db() -> None:
     """Create schema and apply pragmas. Idempotent."""
     _ensure_parent_dir(settings.db_path)
@@ -2043,6 +2125,32 @@ def init_db() -> None:
                     continue  # already applied, nothing to do
                 log.error("schema patch failed: %s -- statement: %s", e, stmt)
                 raise
+
+        # account_session privacy migration (see that table's own SCHEMA
+        # comment above for the full story): not a plain MIGRATIONS
+        # entry because it is not a plain SQL statement -- reducing an
+        # existing raw User-Agent to a device label requires
+        # app/device_label.py's parser, which no ALTER/UPDATE can run
+        # for us. Unlike the MIGRATIONS loop above (idempotent by
+        # re-running harmlessly every boot) and the places_seed/
+        # checkin/freqmapper bootstraps below (idempotent because
+        # re-seeding already-present data is a no-op), this operation
+        # is NOT safe to blindly re-run: applying the label parser to
+        # its own output is not a no-op (a label like "Chrome on
+        # Windows" contains no "Chrome/" token, so re-parsing it
+        # produces "Unknown device" -- see device_label.py's own
+        # comment on why "Version/"+"Safari/" etc. are required
+        # together). _migrate_session_privacy() is therefore gated on
+        # SCHEMA SHAPE, not re-run unconditionally: it checks whether
+        # this database still has the old `ip` column and only does
+        # anything if so, making repeated boots against an
+        # already-migrated database (or a fresh one, which the SCHEMA
+        # above already creates in the new shape) a true no-op. Left
+        # unguarded by try/except, unlike the non-fatal seeds below:
+        # this changes the table's actual columns, so a failure here
+        # must stop boot loudly rather than let the app start up
+        # against a schema app/sessions.py does not expect.
+        _migrate_session_privacy(conn)
 
         # Places Worth Going seed (app/places_seed.py): reference data
         # shipped with the code, same as app/reference/places.csv, but

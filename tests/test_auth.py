@@ -502,7 +502,7 @@ def test_session_cookie_alone_authenticates_over_http(router_module, path, metho
 
     account_id = _make_account(db_path)
     _make_player(db_path, account_id=account_id)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
 
     ingestor = FakeIngestor()
     client = _client_for(router_module.router, ingestor)
@@ -535,7 +535,7 @@ def test_ingest_shaped_dependency_rejects_session_cookie_alone_over_http(db_path
     """
     account_id = _make_account(db_path)
     _make_player(db_path, account_id=account_id)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
 
     from fastapi import APIRouter, Depends
 
@@ -721,7 +721,7 @@ def test_no_key_valid_session_with_linked_player_authenticates_via_session(db_pa
     """
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
 
     ingestor = FakeIngestor()
     dep = require_api_key_principal(allow_session_fallback=True)
@@ -740,7 +740,7 @@ def test_no_key_valid_session_without_linked_player_is_401(db_path):
     credential always produced, never a 500.
     """
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
 
     ingestor = FakeIngestor()
     dep = require_api_key_principal(allow_session_fallback=True)
@@ -783,7 +783,7 @@ def test_revoked_session_is_401_not_accepted(db_path):
 
     account_id = _make_account(db_path)
     _make_player(db_path, account_id=account_id)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     token_hash = _run(verify_session(raw_token)).token_hash
     _run(revoke_session(token_hash))
 
@@ -822,7 +822,7 @@ def test_default_allow_session_fallback_is_false_valid_session_alone_is_401(db_p
     """
     account_id = _make_account(db_path)
     _make_player(db_path, account_id=account_id)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
 
     ingestor = FakeIngestor()
     dep = require_api_key_principal()  # matches app/api.py's _ingest_principal exactly
@@ -854,7 +854,7 @@ def test_checkin_api_shaped_dependency_accepts_session_only(db_path):
     """
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
 
     ingestor = FakeIngestor()
     dep = require_api_key_principal(

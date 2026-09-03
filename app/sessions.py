@@ -95,13 +95,25 @@ class SessionPrincipal:
 # ---- create / verify / touch --------------------------------------------
 
 async def create_session(
-    account_id: int, *, user_agent: str | None, ip: str | None
+    account_id: int, *, device_label: str | None
 ) -> str:
     """Mint a new session for account_id. Returns the RAW token -- the
     only time it ever exists outside the caller's own response; only
     its hash is stored (see account_session's own comment in
     app/db.py). Caller is responsible for handing it to the browser via
     set_session_cookie() before this value goes out of scope.
+
+    Takes a device_label, not a raw User-Agent and IP -- every caller
+    (all three live in app/oauth_api.py: the OAuth callback, the
+    password sign-in route, and the pending-identity "create account"
+    route) is expected to have already reduced the request's own
+    User-Agent header through app/device_label.py's
+    device_label_from_user_agent() before calling this. This module
+    deliberately never sees the raw header at all,
+    let alone the caller's IP address: account_session privacy-hardening
+    (see that table's own comment in app/db.py) means there is no path
+    left, anywhere, that stores an address, so create_session() simply
+    has no parameter for one to be passed through.
     """
     raw_token = secrets.token_urlsafe(_TOKEN_BYTES)
     token_hash = hash_secret(raw_token)
@@ -110,9 +122,9 @@ async def create_session(
     async with WriteSession() as conn:
         conn.execute(
             "INSERT INTO account_session("
-            "  token_hash, account_id, created_at, expires_at, last_seen_at, user_agent, ip"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (token_hash, account_id, now, expires_at, now, user_agent, ip),
+            "  token_hash, account_id, created_at, expires_at, last_seen_at, device_label"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            (token_hash, account_id, now, expires_at, now, device_label),
         )
     return raw_token
 

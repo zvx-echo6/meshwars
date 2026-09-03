@@ -132,7 +132,7 @@ def _login(client: TestClient, db_path: str, *, account_id: int | None = None) -
     """
     if account_id is None:
         account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent="pytest-agent", ip="203.0.113.5"))
+    raw_token = _run(create_session(account_id, device_label="Firefox on Windows"))
     client.cookies.set(SESSION_COOKIE_NAME, raw_token)
     return account_id, raw_token
 
@@ -168,8 +168,12 @@ def test_get_account_shape_with_no_player_and_no_identities(client, db_path):
     assert body["player"] is None
     assert len(body["sessions"]) == 1
     assert body["sessions"][0]["current"] is True
-    assert body["sessions"][0]["ip"] == "203.0.113.5"
-    assert body["sessions"][0]["user_agent"] == "pytest-agent"
+    assert body["sessions"][0]["device_label"] == "Firefox on Windows"
+    # Privacy hardening (app/db.py's account_session comment): no IP
+    # address is stored anywhere anymore, so the sessions payload must
+    # never carry an "ip" key at all -- not null, not omitted-by-
+    # accident, structurally absent.
+    assert "ip" not in body["sessions"][0]
 
 
 def test_get_account_includes_linked_player(client, db_path):
@@ -337,7 +341,7 @@ def test_logout_does_not_touch_other_sessions_on_the_account(client, db_path):
     from app.sessions import verify_session
 
     account_id, raw_token_a = _login(client, db_path)
-    raw_token_b = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token_b = _run(create_session(account_id, device_label=None))
 
     client.post("/api/account/logout")
 
@@ -349,7 +353,7 @@ def test_logout_all_revokes_every_session_on_the_account(client, db_path):
     from app.sessions import verify_session
 
     account_id, raw_token_a = _login(client, db_path)
-    raw_token_b = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token_b = _run(create_session(account_id, device_label=None))
 
     resp = client.post("/api/account/logout-all")
 

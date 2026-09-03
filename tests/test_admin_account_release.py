@@ -307,7 +307,7 @@ def test_after_release_link_key_succeeds_for_a_fresh_account(client, db_path):
     # Before release, the 409 link_key() itself is documented to raise
     # for a player already owned by a different account.
     fresh_account_id = _make_account(db_path)
-    raw_token = _run(create_session(fresh_account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(fresh_account_id, device_label=None))
     client.cookies.set(SESSION_COOKIE_NAME, raw_token)
     blocked = client.post("/api/account/link-key", json={"api_key": GOOD_KEY})
     assert blocked.status_code == 409
@@ -377,7 +377,7 @@ def test_delete_account_link_does_not_exist(client, db_path):
     immediately rather than shipping unnoticed.
     """
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     client.cookies.set(SESSION_COOKIE_NAME, raw_token)
 
     resp = client.delete("/api/account/link")

@@ -305,7 +305,7 @@ def _make_account_and_session(db_path: str) -> tuple[int, str]:
     account_id = cur.lastrowid
     conn.commit()
     conn.close()
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     return account_id, raw_token
 
 

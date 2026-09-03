@@ -102,23 +102,56 @@ def _row_for_token(path: str, token_hash: str) -> sqlite3.Row:
 def test_create_session_returns_a_raw_token_and_stores_only_its_hash(db_path):
     account_id = _make_account(db_path)
 
-    raw_token = _run(create_session(account_id, user_agent="pytest", ip="203.0.113.5"))
+    raw_token = _run(create_session(account_id, device_label="Firefox on Windows"))
 
     conn = sqlite3.connect(db_path)
-    rows = conn.execute("SELECT token_hash, account_id, user_agent, ip FROM account_session").fetchall()
+    rows = conn.execute("SELECT token_hash, account_id, device_label FROM account_session").fetchall()
     conn.close()
     assert len(rows) == 1
-    token_hash, stored_account_id, user_agent, ip = rows[0]
+    token_hash, stored_account_id, device_label = rows[0]
     assert stored_account_id == account_id
-    assert user_agent == "pytest"
-    assert ip == "203.0.113.5"
+    assert device_label == "Firefox on Windows"
     # The raw token is never stored verbatim.
     assert token_hash != raw_token
 
 
+def test_account_session_table_has_no_ip_column(db_path):
+    """Privacy hardening (see account_session's own SCHEMA comment in
+    app/db.py): the table must not have an `ip` column at all anymore
+    -- not present-but-unused, not nullable-and-blank, physically
+    gone. Guards against a future change accidentally reintroducing it
+    (e.g. a careless ALTER TABLE ADD COLUMN ip during unrelated work).
+    """
+    conn = sqlite3.connect(db_path)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(account_session)")}
+    conn.close()
+    assert "ip" not in cols
+    assert "device_label" in cols
+
+
+def test_create_session_with_no_device_label_stores_null(db_path):
+    """A caller with nothing to label (no User-Agent header at all)
+    passes device_label=None -- this must store NULL, not the string
+    "None" or an empty string, so app/account_api.py's _sessions_out()
+    and the frontend can tell "nothing to show" apart from an actual
+    (if degraded) label like "Unknown device".
+    """
+    account_id = _make_account(db_path)
+
+    raw_token = _run(create_session(account_id, device_label=None))
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT device_label FROM account_session WHERE token_hash = (SELECT token_hash FROM account_session)"
+    ).fetchone()
+    conn.close()
+    assert row[0] is None
+    assert raw_token  # sanity: a token was still minted
+
+
 def test_verify_session_ok_for_a_freshly_created_session(db_path):
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
 
     result = _run(verify_session(raw_token))
 
@@ -139,7 +172,7 @@ def test_verify_session_not_found_for_empty_token(db_path):
 
 def test_verify_session_expired(db_path):
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     token_hash = _run(verify_session(raw_token)).token_hash
 
     # Force the row into the past.
@@ -161,7 +194,7 @@ def test_verify_session_revoked_takes_priority_over_expiry(db_path):
     revoked, not expired -- app/sessions.py checks revoked_at first.
     """
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     token_hash = _run(verify_session(raw_token)).token_hash
 
     conn = sqlite3.connect(db_path)
@@ -182,7 +215,7 @@ def test_verify_session_revoked_takes_priority_over_expiry(db_path):
 def test_verify_within_touch_threshold_does_not_write_last_seen_at(db_path, monkeypatch):
     monkeypatch.setattr(db.settings, "account_session_touch_threshold_seconds", 300)
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     first = _run(verify_session(raw_token))
     original_row = _row_for_token(db_path, first.token_hash)
 
@@ -208,7 +241,7 @@ def test_verify_past_touch_threshold_writes_a_fresh_last_seen_at_and_slides_expi
     monkeypatch.setattr(db.settings, "account_session_touch_threshold_seconds", 300)
     monkeypatch.setattr(db.settings, "account_session_lifetime_seconds", 1000)
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     first = _run(verify_session(raw_token))
 
     stale_last_seen = int(time.time()) - 400  # older than the 300s threshold
@@ -235,7 +268,7 @@ def test_verify_past_touch_threshold_writes_a_fresh_last_seen_at_and_slides_expi
 
 def test_revoke_session_makes_it_unverifiable(db_path):
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     token_hash = _run(verify_session(raw_token)).token_hash
 
     _run(revoke_session(token_hash))
@@ -246,7 +279,7 @@ def test_revoke_session_makes_it_unverifiable(db_path):
 
 def test_revoke_session_is_idempotent(db_path):
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     token_hash = _run(verify_session(raw_token)).token_hash
 
     _run(revoke_session(token_hash))
@@ -263,9 +296,9 @@ def test_revoke_session_on_unknown_hash_is_a_silent_no_op(db_path):
 def test_revoke_all_sessions_revokes_every_session_on_the_account_only(db_path):
     account_a = _make_account(db_path)
     account_b = _make_account(db_path)
-    token_a1 = _run(create_session(account_a, user_agent=None, ip=None))
-    token_a2 = _run(create_session(account_a, user_agent=None, ip=None))
-    token_b = _run(create_session(account_b, user_agent=None, ip=None))
+    token_a1 = _run(create_session(account_a, device_label=None))
+    token_a2 = _run(create_session(account_a, device_label=None))
+    token_b = _run(create_session(account_b, device_label=None))
 
     revoked_count = _run(revoke_all_sessions(account_a))
 
@@ -337,7 +370,7 @@ def _request_with_cookie(token: str | None) -> Request:
 def test_require_session_returns_principal_with_linked_player(db_path):
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id)
-    raw_token = _run(create_session(account_id, user_agent="pytest", ip="198.51.100.10"))
+    raw_token = _run(create_session(account_id, device_label="Firefox on Windows"))
 
     principal = _run(require_session(_request_with_cookie(raw_token)))
 
@@ -347,7 +380,7 @@ def test_require_session_returns_principal_with_linked_player(db_path):
 
 def test_require_session_player_id_none_when_no_linked_player(db_path):
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
 
     principal = _run(require_session(_request_with_cookie(raw_token)))
 
@@ -370,10 +403,112 @@ def test_require_session_bad_token_is_401(db_path):
 
 def test_require_session_revoked_token_is_401(db_path):
     account_id = _make_account(db_path)
-    raw_token = _run(create_session(account_id, user_agent=None, ip=None))
+    raw_token = _run(create_session(account_id, device_label=None))
     token_hash = _run(verify_session(raw_token)).token_hash
     _run(revoke_session(token_hash))
 
     with pytest.raises(HTTPException) as exc_info:
         _run(require_session(_request_with_cookie(raw_token)))
     assert exc_info.value.status_code == 401
+
+
+# ---- privacy-hardening migration (db._migrate_session_privacy) -----------
+#
+# These build the OLD pre-migration table shape by hand (SCHEMA itself
+# no longer defines `user_agent`/`ip` at all -- see account_session's
+# own comment in app/db.py) to prove existing rows, not just future
+# ones, get cleaned: Matt's explicit requirement was that an IP address
+# already sitting in the database does not get to linger just because
+# it predates this change.
+
+def _old_shape_db(tmp_path) -> str:
+    """A standalone sqlite file with account_session in its PRE-
+    migration shape (user_agent/ip both present), populated with rows
+    exactly the way a real, already-deployed database would have them
+    before this privacy-hardening pass ever ran. Deliberately does NOT
+    reuse SCHEMA (it already reflects the post-migration shape) --
+    this is the one place in this file that needs the OLD one.
+    """
+    path = str(tmp_path / "pre_migration.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE account_session ("
+        "  token_hash TEXT PRIMARY KEY,"
+        "  account_id INTEGER NOT NULL,"
+        "  created_at INTEGER NOT NULL,"
+        "  expires_at INTEGER NOT NULL,"
+        "  last_seen_at INTEGER NOT NULL,"
+        "  revoked_at INTEGER,"
+        "  user_agent TEXT,"
+        "  ip TEXT"
+        ")"
+    )
+    now = int(time.time())
+    rows = [
+        # A real raw Chrome/Windows UA with an IP -- the ordinary case
+        # this migration exists for.
+        ("hash-a", 1, now, now + 1000, now, None,
+         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+         "203.0.113.5"),
+        # A UA this parser cannot recognise -- must reduce to "Unknown
+        # device", never stay raw and never silently vanish.
+        ("hash-b", 1, now, now + 1000, now, None, "curl/8.1.2", "198.51.100.20"),
+        # A row with NULL user_agent -- e.g. a request that never sent
+        # the header at all. device_label_from_user_agent(None) itself
+        # already resolves to "Unknown device" (its own documented
+        # contract: missing input degrades the same as unparseable
+        # input), so the migration reduces this the same way it
+        # reduces hash-b's unparseable curl UA, not to NULL.
+        ("hash-c", 2, now, now + 1000, now, None, None, None),
+    ]
+    conn.executemany(
+        "INSERT INTO account_session"
+        "  (token_hash, account_id, created_at, expires_at, last_seen_at, revoked_at, user_agent, ip)"
+        "  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    return path
+
+
+def test_migrate_session_privacy_reduces_raw_uas_and_clears_ip(tmp_path):
+    path = _old_shape_db(tmp_path)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+
+    db._migrate_session_privacy(conn)
+    conn.commit()
+
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(account_session)")}
+    # ip is gone entirely -- physically dropped, not blanked (see
+    # _migrate_session_privacy's own comment for why).
+    assert "ip" not in cols
+    assert "user_agent" not in cols
+    assert "device_label" in cols
+
+    by_hash = {
+        row["token_hash"]: row["device_label"]
+        for row in conn.execute("SELECT token_hash, device_label FROM account_session")
+    }
+    conn.close()
+    assert by_hash["hash-a"] == "Chrome on Windows"
+    assert by_hash["hash-b"] == "Unknown device"  # curl UA, unrecognisable -- degrades honestly
+    assert by_hash["hash-c"] == "Unknown device"  # NULL UA -- same honest degradation, not left NULL
+
+
+def test_migrate_session_privacy_is_a_no_op_on_an_already_migrated_db(db_path):
+    """db_path's fixture already runs the current SCHEMA (no `ip`
+    column at all) -- calling the migration again must do nothing and
+    must not raise, since app/db.py's init_db() calls this
+    unconditionally on every boot, migrated database or not.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    db._migrate_session_privacy(conn)  # must not raise
+
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(account_session)")}
+    conn.close()
+    assert "ip" not in cols
+    assert "device_label" in cols
