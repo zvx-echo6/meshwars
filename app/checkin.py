@@ -1015,6 +1015,72 @@ def _record_node_name(conn, connector: str, node_ref: str, player_id: int, name:
     )
 
 
+def _index_mc_directory(
+    directory_nodes: list[dict],
+) -> tuple[dict[str, list[dict]], set[str]]:
+    """Index one MeshCore directory snapshot for key/name lookups:
+    by_prefix (8-hex public-key prefix -> matching directory entries)
+    and ambiguous_names (display names shared by more than one public
+    key anywhere in the directory). Both of _build_directory_bridge's
+    ambiguity rules below read directly off these two structures, so
+    this is the one place the indexing happens -- anything else that
+    needs to know WHY a particular contact did or did not resolve
+    (mc_contact_status below, and app/account_api.py's checkin-health
+    endpoint that calls it) builds on these same indices rather than
+    re-deriving the ambiguity rules a second time.
+    """
+    by_name: dict[str, set[str]] = {}
+    by_prefix: dict[str, list[dict]] = {}
+    for node in directory_nodes:
+        name = node.get("name")
+        pubkey = node.get("public_key")
+        if not isinstance(name, str) or not name or not isinstance(pubkey, str) or len(pubkey) < 8:
+            continue
+        pubkey = pubkey.lower()
+        by_name.setdefault(name, set()).add(pubkey)
+        by_prefix.setdefault(pubkey[:8], []).append(node)
+
+    ambiguous_names = {name for name, keys in by_name.items() if len(keys) > 1}
+    return by_prefix, ambiguous_names
+
+
+def mc_contact_status(
+    by_prefix: dict[str, list[dict]], ambiguous_names: set[str], contact: str,
+) -> dict:
+    """Classify ONE bound MeshCore contact (an 8-hex node_ref) against
+    an already-indexed directory (_index_mc_directory), applying the
+    exact same two ambiguity rules _build_directory_bridge's own loop
+    applies -- this function only tells you what it would decide, not a
+    second opinion. Unlike the bridge, which discards everything but a
+    clean resolution, every outcome is reported here:
+
+    - "resolved": exactly one directory entry matches, name is unique --
+      `name` is what it resolves to.
+    - "not_in_directory": no directory entry's key matches this contact
+      at all.
+    - "key_ambiguous": more than one directory entry shares this
+      contact's 8-hex prefix -- `match_count` says how many.
+    - "name_ambiguous": the key matched exactly one entry, but that
+      entry's display name is also used by a different public key
+      elsewhere in the directory -- `name` is the shared name.
+
+    Built for app/account_api.py's checkin-health endpoint, which needs
+    this per-contact detail to explain a resolution failure to a
+    player; _build_directory_bridge itself only needs the final
+    bridge-wide name -> player_id map, so it calls this the same way but
+    only keeps the "resolved" case.
+    """
+    matches = by_prefix.get(contact, [])
+    if not matches:
+        return {"status": "not_in_directory", "name": None, "match_count": 0}
+    if len(matches) > 1:
+        return {"status": "key_ambiguous", "name": None, "match_count": len(matches)}
+    name = matches[0].get("name")
+    if name in ambiguous_names:
+        return {"status": "name_ambiguous", "name": name, "match_count": 1}
+    return {"status": "resolved", "name": name, "match_count": 1}
+
+
 def _build_directory_bridge(
     conn, directory_nodes: list[dict], connector: str | None = None, now: int | None = None,
 ) -> dict[str, int]:
@@ -1060,18 +1126,7 @@ def _build_directory_bridge(
     this whole bridge is built around), which is what actually gets
     recorded.
     """
-    by_name: dict[str, set[str]] = {}
-    by_prefix: dict[str, list[dict]] = {}
-    for node in directory_nodes:
-        name = node.get("name")
-        pubkey = node.get("public_key")
-        if not isinstance(name, str) or not name or not isinstance(pubkey, str) or len(pubkey) < 8:
-            continue
-        pubkey = pubkey.lower()
-        by_name.setdefault(name, set()).add(pubkey)
-        by_prefix.setdefault(pubkey[:8], []).append(node)
-
-    ambiguous_names = {name for name, keys in by_name.items() if len(keys) > 1}
+    by_prefix, ambiguous_names = _index_mc_directory(directory_nodes)
 
     rows = conn.execute(
         "SELECT pn.node_ref, pn.player_id FROM player_node pn "
@@ -1082,21 +1137,22 @@ def _build_directory_bridge(
     bridge: dict[str, int] = {}
     for r in rows:
         contact = r["node_ref"]  # already bare lowercase 8-hex (app/node_ref.py)
-        matches = by_prefix.get(contact, [])
-        if len(matches) != 1:
-            if len(matches) > 1:
-                log.warning(
-                    "checkin: mc contact %s matches %d directory public keys, "
-                    "refusing to resolve (ambiguous)", contact, len(matches),
-                )
-            continue
-        name = matches[0].get("name")
-        if name in ambiguous_names:
+        status = mc_contact_status(by_prefix, ambiguous_names, contact)
+        if status["status"] == "key_ambiguous":
             log.warning(
-                "checkin: directory name %r is shared by multiple public keys, "
-                "refusing to attribute it to player %d", name, r["player_id"],
+                "checkin: mc contact %s matches %d directory public keys, "
+                "refusing to resolve (ambiguous)", contact, status["match_count"],
             )
             continue
+        if status["status"] == "not_in_directory":
+            continue
+        if status["status"] == "name_ambiguous":
+            log.warning(
+                "checkin: directory name %r is shared by multiple public keys, "
+                "refusing to attribute it to player %d", status["name"], r["player_id"],
+            )
+            continue
+        name = status["name"]
         normalized = normalize_sender_name(name)
         if normalized is None:
             continue

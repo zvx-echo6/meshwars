@@ -57,13 +57,37 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+from . import mc_api, results
 from .auth import new_rate_limit_bucket
 from .client_ip import get_client_ip
 from .config import settings
 from .db import WriteSession, connect
+# Reaching into app/checkin.py's underscore-prefixed helpers here is
+# deliberate, not a style slip: the four read-only routes at the bottom
+# of this module (my stats/honors/checkins/checkin-health additions)
+# exist specifically to surface what those functions already compute
+# for a player, without re-deriving any of it -- checkin_streak() for a
+# player's current streak, and _build_directory_bridge() /
+# _resolve_mc_identities() / mc_contact_status() for exactly the
+# MeshCore identity resolution a real check-in goes through, so "why
+# isn't this crediting me" can never drift from what actually happens
+# at award time.
+# mc_contact_status() and its own index builder are the one piece of
+# genuinely NEW logic in app/checkin.py this pass adds -- they exist so
+# a single bound contact's resolution outcome can be reported instead
+# of only the bridge's final winners; see that function's own docstring.
+#
+# This is deliberately NOT imported here at module level. app/checkin.py
+# pulls in the full ingest/meshview/MQTT chain (app/meshview_client.py
+# -> aiolimiter, httpx, etc) to do its own job, and this is a light,
+# session-scoped HTTP router that FastAPI's app wiring imports eagerly
+# on every process start -- it should not drag that whole chain in just
+# to have the names available. Each function below that needs one of
+# these helpers imports it locally, right where it is used.
+from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .sessions import (
     SessionPrincipal,
     clear_session_cookie,
@@ -73,6 +97,21 @@ from .sessions import (
 )
 
 router = APIRouter()
+
+# 'mt' is exactly as fixed a value as MC_PROTOCOL stands in for 'mc' --
+# see app/mc_api.py's own MT_PROTOCOL and app/admin_ops.py's identical
+# local constant for why this is a bare literal rather than an import:
+# app/ingest.py (the module that would otherwise export it) imports
+# app/api.py, which imports app/mc_api.py, so importing it from here
+# risks the same cycle those two modules already avoid.
+MT_PROTOCOL = "mt"
+
+# How far back a "recent unresolved sender name" is still worth
+# surfacing to a player -- see account_checkin_health()'s own docstring
+# for why these can only ever be shown as "may or may not be yours."
+# Same order of magnitude as app/admin_ops.py's _STALE_DAYS, for the
+# same reason: a name from months ago is noise, not a diagnosis.
+_UNRESOLVED_LOOKBACK_DAYS = 14
 
 # Address-keyed rate limit on link-key -- see
 # settings.account_link_key_rate_limit_attempts/window_seconds' own
@@ -296,3 +335,408 @@ async def logout_all(session: SessionPrincipal = Depends(require_session)) -> JS
     response = JSONResponse({"ok": True}, status_code=200)
     clear_session_cookie(response)
     return response
+
+
+# ---- player-facing data: stats / honors / checkins / checkin-health ------
+#
+# Everything below is scoped to the signed-in account's OWN linked
+# player -- session.player_id, resolved fresh on every request by
+# require_session() (see app/sessions.py). None of these routes accept
+# a player_id or a name; there is no way to ask this router about
+# anyone but yourself. A session with no linked player yet (the account
+# exists, POST /api/account/link-key was never called) gets the same
+# 404 from all four, rather than an empty-shaped 200 that would read as
+# "you have zero of everything" instead of "you have no player."
+
+def _no_linked_player_error() -> JSONResponse:
+    return JSONResponse({"error": "no linked player"}, status_code=404)
+
+
+@router.get("/api/account/stats")
+async def account_stats(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
+    """My current standing, per board.
+
+    app/mc_api.py's find_for() already answers "what does this player
+    hold and score right now" for anyone, by name -- it is the same
+    query GET /api/mc/find runs for a public lookup. This route calls
+    it directly (once per protocol the player's single player row could
+    be active on) rather than copying its SQL, and adds only the two
+    things find_for() cannot give a player about themselves today:
+
+    - checkin_streak: currently only visible via app/mc_api.py's
+      top_checkin_for() (GET /api/mc/top-checkins), and only for the
+      top 20. Computed here with checkin.checkin_streak() itself,
+      seeded from the player's own most recent net_date in
+      mc_checkin_award for that protocol -- the same call the poller
+      makes when it writes a new award row, so this is never a second,
+      possibly-drifting streak implementation, and it does not depend
+      on mc_checkin_award.streak (null on any row written before that
+      column existed).
+    - nets_checked_in: a plain COUNT over mc_checkin_award, which no
+      existing endpoint exposes at all.
+
+    Per-protocol, not merged: mc_checkin_award, mc_tile, and
+    place_activation are all keyed (or windowed) by protocol, and
+    find_for()'s own docstring is explicit that one player row can hold
+    both an 'mc' and an 'mt' radio. A protocol with no active season and
+    no history for this player still gets an entry (find_for() degrades
+    to zeros rather than omitting it), so "boards" always lists both --
+    a player who has only ever played one board sees the other as an
+    honest zero, not a missing key to special-case in a client.
+    """
+    if session.player_id is None:
+        return _no_linked_player_error()
+
+    from .checkin import checkin_streak
+
+    conn = connect()
+    try:
+        player = conn.execute(
+            "SELECT display_name, team FROM player WHERE player_id = ?",
+            (session.player_id,),
+        ).fetchone()
+        if player is None:
+            return _no_linked_player_error()
+        name = player["display_name"]
+        team = player["team"]
+
+        boards: dict[str, dict] = {}
+        for protocol in (MC_PROTOCOL, MT_PROTOCOL):
+            board = mc_api.find_for(protocol, name)   # its own connection -- see module import comment
+            if board is None:
+                continue
+            row = conn.execute(
+                "SELECT COUNT(*), MAX(net_date) FROM mc_checkin_award "
+                " WHERE protocol = ? AND player_id = ?",
+                (protocol, session.player_id),
+            ).fetchone()
+            nets_checked_in = row[0] or 0
+            latest_net_date = row[1]
+            # No checked-in nets on this protocol at all: nothing for
+            # checkin_streak() to walk backward from, and "0" is the
+            # honest answer, not "1" (which is what passing a made-up
+            # net_date would produce -- see that function's own
+            # docstring on why it always returns at least 1 once called).
+            streak = (
+                checkin_streak(conn, session.player_id, protocol, latest_net_date)
+                if latest_net_date else 0
+            )
+            board["nets_checked_in"] = nets_checked_in
+            board["checkin_streak"] = streak
+            boards[protocol] = board
+    finally:
+        conn.close()
+
+    return JSONResponse(
+        {"display_name": name, "team": team, "boards": boards}, status_code=200
+    )
+
+
+@router.get("/api/account/honors")
+async def account_honors(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
+    """My past honors: this player's own rows out of month_award
+    (app/db.py:954), across every FINISHED month, newest first.
+
+    Read-only in the strongest sense -- a frozen month is immutable
+    history by design (see app/results.py:19-25's own docstring), and
+    nothing here recomputes or rewrites a single figure; this is a
+    plain SELECT with a player_id filter that app/results.py's own
+    site-wide /results endpoint (month_results_for()) does not offer.
+
+    month_award.player_id is NULL for a team-scoped award (Largest
+    Territory, Longest Road) -- filtering on it already leaves only
+    this player's own honors (Empire Builder, Top Attacker, Tourist,
+    and so on), never a team's, with no separate award-type check
+    needed. `label` is the same results.AWARD_LABELS lookup
+    month_results_for() applies, so a retired award a player won while
+    it still existed (see AWARD_LABELS' own comments on
+    most_consistent/top_netop/explorer/month_winner) still reads with
+    its real name instead of a raw key.
+    """
+    if session.player_id is None:
+        return _no_linked_player_error()
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT month, protocol, award, scope, value, detail FROM month_award "
+            " WHERE player_id = ? ORDER BY month DESC, protocol, award",
+            (session.player_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    honors = [
+        {
+            "month": r["month"],
+            "protocol": r["protocol"],
+            "award": r["award"],
+            "label": results.AWARD_LABELS.get(r["award"], r["award"]),
+            "scope": r["scope"],
+            "value": r["value"],
+            "detail": r["detail"],
+        }
+        for r in rows
+    ]
+    return JSONResponse({"honors": honors}, status_code=200)
+
+
+@router.get("/api/account/checkins")
+async def account_checkins(
+    session: SessionPrincipal = Depends(require_session),
+    limit: int = Query(50, ge=1, le=200),
+) -> JSONResponse:
+    """My check-in history: this player's own credited rows out of
+    mc_checkin_award, newest net first. No existing endpoint lists a
+    single player's check-ins today -- app/mc_api.py's top_checkin_for()
+    (GET /api/mc/top-checkins) only ranks the top 20 players' current
+    point TOTAL, never any one player's row-by-row history.
+
+    `streak` on each row is the value that was actually stored on it at
+    award time (null for anything written before the streak column
+    existed -- see mc_checkin_award's own comment in app/db.py), so
+    reading this list top to bottom is watching the same streak
+    GET /api/account/stats reports get built one net at a time.
+    """
+    if session.player_id is None:
+        return _no_linked_player_error()
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT season_id, net_date, points, protocol, streak, awarded_at, message_ts "
+            "  FROM mc_checkin_award WHERE player_id = ? "
+            " ORDER BY net_date DESC, protocol LIMIT ?",
+            (session.player_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    return JSONResponse({"checkins": [dict(r) for r in rows]}, status_code=200)
+
+
+# ---- checkin-health --------------------------------------------------
+#
+# The plain-English fix for each contact status below is deliberately
+# actionable, not just descriptive -- this is the endpoint the spec
+# calls "the one to get right," because today the only person who can
+# see WHY a MeshCore check-in isn't landing is an operator reading
+# app/admin_ops.py's overview, and roughly four in ten bound contacts
+# fail to resolve. Every case a player can hit is covered here; there
+# is no catch-all "unknown" bucket to hide behind.
+_CONTACT_EXPLANATIONS = {
+    "resolved": (
+        "This contact resolves automatically. Check-ins it posts under "
+        "this name are credited with nothing further needed from you."
+    ),
+    "not_in_directory": (
+        "This contact's key has never shown up in the check-in directory, "
+        "so it cannot be matched to a name yet. In MeshMapper, check "
+        "Settings, API Endpoints, Include Contact Key is turned on, and "
+        "wardrive with it a little -- the directory picks new radios up "
+        "on its own once they've been heard. Registering a fallback name "
+        "below will credit you in the meantime."
+    ),
+    "key_ambiguous": (
+        "This contact's key prefix currently matches more than one entry "
+        "in the directory, so it is refused rather than guessed at -- a "
+        "wrong credit is worse than a missed one. This is usually "
+        "temporary and clears as the directory updates; if it does not "
+        "clear, this is worth flagging to an operator."
+    ),
+    "name_ambiguous": (
+        "This contact resolves to a display name that more than one "
+        "radio in the directory is currently using, so it is refused "
+        "rather than risk crediting the wrong person. Rename this "
+        "companion node to something nobody else's radio is using."
+    ),
+}
+
+
+def _checkin_contacts_status(conn, player_id: int, directory: list[dict]) -> list[dict]:
+    """Every one of this player's bound MeshCore contacts (player_node,
+    protocol='mc'), each classified against `directory` by
+    checkin.mc_contact_status() -- the exact same per-contact decision
+    checkin._build_directory_bridge() makes at check-in time, just not
+    thrown away for the cases that don't cleanly resolve.
+    """
+    from .checkin import _index_mc_directory, mc_contact_status
+
+    by_prefix, ambiguous_names = _index_mc_directory(directory)
+    rows = conn.execute(
+        "SELECT node_ref, bound_at FROM player_node "
+        " WHERE protocol = ? AND player_id = ? ORDER BY bound_at",
+        (MC_PROTOCOL, player_id),
+    ).fetchall()
+
+    out = []
+    for r in rows:
+        contact = r["node_ref"]
+        status = mc_contact_status(by_prefix, ambiguous_names, contact)
+        out.append({
+            "node_ref": contact,
+            "bound_at": r["bound_at"],
+            "status": status["status"],
+            "resolved_name": (
+                status["name"] if status["status"] in ("resolved", "name_ambiguous") else None
+            ),
+            "match_count": status["match_count"],
+            "explanation": _CONTACT_EXPLANATIONS[status["status"]],
+        })
+    return out
+
+
+def _checkin_binding_status(conn, player_id: int, directory: list[dict]) -> dict:
+    """Whether this player has a self-declared check-in name
+    (mc_checkin_binding) registered, and whether it is actually the
+    thing crediting them right now, or sitting inert behind a key
+    match. Reuses _build_directory_bridge() (the real key-based pass)
+    and _resolve_mc_identities() (the real key-wins-over-fallback
+    priority rule -- see that function's own docstring) instead of
+    re-deriving either. Neither call has any side effect here: both
+    only write to checkin_node_name when given a `connector`, which
+    this never passes.
+    """
+    from .checkin import _build_directory_bridge, _resolve_mc_identities
+
+    row = conn.execute(
+        "SELECT sender_name FROM mc_checkin_binding WHERE player_id = ?",
+        (player_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "registered": False,
+            "sender_name": None,
+            "active": False,
+            "explanation": (
+                "You have not registered a fallback check-in name. If none of "
+                "your bound contacts resolve automatically (see above), "
+                "register the exact name your check-ins post under so you "
+                "keep earning credit while the directory catches up."
+            ),
+        }
+
+    sender_name = row["sender_name"]
+    bridge = _build_directory_bridge(conn, directory)
+    if player_id in bridge.values():
+        return {
+            "registered": True,
+            "sender_name": sender_name,
+            "active": False,
+            "explanation": (
+                "Not currently in effect -- one of your bound contacts already "
+                "resolves through the directory, so this fallback name isn't needed."
+            ),
+        }
+
+    resolved = _resolve_mc_identities(conn, directory, other_directories=[])
+    if resolved.get(sender_name) == player_id:
+        return {
+            "registered": True,
+            "sender_name": sender_name,
+            "active": True,
+            "explanation": "This fallback name is what is currently crediting your check-ins.",
+        }
+
+    return {
+        "registered": True,
+        "sender_name": sender_name,
+        "active": False,
+        "explanation": (
+            "Not currently in effect -- this name collides with a name the "
+            "directory already resolves for someone else, so it is being "
+            "refused rather than risk crediting the wrong person. Register a "
+            "more distinctive fallback name instead."
+        ),
+    }
+
+
+@router.get("/api/account/checkin-health")
+async def account_checkin_health(
+    request: Request, session: SessionPrincipal = Depends(require_session),
+) -> JSONResponse:
+    """Why my check-ins may not be counting.
+
+    Gives a player the same diagnosis app/admin_ops.py's overview
+    already gives an operator about them (checkin_unreachable,
+    checkin_name_changed) -- but self-serve, and per-contact rather
+    than a single flag, since a player can have more than one bound
+    MeshCore radio in more than one resolution state at once.
+
+    Reads the check-in poller's own cached directory
+    (request.app.state.checkin_poller.directory_snapshot(), the
+    UNION across every configured connector) -- the same source
+    app/admin_ops.py's _attention() and app/checkin_api.py's node
+    picker already read from, and never a fresh upstream fetch for a
+    page load. With no poller running (or nothing cached yet), the
+    directory is empty and every contact reports "not_in_directory" --
+    an honest answer, not a 500: there is genuinely nothing to resolve
+    against right now.
+
+    `recent_unresolved_names` is checkin_unresolved_sender read back
+    almost as-is, with one deliberate limitation stated up front:
+    that table is keyed by NAME, not by player_id (a message that
+    resolved to nobody has no player to attribute it to), so entries
+    here can never be asserted as "yours" -- only offered as names a
+    player can eyeball for a typo or a stale binding of their own.
+    """
+    if session.player_id is None:
+        return _no_linked_player_error()
+
+    poller = getattr(request.app.state, "checkin_poller", None)
+    directory = poller.directory_snapshot() if poller is not None else []
+
+    conn = connect()
+    try:
+        contacts = _checkin_contacts_status(conn, session.player_id, directory)
+        binding = _checkin_binding_status(conn, session.player_id, directory)
+
+        cutoff = int(time.time()) - _UNRESOLVED_LOOKBACK_DAYS * 86400
+        unresolved_rows = conn.execute(
+            "SELECT sender_name, net_date, first_seen, last_seen, message_count "
+            "  FROM checkin_unresolved_sender WHERE last_seen > ? "
+            " ORDER BY last_seen DESC LIMIT 25",
+            (cutoff,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    resolved_overall = any(c["status"] == "resolved" for c in contacts) or binding["active"]
+    if resolved_overall:
+        summary = (
+            "At least one of your bound contacts or your fallback name is "
+            "currently crediting your check-ins."
+        )
+    elif not contacts and not binding["registered"]:
+        summary = (
+            "You have no MeshCore contact bound and no fallback name "
+            "registered, so you cannot earn MeshCore net check-ins yet. "
+            "Binding a radio usually happens on its own the first time you "
+            "wardrive with MeshMapper's Include Contact Key setting on, or "
+            "you can register the exact name your check-ins post under below."
+        )
+    else:
+        summary = (
+            "Nothing is currently crediting your MeshCore check-ins. See the "
+            "detail on each contact below, or register a fallback name with "
+            "the exact name your radio posts under."
+        )
+
+    return JSONResponse(
+        {
+            "resolved": resolved_overall,
+            "summary": summary,
+            "contacts": contacts,
+            "binding": binding,
+            "recent_unresolved_names": {
+                "note": (
+                    "Recent check-in messages nobody could be matched to. "
+                    "Keyed by name, not by player -- these may or may not be "
+                    "yours. Never assume one is you just because the name "
+                    "looks close."
+                ),
+                "entries": [dict(r) for r in unresolved_rows],
+            },
+        },
+        status_code=200,
+    )
