@@ -43,7 +43,7 @@
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260903-8" />
+  <link rel="stylesheet" href="/static/account.css?v=20260903-9" />
 </head>
 <body>
 
@@ -120,6 +120,32 @@
            -- confirms the connection happened rather than leaving it
            implicit in the identities list below. -->
       <div id="account-linked-banner" class="account-banner" hidden></div>
+
+      <!-- ===================================================================
+           OWES-PASSWORD PROMPT. Rendered only when GET /api/account's
+           owes_password comes back true (app/account_api.py's
+           _owes_password() -- a verified sign-in email on file with no
+           password set yet). Deliberately at the very top, above even
+           Player, and deliberately NOT dismissible (no close button) --
+           this is a required onboarding step, not a tip. It is NOT a
+           second password form: account.js's renderOwesPasswordBanner()
+           physically relocates the one-and-only #account-password-form
+           (its normal home is the Security > Password panel, marked by
+           #account-password-form-anchor below) into
+           #account-owes-password-form-slot while owed, and moves it back
+           once it isn't -- so there is exactly one set-password
+           implementation, exactly one submit handler
+           (account.js's handlePasswordSubmit), just two places it can
+           visually sit. Distinct styling from the ordinary Security
+           panels lives in account.css's .account-owes-password-banner
+           rule -- see that rule's own comment for why. -->
+      <div id="account-owes-password-banner" class="account-owes-password-banner" hidden role="alert">
+        <div class="account-owes-password-copy">
+          <div class="account-owes-password-title">Set a password for this account</div>
+          <p>This account has a verified email address on file, so MeshWars expects it to be reachable directly by email — that only works once a password is set. Set one now so you're never locked out waiting on an email that might not arrive, or stuck if you ever lose access to the sign-in method you used today.</p>
+        </div>
+        <div id="account-owes-password-form-slot"></div>
+      </div>
 
       <!-- ===================================================================
            PLAYER. First, always -- everything below either depends on a
@@ -332,6 +358,12 @@
         <p id="account-password-hint" class="account-hint"></p>
         <div id="account-password-error" class="account-error" role="alert" hidden></div>
         <div id="account-password-success" class="account-hint" hidden></div>
+        <!-- The form's normal home. account.js's renderOwesPasswordBanner()
+             relocates #account-password-form to the top-of-page prompt
+             above while a password is owed, and puts it back here
+             (right after this anchor) once it isn't -- see that
+             function's own comment. -->
+        <div id="account-password-form-anchor"></div>
         <form id="account-password-form" class="account-password-form" novalidate hidden>
           <label class="account-field" id="account-password-current-field" hidden>
             <span>Current password</span>
@@ -395,7 +427,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260903-8" type="module"></script>
+  <script src="/static/account.js?v=20260903-9" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

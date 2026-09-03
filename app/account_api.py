@@ -191,6 +191,69 @@ def _has_password(conn, account_id: int) -> bool:
     )
 
 
+def _has_verified_identity_email(conn, account_id: int) -> bool:
+    """Exactly the condition POST /api/account/password's own guard
+    checks before it will let a password be set -- pulled out here so
+    that guard (below, in set_password()) and _owes_password() read
+    the SAME query rather than two copies that could drift apart.
+
+    Deliberately account_identity ONLY, never account.contact_email:
+    account_identity's email_verified is a PROVIDER's own assertion (an
+    OAuth consent screen, or this app's own magic-link proof of
+    control) that POST /auth/password/start actually signs a person in
+    with; contact_email is a plain, user-typed "where can we reach
+    you" address that is deliberately never usable to sign in at all
+    (see app/db.py's account.contact_email MIGRATIONS comment, and the
+    CRITICAL/NON-NEGOTIABLE comment on resolve_oauth_callback's case 3
+    in app/oauth_api.py, for exactly why folding it in here would be an
+    account-takeover path). A verified contact_email with no verified
+    identity email must NOT satisfy this -- there would be no address
+    to actually sign in with, so nothing here may treat it as if there
+    were (see tests/test_account_api.py's test for this exact case).
+    """
+    return (
+        conn.execute(
+            "SELECT 1 FROM account_identity WHERE account_id = ? AND email_verified = 1 LIMIT 1",
+            (account_id,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _owes_password(conn, account_id: int) -> bool:
+    """Does this account currently OWE a password -- Matt's rule: "if
+    an account has an email on file, it must have a password; if it
+    has no email, nothing is required." True exactly when the account
+    has a verified identity email (_has_verified_identity_email above)
+    and no password row yet.
+
+    This is deliberately the SAME condition POST /api/account/password
+    already requires before it will let a password be set (see that
+    route's own docstring) -- not a coincidence, the whole point: the
+    "may set a password" guard and the "must have one" rule share one
+    clause (_has_verified_identity_email), so an account can never be
+    compelled to do something it is refused the ability to do. The
+    other clause, "no password row yet," is what keeps this from firing
+    forever once the requirement has been satisfied once.
+
+    Evaluated fresh on every read (GET /api/account calls this, not a
+    flag stamped at sign-up) because it is a STANDING condition, not a
+    one-time sign-up step: an account created via, say, a GitHub
+    identity with no verified email owes nothing on day one, but if
+    that person later links an identity that arrives with a verified
+    email (a second OAuth provider, or email magic-link sign-in), this
+    starts returning True from that moment on -- there is no separate
+    "first login after linking" hook to keep in sync, because nothing
+    is cached; the next GET /api/account just sees it.
+
+    The single authoritative helper for this question -- every caller
+    that needs to know "does this account owe a password" (currently
+    just GET /api/account) reuses this rather than re-deriving the
+    condition inline.
+    """
+    return _has_verified_identity_email(conn, account_id) and not _has_password(conn, account_id)
+
+
 def _door_counts(conn, account_id: int) -> tuple[dict[str, int], bool]:
     """The one place that counts "ways to sign in" for an account --
     used by both DELETE routes below (identity/{provider}, password) to
@@ -317,6 +380,21 @@ def _sessions_out(conn, account_id: int, *, current_token_hash: str) -> list[dic
 
 @router.get("/api/account")
 async def get_account(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
+    """The full account read -- identities, linked player, active
+    sessions, and account-security state (has_password, contact_email,
+    owes_password).
+
+    `owes_password` (see _owes_password()'s own docstring for the full
+    rule) is carried here, not in SessionPrincipal/require_session():
+    every other account route already depends on require_session(),
+    and this is a required ONBOARDING step, not an authorization gate
+    -- it exists for the account page to render a prompt, not for any
+    route to refuse a request over. Adding a query to require_session()
+    would put this on the hot path of every session-authenticated
+    route (checkin, player, key rotation, ...) for a value only the
+    account page reads, and would invite exactly the kind of
+    route-gating this feature deliberately does not do.
+    """
     conn = connect()
     try:
         identities = _identities_out(conn, session.account_id)
@@ -324,6 +402,7 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
         sessions_out = _sessions_out(conn, session.account_id, current_token_hash=session.token_hash)
         has_password = _has_password(conn, session.account_id)
         contact_email = _contact_email_out(conn, session.account_id)
+        owes_password = _owes_password(conn, session.account_id)
     finally:
         conn.close()
 
@@ -335,6 +414,7 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
             "sessions": sessions_out,
             "has_password": has_password,
             "contact_email": contact_email,
+            "owes_password": owes_password,
         },
         status_code=200,
     )
@@ -612,11 +692,12 @@ async def set_password(
 
     now = int(time.time())
     async with WriteSession() as conn:
-        verified = conn.execute(
-            "SELECT 1 FROM account_identity WHERE account_id = ? AND email_verified = 1 LIMIT 1",
-            (session.account_id,),
-        ).fetchone()
-        if verified is None:
+        # Same query _has_verified_identity_email() runs -- see that
+        # helper's own docstring for why this condition must stay
+        # account_identity-only (never account.contact_email), and
+        # _owes_password()'s docstring for the other half of why this
+        # exact clause is shared rather than copied.
+        if not _has_verified_identity_email(conn, session.account_id):
             return JSONResponse(
                 {
                     "error": "a verified email identity is required before setting a "

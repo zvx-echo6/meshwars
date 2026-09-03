@@ -72,6 +72,51 @@
   font-weight: 600;
 }
 
+/* The non-dismissible "set a password" onboarding prompt
+   (frontend/account.js's renderOwesPasswordBanner(), gated on GET
+   /api/account's owes_password). Deliberately gold/accent-toned, not
+   the red .account-error or .account-warning-box treatment used
+   elsewhere on this page -- this isn't reporting that something went
+   wrong, it's a required next step, the same "important, not an
+   error" register --mw-accent-wash/-line already carries for a
+   currently-selected control (see theme.css's own comments on those
+   two variables). A thicker-than-usual border and its own vertical
+   rhythm (more padding than .account-panel) are what make it read as
+   "at the top for a reason" next to the plain panels below it -- and
+   there is deliberately no close/dismiss control anywhere in this
+   rule or the markup it styles (frontend/account.html). The relocated
+   #account-password-form (see account.js's own comment on the move)
+   inherits .account-password-form's own layout unchanged; only the
+   spacing above it here is this rule's concern. */
+.account-owes-password-banner {
+  background: var(--mw-accent-wash);
+  border: 2px solid var(--mw-accent-wash-line);
+  border-left: 4px solid var(--mw-accent);
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+.account-owes-password-title {
+  font-weight: 700;
+  font-size: 0.9375rem;
+  color: var(--mw-accent);
+  margin-bottom: 6px;
+}
+.account-owes-password-copy p {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--mw-text-5);
+  margin: 0 0 12px;
+}
+/* The relocated form sits directly in the banner once it's owed --
+   .account-password-form's own margin-top (below) is right for its
+   normal spot just under a hint paragraph in the Security panel, but
+   reads as too much extra air stacked under the copy paragraph above,
+   which already carries its own margin-bottom. */
+.account-owes-password-banner .account-password-form {
+  margin-top: 0;
+}
+
 /* ---- Sign in (GET /auth/providers) -- signed-out state -------------------
    Same component join.css/link.css each define for their own sign-in
    panel -- duplicated here rather than shared, since this page does not

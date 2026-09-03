@@ -1780,6 +1780,35 @@ function renderPasswordSection(account) {
   form.hidden = false;
 }
 
+// Shows/hides the non-dismissible top-of-page prompt (GET /api/account's
+// owes_password -- see app/account_api.py's _owes_password() for the
+// exact rule: a verified sign-in email on file, no password yet) and
+// physically relocates the ONE #account-password-form between its two
+// possible homes -- #account-owes-password-form-slot (the banner, while
+// owed) and right after #account-password-form-anchor (its normal spot
+// in the Security > Password panel, once it isn't). This is a DOM move
+// (appendChild/insertAdjacentElement re-parent the existing node), not a
+// clone: the form's fields, its submit handler (handlePasswordSubmit,
+// wired up once in boot() below), and every other listener on it stay
+// attached exactly as they were -- there is exactly one set-password
+// form and one handler in this file, just two places it can visually
+// sit. Idempotent: calling this again with the account in the same
+// owed/not-owed state just re-parents the node to where it already is,
+// which is harmless.
+function renderOwesPasswordBanner(account) {
+  const banner = document.getElementById('account-owes-password-banner');
+  const slot = document.getElementById('account-owes-password-form-slot');
+  const anchor = document.getElementById('account-password-form-anchor');
+  const form = document.getElementById('account-password-form');
+
+  banner.hidden = !account.owes_password;
+  if (account.owes_password) {
+    slot.appendChild(form);
+  } else {
+    anchor.insertAdjacentElement('afterend', form);
+  }
+}
+
 async function handlePasswordSubmit(e) {
   e.preventDefault();
   clearPasswordMessages();
@@ -2040,6 +2069,7 @@ async function refreshAccountCore() {
     renderIdentities(data.identities);
     renderSessions(data.sessions);
     renderPasswordSection(data);
+    renderOwesPasswordBanner(data);
     renderContactEmail(data.contact_email);
   } catch (err) {
     // Leave whatever was already rendered in place.
@@ -2088,6 +2118,7 @@ async function loadAccount() {
   renderPlayer(finalData.player);
   renderSessions(finalData.sessions);
   renderPasswordSection(finalData);
+  renderOwesPasswordBanner(finalData);
   renderContactEmail(finalData.contact_email);
 
   const hasPlayer = !!finalData.player;

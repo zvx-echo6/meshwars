@@ -636,6 +636,128 @@ def test_get_account_identity_cannot_be_removed_at_the_last_door(client, db_path
 
 
 # =========================================================================
+# GET /api/account -- owes_password (app/account_api.py's _owes_password())
+#
+# Matt's rule: "if an account has an email on file, it must have a
+# password; if it has no email, nothing is required." Deliberately the
+# SAME condition POST /api/account/password's own guard checks --
+# _has_verified_identity_email() -- so an account can never be told to
+# do something it is refused the ability to do. "Email on file" means
+# an account_identity row with email_verified=1 ONLY -- a verified
+# account.contact_email deliberately does NOT count (it is never
+# usable to sign in at all; see app/db.py's account.contact_email
+# MIGRATIONS comment and the CRITICAL/NON-NEGOTIABLE comment on
+# resolve_oauth_callback's case 3 in app/oauth_api.py for exactly why
+# folding it in here would compel a password nobody could ever use to
+# sign in).
+# =========================================================================
+
+def test_owes_password_true_with_verified_identity_and_no_password(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is True
+
+
+def test_owes_password_false_with_verified_identity_and_password(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+    _set_password(db_path, account_id, "a-fine-password")
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is False
+
+
+def test_owes_password_false_with_no_verified_email_at_all(client, db_path):
+    # The "no email, nothing required" half of the rule -- an account
+    # with no identities whatsoever (e.g. signed up some other way,
+    # nothing linked yet) must not be told it owes a password. This is
+    # the case that must never regress.
+    _login(client, db_path)
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is False
+
+
+def test_owes_password_false_with_unverified_identity_email(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=0)
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is False
+
+
+def test_owes_password_false_with_verified_contact_email_and_no_verified_identity(client, db_path, monkeypatch):
+    # Pins the deliberate exclusion: contact_email is never usable to
+    # sign in, so verifying one must NOT trigger the requirement -- if
+    # a later change quietly folds contact_email into "email on file,"
+    # this is the test that should catch it.
+    _enable_email(monkeypatch)
+    calls = _stub_send(monkeypatch)
+    account_id, _ = _login(client, db_path)
+    client.post("/api/account/contact-email", json={"email": "me@example.com"})
+    raw_token = calls[0][1].split("token=", 1)[1]
+    verify_resp = client.get("/auth/contact-email/verify", params={"token": raw_token, "format": "json"})
+    assert verify_resp.json()["verified"] is True
+
+    body = client.get("/api/account").json()
+
+    assert body["contact_email"]["verified"] is True
+    assert body["owes_password"] is False
+
+
+def test_owes_password_is_a_standing_condition_not_only_at_signup(client, db_path):
+    # Matt's corrected example: an account created via a GitHub identity
+    # with no verified email owes nothing at signup; if that person
+    # LATER links an identity that arrives with a verified email (a
+    # second OAuth provider, or email magic-link sign-in), the
+    # requirement applies from that moment -- evaluated fresh on every
+    # GET /api/account, not stamped once at account creation.
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", subject="gh-sub-1", email=None, email_verified=0)
+    assert client.get("/api/account").json()["owes_password"] is False
+
+    _add_identity(db_path, account_id, provider="google", email="dev@example.com", email_verified=1)
+
+    assert client.get("/api/account").json()["owes_password"] is True
+
+
+def test_owes_password_cleared_by_setting_a_password(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+    assert client.get("/api/account").json()["owes_password"] is True
+
+    resp = client.post("/api/account/password", json={"new_password": "a-fine-password"})
+    assert resp.status_code == 200
+
+    assert client.get("/api/account").json()["owes_password"] is False
+
+
+def test_owing_a_password_is_not_an_authorization_gate(client, db_path):
+    # This is a required ONBOARDING step, not a block: an account that
+    # owes a password must still be able to read its own account, set
+    # the password it owes, and sign out -- none of that may be
+    # refused while owes_password is True.
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+
+    read_resp = client.get("/api/account")
+    assert read_resp.status_code == 200
+    assert read_resp.json()["owes_password"] is True
+
+    set_resp = client.post("/api/account/password", json={"new_password": "a-fine-password"})
+    assert set_resp.status_code == 200
+
+    logout_resp = client.post("/api/account/logout")
+    assert logout_resp.status_code == 200
+
+
+# =========================================================================
 # DELETE /api/account/identity/{provider} -- last-door guard
 # =========================================================================
 
