@@ -70,6 +70,8 @@ services:
       OAUTH_PUBLIC_BASE_URL: "${OAUTH_PUBLIC_BASE_URL:-}"
       OAUTH_GITHUB_CLIENT_ID: "${OAUTH_GITHUB_CLIENT_ID:-}"
       OAUTH_GITHUB_CLIENT_SECRET: "${OAUTH_GITHUB_CLIENT_SECRET:-}"
+      OAUTH_DISCORD_CLIENT_ID: "${OAUTH_DISCORD_CLIENT_ID:-}"
+      OAUTH_DISCORD_CLIENT_SECRET: "${OAUTH_DISCORD_CLIENT_SECRET:-}"
       # Email sign-in (magic link) (app/email_login.py, app/oauth_api.py).
       # Empty SMTP_HOST means the feature stays off -- see .env.example
       # for the full contract. Never set real values in this file; it is
