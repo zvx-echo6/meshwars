@@ -54,7 +54,7 @@ import {
   setupEmailSignInForm,
   setupPasswordSignInForm,
   PASSWORD_SIGNIN_AVAILABLE,
-} from './signin-email.js?v=20260903-2';
+} from './signin-email.js?v=20260903-3';
 
 // No local PROVIDER_LABELS map here -- app/oauth.py's PROVIDER_LABELS
 // is the single source of truth, and every API response this page

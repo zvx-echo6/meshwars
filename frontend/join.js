@@ -31,7 +31,7 @@
  * stay that way.
  */
 
-import { fetchProviders, renderProviderButtons, setupEmailSignInForm, setupPasswordSignInForm } from './signin-email.js?v=20260903-2';
+import { fetchProviders, renderProviderButtons, setupEmailSignInForm, setupPasswordSignInForm } from './signin-email.js?v=20260903-3';
 
 // Same roster/colors as frontend/mc.js -- duplicated rather than
 // imported, since this page must stay self-contained and load

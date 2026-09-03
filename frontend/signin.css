@@ -1,0 +1,197 @@
+/* =====================================================================
+   frontend/signin.css -- the sign-in-card styling shared by every page
+   that offers it: frontend/account.html (the signed-out /account page's
+   welcome panel), frontend/join.html (registration flow's own sign-in
+   panel), and frontend/link.html (the pending-identity screen's "sign
+   in with a method you already use" choice). Same three pages
+   frontend/signin-email.js already serves -- see that file's own header
+   comment for why this is one shared module rather than a copy per
+   page: there is only one correct way to render GET /auth/providers as
+   a row of sign-in buttons plus the "email" entry's address-and-submit
+   form, and nothing below is page-specific enough to justify drifting
+   three ways.
+
+   Loaded after theme.css, which is where the --mw-* custom properties
+   this file reads are defined (:root, all three pages load it), and
+   before each page's own stylesheet, so a page can still override a
+   rule here without !important -- see each page's own <link> order.
+
+   NOT everything the sign-in card touches lives here. Two rules stay
+   page-local instead of being forced into a false three-way match:
+     - .signin-email-sent (the "check your email" status line) is a
+       different --mw-text-* shade on link.css than on
+       account.css/join.css -- each page still defines it.
+     - .signin-password-group (password sign-in) has no link.css
+       equivalent at all -- link.html never offers password sign-in
+       (see frontend/link.js's own comment) -- so only account.css and
+       join.css still define it.
+   ===================================================================== */
+
+/* ---- Sign in (GET /auth/providers) -- row of provider buttons ------------
+   A plain link per enabled provider, not a <button> -- /auth/{provider}/
+   start is a GET redirect (app/oauth_api.py), so clicking one of these
+   IS the whole sign-in action, no click handler needed. Which providers
+   render, and the "email" fallback, are frontend/signin-email.js's
+   renderProviderButtons() -- see that function's own comment. */
+.signin-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+/* The shape every provider button shares -- height, radius, type,
+   focus ring and hit target all live here so the row reads as one set
+   no matter which brand modifier below applies. An unmapped future
+   provider gets the --generic modifier instead of one of the three
+   brand ones below (see frontend/signin-email.js's
+   renderProviderButtons() for how it picks) and this rule alone: still
+   a real, presentable button, just without an icon or a brand colour. */
+.signin-provider-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 44px;
+  text-align: center;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.signin-provider-btn:hover { background: var(--mw-line); }
+.signin-provider-btn:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 2px;
+}
+
+.signin-provider-icon {
+  display: inline-flex;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+.signin-provider-icon svg { display: block; width: 100%; height: 100%; }
+
+.signin-provider-label { flex: none; }
+
+/* GitHub -- the light/inverse lockup (white button, dark mark and
+   text) rather than GitHub's own dark (#24292f-ish) button: this
+   theme's own dark surfaces (--mw-raised/--mw-panel) already sit in
+   roughly that same dark range, so the dark GitHub button would nearly
+   disappear into the card behind it instead of reading as its own
+   button. White gives it real contrast against this theme. Border
+   colour is GitHub's own light-mode hairline grey, not a page token --
+   a pure white-on-white edge would vanish against this button's own
+   background. */
+.signin-provider-btn--github {
+  background: #ffffff;
+  color: #24292f;
+  border-color: #d0d7de;
+}
+.signin-provider-btn--github:hover { background: #f6f8fa; }
+
+/* Google -- their own guidance: a white (or dark) button, the four
+   official G colours at full strength (never recoloured -- see
+   PROVIDER_ICONS's own comment in frontend/signin-email.js), a real
+   border, and near-black text. None of that is this theme's palette,
+   so none of it comes from --mw-* tokens. */
+.signin-provider-btn--google {
+  background: #ffffff;
+  color: #1f1f1f;
+  border-color: #747775;
+}
+.signin-provider-btn--google:hover { background: #f7f8f8; }
+
+/* Discord -- their own blurple, with the Clyde mark and the label text
+   both white per brand (the mark is currentColor -- see
+   frontend/signin-email.js's PROVIDER_ICONS comment -- so it follows
+   this rule's `color`). */
+.signin-provider-btn--discord {
+  background: #5865f2;
+  color: #ffffff;
+  border-color: #5865f2;
+}
+.signin-provider-btn--discord:hover { background: #4752c4; }
+
+/* ---- Email sign-in (POST /auth/email/start) ------------------------------
+   A sibling of .signin-providers above, not one of its entries -- each
+   page's own HTML comment (account.html's #account-signin-email-form,
+   join.html's #signin-email-form, link.html's #link-email-form)
+   explains why email needs a real form (address field + submit) rather
+   than the one-line provider-button link shape. */
+.signin-email-form {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--mw-line);
+}
+
+.signin-email-form label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 0.75rem;
+  color: var(--mw-text-5);
+}
+
+.signin-email-form label > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.6875rem;
+}
+
+/* The hand-drawn envelope next to "Email" -- an inline SVG built from
+   a rect + a chevron, not a brand mark or an emoji character, so it
+   carries no separate colour rule of its own: currentColor follows
+   this label's own text colour. */
+.signin-icon-envelope { flex: none; opacity: 0.85; }
+
+/* Both input types styled together even though link.html never renders
+   a password field (link.js: link.html never offers password sign-in).
+   account.html/join.html's password-sign-in group reuses this same
+   email field's row shape (see their own .signin-password-group,
+   still page-local -- this file's own header explains why); the extra
+   selector is simply inert on link.html, not a visual difference. */
+.signin-email-form input[type="email"],
+.signin-email-form input[type="password"] {
+  width: 100%;
+  background: var(--mw-page);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 0.875rem;
+}
+.signin-email-form input[type="email"]:focus,
+.signin-email-form input[type="password"]:focus {
+  outline: none;
+  border-color: var(--mw-accent);
+  box-shadow: 0 0 0 2px var(--mw-accent-wash);
+}
+
+.signin-email-submit-btn {
+  width: 100%;
+  min-height: 44px;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.signin-email-submit-btn:hover { background: var(--mw-line); }
+.signin-email-submit-btn:disabled { opacity: 0.5; cursor: default; }
+.signin-email-submit-btn:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 2px;
+}

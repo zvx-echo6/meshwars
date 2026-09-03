@@ -80,90 +80,12 @@
 #link-create-btn:hover { background: var(--mw-line); }
 #link-create-btn:disabled { opacity: 0.5; cursor: default; }
 
-/* ---- Sign in (GET /auth/{provider}/start) --------------------------------
-   Same component join.css defines for the join page's own sign-in
-   panel -- duplicated here rather than shared, since this page does not
-   load join.css (see this file's own header comment). A plain link per
-   enabled provider: /auth/{provider}/start is a GET redirect
-   (app/oauth_api.py), so clicking one of these IS the whole action, no
-   click handler needed. */
-.signin-providers {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.signin-provider-btn {
-  display: block;
-  text-align: center;
-  background: var(--mw-raised);
-  color: var(--mw-accent);
-  border: 1px solid var(--mw-line-strong);
-  border-radius: 4px;
-  padding: 10px;
-  font-size: 0.875rem;
-  font-weight: 700;
-  text-decoration: none;
-  cursor: pointer;
-}
-.signin-provider-btn:hover { background: var(--mw-line); }
-
-/* ---- Email sign-in (POST /auth/email/start) ------------------------------
-   Same component join.css defines for the join page's own #signin-
-   email-form -- duplicated here for the same reason .signin-providers/
-   .signin-provider-btn above already are (this page does not load
-   join.css). A sibling of #link-existing-providers above, not one of
-   its entries -- see link.html's own comment on #link-email-form. */
-.signin-email-form {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--mw-line);
-}
-
-.signin-email-form label {
-  display: block;
-  margin-bottom: 10px;
-  font-size: 0.75rem;
-  color: var(--mw-text-5);
-}
-
-.signin-email-form label > span {
-  display: block;
-  margin-bottom: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-size: 0.6875rem;
-}
-
-.signin-email-form input[type="email"] {
-  width: 100%;
-  background: var(--mw-page);
-  color: var(--mw-text-1);
-  border: 1px solid var(--mw-line);
-  border-radius: 4px;
-  padding: 8px 10px;
-  font-size: 0.875rem;
-}
-.signin-email-form input[type="email"]:focus {
-  outline: none;
-  border-color: var(--mw-accent);
-}
-
-.signin-email-submit-btn {
-  width: 100%;
-  background: var(--mw-raised);
-  color: var(--mw-accent);
-  border: 1px solid var(--mw-line-strong);
-  border-radius: 4px;
-  padding: 10px;
-  font-size: 0.875rem;
-  font-weight: 700;
-  cursor: pointer;
-}
-.signin-email-submit-btn:hover { background: var(--mw-line); }
-.signin-email-submit-btn:disabled { opacity: 0.5; cursor: default; }
-
+/* The "check your email" status line under the magic-link button --
+   everything else this sign-in card needs now lives in
+   frontend/signin.css (shared with account.css/join.css, see that
+   file's own header), but this page uses a different --mw-text-*
+   step here than account.css/join.css do, so it stays local rather
+   than forcing all three pages to the same shade. */
 .signin-email-sent {
   font-size: 0.6875rem;
   color: var(--mw-text-5);

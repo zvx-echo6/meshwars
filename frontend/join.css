@@ -76,93 +76,12 @@ body {
 }
 .join-check-teaser a:hover { text-decoration: underline; }
 
-/* ---- Sign in (GET /auth/{provider}/start) --------------------------------
-   A plain link per enabled provider, not a <button> -- /auth/{provider}/
-   start is a GET redirect (app/oauth_api.py), so clicking one of these
-   link IS the whole sign-in action, no click handler needed. join.js's
-   setupSignIn() only decides which providers to render (and reveals
-   #signin-panel, which starts `hidden` in join.html) -- see that
-   function's own comment for why an unconfigured provider is never
-   rendered here as a dead button. */
-.signin-providers {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.signin-provider-btn {
-  display: block;
-  text-align: center;
-  background: var(--mw-raised);
-  color: var(--mw-accent);
-  border: 1px solid var(--mw-line-strong);
-  border-radius: 4px;
-  padding: 10px;
-  font-size: 0.875rem;
-  font-weight: 700;
-  text-decoration: none;
-  cursor: pointer;
-}
-.signin-provider-btn:hover { background: var(--mw-line); }
-
-/* ---- Email sign-in (POST /auth/email/start) ------------------------------
-   A sibling of .signin-providers above, not one of its entries -- see
-   join.html's own comment on #signin-email-form for why email needs a
-   real form (address field + submit) rather than the one-line
-   provider-button link shape. Shown/hidden by join.js's setupSignIn()
-   depending on whether GET /auth/providers lists "email" as enabled. */
-.signin-email-form {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--mw-line);
-}
-
-.signin-email-form label {
-  display: block;
-  margin-bottom: 10px;
-  font-size: 0.75rem;
-  color: var(--mw-text-5);
-}
-
-.signin-email-form label > span {
-  display: block;
-  margin-bottom: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-size: 0.6875rem;
-}
-
-.signin-email-form input[type="email"],
-.signin-email-form input[type="password"] {
-  width: 100%;
-  background: var(--mw-page);
-  color: var(--mw-text-1);
-  border: 1px solid var(--mw-line);
-  border-radius: 4px;
-  padding: 8px 10px;
-  font-size: 0.875rem;
-}
-.signin-email-form input[type="email"]:focus,
-.signin-email-form input[type="password"]:focus {
-  outline: none;
-  border-color: var(--mw-accent);
-}
-
-.signin-email-submit-btn {
-  width: 100%;
-  background: var(--mw-raised);
-  color: var(--mw-accent);
-  border: 1px solid var(--mw-line-strong);
-  border-radius: 4px;
-  padding: 10px;
-  font-size: 0.875rem;
-  font-weight: 700;
-  cursor: pointer;
-}
-.signin-email-submit-btn:hover { background: var(--mw-line); }
-.signin-email-submit-btn:disabled { opacity: 0.5; cursor: default; }
-
+/* The "check your email" status line under the magic-link button --
+   everything else this sign-in card needs now lives in
+   frontend/signin.css (shared with account.css/link.css, see that
+   file's own header), but this rule's colour differs on link.css
+   (a different --mw-text-* step), so it stays local rather than
+   forcing all three pages to the same shade. */
 .signin-email-sent {
   font-size: 0.6875rem;
   color: var(--mw-text-6);
@@ -175,7 +94,12 @@ body {
    join.html's own comment on #signin-password-group for why this isn't
    a separate form. Its own border-top visually separates it from the
    magic-link button/status text above, the same way .signin-email-form
-   itself is set off from .signin-providers above it. */
+   is set off from .signin-providers in frontend/signin.css. Same shape
+   account.css defines for its own #account-signin-password-group --
+   link.css has no equivalent (link.html never offers password sign-in,
+   see link.js's own comment), so this isn't a three-way match like
+   frontend/signin.css's rules and stays local to the two pages that
+   need it. */
 .signin-password-group {
   margin-top: 12px;
   padding-top: 12px;

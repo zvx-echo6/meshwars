@@ -45,7 +45,7 @@
 // account_identity/account_pending_identity at all). Offering password
 // sign-in here would silently leave the pending identity unclaimed,
 // so it stays limited to the two doors that actually resolve it.
-import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-2';
+import { fetchProviders, renderProviderButtons, setupEmailSignInForm } from './signin-email.js?v=20260903-3';
 
 function showError(message) {
   const el = document.getElementById('link-error');

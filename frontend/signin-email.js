@@ -66,19 +66,81 @@ export async function fetchProviders() {
   }
 }
 
-// One plain <a href="/auth/{name}/start"> per entry -- that route is
-// itself a GET redirect, so no click handler is needed here at all,
-// only the decision (made by each caller) of which providers to pass
-// in. `providers` is expected to already exclude "email" (see this
-// file's own header comment) and, on frontend/link.js, the provider
-// that produced the pending identity being resolved.
+// Inline brand marks for the OAuth providers app/oauth.py's PROVIDERS
+// can list ("github", "discord", "google" today), keyed by the
+// provider's raw `name` -- never its `label`, which is free text (see
+// app/oauth.py's PROVIDER_LABELS) and never guaranteed to match one of
+// these keys. Every path below is copied straight from that provider's
+// own published brand mark and drawn inline here as plain SVG markup --
+// nothing is fetched from a CDN or any other host, so this card makes
+// no request beyond GET /auth/providers itself and renders identically
+// with no network reachable at all. Google's four colours are literal
+// fill values on purpose (see .signin-provider-btn--google in
+// account.css/join.css/link.css for why) -- the G is never recoloured
+// to the page's own palette. GitHub's and Discord's marks use
+// currentColor, so their colour comes from the button's own `color`
+// (also set in those same three stylesheets, one brand colour each).
+//
+// A provider name with no entry here -- anything PROVIDERS grows later
+// that nobody's added a mark for yet -- falls through the `icon`
+// lookup below to the "generic" branch: still a full-width, full-height
+// button with real hover/focus states and its "Sign in with {label}"
+// text, just without an icon or a brand colour. It never renders an
+// empty box.
+const PROVIDER_ICONS = {
+  github:
+    '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>',
+  google:
+    '<svg viewBox="0 0 18 18" aria-hidden="true" focusable="false"><path fill="#4285F4" d="M17.64 9.2045c0-.6381-.0573-1.2518-.1636-1.8409H9v3.4814h4.8436c-.2086 1.125-.8427 2.0782-1.7959 2.7164v2.2582h2.9087c1.7018-1.5668 2.6836-3.8741 2.6836-6.6151z"/><path fill="#34A853" d="M9 18c2.43 0 4.4673-.8059 5.9564-2.1805l-2.9087-2.2582c-.8059.54-1.8368.8618-3.0477.8618-2.3436 0-4.3282-1.5818-5.0359-3.7104H.9573v2.3318C2.4382 15.9832 5.4818 18 9 18z"/><path fill="#FBBC05" d="M3.9641 10.71c-.18-.54-.2823-1.1168-.2823-1.71s.1023-1.17.2823-1.71V4.9582H.9573C.3477 6.1732 0 7.5477 0 9s.3477 2.8268.9573 4.0418L3.9641 10.71z"/><path fill="#EA4335" d="M9 3.5795c1.3214 0 2.5077.4541 3.4405 1.346l2.5814-2.5814C13.4632.8918 11.4259 0 9 0 5.4818 0 2.4382 2.0168.9573 4.9582L3.9641 7.29C4.6718 5.1614 6.6564 3.5795 9 3.5795z"/></svg>',
+  discord:
+    '<svg viewBox="0 0 256 199" aria-hidden="true" focusable="false"><path fill="currentColor" d="M216.856 16.597A208.502 208.502 0 0 0 164.042 0c-2.275 4.113-4.933 9.645-6.766 14.046-19.692-2.961-39.203-2.961-58.533 0-1.832-4.4-4.55-9.933-6.846-14.046a207.809 207.809 0 0 0-52.855 16.638C5.618 67.147-3.443 116.4 1.087 164.956c22.169 16.555 43.653 26.612 64.775 33.193A161.094 161.094 0 0 0 79.735 175.3a136.413 136.413 0 0 1-21.846-10.632 108.636 108.636 0 0 0 5.356-4.237c42.122 19.702 87.89 19.702 129.51 0a131.66 131.66 0 0 0 5.355 4.237 136.07 136.07 0 0 1-21.886 10.653c4.006 8.02 8.638 15.67 13.873 22.848 21.142-6.58 42.646-16.637 64.815-33.213 5.316-56.288-9.08-105.09-38.056-148.36ZM85.474 135.095c-12.645 0-23.015-11.805-23.015-26.18s10.149-26.2 23.015-26.2c12.867 0 23.236 11.804 23.015 26.2.02 14.375-10.148 26.18-23.015 26.18Zm85.051 0c-12.645 0-23.014-11.805-23.014-26.18s10.148-26.2 23.014-26.2c12.867 0 23.236 11.804 23.015 26.2 0 14.375-10.148 26.18-23.015 26.18Z"/></svg>',
+};
+
+// One <a href="/auth/{name}/start"> per entry -- that route is itself a
+// GET redirect, so no click handler is needed here at all, only the
+// decision (made by each caller) of which providers to pass in.
+// `providers` is expected to already exclude "email" (see this file's
+// own header comment) and, on frontend/link.js, the provider that
+// produced the pending identity being resolved.
+//
+// Each button is an icon (PROVIDER_ICONS above, `aria-hidden` since
+// it's purely decorative next to the visible label right beside it --
+// see this file's own header comment on the "generic" fallback for
+// when there is no icon) plus a `.signin-provider-label` span carrying
+// the actual "Sign in with {label}" text, which is also the button's
+// whole accessible name -- no separate aria-label needed, and none of
+// this changes what `link.textContent` reads back as. The brand
+// colours themselves are CSS, not this file's concern -- see
+// .signin-provider-btn--github/--google/--discord in
+// account.css/join.css/link.css (each one, since this component's CSS
+// is duplicated per page the same way its markup is -- see this file's
+// own header comment).
 export function renderProviderButtons(providers, wrap) {
   wrap.replaceChildren();
   providers.forEach((p) => {
+    const key = String(p.name || '').toLowerCase();
+    const icon = PROVIDER_ICONS[key];
+    const label = p.label || p.name;
+
     const link = document.createElement('a');
-    link.className = 'signin-provider-btn';
+    link.className = icon
+      ? `signin-provider-btn signin-provider-btn--${key}`
+      : 'signin-provider-btn signin-provider-btn--generic';
     link.href = `/auth/${encodeURIComponent(p.name)}/start`;
-    link.textContent = `Sign in with ${p.label || p.name}`;
+
+    if (icon) {
+      const iconWrap = document.createElement('span');
+      iconWrap.className = 'signin-provider-icon';
+      iconWrap.setAttribute('aria-hidden', 'true');
+      iconWrap.innerHTML = icon;
+      link.appendChild(iconWrap);
+    }
+
+    const text = document.createElement('span');
+    text.className = 'signin-provider-label';
+    text.textContent = `Sign in with ${label}`;
+    link.appendChild(text);
+
     wrap.appendChild(link);
   });
 }
