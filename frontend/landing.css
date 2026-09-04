@@ -530,18 +530,24 @@ body {
 /* Sign-out control next to Account -- see join.css's own copy of this
    rule for the full reasoning; duplicated here for the same reason the
    rest of the nav block is duplicated per owning stylesheet. */
+/* Icon, so it is sized as one: a square target rather than the text
+   padding this carried when it said "Sign out". It keeps the border the
+   nav links have, unlike the theme switch and GitHub glyphs beside it
+   which sit borderless at low opacity -- those are ambient chrome,
+   while this is an action somebody goes looking for, and it sits
+   immediately after Account where they will look. The svg carries
+   fill="currentColor", so color here is the only thing that needs to
+   move between skins. */
 .mw-nav-signout {
-  padding: 6px 12px;
-  font: inherit;
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
   color: var(--mw-text-5);
   border: 1px solid var(--mw-line);
   border-radius: 4px;
   background: var(--mw-panel);
   cursor: pointer;
-  white-space: nowrap;
 }
 .mw-nav-signout:hover { background: var(--mw-raised); color: var(--mw-accent); }
 .mw-nav-signout:focus-visible {

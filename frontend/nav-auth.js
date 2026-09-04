@@ -64,7 +64,24 @@ function addSignOutButton() {
   btn.type = 'button';
   btn.id = 'mw-nav-signout';
   btn.className = 'mw-nav-signout';
-  btn.textContent = 'Sign out';
+  // Icon, not a word: the nav already carries two icon-only controls
+  // (the theme switch and the GitHub link) built exactly this way --
+  // inline 16x16 svg, fill="currentColor" so it follows whichever skin
+  // is active without a token of its own, aria-hidden on the glyph and
+  // the accessible name on the button. A text label here was both the
+  // odd one out and the widest thing on a row that has to fit eight
+  // items on a phone.
+  //
+  // The name is NOT optional decoration: an icon-only button with no
+  // aria-label is unlabelled to a screen reader, and title alone is not
+  // a reliable substitute. title stays as well, for the pointer hover.
+  btn.setAttribute('aria-label', 'Sign out');
+  btn.title = 'Sign out';
+  btn.innerHTML =
+    '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">'
+    + '<path fill="currentColor" d="M6.5 2H3.2A1.2 1.2 0 0 0 2 3.2v9.6A1.2 1.2 0 0 0 3.2 14h3.3v-1.5H3.5v-9h3V2z"/>'
+    + '<path fill="currentColor" d="M10.4 4.4 9.34 5.46l1.79 1.79H6.2v1.5h4.93l-1.79 1.79 1.06 1.06L14.2 8z"/>'
+    + '</svg>';
   btn.addEventListener('click', handleSignOut);
   link.insertAdjacentElement('afterend', btn);
 }
