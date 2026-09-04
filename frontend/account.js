@@ -1242,10 +1242,14 @@ async function handleConnectSubmit(e) {
 // this function is what fills it in: every <h2 id> under .account-body
 // that isn't currently sitting under a `hidden` ancestor, in document
 // order. Only h2's -- the rail is one entry per top-level area (Player,
-// Radios & troubleshooting, Play, Security), the same granularity
-// docs.html/rules.html's own rails use; a panel's own <h3> is reachable
-// through search instead, same as an <h3> subsection is on those two
-// pages.
+// Radios & troubleshooting, Play, Security, Admin), the same
+// granularity docs.html/rules.html's own rails use; a panel's own <h3>
+// is reachable through search instead, same as an <h3> subsection is on
+// those two pages. Admin is the one area that isn't always there at
+// all -- #account-admin-group sits hidden under its own h2 for an
+// account with no role, so this scan skips it exactly the way it
+// already skips Radios & troubleshooting / Play for an account with
+// no linked player (see #account-player-groups above).
 function buildAccountToc() {
   const tocList = document.querySelector('.account-toc-list');
   if (!tocList) return;
@@ -3141,69 +3145,167 @@ async function handleTotpDisableSubmit(e) {
 }
 
 // ============================================================================
-// SECURITY: admin access (POST /api/admin/roles/claim) -- the panel's own
-// entry point, and the claim flow that mirrors POST /api/account/link-key
-// (see app/admin_api.py's own module docstring for the full design).
+// ADMIN (the top-level rail group, gated on account.role) and, inside
+// Security, "Claim a role" (POST /api/admin/roles/claim, the flow that
+// mirrors POST /api/account/link-key -- see app/admin_api.py's own
+// module docstring for the full design). One function drives both,
+// off the one GET /api/account response -- account.role and
+// account.totp are read here exactly once, never recomputed anywhere
+// else on this page, so there is exactly one source of truth for "does
+// this account hold a role, and can it use it yet."
+//
+// ---- the six states, and what each one says ---------------------------
+//
+// A real person hit this today: granted admin, with no two-factor set
+// up yet, this section used to stack FOUR sentences -- "holds admin,"
+// "enable two-factor before opening the panel," "already holds admin,
+// entering a token elevates it," "enable two-factor before claiming" --
+// two pairs saying the same two things twice, because the has-a-role
+// copy and the claim-form copy were written assuming a reader only
+// ever saw one or the other, and then both started rendering together.
+// He read all four and still sent the person an API key instead of
+// telling them to turn on two-factor. Every state below says each true
+// thing exactly once:
+//
+//   no role,      no two-factor:  one sentence -- what unlocks claiming
+//                                  (turn on two-factor), folded into the
+//                                  same sentence that explains the claim
+//                                  itself. No form (nothing to submit
+//                                  yet).
+//   no role,      two-factor on:  one short sentence + the claim form.
+//   holds admin,  no two-factor:  role line, then the ONE gate sentence
+//                                  (covers both opening the panel and
+//                                  elevating), then -- separated by a
+//                                  divider, in the smallest text on the
+//                                  page -- a single subordinate mention
+//                                  that elevating to operator becomes
+//                                  possible once that gate clears. No
+//                                  form yet; nothing to submit.
+//   holds admin,  two-factor on:  role line + the panel link, then the
+//                                  same divider-separated subordinate
+//                                  mention, now with the actual form.
+//   holds operator, no two-factor: role line + the one gate sentence.
+//                                  Nothing about elevating -- operator
+//                                  has nothing above it to claim.
+//   holds operator, two-factor on: role line + the panel link. Nothing
+//                                  else.
+//
+// ---- where each state's copy lives -------------------------------------
+//
+// The panel-link gate sentence (#account-admin-has-role-needs-totp) is
+// the one Matt specifically flagged as needing to stay prominent -- see
+// this file's own comment on #account-admin-group in account.html.
+// #account-admin-claim-block (hint + error/success + form) is the one
+// movable piece: it lives in Security's "Claim a role" panel by default
+// and gets physically relocated into the Admin group's own
+// #account-admin-elevate-anchor instead whenever the account already
+// holds admin -- same appendChild-relocation account.js already uses
+// to move #account-password-form between the owes-password banner and
+// its normal Security home (see that form's own comment in
+// account.html). Relocating rather than duplicating the block means
+// there is exactly one hint paragraph, one error/success pair, and one
+// submit handler for "claim or elevate to operator," never two copies
+// that could say different things.
 // ============================================================================
 
 const ADMIN_ROLE_LABELS = { admin: 'admin', operator: 'operator' };
 
 function renderAdminSection(account) {
-  const hasRoleEl = document.getElementById('account-admin-has-role');
-  const claimEl = document.getElementById('account-admin-claim');
-  const claimHintEl = document.getElementById('account-admin-claim-hint');
-  const claimAdminHintEl = document.getElementById('account-admin-claim-admin-hint');
-  const needsTotpEl = document.getElementById('account-admin-claim-needs-totp');
-  const hasRoleNeedsTotpEl = document.getElementById('account-admin-has-role-needs-totp');
+  const groupEl = document.getElementById('account-admin-group');
+  const roleLineEl = document.getElementById('account-admin-role-line');
+  const needsTotpEl = document.getElementById('account-admin-has-role-needs-totp');
   const panelLinkEl = document.getElementById('account-admin-panel-link');
-  hasRoleEl.hidden = true;
-  claimEl.hidden = true;
-  claimHintEl.hidden = true;
-  claimAdminHintEl.hidden = true;
+  const elevateEl = document.getElementById('account-admin-elevate');
+  const elevateAnchorEl = document.getElementById('account-admin-elevate-anchor');
+  const claimPanelEl = document.getElementById('account-admin-claim-panel');
+  const claimAnchorEl = document.getElementById('account-admin-claim-anchor');
+  const claimBlockEl = document.getElementById('account-admin-claim-block');
+  const claimHintEl = document.getElementById('account-admin-claim-hint');
+  const claimFormEl = document.getElementById('account-admin-claim-form');
 
   const totpOn = !!(account.totp && account.totp.enabled);
+  const role = account.role || null;
 
-  if (account.role) {
-    hasRoleEl.hidden = false;
-    document.getElementById('account-admin-role-line').textContent =
-      'This account holds the ' + (ADMIN_ROLE_LABELS[account.role] || account.role) + ' role.';
+  // The rail-visible group: hidden outright for no role, so
+  // buildAccountToc() never lists "Admin" for an account that has
+  // nothing to do there. Both admin and operator get it -- gated on
+  // "holds any role," never on which one.
+  groupEl.hidden = !role;
+  // Security's claim panel is the mirror image: visible only for no
+  // role. An admin's elevate path lives in the group above instead
+  // (see #account-admin-elevate below), so once any role is held this
+  // panel has nothing left to show.
+  claimPanelEl.hidden = !!role;
 
-    // Holding a role is not enough to USE it -- app/admin_api.py's
-    // _role_guard() also requires active two-factor authentication on
-    // the account, for admin and operator alike (enforced at USE, not
-    // at grant -- an operator can hand out the role before someone has
-    // enrolled an authenticator). Tell them that up front rather than
-    // showing a link into a panel that will just refuse every request
-    // with a 403.
-    hasRoleNeedsTotpEl.hidden = totpOn;
-    panelLinkEl.hidden = !totpOn;
+  // Default parking spot for the one movable claim/elevate block --
+  // its own markup's "normal home" (account.html). Every state except
+  // admin leaves it right here (for no role, because this is where it's
+  // actually shown; for operator, because there is nothing for it to do
+  // in either spot, and this is the one that's already hidden via
+  // #account-admin-claim-panel above). The admin branch below moves it
+  // out. Unconditional, before any early return, so it can never be
+  // left sitting outside both hidden ancestors.
+  claimAnchorEl.appendChild(claimBlockEl);
 
-    if (account.role !== 'admin') {
-      // operator: there is nothing above it to claim, so the claim
-      // form -- and its token field -- stays hidden entirely.
-      return;
+  if (!role) {
+    if (totpOn) {
+      claimHintEl.textContent = 'Claim the operator role with the admin token given to you out of band.';
+      claimFormEl.hidden = false;
+    } else {
+      // One sentence carries both the claim description and the gate --
+      // there is no form yet to separately warn about, so there is
+      // nothing a second sentence would add.
+      claimHintEl.textContent = 'Claim the operator role with an admin token given to you out of band, once two-factor authentication above is active — the highest-privilege role in this app never sits on a single factor.';
+      claimFormEl.hidden = true;
     }
-
-    // admin: app/admin_api.py's POST /api/admin/roles/claim
-    // deliberately lets an account that already holds admin claim
-    // operator the same way any other account does (see that route's
-    // docstring). Fall through to also show the claim form below, worded
-    // for elevation rather than a first claim.
-    claimAdminHintEl.hidden = false;
-  } else {
-    // No role yet -- the claim form, worded for a first claim.
-    claimHintEl.hidden = false;
+    document.getElementById('account-admin-claim-submit').disabled = !totpOn;
+    return;
   }
 
-  // Shown whenever an elevation path is actually open (no role yet, or
-  // admin reaching for operator) -- there is nothing else to gate it on:
-  // the claim form is how a role is REACHED or RAISED. The submit button
-  // stays disabled without active two-factor -- app/admin_api.py's POST
-  // /api/admin/roles/claim refuses the claim server-side either way,
-  // this is just not making someone type a token only to learn that
-  // after the fact.
-  claimEl.hidden = false;
+  roleLineEl.textContent =
+    'This account holds the ' + (ADMIN_ROLE_LABELS[role] || role) + ' role.';
+
+  // Holding a role is not enough to USE it -- app/admin_api.py's
+  // _role_guard() also requires active two-factor authentication on
+  // the account, for admin and operator alike (enforced at USE, not at
+  // grant -- an operator can hand out the role before someone has
+  // enrolled an authenticator). Stated exactly once here, covering both
+  // the panel link right below it and, for an admin, the elevate form
+  // further down -- see this function's own header comment for why
+  // that "exactly once" matters.
   needsTotpEl.hidden = totpOn;
+  panelLinkEl.hidden = !totpOn;
+
+  if (role !== 'admin') {
+    // operator: there is nothing above it to claim, so the elevate
+    // block -- divider, hint and form alike -- stays hidden entirely,
+    // and the movable claim block is left parked in its Security home
+    // (harmless: that panel is hidden too, for any role).
+    elevateEl.hidden = true;
+    document.getElementById('account-admin-claim-submit').disabled = !totpOn;
+    return;
+  }
+
+  // admin: app/admin_api.py's POST /api/admin/roles/claim deliberately
+  // lets an account that already holds admin claim operator the same
+  // way any other account does (see that route's own docstring). Shown
+  // as a clearly secondary action below the panel link -- a divider
+  // plus the page's smallest text style, never its own heading or box
+  // -- so it reads as one small extra thing tucked under "Open the
+  // admin panel," not a second instruction competing for the same
+  // attention.
+  elevateEl.hidden = false;
+  elevateAnchorEl.appendChild(claimBlockEl);
+  if (totpOn) {
+    claimHintEl.textContent = 'This account can also claim the operator role with an admin token issued out of band.';
+    claimFormEl.hidden = false;
+  } else {
+    // The gate itself was already said once, above (needsTotpEl) --
+    // this only adds the one new fact: elevating is on the other side
+    // of that same gate too.
+    claimHintEl.textContent = 'Once two-factor authentication above is active, this account can also claim the operator role with an admin token.';
+    claimFormEl.hidden = true;
+  }
   document.getElementById('account-admin-claim-submit').disabled = !totpOn;
 }
 

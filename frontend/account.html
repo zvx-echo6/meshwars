@@ -42,7 +42,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260904-3" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260904-5" />
   <link rel="stylesheet" href="/static/rules.css?v=20260904-3" />
   <!-- This page has no search box (Matt: your own settings, not
        something to search), but it still loads search.css for two
@@ -54,7 +54,7 @@
        page load. Do not remove this link without replacing both. -->
   <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
   <link rel="stylesheet" href="/static/signin.css?v=20260904-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260904-9" />
+  <link rel="stylesheet" href="/static/account.css?v=20260904-11" />
   <link rel="stylesheet" href="/static/totp.css?v=20260903-1" />
 </head>
 <body>
@@ -754,46 +754,63 @@
         </div>
       </section>
 
-      <!-- Admin access -- the panel's own entry point. Visible to every
-           account (the claim form is how a role is REACHED, so it can't
-           be gated on already holding one); the button to the actual
-           panel only ever appears once GET /api/account reports a role
-           (account.js's renderAdminSection()) -- see
-           app/admin_api.py's own module docstring for the full claim
-           design (token + active two-factor, mirrors link-key). -->
-      <section id="account-admin-panel" class="account-panel">
-        <h3 id="admin" class="account-title">Admin access</h3>
+      <!-- Claim a role -- the ONLY door in for an account that holds no
+           role at all (see app/admin_api.py's own module docstring for
+           the full claim design: token + active two-factor, mirrors
+           link-key). The instant an account holds ANY role this panel
+           has nothing left to do -- an admin's own path to elevate onto
+           operator lives inside the Admin group further down the page
+           instead, not here, so this whole panel is hidden the moment
+           account.role stops being null (account.js's
+           renderAdminSection()). Restating "this account holds the
+           admin role" and the two-factor gate a second time down here
+           for an admin who already sees both up in the Admin group
+           was exactly the duplicated-sentence mess Matt flagged from a
+           real screenshot -- see renderAdminSection()'s own comment for
+           the full before/after.
 
-        <!-- Already holds a role. -->
-        <div id="account-admin-has-role" hidden>
-          <p id="account-admin-role-line" class="account-hint"></p>
-          <!-- Holding a role is not enough to USE it -- app/admin_api.py's
-               _role_guard() also requires active two-factor authentication,
-               for admin and operator alike (see that function's own
-               docstring). Shown instead of the panel link so nobody clicks
-               through to a page that will just refuse them. -->
-          <p id="account-admin-has-role-needs-totp" class="account-hint" hidden>Enable two-factor authentication above before opening the admin panel — the admin and operator roles require it to be used, not just to be granted.</p>
-          <a href="/admin" id="account-admin-panel-link" class="account-link-btn">Open the admin panel</a>
-        </div>
+           Deliberately an <h3>, not promoted to the rail: an account
+           with no role gets no "Admin" entry there at all (see
+           #account-admin-group further down for the reasoning).
 
-        <!-- The claim form: shown for no role (a first claim) and for
-             admin (elevating to operator) -- hidden for operator, since
-             there is nothing above it to claim. account.js's
-             renderAdminSection() picks which hint below to show and
-             toggles this block's visibility for all three states. -->
-        <div id="account-admin-claim" hidden>
-          <p id="account-admin-claim-hint" class="account-hint" hidden>Claim the operator role with the admin token given to you out of band. Two-factor authentication must be enabled first — the highest-privilege role in this app never sits on a single factor.</p>
-          <p id="account-admin-claim-admin-hint" class="account-hint" hidden>This account already holds the admin role. Entering the admin token below along with a current two-factor code elevates it to operator. Two-factor authentication must be enabled first — the highest-privilege role in this app never sits on a single factor.</p>
-          <p id="account-admin-claim-needs-totp" class="account-hint" hidden>Enable two-factor authentication above before claiming a role.</p>
-          <div id="account-admin-claim-error" class="account-error" role="alert" hidden></div>
-          <div id="account-admin-claim-success" class="account-hint" hidden></div>
-          <form id="account-admin-claim-form" class="account-connect-form" novalidate autocomplete="off">
-            <label class="account-field">
-              <span>Admin token</span>
-              <input type="password" id="f-account-admin-token" autocomplete="off" />
-            </label>
-            <button type="submit" id="account-admin-claim-submit">Claim operator role</button>
-          </form>
+           #account-admin-claim-anchor is the parked "home" for the one
+           movable claim block (#account-admin-claim-block) -- same
+           physically-relocated-between-two-spots pattern
+           #account-password-form already uses between this page's
+           owes-password banner and its normal Security home (see that
+           form's own comment above), reused here so there is exactly
+           one hint paragraph, one error/success pair, and one submit
+           handler for "claim/elevate to operator," never two competing
+           copies of the same form. -->
+      <section id="account-admin-claim-panel" class="account-panel" hidden>
+        <h3 id="admin-claim" class="account-title">Claim a role</h3>
+        <div id="account-admin-claim-anchor">
+          <!-- The claim/elevate block itself -- lives here, its normal
+               home, in the raw markup (so it starts out under this
+               panel's own `hidden`, same as everything else here, even
+               before account.js runs); account.js's renderAdminSection()
+               moves it down into #account-admin-elevate-anchor instead
+               whenever the signed-in account already holds admin, and
+               always parks it back here otherwise (including for
+               operator, which has nothing to show in either spot -- see
+               that function's own comment for why leaving it unparked
+               would be a bug, not a no-op). Wording of
+               #account-admin-claim-hint is written fresh by that same
+               function for whichever of the two spots and whichever
+               two-factor state it's currently rendering for -- see its
+               own comment for the exact copy in each case. -->
+          <div id="account-admin-claim-block">
+            <p id="account-admin-claim-hint" class="account-hint"></p>
+            <div id="account-admin-claim-error" class="account-error" role="alert" hidden></div>
+            <div id="account-admin-claim-success" class="account-hint" hidden></div>
+            <form id="account-admin-claim-form" class="account-connect-form" novalidate autocomplete="off" hidden>
+              <label class="account-field">
+                <span>Admin token</span>
+                <input type="password" id="f-account-admin-token" autocomplete="off" />
+              </label>
+              <button type="submit" id="account-admin-claim-submit">Claim operator role</button>
+            </form>
+          </div>
         </div>
       </section>
 
@@ -897,6 +914,82 @@
         </div>
       </section>
 
+      <!-- ===================================================================
+           ADMIN. The operator console's own entry point -- its own
+           top-level group, rather than the subsection buried in
+           Security it used to be, so buildAccountToc()'s own h2[id]
+           scan picks it up and it shows in the rail (the site owner's
+           own ask: "move the admin panel button to the left side bar
+           when its available"). Last of the top-level groups since it
+           is the least-used one, same reasoning Security itself went
+           last before this existed.
+
+           #account-admin-group is the gate account.js's
+           renderAdminSection() drives off GET /api/account's own
+           account.role -- hidden whenever that account holds no role at
+           all, so an account with no role never gets an "Admin" entry
+           in the rail. Same hidden-wrapper-around-an-h2 trick
+           #account-player-groups already uses above to keep Radios &amp;
+           troubleshooting / Play out of the rail for an account with no
+           linked player; buildAccountToc()'s own h2[id] scan skips
+           anything sitting under a hidden ancestor either way, so this
+           needed no change to that function itself. Both admin AND
+           operator get this group -- renderAdminSection() gates it on
+           "holds any role", not on which one.
+
+           The claim form that actually REACHES a role in the first
+           place stays back in Security's own "Claim a role" panel
+           instead of moving down here -- an account with no role has
+           nothing to gate this group open on, so the claim path can't
+           live inside something that's hidden for exactly that account
+           (see that panel's own comment further up). An admin's own
+           path to elevate onto operator, by contrast, DOES live here,
+           folded in below the panel link as a clearly secondary action
+           -- see #account-admin-elevate's own comment for why. -->
+      <div id="account-admin-group" hidden>
+        <h2 id="admin" class="account-group-title">Admin</h2>
+
+        <section class="account-panel">
+          <p id="account-admin-role-line" class="account-hint"></p>
+
+          <!-- Holding a role is not enough to USE it -- app/admin_api.py's
+               _role_guard() also requires active two-factor authentication
+               on the account, for admin and operator alike (see that
+               function's own docstring). Stated exactly once, covering
+               BOTH the panel link right below it and, for an admin, the
+               elevate form further down -- a real person hit the
+               now-fixed version of this page today where the same "turn
+               on two-factor" requirement was said twice in two different
+               sentences and neither one stood out; account.js's
+               renderAdminSection() shows this single line instead of
+               either of those, and hides the panel link (and the elevate
+               form) until it's satisfied, so nobody clicks through to a
+               console that will just 403 them. -->
+          <p id="account-admin-has-role-needs-totp" class="account-hint" hidden>Enable two-factor authentication above before opening the admin panel — the admin and operator roles require it to be used, not just to be granted.</p>
+
+          <a href="/admin" id="account-admin-panel-link" class="account-link-btn" hidden>Open the admin panel</a>
+
+          <!-- Elevate to operator -- admin only; operator has nothing
+               above it left to claim (app/admin_api.py's POST
+               /api/admin/roles/claim docstring covers why an existing
+               admin is allowed to reach operator the same way a first
+               claim works). A <hr> plus account.js's smallest text style
+               (.account-hint) is deliberately all the visual separation
+               this gets -- not a box, not its own heading -- so it reads
+               as one small secondary action tucked under "Open the admin
+               panel," never a second thing arguing for equal attention
+               next to it. #account-admin-claim-block (defined up in
+               Security, moved down into #account-admin-elevate-anchor by
+               renderAdminSection() only while this is showing) supplies
+               the actual hint text and form -- see that block's own
+               comment. -->
+          <div id="account-admin-elevate" hidden>
+            <hr class="account-divider" />
+            <div id="account-admin-elevate-anchor"></div>
+          </div>
+        </section>
+      </div>
+
         </div>
       </div>
 
@@ -908,8 +1001,8 @@
     <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="/privacy">Privacy</a>.</p>
   </footer>
 
-  <script src="/static/account.js?v=20260904-17" type="module"></script>
+  <script src="/static/account.js?v=20260904-18" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
-  <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
+  <script src="/static/nav-auth.js?v=20260904-1" type="module"></script>
 </body>
 </html>

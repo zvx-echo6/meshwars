@@ -271,9 +271,21 @@
   border-color: var(--mw-accent);
 }
 
+/* Structural, not an allowlist. This was a hand-maintained list of ids,
+   so every standalone button added to a panel since then has rendered as
+   an unstyled native control: "Delete my account", "Rotate key" and
+   "Disable two-factor authentication" were all bare. They only looked
+   fine in passing because their panels are hidden in most account
+   states. Matching a panel's own direct-child button means the next one
+   added is styled by construction rather than by remembering to come
+   back here. :not([class]) is the whole rule: a standalone button is one
+   nobody gave a class to, at whatever depth it sits, and anything with a
+   class of its own (.account-link-btn, .account-wizard-choice-btn) opts
+   out and keeps its treatment. A child combinator was tried first and
+   was too narrow -- it missed the two-factor disable button, which sits
+   inside a state wrapper rather than directly in the panel. */
 .account-connect-form button,
-#account-logout-btn,
-#account-logout-all-btn {
+.account-panel button:not([class]) {
   background: var(--mw-raised);
   color: var(--mw-accent);
   border: 1px solid var(--mw-line-strong);
@@ -284,11 +296,9 @@
   cursor: pointer;
 }
 .account-connect-form button:hover,
-#account-logout-btn:hover,
-#account-logout-all-btn:hover { background: var(--mw-line); }
+.account-panel button:not([class]):hover { background: var(--mw-line); }
 .account-connect-form button:disabled,
-#account-logout-btn:disabled,
-#account-logout-all-btn:disabled { opacity: 0.5; cursor: default; }
+.account-panel button:not([class]):disabled { opacity: 0.5; cursor: default; }
 
 /* ---- Player: sign-up wizard (#account-wizard, account.js's
    showWizardStep()) --------------------------------------------------
@@ -471,8 +481,12 @@
 /* ---- Group headings ---------------------------------------------------
    One level above .account-title: groups a run of .account-panel
    sections under a single label ("Player", "Radios & troubleshooting",
-   "Play", "Security") so the page reads as a small number of clear
-   areas instead of one long undifferentiated list of panels. These are
+   "Play", "Security", "Admin") so the page reads as a small number of
+   clear areas instead of one long undifferentiated list of panels. Admin
+   is the one of the five that isn't always there -- #account-admin-group
+   (account.html) sits hidden for an account with no role, so its own
+   h2 never renders at all in that case, same as Radios &
+   troubleshooting / Play for an account with no linked player. These are
    this page's h2s -- the same rail-level heading rules.css's own
    .rules-body h2 carries (gold-light, 2px gold rule underneath), so
    the same look applies whether the heading is reached by scrolling
@@ -491,11 +505,12 @@
 /* Player is the very first thing on the page, so it doesn't want the
    extra top margin every later group heading uses to separate itself
    from the group before it. Targeted by id rather than :first-of-type:
-   these four headings sit at three different nesting depths (Player
+   these five headings sit at four different nesting depths (Player
    inside its own <section>; Radios/Play inside #account-player-groups;
-   Security a direct child of .account-body), so :first-of-type -- which
-   only ever looks at siblings under the SAME parent -- would also zero
-   out Radios and Security, which is not what this is for. */
+   Security a direct child of .account-body; Admin inside
+   #account-admin-group), so :first-of-type -- which only ever looks at
+   siblings under the SAME parent -- would also zero out Radios,
+   Security and Admin, which is not what this is for. */
 #player.account-group-title {
   margin-top: 0;
 }
