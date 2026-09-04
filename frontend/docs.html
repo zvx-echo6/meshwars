@@ -71,7 +71,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260904-2" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260904-3" />
   <link rel="stylesheet" href="/static/rules.css?v=20260904-3" />
   <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
   <link rel="stylesheet" href="/static/docs.css?v=20260904-1" />
@@ -184,7 +184,7 @@
 
         <section id="setup-meshtastic">
           <h2>Setting up Meshtastic</h2>
-          <p>Meshtastic works the other way around from MeshCore: nothing is ever pushed to MeshWars directly. Instead, <a href="https://help.freqmapper.net/" target="_blank" rel="noopener noreferrer">FreqMapper</a> -- a separate Meshtastic coverage-mapping app -- verifies where your radio is actually heard, and MeshWars reads that coverage to paint your square. There is no MeshWars session or batch here; your radio just needs to be enrolled and mapping through FreqMapper. Registering with MeshWars (below) and setting up FreqMapper are two separate things -- both are required.</p>
+          <p>Meshtastic works the other way around from MeshCore: nothing is ever pushed to MeshWars directly. Instead, <a href="https://help.freqmapper.net/" target="_blank" rel="noopener noreferrer">FreqMapper</a> -- a separate Meshtastic coverage-mapping app -- verifies where your radio is actually heard, and MeshWars reads that coverage to paint your square. There is no MeshWars session or batch here; your radio just needs to be enrolled and mapping through FreqMapper. Registering with MeshWars (below) and setting up FreqMapper are two separate things. FreqMapper is what this section walks through and what we recommend -- a registered radio's own position packets can paint a square too, but that path is less reliable as of Meshtastic 2.8, so FreqMapper is the one to actually count on.</p>
           <p>On the join page, with Meshtastic selected, register your node ID (found by searching, or entered by hand) and optionally its public key -- the key is what lets MeshWars keep following your radio if its node ID ever changes. Then, to actually get mapped, set up FreqMapper itself:</p>
           <ol class="rules-list">
             <li>Install FreqMapper -- iOS through its TestFlight beta, Android from the APK at <a href="https://dev.freqmapper.net" target="_blank" rel="noopener noreferrer">dev.freqmapper.net</a>.</li>
@@ -203,7 +203,20 @@
 
         <section id="account">
           <h2>Your account</h2>
-          <p>Everything below lives in one place: the setup-check panel near the bottom of <a href="/join">the join page</a>. Paste your API key and press Check to unlock it -- the same panel handles checking your status, reading your diagnostics, adding or removing radios, switching teams, and (MeshCore only) confirming a node that isn't matching on its own.</p>
+          <p>Most of what's below lives in one place: the setup-check panel near the bottom of <a href="/join">the join page</a>. Paste your API key and press Check to unlock it -- the same panel handles checking your status, reading your diagnostics, adding or removing radios, and switching teams. Confirming a node that isn't matching on its own (below) is different -- it's on <a href="/account">the account page</a> instead, and needs you signed in.</p>
+
+          <h3 id="account-signin">Accounts and signing in</h3>
+          <p>An account is different from a player. A player -- the thing the invite-code join above creates -- holds your team, your radios and your points; an account is how you sign in on the web, and it links to exactly one player. You don't need one to play: the invite-code flow works with no account at all. What an account buys you is a way in that isn't an API key you have to hang onto, and it's required for a couple of things below -- confirming a node (see <a href="#account-checkin-name">Confirm my node</a>) and the admin/operator surface.</p>
+          <p>On <a href="/account">the account page</a>, sign in with GitHub, Discord, Google, a magic-link email, or a password. Each one you connect is an independent door into the same account -- losing access to one doesn't lock you out as long as another still works. A password is only ever asked for if a mailed link is your one and only way in; connect any of GitHub, Discord or Google and MeshWars stops asking for one.</p>
+
+          <h3 id="account-join-wizard">Joining through your account</h3>
+          <p>Signing in with no player linked yet opens a short wizard. If you already have an API key from before, pick "I have an API key" and enter it to connect that player to this account. Otherwise, pick "I'm new here" and go through display name, then team, then radio type and Join. No invite code either way -- being signed in already clears a stronger bar than the code does.</p>
+          <p>Radio type on that last step matters more than it looks:</p>
+          <ul class="rules-list">
+            <li><strong>MeshCore:</strong> you get an API key, shown exactly once -- copy it before continuing. It goes into MeshMapper, same as <a href="#setup-meshcore">Setting up MeshCore</a> describes.</li>
+            <li><strong>Meshtastic:</strong> no key at all. Nothing on this path -- FreqMapper, check-ins -- ever reads one, so joining as Meshtastic through your account mints nothing to lose. You can still generate one later from Security on the account page; nothing on the Meshtastic side of MeshWars will ever use it.</li>
+          </ul>
+          <p>If a password is still owed once you finish (see above), the wizard's last step is setting one. You can dismiss the wizard without doing that, but the account page will keep prompting you until you do.</p>
 
           <h3 id="account-check">Checking your setup</h3>
           <p>Once your key checks out, you'll see your name and team, and -- for each protocol you have a radio registered on -- when MeshWars last heard from you and a plain-language diagnosis of what, if anything, is wrong.</p>
@@ -273,6 +286,16 @@
             <li><strong>Meshtastic:</strong> nothing on the radio or in the app ever stores your key. Ask an operator for a new one -- see the <a href="/about">About page</a> for how to reach the community running your net.</li>
           </ul>
           <p>A brand new key doesn't disturb your account, your points, your team, or any radio you already have registered -- it's only a new way in.</p>
+
+          <h3 id="account-2fa">Two-factor authentication</h3>
+          <p>Optional, from Security on the account page -- an authenticator-app code on top of your password or magic-link email. GitHub, Discord and Google already have their own two-factor options on their side, so this only ever guards the two sign-in methods MeshWars issues itself. Save the recovery codes it gives you the one time it shows them; each is good for one sign-in if you lose your authenticator app.</p>
+          <p>It stops being optional if you hold the admin or operator role -- both require it to actually use the admin panel, not just to be granted.</p>
+
+          <h3 id="account-lost-access">Losing access to your account</h3>
+          <p>MeshWars won't let you remove your own last sign-in door (see <a href="#account-signin">Accounts and signing in</a> above), so you can't lock yourself out through the account page itself. If you still end up locked out -- lost access to your email, or an OAuth account you signed in with -- there's no self-service way back into that specific account, but your player isn't stuck: an operator can issue you a fresh API key for it, and free it from the dead account if it needs to move to a new one. See the <a href="/about">About page</a> for how to reach the community running your net. Setting a password and connecting more than one sign-in method now is the cheapest way to avoid needing that.</p>
+
+          <h3 id="account-delete">Deleting your account</h3>
+          <p>At the bottom of Security is "Delete my account" -- it permanently destroys your sign-in methods, password, two-factor, and API key, and unbinds any radios. It's confirmed by typing your own display name (plus a two-factor code if you have one enabled), and it can't be undone. Your team keeps the squares and history you earned; see <a href="/privacy">Privacy</a> for exactly what survives and what doesn't.</p>
         </section>
 
         <section id="board">
@@ -436,6 +459,10 @@
       </div>
     </div>
   </main>
+
+  <footer class="mw-footer">
+    <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="/privacy">Privacy</a>.</p>
+  </footer>
 
   <script src="/static/docs.js?v=20260904-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>

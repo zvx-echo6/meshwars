@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <!-- Applied before any stylesheet paints, so a reader who chose the
+       neon skin never sees a frame of gold first. Deliberately inline
+       and tiny: a fetched script here would block first paint, which is
+       the thing this exists to avoid. Mirrors theme-toggle.js, which
+       owns everything after load. -->
+  <script>
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
+  </script>
+  <title>MeshWars — Privacy</title>
+  <meta name="description" content="What MeshWars stores about you, why, how long it's kept, who can see it, and what you can remove yourself.">
+  <link rel="canonical" href="https://meshwars.com/privacy">
+
+  <!-- See index.html's matching comment: Google reads a site's
+       search-results favicon from the home page specifically, but these
+       declarations are kept identical across all three pages so the
+       <head> stays consistent site-wide. -->
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="MeshWars — Privacy">
+  <meta property="og:description" content="What MeshWars stores about you, why, how long it's kept, who can see it, and what you can remove yourself.">
+  <meta property="og:url" content="https://meshwars.com/privacy">
+  <meta property="og:image" content="https://meshwars.com/static/assets/social/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="MeshWars — Privacy">
+  <meta name="twitter:description" content="What MeshWars stores about you, why, how long it's kept, who can see it, and what you can remove yourself.">
+  <meta name="twitter:image" content="https://meshwars.com/static/assets/social/twitter-card.png">
+
+  <!-- See index.html's matching comment for what this describes and why
+       it's minimal. Same content, this page's own "url". -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Game",
+    "name": "MeshWars",
+    "alternateName": "Mesh Wars",
+    "url": "https://meshwars.com/privacy",
+    "publisher": { "@id": "https://meshwars.com/#org" },
+    "description": "A real-world capture-the-flag game played over mesh radio. Seven teams claim map squares by reaching Meshtastic or MeshCore mesh coverage from them.",
+    "genre": ["Location-based game", "Capture the flag"],
+    "isBasedOn": {
+      "@type": "SoftwareSourceCode",
+      "name": "MeshWars",
+      "codeRepository": "https://github.com/zvx-echo6/meshwars",
+      "programmingLanguage": "Python",
+      "license": "https://www.gnu.org/licenses/agpl-3.0.html"
+    }
+  }
+  </script>
+
+  <!-- Cache-busting: /static assets are served cacheable while these HTML
+       pages are no-cache. Without a version string, a returning visitor can get
+       fresh HTML paired with a stale cached stylesheet/script. Bump v=20260818 on
+       EVERY /static CSS/JS reference on this page whenever any of those files
+       change -- do not touch the pinned external Leaflet CDN links. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260904-3" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260904-3" />
+</head>
+<body>
+
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/">Map</a>
+      <a href="/results">Results</a>
+      <a href="/rules">Rules</a>
+      <a href="/docs">Docs</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <a href="/account" id="mw-nav-account">Account</a>
+      <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+      </button>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main class="rules-wrap">
+
+    <header class="rules-header">
+      <h1 class="rules-title">Privacy</h1>
+      <p class="rules-sub">What MeshWars stores about you, why, how long it's kept, who can see it, and what you can remove yourself. Identity can be public. Location can be public. The link between them cannot.</p>
+    </header>
+
+    <div class="rules-layout">
+      <nav class="rules-toc" aria-label="Sections">
+        <p class="rules-toc-title">Contents</p>
+        <ul>
+        <li><a href="#short-version">The short version</a></li>
+        <li><a href="#what-we-store">What we store, and why</a></li>
+        <li><a href="#kept-forever">Kept forever, on purpose</a></li>
+        <li><a href="#retention">How long everything else is kept</a></li>
+        <li><a href="#self-service">What you can do yourself</a></li>
+        <li><a href="#who-can-see">Who can see the link between identity and location</a></li>
+        <li><a href="#third-parties">What leaves the system</a></li>
+        <li><a href="#cookies">Cookies and local storage</a></li>
+        </ul>
+      </nav>
+
+      <div class="rules-body">
+
+        <section id="short-version">
+          <h2>The short version</h2>
+          <p>&ldquo;Identity can be public. Location can be public. The link between them cannot.&rdquo; Anyone can look at the map and see which squares each team holds. Seeing which real account is behind a specific position requires being signed in. And the operating rule behind everything below is simple: the less MeshWars stores, the better.</p>
+        </section>
+
+        <section id="what-we-store">
+          <h2>What we store, and why</h2>
+          <p>This is everything MeshWars keeps about a player, in plain terms, and how it's stored.</p>
+
+          <h3 id="store-signin">Sign-in identity</h3>
+          <p>When you sign in with Google, GitHub or Discord, MeshWars stores the provider's name, the account id that provider gave us, your email address, and whether that provider says the email is verified. All of it is stored as given &mdash; none of it is hashed or encrypted.</p>
+
+          <h3 id="store-contact-email">Contact email</h3>
+          <p>A contact email you set yourself is stored raw. It's for reaching you &mdash; you can never sign in with it.</p>
+
+          <h3 id="store-password">Password</h3>
+          <p>If you set a password, only a scrypt hash of it, with a salt, is stored. The password itself is never kept.</p>
+
+          <h3 id="store-2fa">Two-factor authentication</h3>
+          <p>The secret behind your two-factor codes is stored encrypted, with the encryption key held outside the database. Your recovery codes are stored as SHA-256 hashes only, and are deleted the moment you turn two-factor off.</p>
+
+          <h3 id="store-api-keys">API keys</h3>
+          <p>Both a player key and an integration key are stored as a hash. The raw key is shown to you once, when it's issued, and is never stored anywhere after that &mdash; lose it and it has to be reissued, not recovered.</p>
+
+          <h3 id="store-display-name">Display name</h3>
+          <p>Your display name is whatever you chose. It's stored raw, and there is no requirement that it be your real name.</p>
+
+          <h3 id="store-sessions">Sessions</h3>
+          <p>Signing in creates a session. MeshWars stores a hash of your session cookie &mdash; never the cookie itself &mdash; a coarse device label like &ldquo;Chrome on Windows,&rdquo; and when the session started and last renewed. It does not store your IP address: that column has been dropped from the database entirely, and the same change rewrote every stored raw browser identifier down to that same coarse device label.</p>
+
+          <h3 id="store-radio">Radio and node identifiers</h3>
+          <p>Your radio's node ID or public key is stored as-is. This isn't really a MeshWars secret &mdash; your radio already broadcasts that identifier in the clear, over the air, to anyone listening on the mesh.</p>
+
+          <h3 id="store-positions">Positions</h3>
+          <p>Each ping updates your last known position; it overwrites the previous one rather than piling up a history. Pings and repeater credit are stored at roughly 300-metre grid-cell resolution, not exact coordinates, and are deleted 48 hours after they're recorded. An earlier table that held finer-grained position tied to radio identity was found in an audit and dropped outright &mdash; it no longer exists in any form.</p>
+        </section>
+
+        <section id="kept-forever">
+          <h2>Kept forever, on purpose</h2>
+          <p>Some records are never deleted. This is deliberate, not an oversight: capture history (who took which square, and when), check-in awards, team changes, the account event log and the admin action log are all kept indefinitely, because they're what makes the scoreboard's history and an audit trail possible at all.</p>
+        </section>
+
+        <section id="retention">
+          <h2>How long everything else is kept</h2>
+          <p>Outside of what's kept forever above, everything else runs on a timer enforced in code:</p>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>Position pings and repeater credit</th><td>48 hours</td></tr>
+              <tr><th>Ingest stat counters</th><td>30 days</td></tr>
+              <tr><th>Message buffer</th><td>48 hours</td></tr>
+              <tr><th>Duplicate-detection ledger</th><td>72 hours</td></tr>
+              <tr><th>Unresolved check-in sender log</th><td>60 days</td></tr>
+              <tr><th>Sign-in tickets and two-factor challenges</th><td>consumed, or expired and swept</td></tr>
+              <tr><th>Dead session rows (signed out, revoked or expired)</th><td>swept about an hour later</td></tr>
+            </tbody>
+          </table>
+          <p>That last row is recent: dead session rows are now swept within about an hour of going dead. A session you're still actively using is never touched by this.</p>
+        </section>
+
+        <section id="self-service">
+          <h2>What you can do yourself</h2>
+          <p>From your account, you can sign out one device or every device, rotate your API key, set or remove a password, unlink a sign-in provider, and turn two-factor off.</p>
+          <p>You can also delete your account outright. &ldquo;Delete my account&rdquo; destroys, in one irreversible step, everything that identifies you: every sign-in method, your password, your two-factor secret and recovery codes, every active session, and your API key. Any radios you'd registered are unbound. It has to be confirmed by typing your own display name (and a two-factor code too, if you have one enabled), so it can't happen by accident or from a browser that isn't really yours.</p>
+          <p><strong>What it does not erase is the game record.</strong> The framing is deliberately &ldquo;delete the person, keep the team&rdquo; &mdash; the squares your team already holds because of you, and your capture history, month awards and check-in awards, all stay on the board exactly as they are. Only your player's own display name changes, to a placeholder nobody can trace back to you; who used to hold that name is not recoverable afterward.</p>
+        </section>
+
+        <section id="who-can-see">
+          <h2>Who can see the link between identity and location</h2>
+          <p>The map is public &mdash; anyone can see which squares each team holds. Seeing which account sits behind a specific position is different: that requires signing in. A route that once exposed this link without signing in has since been closed.</p>
+
+          <h3 id="integration-api">The integration API</h3>
+          <p>The one deliberate exception is <code>/api/v1</code>, the integration API used by bots and dashboards built on MeshWars, which returns more than an anonymous visitor sees. In the operator's own words: its key is issued personally by the operator, so it's accountable rather than anonymous, and revocable per key.</p>
+        </section>
+
+        <section id="third-parties">
+          <h2>What leaves the system</h2>
+          <p>MeshWars talks to a small number of outside services, each in a narrow way:</p>
+          <ul class="rules-list">
+            <li><strong>Mesh data sources</strong> (MeshView, FreqMapper, MeshCore map endpoints) &mdash; MeshWars only reads from these. It's a consumer of mesh coverage data that's already public; no player data goes out to them.</li>
+            <li><strong>Sign-in providers</strong> (Google, GitHub, Discord) &mdash; they receive only what a sign-in requires, and return your subject id, email and verified flag. Nothing else comes back, and nothing else is kept.</li>
+            <li><strong>Email</strong> &mdash; sent through an SMTP server the operator configures. A sign-in email contains only the sign-in link.</li>
+          </ul>
+          <p>There is no analytics or telemetry of any kind in the backend.</p>
+        </section>
+
+        <section id="cookies">
+          <h2>Cookies and local storage</h2>
+          <p>Every cookie MeshWars sets is HttpOnly, SameSite=Lax and Secure by default. Your session cookie lasts 30 days and slides forward each time you use it. A few short-lived cookies exist for the moments in between: mid-sign-in state, a pending account link, and an in-progress two-factor challenge.</p>
+          <p>The only thing MeshWars keeps in your browser's local storage is whether you've dismissed a notice, tagged to that notice's version. There is no identity of any kind in it.</p>
+        </section>
+
+        <p class="rules-footnote">Last reviewed 2026-09-04.</p>
+
+      </div>
+    </div>
+  </main>
+
+  <footer class="mw-footer">
+    <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="/privacy">Privacy</a>.</p>
+  </footer>
+
+  <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
+  <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
+</body>
+</html>

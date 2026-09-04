@@ -1051,3 +1051,23 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .mw-theme-btn { transition: none; }
 }
+
+/* Site-wide footer -- same rule as .mw-nav above: this page does not
+   load landing.css, so the block lives here too rather than in one
+   shared file. Keep in sync with landing.css's copy. */
+.mw-footer {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 20px 16px 40px;
+  border-top: 1px solid var(--mw-line);
+}
+
+.mw-footer p {
+  margin: 0;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.mw-footer a { color: var(--mw-gold); font-weight: 600; text-decoration: none; }
+.mw-footer a:hover { text-decoration: underline; }

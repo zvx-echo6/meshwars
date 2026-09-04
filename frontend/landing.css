@@ -650,3 +650,30 @@ body {
   border-radius: 3px;
   background: var(--mw-surface-2, rgba(255,255,255,0.06));
 }
+
+/* Site-wide footer: about.html, docs.html, rules.html, privacy.html,
+   results.html and api.html all load this file, so it lives here --
+   duplicated into join.css for the one content page that does not (the
+   nav above is split the same way; see that file's own note on this).
+   Sits after </main> as a sibling, not inside it, so the max-width and
+   gutter are repeated here rather than inherited from .landing-wrap /
+   .rules-wrap / .join-wrap. Same quiet treatment as .landing-footnote /
+   rules.css's .rules-footnote just above it on the page where both
+   exist -- a rule, muted small type -- so the two read as one closing
+   passage instead of two competing sign-offs. */
+.mw-footer {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 20px 16px 40px;
+  border-top: 1px solid var(--mw-line);
+}
+
+.mw-footer p {
+  margin: 0;
+  color: var(--mw-text-6);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+}
+
+.mw-footer a { color: var(--mw-gold); font-weight: 600; text-decoration: none; }
+.mw-footer a:hover { text-decoration: underline; }
