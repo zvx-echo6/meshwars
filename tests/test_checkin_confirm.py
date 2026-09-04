@@ -378,6 +378,40 @@ def test_candidate_appears_when_last_heard_advances_past_baseline(client, db_pat
     assert candidate["node_ref"] == PUBKEY[:8]
     assert candidate["name"] == NAME
     assert candidate["already_claimed"] is False
+    assert candidate["already_yours"] is False
+
+
+# ---- a candidate that is the caller's OWN radio is not already_claimed --
+# and IS distinguishable from a plain available one (the bug this session
+# was created to fix: _claimed_node_refs used to return "bound to ANY
+# player", so the caller's own radio came back flagged already_claimed
+# the same as a stranger's, and the UI greyed it out as someone else's).
+
+def test_candidate_that_is_callers_own_radio_is_not_claimed_but_is_marked_yours(client, db_path, monkeypatch):
+    _make_corescope_net(db_path)
+    player_id = _login(client, db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+        "VALUES ('mc', ?, ?, ?, ?)",
+        (PUBKEY[:8], player_id, NOW, PUBKEY),
+    )
+    conn.commit()
+    conn.close()
+
+    state = {"nodes": [_node(last_heard="2026-09-01T12:00:00Z")]}
+    calls: list[str] = []
+    _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+
+    assert client.post("/api/checkin/confirm/start", json={"name": NAME}).status_code == 200
+    state["nodes"][0]["last_heard"] = "2026-09-01T12:05:00Z"
+
+    status_body = client.get("/api/checkin/confirm/status").json()
+    assert status_body["state"] == "found"
+    candidate = status_body["candidates"][0]
+    assert candidate["already_claimed"] is False
+    assert candidate["already_yours"] is True
 
 
 # ---- a baseline node with an unchanged last_heard is not a candidate -----
@@ -426,6 +460,38 @@ def test_node_with_different_name_never_appears(client, db_path, monkeypatch):
     keys = [c["public_key"] for c in status_body["candidates"]]
     assert keys == [PUBKEY]
     assert OTHER_PUBKEY not in keys
+
+
+# ---- a candidate genuinely bound to a DIFFERENT player is still flagged --
+
+def test_candidate_bound_to_a_different_player_is_still_already_claimed(client, db_path, monkeypatch):
+    _make_corescope_net(db_path)
+    other_player_id = _make_player(db_path, display_name="Other", team="BLUE")
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+        "VALUES ('mc', ?, ?, ?, ?)",
+        (PUBKEY[:8], other_player_id, NOW, PUBKEY),
+    )
+    conn.commit()
+    conn.close()
+
+    player_id = _login(client, db_path)
+    assert player_id != other_player_id
+
+    state = {"nodes": [_node(last_heard="2026-09-01T12:00:00Z")]}
+    calls: list[str] = []
+    _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+
+    assert client.post("/api/checkin/confirm/start", json={"name": NAME}).status_code == 200
+    state["nodes"][0]["last_heard"] = "2026-09-01T12:05:00Z"
+
+    status_body = client.get("/api/checkin/confirm/status").json()
+    assert status_body["state"] == "found"
+    candidate = status_body["candidates"][0]
+    assert candidate["already_claimed"] is True
+    assert candidate["already_yours"] is False
 
 
 # ---- accept binds player_node correctly -----------------------------------
@@ -503,6 +569,41 @@ def test_accept_refuses_node_already_claimed_by_another_player(client, db_path, 
 
     row = _player_node_row(db_path, PUBKEY[:8])
     assert row["player_id"] == other_player_id  # unchanged -- not rebound to the caller
+
+
+# ---- accept still succeeds for a node already bound to the CALLER --------
+# Guards the existing behaviour confirm_accept's own docstring documents
+# ("already bound to the CALLER is treated as success, not an error -- a
+# retried request, a second click") -- separate code from confirm/status's
+# already_claimed/already_yours candidate labelling above, so needs its
+# own regression coverage.
+
+def test_accept_succeeds_when_node_already_bound_to_caller(client, db_path, monkeypatch):
+    _make_corescope_net(db_path)
+    player_id = _login(client, db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+        "VALUES ('mc', ?, ?, ?, ?)",
+        (PUBKEY[:8], player_id, NOW, PUBKEY),
+    )
+    conn.commit()
+    conn.close()
+
+    state = {"nodes": [_node(last_heard="2026-09-01T12:00:00Z")]}
+    calls: list[str] = []
+    _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+
+    assert client.post("/api/checkin/confirm/start", json={"name": NAME}).status_code == 200
+    state["nodes"][0]["last_heard"] = "2026-09-01T12:05:00Z"
+
+    resp = client.post("/api/checkin/confirm/accept", json={"public_key": PUBKEY})
+    assert resp.status_code == 200
+    assert resp.json() == {"node_ref": PUBKEY[:8]}
+
+    row = _player_node_row(db_path, PUBKEY[:8])
+    assert row["player_id"] == player_id  # unchanged -- still theirs
 
 
 # ---- expired window -------------------------------------------------------
@@ -679,6 +780,7 @@ def test_mt_message_with_code_surfaces_candidate(client, db_path, monkeypatch):
     assert cand["node_ref"] == MT_NODE_REF
     assert cand["node_id"] == MT_NODE_ID
     assert cand["already_claimed"] is False
+    assert cand["already_yours"] is False
 
 
 # ---- a message without the code never becomes a candidate ----------------

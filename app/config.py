@@ -364,12 +364,43 @@ class Settings(BaseSettings):
     join_meshtastic_enabled: bool = False
 
     # Admin door (/admin, /api/admin/*): lists players and keys, and can
-    # revoke a key or disable a player. There is no other authentication
-    # anywhere in this application -- this token is the whole of it, so
-    # an empty value disables the admin interface entirely rather than
-    # leaving it open. Empty must mean off, never open, same reasoning
-    # as join_invite_code above.
+    # revoke a key or disable a player. Empty must mean off, never open,
+    # same reasoning as join_invite_code above.
+    #
+    # CLAIM-ONLY (privacy-hardening pass): this token used to authenticate
+    # every /api/admin/* request directly (the X-Admin-Token header,
+    # compared with secrets.compare_digest -- see app/admin_api.py's own
+    # module docstring for the full history). It no longer does. Every
+    # real admin/operator action now goes through a signed-in account
+    # holding a role (account.role -- see app/db.py's own MIGRATIONS
+    # comment on that column, and app/admin_api.py's _role_guard()); this
+    # token's ONLY remaining power is POST /api/admin/roles/claim, which
+    # lets an already signed-in account with active two-factor
+    # authentication grant ITSELF the operator role. That is a single
+    # auditable event (admin_action_log), not an anonymous bypass -- the
+    # difference the whole redesign exists to make.
+    #
+    # Left set after bootstrap, this token remains a way to mint an
+    # ADDITIONAL operator (a second person, or recovery from a fresh
+    # account if every existing operator is unreachable) -- see that
+    # route's own docstring for why several accounts claiming with the
+    # same token is intentional, not a bug. Cleared once no more
+    # claiming is wanted; every already-granted role keeps working
+    # regardless (see _admin_surface_enabled()'s own comment for exactly
+    # what stays reachable once this is blank again).
     admin_token: str = ""
+
+    # Address-keyed rate limit on POST /api/admin/roles/claim -- same
+    # "without one this is a token-guessing oracle" reasoning
+    # account_link_key_rate_limit_attempts/window_seconds gives for its
+    # own endpoint just below, and the same independent-_BoundedHits-
+    # instance-per-call-site convention (app/auth.py's module docstring).
+    # This is the highest-value guessing target the whole roles feature
+    # adds -- a correct guess grants the OPERATOR role outright, not
+    # merely a player -- so it gets its own budget rather than sharing
+    # link-key's.
+    admin_claim_operator_rate_limit_attempts: int = 5
+    admin_claim_operator_rate_limit_window_seconds: int = 60
 
     # Rate limit on the status-check endpoint (/api/mc/status), keyed
     # per client address rather than per key -- a caller with no key,

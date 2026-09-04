@@ -241,6 +241,47 @@ def test_link_key_success(client, db_path):
     assert event == ("player_linked", "user")
 
 
+def test_link_key_relinking_the_same_already_linked_player_is_a_success_noop(client, db_path):
+    """The exact bug this session was created to fix: a retried/double
+    -clicked link-key call naming the player ALREADY linked to THIS
+    account is not a conflict -- the desired end state already holds.
+    Must return 200 with the player, same shape a fresh link returns,
+    and must NOT double the original account_link_event.
+    """
+    account_id, _ = _login(client, db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player(player_id, display_name, team, created_at, account_id) VALUES (?, ?, ?, ?, ?)",
+        (KEY_PLAYER_ID, "KeyHolder", "GREEN", int(time.time()), account_id),
+    )
+    conn.execute(
+        "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+        "VALUES (?, 'player_linked', ?, 'user', ?)",
+        (account_id, f"player_id={KEY_PLAYER_ID}", int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.post("/api/account/link-key", json={"api_key": GOOD_KEY})
+
+    assert resp.status_code == 200
+    assert resp.json()["player"] == {
+        "player_id": KEY_PLAYER_ID,
+        "display_name": "KeyHolder",
+        "team": "GREEN",
+    }
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT account_id FROM player WHERE player_id = ?", (KEY_PLAYER_ID,)).fetchone()
+    events = conn.execute(
+        "SELECT kind FROM account_link_event WHERE account_id = ?", (account_id,)
+    ).fetchall()
+    conn.close()
+    assert row[0] == account_id  # still linked
+    assert len(events) == 1  # the original event, not doubled by the retry
+
+
 def test_link_key_refused_when_account_already_has_a_player(client, db_path):
     account_id, _ = _login(client, db_path)
     _make_player(db_path, account_id=account_id)  # account already linked to a different player
