@@ -143,15 +143,27 @@ const PROVIDER_ICONS = {
 // it's purely decorative next to the visible label right beside it --
 // see this file's own header comment on the "generic" fallback for
 // when there is no icon) plus a `.signin-provider-label` span carrying
-// the actual "Sign in with {label}" text, which is also the button's
-// whole accessible name -- no separate aria-label needed, and none of
-// this changes what `link.textContent` reads back as. The brand
-// colours themselves are CSS, not this file's concern -- see
+// the actual "{verb} {label}" text, which is also the button's whole
+// accessible name -- no separate aria-label needed, and none of this
+// changes what `link.textContent` reads back as. The brand colours
+// themselves are CSS, not this file's concern -- see
 // .signin-provider-btn--github/--google/--discord in
 // account.css/join.css/link.css (each one, since this component's CSS
 // is duplicated per page the same way its markup is -- see this file's
 // own header comment).
-export function renderProviderButtons(providers, wrap) {
+//
+// `verb` defaults to "Sign in with", the only wording every existing
+// caller (this signed-out panel, frontend/link.js's own "sign in with
+// a method you already use" choice) has ever needed. account.js's
+// SIGNED-IN Sign-in methods panel is a second context for the exact
+// same `/auth/{provider}/start` redirect -- app/oauth_api.py's case 2
+// links the identity onto the already-logged-in account rather than
+// starting a new session -- where "Sign in with GitHub" would read as
+// though it logs the reader out first. That caller passes "Connect"
+// instead, the same verb this page's own per-identity "Disconnect"
+// button already uses for the opposite action, rather than this
+// module growing a second near-identical button-builder.
+export function renderProviderButtons(providers, wrap, verb = 'Sign in with') {
   wrap.replaceChildren();
   providers.forEach((p) => {
     const key = String(p.name || '').toLowerCase();
@@ -174,7 +186,7 @@ export function renderProviderButtons(providers, wrap) {
 
     const text = document.createElement('span');
     text.className = 'signin-provider-label';
-    text.textContent = `Sign in with ${label}`;
+    text.textContent = `${verb} ${label}`;
     link.appendChild(text);
 
     wrap.appendChild(link);

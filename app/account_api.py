@@ -131,6 +131,18 @@ from .sessions import (
     revoke_all_sessions,
     revoke_session,
 )
+# DELETE /api/account below re-verifies a live TOTP code or recovery
+# code before it will act, reusing these two functions rather than
+# re-implementing either -- see app/totp_api.py's DELETE /api/account/totp
+# (totp_disable()) for the existing route this borrows the "prove a
+# CURRENT factor before this destructive action proceeds" shape from.
+# Module-level, not a local import inside the route: unlike
+# app/checkin.py's helpers (kept local because that module drags in the
+# whole ingest/meshview/MQTT chain -- see the comment on that import
+# above), app/totp_api.py is exactly as light a session-scoped router as
+# this one, and it does not import this module back, so there is no
+# cycle to avoid by deferring it.
+from .totp_api import verify_and_consume_recovery_code, verify_and_consume_totp_code
 
 router = APIRouter()
 
@@ -1270,6 +1282,425 @@ async def use_identity_email_as_contact(
     return JSONResponse(
         {"ok": True, "email": _mask_email(email), "verified": True}, status_code=200
     )
+
+
+# ---- account deletion ------------------------------------------------------
+#
+# DELETE /api/account: self-service, irreversible, "delete the person,
+# keep the team" -- Matt's own resolution of the design tension this
+# route exists to answer. The alternative considered and rejected was
+# deleting the `player` row outright (mirroring what
+# app/admin_api.py's POST /api/admin/player/delete already does): a
+# player is not an island -- mc_tile.last_player_id, mc_tile_capture_log,
+# mc_tile_unique_painter, mc_checkin_award, month_award, and
+# place_activation all name a player_id from rows OTHER people are also
+# part of (a captured square's history, a month's published standings,
+# a check-in streak). Deleting the player row would mean retroactively
+# editing a shared, already-published record to serve one person's
+# deletion -- rewriting history everyone else who played that month
+# still sees. So this route does the opposite of admin delete on
+# purpose: every table that is genuinely this ONE person's own data --
+# their login, their sessions, their radios, their raw ping history --
+# is hard-deleted outright, while `player` itself survives, stripped of
+# everything that named who it was. What is left behind is exactly what
+# a logged-out visitor already sees looking at that square today: a
+# team took it, and nobody can say who. That is this project's own
+# standing rule -- "identity can be public, location can be public, the
+# link between them cannot" -- applied to the one case where the person
+# themselves is asking to be the one who can no longer be linked.
+#
+# Table-by-table disposition (every table this codebase's schema
+# stores a player_id or account_id in -- see app/db.py's SCHEMA --
+# falls into exactly one of these three groups, no fourth bucket
+# needed):
+#
+# HARD-DELETED (account-scoped -- _ACCOUNT_SCOPED_TABLES below):
+#   account_identity, account_session, account_password, account_totp,
+#   account_totp_recovery_code, account_totp_challenge,
+#   account_contact_email_token, account_link_event, and finally
+#   `account` itself. Every one of these is either a sign-in credential,
+#   a login session, or an audit trail of what THIS account did to
+#   ITSELF -- nothing here is shared with, or meaningful to, anyone
+#   else. account_session going away here is what makes the caller's
+#   own cookie stop working (see this route's own return path below --
+#   there is no separate "and also log them out" step, deleting the row
+#   the cookie names IS the logout).
+#
+# HARD-DELETED (player-scoped -- _PLAYER_SCOPED_TABLES below):
+#   api_key, player_node, checkin_node_name, mc_checkin_binding,
+#   mc_node_confirmation, mt_node_confirmation, player_last_fix,
+#   player_cell_ping, player_cell_repeater_credit, player_ingest_stat,
+#   join_token. Every one of these is keyed on player_id alone, holds
+#   nothing anyone but this player could be affected by losing (a
+#   radio binding, a credential, a raw location/timing trail kept for
+#   anti-cheat and diagnostics), and none of it is read by anything
+#   that produces a number someone ELSE'S standing depends on.
+#
+# TOMBSTONED, not deleted: `player` itself. display_name is overwritten
+# with a value that cannot collide and cannot be mistaken for a real
+# name (see _tombstone_display_name() below), disabled_at is set (the
+# same column app/admin_api.py's disable path already uses to mean
+# "not active"), and account_id is cleared (the player is no longer
+# claimable by, or attributable to, any account -- the same NULL state
+# a never-linked key-only player already sits in). team is left alone
+# on purpose: it is not identifying on its own, and every surviving
+# table below still needs it to keep meaning anything.
+#
+# LEFT COMPLETELY UNTOUCHED, now anonymous by construction: mc_tile,
+# mc_tile_capture_log, mc_tile_unique_painter, mc_checkin_award,
+# month_award, place_activation, player_team_change. Each of these
+# still carries this player's (now-stale) player_id, but every one of
+# them is a SHARED record -- a square's capture history, a month's
+# published standings, a check-in streak, a place activation credit --
+# that other players' own numbers are built out of, or that has already
+# been shown publicly with a name attached. Deleting or blanking a
+# player_id out of these would either break a join for everyone still
+# reading that history, or -- worse -- silently reassign a real event
+# to nobody, which is not privacy, it is data corruption. Instead, every
+# one of these already resolves a player_id to a display name by
+# joining against `player` at READ time (never by storing the name
+# redundantly) -- see e.g. app/results.py's own month-award/standings
+# queries -- so the moment the join above runs, the tombstoned
+# display_name is what every one of these tables now shows: the
+# capture stays real, the credit stays real, and the name attached to
+# it is gone. This is the entire mechanism the "keep the team" half of
+# Matt's decision relies on; it costs this route nothing further.
+#
+# What was verified against app/db.py's SCHEMA and found to need NO
+# entry above: account_pending_identity and email_login_token are
+# keyed on a raw provider identity / email address, never on account_id
+# at all -- they exist to hand a brand-new sign-in a token BEFORE any
+# account is chosen, so there is nothing here to attribute to this
+# account in the first place (and both already self-expire on their
+# own short TTL regardless). admin_action_log.actor_account_id is left
+# alone too, and deliberately not folded into the account-scoped list:
+# it is a system audit trail of admin/operator ACTIONS TAKEN, the exact
+# same "shared record, not personal data at rest" shape this route
+# already gives player_team_change/mc_checkin_award/month_award above --
+# an operator's account_id surviving in a log line of something THEY
+# DID to something or someone else is not a fact about the account
+# being deleted here in the way account_link_event's own rows are.
+#
+# Compare this deliberately against POST /api/admin/player/delete
+# (app/admin_api.py), which this route does NOT touch and NEVER should:
+# that route is the operator path (moderation/cleanup of a player,
+# possibly not this account holder, possibly against their wishes) and
+# behaves entirely differently on purpose -- it hard-deletes mc_tile/
+# mc_tile_score/mc_tile_capture/mc_tile_capture_log rows where the
+# target player is the last painter, and mc_tile_unique_painter, which
+# DOES rewrite square/capture history rather than merely anonymizing
+# it, and it does NOT touch player_last_fix, player_cell_repeater_credit,
+# join_token, checkin_node_name, mc_checkin_binding,
+# mc_node_confirmation, or mt_node_confirmation at all, leaving those
+# pointing at a player_id that no longer resolves to anything once the
+# player row itself is gone. Both of those facts are worth naming
+# plainly: next to this route, admin delete's own cascade now reads as
+# inconsistent -- it destroys shared history this route goes out of its
+# way to preserve, and it leaves orphaned player_id references in seven
+# tables this route makes sure never happens. That inconsistency is
+# reported, not fixed here -- admin delete is explicitly out of scope
+# for this change, and it is a genuinely different operation (a
+# moderation action against someone who may not have asked for it) that
+# deserves its own deliberate decision, not a drive-by edit riding
+# along with this one.
+
+# Every table keyed on account_id whose ENTIRE row belongs to this one
+# account and nothing else -- see this section's own comment above for
+# why each belongs here. `account` itself is deleted separately, last,
+# once every one of these has already been cleared.
+_ACCOUNT_SCOPED_TABLES = (
+    "account_identity",
+    "account_session",
+    "account_password",
+    "account_totp",
+    "account_totp_recovery_code",
+    "account_totp_challenge",
+    "account_contact_email_token",
+    "account_link_event",
+)
+
+# Every table keyed on player_id whose entire row belongs to this one
+# player and nothing else -- see this section's own comment above for
+# why each belongs here, and for the (deliberately longer) list of
+# player_id-keyed tables that are NOT here because other players'
+# standing is built out of them.
+_PLAYER_SCOPED_TABLES = (
+    "api_key",
+    "player_node",
+    "checkin_node_name",
+    "mc_checkin_binding",
+    "mc_node_confirmation",
+    "mt_node_confirmation",
+    "player_last_fix",
+    "player_cell_ping",
+    "player_cell_repeater_credit",
+    "player_ingest_stat",
+    "join_token",
+)
+
+# Fixed confirmation phrase for the one shape this route has no
+# display_name to check against: an account with no linked player at
+# all (POST /api/join was never finished, or POST /api/account/link-key
+# was never called). There is no name to type in that case, but the
+# same "prove you meant this, not a misclick" purpose the display_name
+# check below serves still applies, so this stands in for it -- an
+# exact-match literal, same case-sensitive comparison style as the
+# display_name check, chosen to read unambiguously as "yes, delete"
+# rather than something a person could type by accident.
+_NO_PLAYER_CONFIRM_PHRASE = "DELETE MY ACCOUNT"
+
+
+def _tombstone_display_name(player_id: int) -> str:
+    """The value player.display_name is overwritten with on deletion --
+    see this module's own "account deletion" section comment above for
+    the full reasoning; this is just the shape.
+
+    Cannot collide with a name a living player holds or could ever
+    register, by construction rather than by luck: app/join_api.py's
+    _validate_display_name() caps every player-CHOSEN display name at
+    32 characters (`1 <= len(name) <= 32`), and that is the ONLY path
+    that ever writes a display_name from user input -- there is no
+    rename route anywhere in this codebase (display_name is set once,
+    at registration, and never again outside this function and the
+    admin/join paths that also run through the same validator). The
+    fixed text below, BEFORE the player_id digits are even appended, is
+    already 35 characters -- past that 32-character ceiling on its own,
+    for every possible player_id including a hypothetically empty one.
+    No value this function can ever produce is therefore a value
+    _validate_display_name() could ever have accepted, for any
+    player_id, of any length, ever.
+    -- and cannot collide between two DIFFERENT deleted players either:
+    player_id is `player`'s own AUTOINCREMENT primary key (see
+    app/db.py's SCHEMA), so SQLite never reuses one, even for a row
+    this function tombstones rather than deletes -- there is exactly
+    one row in this database that will ever produce this exact string
+    for a given player_id, forever.
+    """
+    return f"Deleted player — account removed (#{player_id})"
+
+
+@router.delete("/api/account")
+async def delete_account(
+    request: Request, session: SessionPrincipal = Depends(require_session)
+) -> JSONResponse:
+    """Permanently and irreversibly delete the caller's own account --
+    see this module's "account deletion" section comment above for the
+    full table-by-table design and why `player` is tombstoned rather
+    than deleted. Nothing about this route is reachable on anyone's
+    behalf but the caller's own: there is no player_id or account_id in
+    the request body, only session.account_id/session.player_id,
+    resolved from the cookie itself, the same "nothing here for a
+    caller to get wrong the way a mistyped player_id could" reasoning
+    POST /api/account/rotate-key's own docstring gives.
+
+    ---- confirmation --------------------------------------------------
+
+    Body must carry `display_name` equal, EXACTLY (case-sensitive, no
+    trimming -- the same comparison POST /api/admin/player/delete's own
+    guard runs), to the caller's OWN player's current display_name, if
+    the account has a linked player. An account with NO linked player
+    has no display_name to check instead, so the same field must
+    instead exactly equal _NO_PLAYER_CONFIRM_PHRASE. Either way, a
+    mismatch is a plain refusal -- nothing is deleted, nothing is
+    partially deleted -- not a prompt to try again with a hint about
+    what went wrong (see the standard, deliberately unhelpful "display
+    name does not match" error every one of admin_api.py's own
+    display_name-guarded routes already returns, for the same "an
+    attacker fishing for the right value gets nothing back" reasoning).
+
+    ---- re-authentication ----------------------------------------------
+
+    This is account deletion reachable from a possibly-borrowed
+    browser: a session cookie alone proves someone was signed in at
+    some point, not that the person clicking "delete" right now is the
+    account holder and not, say, a housemate or a coworker at an
+    unattended desk. So a fresh credential is required on top of the
+    session, ONE of two shapes depending on what this specific account
+    actually has to offer -- never a credential this account cannot
+    possibly supply:
+
+    - If the account has an ACTIVATED TOTP secret (account_totp,
+      activated_at IS NOT NULL), a live `totp_code` or an unused
+      `totp_recovery_code` is required and verified the exact same way
+      DELETE /api/account/totp already does before it will turn TOTP
+      OFF (see that route's own docstring for why a proven CURRENT
+      factor is the bar for an action this consequential) -- reusing
+      verify_and_consume_totp_code()/verify_and_consume_recovery_code()
+      directly, not reimplementing either. TOTP is checked first, ahead
+      of password, when an account happens to hold both: it is strictly
+      the stronger proof (something currently held, not something a
+      browser's saved-password autofill could hand a borrower just as
+      readily as the account holder).
+    - Otherwise, if the account has a password (account_password), the
+      current `password` is required and checked with verify_password()
+      -- the same "prove the CURRENT one before accepting anything new"
+      shape POST /api/account/password's own change-password path
+      already uses.
+    - Otherwise -- an account reachable only through OAuth-provider
+      identities, with neither TOTP nor a password ever set -- nothing
+      further is required beyond the session and the confirmation
+      above. There is no third credential to ask for: this app has no
+      concept of "re-run an OAuth consent screen mid-session" (that is
+      a full redirect round trip through a provider that owns it, not a
+      value this request could carry), and asking for a secret the
+      account genuinely does not hold would not add a real barrier --
+      it would only ever be satisfiable by leaving the field blank,
+      which is no barrier at all. An OAuth-only account's real
+      protection here is the same one every other route in this module
+      already leans on: the provider's own session/cookie jar on
+      whatever device is signed into it.
+
+    No separate rate limiter guards the password/TOTP checks above --
+    same posture POST /api/account/password's own current_password
+    check already has today (no limiter there either): scrypt's own
+    cost already throttles a password-guessing loop to a handful of
+    attempts a second, TOTP guessing is bounded the same way DELETE
+    /api/account/totp's own `_disable_account_limiter` already bounds
+    it for that route (a fresh limiter instance here would just be a
+    second budget for the identical guessing problem, not additional
+    protection), and neither of those existing limiters is reused
+    directly here either, matching this codebase's own "a rate-limit
+    bucket is private to the one call site that owns it" convention
+    (see app/auth.py's module docstring).
+
+    ---- atomicity -------------------------------------------------------
+
+    Every delete and the one UPDATE (tombstoning `player`) run inside
+    ONE WriteSession -- app/db.py's global single-writer transaction
+    every write in this codebase already serializes through. Either
+    every row in _ACCOUNT_SCOPED_TABLES/_PLAYER_SCOPED_TABLES is gone,
+    the player row (if any) is tombstoned, and the account row itself
+    is gone, all in the same COMMIT -- or, on any exception anywhere in
+    that block, WriteSession's own __aexit__ rolls the whole transaction
+    back and nothing changed at all (see app/db.py's WriteSession
+    docstring). There is no window where some tables are cleared and
+    others are not: a half-deleted account is worse than a failed
+    request that can simply be retried.
+
+    ---- what "signed out afterward" actually is here ---------------------
+
+    account_session is one of the tables _ACCOUNT_SCOPED_TABLES deletes
+    -- including the row this very request's own cookie names. There is
+    no separate "and also revoke this session" step the way POST
+    /api/account/logout calls revoke_session(): by the time this
+    transaction commits, the row app/sessions.py's require_session()
+    would need to find on the caller's NEXT request no longer exists,
+    so the account is signed out as a direct consequence of what this
+    route already does to its own data, not an extra action bolted on.
+    clear_session_cookie() below only clears the browser's copy of a
+    token that already can't authenticate anything -- the same
+    belt-and-suspenders shape every other route in this module already
+    gives a dead session (see logout()/logout_all() just above).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        body = {}
+
+    confirm = body.get("display_name")
+    now = int(time.time())
+
+    async with WriteSession() as conn:
+        player_row = None
+        if session.player_id is not None:
+            player_row = conn.execute(
+                "SELECT player_id, display_name FROM player WHERE player_id = ?",
+                (session.player_id,),
+            ).fetchone()
+
+        if player_row is not None:
+            if not isinstance(confirm, str) or confirm != player_row["display_name"]:
+                return JSONResponse(
+                    {"error": "display name does not match"}, status_code=409
+                )
+        else:
+            if not isinstance(confirm, str) or confirm != _NO_PLAYER_CONFIRM_PHRASE:
+                return JSONResponse(
+                    {
+                        "error": f'type "{_NO_PLAYER_CONFIRM_PHRASE}" in display_name '
+                        f"to confirm -- this account has no linked player to name"
+                    },
+                    status_code=409,
+                )
+
+        totp_row = conn.execute(
+            "SELECT activated_at FROM account_totp WHERE account_id = ?",
+            (session.account_id,),
+        ).fetchone()
+        totp_active = totp_row is not None and totp_row["activated_at"] is not None
+
+        if totp_active:
+            code = body.get("totp_code")
+            recovery_code = body.get("totp_recovery_code")
+            ok = False
+            if isinstance(code, str) and code:
+                ok = verify_and_consume_totp_code(
+                    conn, account_id=session.account_id, code=code, now=now
+                )
+            if not ok and isinstance(recovery_code, str) and recovery_code:
+                ok = verify_and_consume_recovery_code(
+                    conn, account_id=session.account_id, raw_code=recovery_code, now=now
+                )
+            if not ok:
+                return JSONResponse(
+                    {"error": "a current two-factor code or recovery code is required"},
+                    status_code=401,
+                )
+        else:
+            existing_password = _load_password(conn, session.account_id)
+            if existing_password is not None:
+                password = body.get("password")
+                if not isinstance(password, str) or not password:
+                    return JSONResponse(
+                        {"error": "password is required"}, status_code=400
+                    )
+                if not verify_password(password, existing_password):
+                    return JSONResponse(
+                        {"error": "password is incorrect"}, status_code=401
+                    )
+
+        # ---- past this point, the request is fully authenticated and
+        # confirmed -- everything below is the actual, irreversible
+        # deletion. See this module's "account deletion" section
+        # comment above for why each table is here.
+        counts: dict[str, int] = {}
+
+        if player_row is not None:
+            player_id = player_row["player_id"]
+            for table in _PLAYER_SCOPED_TABLES:
+                c = conn.execute(
+                    f"DELETE FROM {table} WHERE player_id = ?", (player_id,)
+                )
+                counts[table] = c.rowcount
+
+            conn.execute(
+                "UPDATE player SET display_name = ?, disabled_at = ?, account_id = NULL "
+                "WHERE player_id = ?",
+                (_tombstone_display_name(player_id), now, player_id),
+            )
+
+        for table in _ACCOUNT_SCOPED_TABLES:
+            c = conn.execute(
+                f"DELETE FROM {table} WHERE account_id = ?", (session.account_id,)
+            )
+            counts[table] = c.rowcount
+
+        conn.execute("DELETE FROM account WHERE account_id = ?", (session.account_id,))
+
+    # Same cache-staleness fix POST /api/account/rotate-key and
+    # app/admin_api.py's player_delete/reissue already apply, after
+    # commit, so a key this transaction just revoked-by-deletion cannot
+    # keep authenticating at the ingest endpoint until its cache entry
+    # naturally expires (settings.mc_key_cache_seconds).
+    if player_row is not None:
+        ingestor = request.app.state.mc_ingestor
+        ingestor.invalidate_player(player_row["player_id"])
+
+    response = JSONResponse({"ok": True}, status_code=200)
+    clear_session_cookie(response)
+    return response
 
 
 # ---- player-facing data: stats / honors / checkins / checkin-health ------

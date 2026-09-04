@@ -12,8 +12,8 @@
  * /api/account/stats, GET /api/account/checkins, GET
  * /api/account/honors, DELETE /api/account/identity/{provider},
  * POST/DELETE /api/account/password, POST /api/account/contact-email,
- * POST /api/account/contact-email/use-identity, and POST
- * /api/account/rotate-key -- all documented in
+ * POST /api/account/contact-email/use-identity, POST
+ * /api/account/rotate-key, and DELETE /api/account -- all documented in
  * app/account_api.py, app/nodes_api.py, app/mc_api.py,
  * app/checkin_api.py, app/join_api.py, and app/oauth_api.py.
  * Self-contained, same as every other page script in this codebase: no
@@ -89,7 +89,7 @@ import {
   setupPasswordSignInForm,
   showAuthErrorFromQuery,
   PASSWORD_SIGNIN_AVAILABLE,
-} from './signin-email.js?v=20260904-1';
+} from './signin-email.js?v=20260904-2';
 
 // No local PROVIDER_LABELS map here -- app/oauth.py's PROVIDER_LABELS
 // is the single source of truth, and every API response this page
@@ -375,6 +375,131 @@ function renderIdentities(identities) {
 
     list.appendChild(li);
   });
+}
+
+// ---- Sign-in methods: connect another provider (signed-in state) ---------
+
+// The list just above (renderIdentities()) shows what's already
+// connected; this fills #account-identities-add-providers with what
+// ISN'T -- reusing renderSignedOut()'s exact same component
+// (fetchProviders() + renderProviderButtons(), both imported from
+// signin-email.js) rather than a second copy of it. The only two
+// things specific to this, signed-in, context: "email" is filtered out
+// here too (there is still no /auth/email/start redirect to point a
+// plain link at, and this page has no other way to add a second EMAIL
+// identity while signed in either -- adding one is out of scope for
+// this control, which only ever offers what GET /auth/providers lists),
+// and a provider this account already holds an identity for is filtered
+// out as well, using the SAME `identities` array renderIdentities() was
+// just called with, so the two lists can never show the same provider
+// twice between them.
+//
+// Clicking a button here hits the exact same `/auth/{provider}/start`
+// -> `/auth/{provider}/callback` round trip the signed-out panel's
+// buttons do -- no separate endpoint. What's different is only which
+// case app/oauth_api.py's resolve_oauth_callback() takes once that
+// callback lands: case 2 (a session already exists) links the new
+// identity onto THIS account and keeps the current session, rather
+// than case 1/3's fresh login. See recordProviderLinkAttempt() below
+// for why this also writes one line to sessionStorage before letting
+// that navigation proceed.
+async function renderAddIdentityProviders(identities) {
+  const wrap = document.getElementById('account-identities-add-providers');
+  const hint = document.getElementById('account-identities-add-hint');
+  if (!wrap) return;
+
+  const linkedProviders = new Set((identities || []).map((i) => i.provider));
+  const providers = await fetchProviders();
+  const addable = providers.filter((p) => p.name !== 'email' && !linkedProviders.has(p.name));
+
+  renderProviderButtons(addable, wrap, 'Connect');
+  if (hint) hint.hidden = addable.length !== 0;
+}
+
+// sessionStorage key recordProviderLinkAttempt()/
+// checkProviderLinkOutcome() below share -- see the pair's own
+// comments for the full round trip this exists to detect.
+const _PROVIDER_LINK_ATTEMPT_KEY = 'mw_account_provider_link_attempt';
+
+// How stale a recorded attempt can be and still be trusted as "this is
+// the flow that just finished" rather than some earlier, abandoned one
+// (a tab left open for hours, then finally closed and reopened to a
+// bookmarked /account) -- generous next to how long an actual OAuth
+// round trip takes, narrow enough that a genuinely old attempt is just
+// ignored rather than misreported.
+const _PROVIDER_LINK_ATTEMPT_MAX_AGE_MS = 15 * 60 * 1000;
+
+// Called once, at page load, on #account-identities-add-providers --
+// event delegation on the wrap rather than a listener per button, so
+// re-rendering that wrap's contents (renderAddIdentityProviders() runs
+// again after every Security-panel mutation) never has to re-wire
+// anything. Records which account this browser was signed in as right
+// before following one of these links out to a provider's consent
+// screen, in sessionStorage rather than a variable, because the
+// consent screen and the callback that follows it are both full
+// navigations away from and back to this page -- nothing kept only in
+// memory survives that round trip, and sessionStorage is scoped to
+// this tab and this origin, so it survives the trip through the
+// provider's own domain and back untouched (see MDN's own note on
+// Storage lifetime: a tab's storage area for an origin persists for as
+// long as the tab does, regardless of what other origins it visits in
+// between).
+//
+// What this is FOR: app/oauth_api.py's case 1 is checked BEFORE case
+// 2, unconditionally (see that module's own comment on
+// resolve_oauth_callback) -- an identity that already belongs to a
+// DIFFERENT account always logs in to THAT account instead of linking
+// onto whoever was already signed in, silently replacing the session
+// cookie. That outcome is a plain, successful redirect to /account
+// with no `auth_error` at all (only a failed attempt gets one -- see
+// _callback_error_response's own docstring), so it is otherwise
+// indistinguishable, from this page alone, from the intended case-2
+// outcome (linked onto the SAME account). Comparing the account id
+// recorded here against GET /api/account's own account_id once this
+// page reloads (checkProviderLinkOutcome() below) is the only signal
+// this page has for telling the two apart.
+function recordProviderLinkAttempt() {
+  try {
+    sessionStorage.setItem(
+      _PROVIDER_LINK_ATTEMPT_KEY,
+      JSON.stringify({ accountId: lastAccountData ? lastAccountData.account_id : null, ts: Date.now() }),
+    );
+  } catch (err) {
+    // Private browsing / storage disabled -- the account-switch check
+    // below just finds nothing and stays silent, same as a reader who
+    // never clicked one of these buttons at all.
+  }
+}
+
+function setupAddIdentityProviderTracking() {
+  const wrap = document.getElementById('account-identities-add-providers');
+  if (!wrap) return;
+  wrap.addEventListener('click', (e) => {
+    if (e.target.closest('a.signin-provider-btn')) recordProviderLinkAttempt();
+  });
+}
+
+// The other half of recordProviderLinkAttempt() above -- read once,
+// per page load, after GET /api/account's own account_id for THIS load
+// is known. Consumes (clears) the recorded attempt either way, so a
+// single click here only ever gets checked once, not on every
+// unrelated future page load.
+function checkProviderLinkOutcome(currentAccountId) {
+  let raw = null;
+  try { raw = sessionStorage.getItem(_PROVIDER_LINK_ATTEMPT_KEY); } catch (err) { raw = null; }
+  if (!raw) return;
+  try { sessionStorage.removeItem(_PROVIDER_LINK_ATTEMPT_KEY); } catch (err) { /* ignore */ }
+
+  let info = null;
+  try { info = JSON.parse(raw); } catch (err) { info = null; }
+  if (!info || info.accountId == null) return;
+  if (Date.now() - info.ts > _PROVIDER_LINK_ATTEMPT_MAX_AGE_MS) return;
+
+  if (info.accountId !== currentAccountId) {
+    showIdentitiesError(
+      'That sign-in method already belongs to a different account — you are now signed in as that account instead of the one you started from.',
+    );
+  }
 }
 
 // ---- Player (GET /api/account's own player field, or null) ---------------
@@ -3332,6 +3457,185 @@ async function handleRotateKeyConfirm() {
 }
 
 // ============================================================================
+// SECURITY: account deletion (DELETE /api/account)
+//
+// See app/account_api.py's DELETE /api/account docstring for the full
+// contract -- summarized here only enough to explain why this reads
+// lastAccountData rather than asking the server anything extra: the
+// confirmation field is the caller's OWN player's display_name, exact
+// case-sensitive match, EXCEPT for the one account shape with no
+// player to name at all (a fixed literal phrase, DELETE_ACCOUNT_NO_
+// PLAYER_PHRASE below), and the one extra credential the route demands
+// is whichever of TOTP/password this specific account actually holds
+// -- never both, never a placeholder for the one it lacks.
+// lastAccountData.totp.enabled and .has_password (GET /api/account)
+// are the same two fields renderTotpSection()/renderPasswordSection()
+// already trust for the identical question, reused here rather than a
+// second GET /api/account round trip just to ask again.
+// ============================================================================
+
+// The one literal DELETE /api/account accepts from an account with no
+// linked player -- see that route's own _NO_PLAYER_CONFIRM_PHRASE.
+// Duplicated here as a constant rather than fetched, same as every
+// other server-side literal this page already has to display exactly
+// (e.g. the six-digit TOTP shape check just below): it never changes
+// without both sides of this contract changing together.
+const DELETE_ACCOUNT_NO_PLAYER_PHRASE = 'DELETE MY ACCOUNT';
+
+function showDeleteAccountError(message) {
+  const el = document.getElementById('account-delete-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+// Opens the confirm block and picks which extra credential field (if
+// any) to show, fresh, every time -- never trusts whatever was left
+// visible from a previous open, since TOTP/password state can change
+// underneath this panel without a reload (turning TOTP on above, for
+// instance).
+function handleDeleteAccountBtnClick() {
+  document.getElementById('account-delete-error').hidden = true;
+
+  const player = lastAccountData && lastAccountData.player;
+  const nameLabel = document.getElementById('account-delete-name-label');
+  const nameInput = document.getElementById('f-account-delete-name');
+  nameInput.value = '';
+  // player.display_name is player-supplied -- textContent, not
+  // innerHTML, same discipline map2.js's own comment on this exact
+  // point already documents.
+  nameLabel.textContent = player
+    ? `Type your display name — ${player.display_name} — to confirm`
+    : `Type ${DELETE_ACCOUNT_NO_PLAYER_PHRASE} to confirm`;
+
+  const totpActive = !!(lastAccountData && lastAccountData.totp && lastAccountData.totp.enabled);
+  const hasPassword = !!(lastAccountData && lastAccountData.has_password);
+
+  const totpField = document.getElementById('account-delete-totp-field');
+  document.getElementById('f-account-delete-totp').value = '';
+  totpField.hidden = !totpActive;
+
+  const passwordField = document.getElementById('account-delete-password-field');
+  document.getElementById('f-account-delete-password').value = '';
+  // Only ever asked for when TOTP is NOT active -- DELETE /api/account
+  // checks TOTP first, ahead of password, exactly once, so this mirrors
+  // that same either/or rather than ever showing both fields at once.
+  passwordField.hidden = totpActive || !hasPassword;
+
+  document.getElementById('account-delete-confirm').hidden = false;
+  nameInput.focus();
+}
+
+function handleDeleteAccountCancel() {
+  document.getElementById('account-delete-confirm').hidden = true;
+}
+
+async function handleDeleteAccountSubmit(e) {
+  e.preventDefault();
+  const errEl = document.getElementById('account-delete-error');
+  errEl.hidden = true;
+
+  const player = lastAccountData && lastAccountData.player;
+  const totpActive = !!(lastAccountData && lastAccountData.totp && lastAccountData.totp.enabled);
+  const hasPassword = !!(lastAccountData && lastAccountData.has_password);
+
+  // Sent EXACTLY as typed -- the route's own comparison is
+  // case-sensitive with no trimming (see its docstring), so trimming
+  // here would only let a whitespace typo pass a client-side check it
+  // would still fail server-side.
+  const nameValue = document.getElementById('f-account-delete-name').value;
+  if (!nameValue) {
+    showDeleteAccountError(player
+      ? 'Type your display name to confirm.'
+      : `Type ${DELETE_ACCOUNT_NO_PLAYER_PHRASE} to confirm.`);
+    return;
+  }
+  const body = { display_name: nameValue };
+
+  if (totpActive) {
+    const code = document.getElementById('f-account-delete-totp').value.trim();
+    if (!code) {
+      showDeleteAccountError('Enter a current two-factor code or one of your recovery codes.');
+      return;
+    }
+    // Same "shape tells you which one" split handleTotpDisableSubmit()
+    // above already uses for the identical DELETE /api/account/totp
+    // choice -- a live code is always exactly 6 digits (app/totp.py's
+    // own _DIGITS), anything else is treated as a recovery code.
+    if (/^[0-9]{6}$/.test(code)) {
+      body.totp_code = code;
+    } else {
+      body.totp_recovery_code = code;
+    }
+  } else if (hasPassword) {
+    const password = document.getElementById('f-account-delete-password').value;
+    if (!password) {
+      showDeleteAccountError('Enter your current password.');
+      return;
+    }
+    body.password = password;
+  }
+
+  const submitBtn = document.getElementById('account-delete-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/account', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      // The response already cleared the session cookie server-side
+      // (app/account_api.py's delete_account() calls
+      // clear_session_cookie() before returning) -- a full navigation,
+      // not a fetch-and-rerender, specifically so nothing on this page
+      // tries another authenticated call against a session that no
+      // longer exists. Lands back on this same page's own signed-out
+      // view, with the banner #account-deleted-banner shows -- see
+      // that element's own comment in account.html.
+      window.location.assign('/account?deleted=1');
+      return;
+    }
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    const serverError = data && data.error;
+    let message;
+    if (res.status === 409) {
+      // Both of DELETE /api/account's two possible 409s (wrong display
+      // name; wrong/missing literal phrase for a no-player account)
+      // are already worded to read correctly on their own -- see that
+      // route's own docstring for why a mismatch gets no more detail
+      // than that.
+      message = serverError || 'That did not match. Check it and try again.';
+    } else if (res.status === 401) {
+      message = serverError || 'That code or password was not accepted. Check it and try again.';
+    } else if (res.status === 400) {
+      message = serverError || 'Something is missing from this request. Check the form and try again.';
+    } else {
+      message = serverError || 'Something went wrong. Try again in a moment.';
+    }
+    showDeleteAccountError(message);
+  } catch (err) {
+    showDeleteAccountError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+// Reads DELETE /api/account's own redirect-with-a-query-param landing
+// (see handleDeleteAccountSubmit() above and #account-deleted-banner's
+// comment in account.html) -- same shape signin-email.js's own
+// showAuthErrorFromQuery() already establishes for a failed sign-in
+// redirect, just success-toned and local to this page since account.js
+// is the only script that ever sets this particular query param.
+function showAccountDeletedBanner() {
+  const el = document.getElementById('account-deleted-banner');
+  if (!el) return;
+  if (new URLSearchParams(window.location.search).get('deleted') !== '1') return;
+  el.textContent = 'Your account has been deleted.';
+  el.hidden = false;
+}
+
+// ============================================================================
 // Load every player-scoped section -- called once a linked player is
 // confirmed (loadAccount() on boot, or right after a successful
 // connect-by-key). Each of these is independent and fails quietly on
@@ -3411,6 +3715,7 @@ async function refreshAccountCore() {
     const data = await res.json();
     lastAccountData = data;
     renderIdentities(data.identities);
+    await renderAddIdentityProviders(data.identities);
     renderSessions(data.sessions);
     renderPasswordSection(data);
     renderOwesPasswordBanner(data);
@@ -3467,6 +3772,7 @@ async function loadAccount() {
 
   lastAccountData = finalData;
   renderIdentities(finalData.identities);
+  await renderAddIdentityProviders(finalData.identities);
   renderPlayer(finalData.player);
   renderSessions(finalData.sessions);
   renderPasswordSection(finalData);
@@ -3474,6 +3780,16 @@ async function loadAccount() {
   renderTotpSection(finalData);
   renderAdminSection(finalData);
   renderContactEmail(finalData.contact_email, finalData.identities);
+
+  // Both read off this SAME load's account_id/query-string -- see
+  // showAuthErrorFromQuery()'s own docstring (signin-email.js) and
+  // checkProviderLinkOutcome()'s own comment above for the two
+  // failure/edge cases a signed-in "connect another provider" attempt
+  // can come back as. Run after renderIdentities() above, which starts
+  // every render by hiding #account-identities-error -- calling either
+  // of these first would just have that hide wipe them out again.
+  showAuthErrorFromQuery(document.getElementById('account-identities-error'));
+  checkProviderLinkOutcome(finalData.account_id);
 
   const hasPlayer = !!finalData.player;
   applyPlayerGate(hasPlayer);
@@ -3496,6 +3812,10 @@ function boot() {
   // failed sign-in redirect always lands in. See signin-email.js's own
   // showAuthErrorFromQuery() docstring for the message table.
   showAuthErrorFromQuery(document.getElementById('account-signin-error'));
+  // Same "nothing to wait on" reasoning as the call just above -- a
+  // just-completed DELETE /api/account also lands right back on this
+  // same signed-out view. See showAccountDeletedBanner()'s own comment.
+  showAccountDeletedBanner();
 
   document.getElementById('account-connect-form').addEventListener('submit', handleConnectSubmit);
   buildJoinTeamPicker();
@@ -3527,6 +3847,7 @@ function boot() {
     errorEl: document.getElementById('account-signin-email-error'),
     submitBtn: document.getElementById('account-signin-password-btn'),
   });
+  setupAddIdentityProviderTracking();
 
   setupAddRadioProtocolToggle();
   document.getElementById('account-add-radio-form').addEventListener('submit', handleAddRadioSubmit);
@@ -3558,6 +3879,10 @@ function boot() {
   document.getElementById('account-rotate-key-btn').addEventListener('click', handleRotateKeyBtnClick);
   document.getElementById('account-rotate-key-cancel-btn').addEventListener('click', handleRotateKeyCancel);
   document.getElementById('account-rotate-key-confirm-btn').addEventListener('click', handleRotateKeyConfirm);
+
+  document.getElementById('account-delete-btn').addEventListener('click', handleDeleteAccountBtnClick);
+  document.getElementById('account-delete-cancel-btn').addEventListener('click', handleDeleteAccountCancel);
+  document.getElementById('account-delete-form').addEventListener('submit', handleDeleteAccountSubmit);
 
   loadAccount();
 }

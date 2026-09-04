@@ -42,7 +42,7 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260904-2" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260904-3" />
   <link rel="stylesheet" href="/static/rules.css?v=20260904-3" />
   <!-- This page has no search box (Matt: your own settings, not
        something to search), but it still loads search.css for two
@@ -101,6 +101,15 @@
     <section id="account-signed-out" class="account-panel" hidden>
       <div class="account-title">Sign in</div>
       <p class="account-hint">Sign in to see your connected sign-in methods, your linked player, and your active sessions.</p>
+      <!-- DELETE /api/account clears the session cookie and sends the
+           browser here with ?deleted=1 (account.js's
+           handleDeleteAccountSubmit()) -- the same "land back on THIS
+           page's own signed-out view, banner set by a query param"
+           shape a failed sign-in already uses just below
+           (#account-signin-error / auth_error), reused here rather than
+           inventing a dedicated confirmation page. Read once, at boot,
+           by account.js's showAccountDeletedBanner(). -->
+      <div id="account-deleted-banner" class="account-banner" hidden></div>
       <!-- A failed sign-in attempt (GET /auth/{provider}/callback or GET
            /auth/email/callback) redirects back HERE now with a short
            `auth_error` code -- see app/oauth_api.py's
@@ -626,9 +635,19 @@
 
       <section class="account-panel">
         <h3 id="signin-methods" class="account-title">Sign-in methods</h3>
-        <p class="account-hint">Each of these is an independent way into this same account — add another any time from the join page.</p>
+        <p class="account-hint">Each of these is an independent way into this same account — connect another below any time.</p>
         <div id="account-identities-error" class="account-error" role="alert" hidden></div>
         <ul id="account-identities" class="account-identities"></ul>
+        <!-- Providers not yet linked to this account -- reuses the same
+             GET /auth/providers-sourced button component the signed-out
+             panel above renders from (see account.js's
+             renderAddIdentityProviders()), filtered to what
+             app/oauth_api.py's resolve_oauth_callback() case 2 will
+             actually accept: an unconfigured provider is never shown,
+             same as above, and a provider already in the list just
+             above is never offered a second time. -->
+        <p id="account-identities-add-hint" class="account-hint" hidden>No other sign-in methods are available to connect.</p>
+        <div id="account-identities-add-providers" class="signin-providers"></div>
       </section>
 
       <section class="account-panel">
@@ -827,6 +846,57 @@
         </div>
       </section>
 
+      <!-- DELETE ACCOUNT. The most destructive action on this page, so it
+           goes last, below even Sessions -- see app/account_api.py's
+           DELETE /api/account docstring for the full contract this form
+           drives. Same two-step "expand a confirm block, don't act on
+           one click" shape #account-rotate-key-confirm and
+           #account-totp-disable-confirm already use (reusing
+           .account-rotate-key-confirm/.account-warning-box-strong/
+           .account-confirm-actions rather than inventing new styling),
+           not a third, different pattern. The typed confirmation is the
+           caller's own display name (account.js fills the label in with
+           the real one from GET /api/account at click time) -- or, for
+           the rare account with no linked player at all, the literal
+           phrase the route itself specifies, since there's no name to
+           type instead. The two-factor field only ever appears when GET
+           /api/account's totp.enabled says this account actually has an
+           activated factor to prove; the current-password field only
+           ever appears when it does not, and the account holds a
+           password instead -- account.js's handleDeleteAccountBtnClick()
+           picks between them, never both, mirroring exactly which of
+           the two the route itself will demand. -->
+      <section class="account-panel">
+        <h3 id="delete-account" class="account-title">Delete account</h3>
+        <p class="account-hint">The most destructive action on this page — deletes your account and everything tied to it that isn't shared with your team.</p>
+        <div id="account-delete-error" class="account-error" role="alert" hidden></div>
+        <button type="button" id="account-delete-btn">Delete my account</button>
+        <div id="account-delete-confirm" class="account-rotate-key-confirm" hidden>
+          <div class="account-warning-box account-warning-box-strong">
+            <strong>This deletes your account. It cannot be undone.</strong>
+            <span>Every way you sign in — password, two-factor, and any connected sign-in provider — is destroyed, along with your session. Your API key stops working immediately, and any radios linked to your player are unbound. The squares your team already holds stay with the team; they just stop being credited to you.</span>
+          </div>
+          <form id="account-delete-form" novalidate autocomplete="off">
+            <label class="account-field">
+              <span id="account-delete-name-label">Type your display name to confirm</span>
+              <input type="text" id="f-account-delete-name" autocomplete="off" />
+            </label>
+            <label class="account-field" id="account-delete-totp-field" hidden>
+              <span>Code or recovery code</span>
+              <input type="text" id="f-account-delete-totp" autocomplete="off" />
+            </label>
+            <label class="account-field" id="account-delete-password-field" hidden>
+              <span>Current password</span>
+              <input type="password" id="f-account-delete-password" autocomplete="current-password" />
+            </label>
+            <div class="account-confirm-actions">
+              <button type="submit" id="account-delete-submit">Yes, delete my account</button>
+              <button type="button" id="account-delete-cancel-btn" class="account-link-btn">Cancel</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
         </div>
       </div>
 
@@ -834,7 +904,11 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260904-15" type="module"></script>
+  <footer class="mw-footer">
+    <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="/privacy">Privacy</a>.</p>
+  </footer>
+
+  <script src="/static/account.js?v=20260904-17" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>
