@@ -1,0 +1,313 @@
+/* =========================================================================
+   frontend/nav.css -- the site nav bar (wordmark, Map / Results / Rules /
+   Docs / About / Join / Account, the sign-out glyph, the theme switch,
+   the GitHub mark). Fixed, full width, across the very top of every page
+   that loads this file.
+
+   Consolidated out of a three-way duplicate: coverage.css, landing.css
+   and join.css each carried an identical copy of this whole block (see
+   join.css's own header comment on that file's copy for the fuller
+   history of why -- the pages never shared a stylesheet, so the nav's
+   rules were copied per page rather than factored out). This file is
+   step one of undoing that: it is landing.css's copy, moved here
+   verbatim, with landing.css's own copy deleted. landing.css was picked
+   as the source because its .mw-theme-btn rule was already correctly
+   ordered ahead of its own mobile override; coverage.css and join.css
+   both needed a second, later @media (max-width: 600px) block to fix
+   the same ordering bug, each with its own comment explaining why --
+   see either file's copy if this file's own history is ever in
+   question. One real behavioural difference was found while moving
+   this: landing.css's prefers-reduced-motion query below covers BOTH
+   .mw-nav-github and .mw-theme-btn, while coverage.css's and join.css's
+   copies cover only .mw-theme-btn, leaving the GitHub mark's transition
+   running under reduced motion on those two pages. This file keeps
+   landing.css's broader version -- narrower on two pages was
+   unintentional drift, not a decision anyone made on purpose.
+
+   Consolidation finished: every page that carries the nav (all 13
+   public pages plus admin.html) now loads this file instead of its own
+   copy, and coverage.css / join.css both had their duplicate blocks
+   removed. Diffing each of those two against this file surfaced no
+   further drift beyond the two documented above (the reduced-motion
+   scope, and the already-fixed .mw-theme-btn ordering) -- confirmed by
+   normalizing and comparing every rule in each file, not by eye.
+
+   --mw-nav-h is read by a page's own layout rules (top padding, sticky
+   offsets, scroll-margin-top) so content starts exactly at the bar's
+   bottom edge with no gap or overlap -- defined once here, on :root,
+   rather than once per owning stylesheet. Load this file after
+   theme.css (it reads --mw-panel / --mw-line / --mw-text-5 / --mw-accent
+   / --mw-friendly / --mw-crest, all defined there) and before any page
+   stylesheet that itself reads --mw-nav-h.
+   ========================================================================= */
+:root {
+  --mw-nav-h: 48px;
+}
+/* Below 600px the nav wraps (see the .mw-nav rule further down) and
+   --mw-nav-h has to track its real rendered height rather than one
+   fixed number, since browser sub-pixel rounding of the wrapped rows
+   genuinely produces three distinct heights across this range, not
+   two -- measured directly (getBoundingClientRect) at every integer
+   width from 320-700px, not estimated, SIGNED IN (a Playwright rig
+   with a seeded session cookie, both skins -- identical in both, since
+   nothing here is skin-dependent). Signed in is the widest the nav
+   ever gets: nav-auth.js adds a sign-out glyph next to Account once a
+   session is confirmed, and that extra item shifts every wrap point
+   below. The values below replace an earlier signed-out-only
+   measurement (600-523px/522-492px/491-320px, 63/89/88px) that was
+   off by 1-3px through most of this range -- confirmed by reproducing
+   the resulting admin console topbar overlap it caused (about 5px at
+   390px width, 1px at 600px, 0px at 1280px, where this range no
+   longer applies) on an unmodified public page, signed in, before
+   correcting these numbers.
+
+   Ordered widest-condition-first so each narrower @media (a subset of
+   the one above it) wins the cascade for its own range: 600-486px is
+   one row of links under the wordmark (64px total); 485-430px has the
+   theme switch and GitHub mark pushed to their own row below that
+   (92px); 429-320px is where the links themselves also wrap into two
+   rows, which nets out slightly SHORTER than the row above (89px) --
+   two rows of the smallest (10px-font) pills is shallower than one
+   full-size row of links plus a separate row for just the theme
+   switch and GitHub mark. */
+@media (max-width: 600px) {
+  :root { --mw-nav-h: 64px; }
+}
+@media (max-width: 485px) {
+  :root { --mw-nav-h: 92px; }
+}
+@media (max-width: 429px) {
+  :root { --mw-nav-h: 89px; }
+}
+
+.mw-nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--mw-nav-h);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  background: var(--mw-panel);
+  border-bottom: 1px solid var(--mw-line);
+  box-sizing: border-box;
+  /* Found while re-measuring --mw-nav-h above: line-height and
+     font-family are both inherited, not reset here, so a pill's real
+     rendered height (font-size + padding + border, driven by
+     line-height) and its real rendered WIDTH (driven by font-family --
+     even a fallback-only difference measurably shifts glyph widths)
+     both used to depend on whatever the HOST page's body set, not on
+     this file alone. Two separate drifts, both against admin.css
+     specifically: it sets body's line-height to 1.5 where
+     landing.css/join.css/coverage.css leave it at the UA default
+     ("normal"), which alone made every wrapped-row pill 4px taller on
+     /admin; and its font stack (system-ui, -apple-system, "Segoe UI",
+     sans-serif) is shorter than the one every other page uses
+     (-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+     Arial, sans-serif), which was enough sub-pixel width difference
+     per link to move the flex-wrap point at a handful of widths right
+     at each breakpoint's edge. Both are the kind of drift a shared
+     file is supposed to make impossible: the whole point of measuring
+     --mw-nav-h once is for it to be correct EVERYWHERE this file is
+     loaded, not just on whichever page it happened to get measured
+     on. Pinning both here (to "normal", and to the stack the majority
+     of pages already use) makes the nav's box a function of nav.css
+     alone again, matching the value every page's own layout math
+     (body padding, sticky offsets, scroll-margin-top) already
+     assumes. */
+  line-height: normal;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.mw-nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--mw-accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+/* A background rather than an <img src>, so the mark follows
+   --mw-crest the way every colour follows its token. The element keeps
+   an aria-label and role="img" since a background carries no alternative
+   text of its own. */
+.mw-nav-crest {
+  display: block;
+  height: 28px;
+  width: 28px;
+  flex: none;
+  background-image: var(--mw-crest);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.mw-nav-links {
+  display: flex;
+  gap: 4px;
+}
+.mw-nav-links a {
+  padding: 6px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--mw-text-5);
+  text-decoration: none;
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  background: var(--mw-panel);
+  white-space: nowrap;
+}
+.mw-nav-links a:hover { background: var(--mw-raised); color: var(--mw-accent); }
+.mw-nav-links a.active { color: var(--mw-accent); border-color: var(--mw-accent); }
+
+/* Signed-in indicator on the Account nav link -- see join.css's own
+   copy of this rule for the full reasoning; duplicated here for the
+   same reason the rest of the nav block is duplicated per owning
+   stylesheet. */
+.mw-nav-account-signed-in::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--mw-friendly);
+  vertical-align: middle;
+}
+
+/* Sign-out control next to Account -- see join.css's own copy of this
+   rule for the full reasoning; duplicated here for the same reason the
+   rest of the nav block is duplicated per owning stylesheet. */
+/* Icon, so it is sized as one: a square target rather than the text
+   padding this carried when it said "Sign out". It keeps the border the
+   nav links have, unlike the theme switch and GitHub glyphs beside it
+   which sit borderless at low opacity -- those are ambient chrome,
+   while this is an action somebody goes looking for, and it sits
+   immediately after Account where they will look. The svg carries
+   fill="currentColor", so color here is the only thing that needs to
+   move between skins. */
+.mw-nav-signout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  color: var(--mw-text-5);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  background: var(--mw-panel);
+  cursor: pointer;
+}
+.mw-nav-signout:hover { background: var(--mw-raised); color: var(--mw-accent); }
+.mw-nav-signout:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 2px;
+}
+.mw-nav-signout:disabled { opacity: 0.5; cursor: default; }
+
+/* GitHub mark: deliberately understated per the owner ("faded into the
+   background so its visible but not prominent") -- low opacity at rest,
+   full opacity on hover/focus. Lives inside .mw-nav-links (not a third
+   flex child of .mw-nav) so the existing brand/links space-between
+   layout is untouched -- it's just one more item in the links row. */
+.mw-nav-github {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  color: var(--mw-text-5);
+  opacity: 0.35;
+  text-decoration: none;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-nav-github svg { display: block; }
+
+/* The skin switch, sitting quietly beside the GitHub mark and styled to
+   match it: this is a preference, not a feature, and it should not
+   compete with the page links for attention. The half-filled circle is
+   the conventional glyph and needs no label to read as "appearance".
+   It is a <button> rather than a link because it changes the page you
+   are on rather than taking you somewhere. */
+.mw-theme-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  color: var(--mw-text-5);
+  opacity: 0.35;
+  border-radius: 4px;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.mw-theme-btn svg { display: block; }
+.mw-theme-btn:hover,
+.mw-theme-btn:focus-visible {
+  opacity: 1;
+  color: var(--mw-accent);
+}
+.mw-theme-btn[aria-pressed="true"] {
+  opacity: 0.85;
+  color: var(--mw-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-nav-github, .mw-theme-btn { transition: none; }
+}
+.mw-nav-github:hover,
+.mw-nav-github:focus-visible {
+  opacity: 1;
+  color: var(--mw-accent);
+}
+
+@media (max-width: 600px) {
+  /* Six page links plus Join, Account, the sign-out button (once
+     signed in), the theme switch and the GitHub mark no longer fit on
+     one row at phone widths even at this shrunk size -- they used to
+     run off the right edge past the viewport, reachable only by
+     scrolling sideways. Wrapping is the fix already used elsewhere in
+     this codebase (the contents rail's <ul> in rules.css, the admin
+     console's own nav in admin.css) rather than a horizontally
+     scrolling strip -- the owner has rejected that pattern outright --
+     or a hamburger that hides items a visitor needs (Account, not
+     least). The wordmark gets its own full-width row instead of
+     sharing one with the links: it needs its icon-plus-text kept
+     whole, so sharing a row would just leave a ragged, unpredictable
+     amount of room for the first line of links, and the admin nav
+     above never shares its row with anything else when it wraps
+     either. .mw-nav moves from a fixed one-line height to an
+     intrinsic (auto) one so it can grow to however many rows the
+     links need -- --mw-nav-h below is the measured result at each
+     width this rule applies to, kept in sync by hand since a CSS
+     variable cannot read a flex container's own rendered height. */
+  .mw-nav {
+    flex-wrap: wrap;
+    align-content: flex-start;
+    height: auto;
+    padding: 6px 8px;
+    gap: 4px 6px;
+  }
+  .mw-nav-brand { flex: 1 1 100%; font-size: 12px; gap: 6px; }
+  .mw-nav-crest { height: 22px; }
+  .mw-nav-links { flex: 1 1 100%; flex-wrap: wrap; row-gap: 4px; column-gap: 3px; }
+  .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
+  .mw-nav-signout { padding: 4px 6px; font-size: 10px; }
+  .mw-nav-github { padding: 4px; }
+  .mw-nav-github svg { width: 14px; height: 14px; }
+  /* Matches .mw-nav-github's own mobile shrink just above -- without
+     it this was the one item in the row still sized for desktop
+     (6px padding, 15px icon vs. every pill's 4px/10px here), which
+     made flex-wrap group items into rows of uneven height and put
+     the row split at an unpredictable width instead of a clean one
+     driven only by how many items fit. */
+  .mw-theme-btn { padding: 4px; }
+  .mw-theme-btn svg { width: 14px; height: 14px; }
+}

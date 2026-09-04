@@ -1781,14 +1781,6 @@ async function checkAccess() {
   await showApp();
 }
 
-async function signOut() {
-  try {
-    await fetch('/api/account/logout', { method: 'POST' });
-  } catch (e) { /* falling through to the redirect either way */ }
-  location.href = '/account';
-}
-
-document.getElementById('signout-btn').addEventListener('click', signOut);
 document.getElementById('refresh-btn').addEventListener('click', function () {
   setStatus('Refreshing...', false);
   // Goes through checkAccess(), not straight to refreshAll() -- this

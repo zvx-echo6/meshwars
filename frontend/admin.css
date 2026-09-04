@@ -68,7 +68,7 @@
    inventing a fourth version of the same button -- this is what keeps
    the panel looking like the rest of the site instead of a redesign.
    Quiet drops the fill for a lower-emphasis action (Edit, Cancel,
-   Refresh, Sign out). Danger is the one tier that leaves the accent
+   Refresh). Danger is the one tier that leaves the accent
    hue entirely: hostile border over an accent-deep wash, the same pair
    .landing-warning-box already uses elsewhere on the site to flag a
    warning, so a destructive action reads as a different KIND of
@@ -133,6 +133,10 @@ textarea:focus-visible {
   }
 }
 
+/* Top padding matches --mw-nav-h (frontend/nav.css) -- the site nav
+   above is position: fixed, so the page needs to start below it rather
+   than under it. Both .adm-login and .adm-topbar (further down) build
+   on this same offset: see their own comments. */
 body {
   background: var(--mw-page);
   color: var(--mw-text-2);
@@ -140,7 +144,7 @@ body {
   font-size: 15px;
   line-height: 1.5;
   margin: 0;
-  padding: 0 16px 80px;
+  padding: var(--mw-nav-h) 16px 80px;
 }
 
 .adm-wrap { max-width: 1080px; margin: 0 auto; }
@@ -149,8 +153,12 @@ body {
    Its own view. Until the token is accepted there is nothing to show,
    and a page of empty panels behind a text box does not communicate
    that -- it just looks broken. */
+/* min-height accounts for body's own top padding (--mw-nav-h, see
+   body's comment above) -- plain 100vh here would make this taller
+   than the viewport below the fixed nav and add a needless scrollbar
+   to what should be a single centered screen. */
 .adm-login {
-  min-height: 100vh;
+  min-height: calc(100vh - var(--mw-nav-h));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -235,9 +243,14 @@ body {
 }
 
 /* ---- the app shell --------------------------------------------------- */
+/* Sticks below the site nav (position: fixed, z-index: 1000 --
+   frontend/nav.css), not at the very top of the viewport -- top
+   matches --mw-nav-h so this bar stops exactly at the nav's bottom
+   edge on scroll, same offset body's own top padding already gives it
+   at rest. */
 .adm-topbar {
   position: sticky;
-  top: 0;
+  top: var(--mw-nav-h);
   z-index: 20;
   display: flex;
   align-items: center;
@@ -296,6 +309,11 @@ body {
   margin: 0 auto;
 }
 
+/* top/max-height: 43px was .adm-topbar's own measured height -- now
+   offset by --mw-nav-h on top of that (the site nav, further up
+   still) the same way .adm-topbar's own top offset is, so this sticks
+   directly under the topbar rather than under the topbar's old
+   pre-nav position. */
 .adm-nav {
   display: flex;
   flex-direction: column;
@@ -303,9 +321,9 @@ body {
   padding: 18px 10px 40px;
   border-right: 1px solid var(--mw-line);
   position: sticky;
-  top: 43px;
+  top: calc(var(--mw-nav-h) + 43px);
   align-self: start;
-  max-height: calc(100vh - 43px);
+  max-height: calc(100vh - var(--mw-nav-h) - 43px);
   overflow-y: auto;
 }
 
