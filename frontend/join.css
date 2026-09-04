@@ -902,8 +902,25 @@ body {
 :root {
   --mw-nav-h: 48px;
 }
+/* Below 600px the nav wraps (see the .mw-nav rule further down) and
+   --mw-nav-h has to track its real rendered height rather than one
+   fixed number, since browser sub-pixel rounding of the wrapped rows
+   genuinely produces three distinct heights across this range, not
+   two -- measured directly (getBoundingClientRect) at every width
+   from 320-600px, not estimated. Ordered widest-condition-first so
+   each narrower @media (a subset of the one above it) wins the
+   cascade for its own range: 600-523px is one row of links under the
+   wordmark (63px total); 522-492px has the theme switch join that
+   first row too (89px); 491-320px is back to two full rows of links
+   (88px) once nothing else fits on the first one. */
 @media (max-width: 600px) {
-  :root { --mw-nav-h: 40px; }
+  :root { --mw-nav-h: 63px; }
+}
+@media (max-width: 522px) {
+  :root { --mw-nav-h: 89px; }
+}
+@media (max-width: 491px) {
+  :root { --mw-nav-h: 88px; }
 }
 
 .mw-nav {
@@ -988,6 +1005,39 @@ body {
   vertical-align: middle;
 }
 
+/* Sign-out control, sitting right after the Account link -- created by
+   frontend/nav-auth.js only once GET /api/account confirms a live
+   session, so it is simply never in the DOM when signed out (no
+   hidden-by-default rule needed here). A <button>, not a link styled
+   to look like one, since it performs an action (ends the current
+   session) rather than navigating -- styled to match .mw-nav-links a
+   exactly, padding/border/type/case included, so it reads as one more
+   quiet nav item rather than a competing control. :focus-visible uses
+   the same outline shape signin.css already uses for its own custom
+   buttons (2px, var(--mw-accent), offset) rather than inventing a
+   second focus language. Duplicated in coverage.css and landing.css
+   for the same per-owning-stylesheet reason as the rest of this
+   block. */
+.mw-nav-signout {
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--mw-text-5);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  background: var(--mw-panel);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mw-nav-signout:hover { background: var(--mw-raised); color: var(--mw-accent); }
+.mw-nav-signout:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 2px;
+}
+.mw-nav-signout:disabled { opacity: 0.5; cursor: default; }
+
 /* GitHub mark: deliberately understated per the owner ("faded into the
    background so its visible but not prominent") -- low opacity at rest,
    full opacity on hover/focus. Lives inside .mw-nav-links (not a third
@@ -1012,11 +1062,37 @@ body {
 }
 
 @media (max-width: 600px) {
-  .mw-nav { padding: 0 8px; gap: 6px; }
-  .mw-nav-brand { font-size: 12px; gap: 6px; }
+  /* Six page links plus Join, Account, the sign-out button (once
+     signed in), the theme switch and the GitHub mark no longer fit on
+     one row at phone widths even at this shrunk size -- they used to
+     run off the right edge past the viewport, reachable only by
+     scrolling sideways. Wrapping is the fix already used elsewhere in
+     this codebase (the contents rail's <ul> in rules.css, the admin
+     console's own nav in admin.css) rather than a horizontally
+     scrolling strip -- the owner has rejected that pattern outright --
+     or a hamburger that hides items a visitor needs (Account, not
+     least). The wordmark gets its own full-width row instead of
+     sharing one with the links: it needs its icon-plus-text kept
+     whole, so sharing a row would just leave a ragged, unpredictable
+     amount of room for the first line of links, and the admin nav
+     above never shares its row with anything else when it wraps
+     either. .mw-nav moves from a fixed one-line height to an
+     intrinsic (auto) one so it can grow to however many rows the
+     links need -- --mw-nav-h below is the measured result at each
+     width this rule applies to, kept in sync by hand since a CSS
+     variable cannot read a flex container's own rendered height. */
+  .mw-nav {
+    flex-wrap: wrap;
+    align-content: flex-start;
+    height: auto;
+    padding: 6px 8px;
+    gap: 4px 6px;
+  }
+  .mw-nav-brand { flex: 1 1 100%; font-size: 12px; gap: 6px; }
   .mw-nav-crest { height: 22px; }
-  .mw-nav-links { gap: 3px; }
+  .mw-nav-links { flex: 1 1 100%; flex-wrap: wrap; row-gap: 4px; column-gap: 3px; }
   .mw-nav-links a { padding: 4px 6px; font-size: 10px; }
+  .mw-nav-signout { padding: 4px 6px; font-size: 10px; }
   .mw-nav-github { padding: 4px; }
   .mw-nav-github svg { width: 14px; height: 14px; }
 }
@@ -1050,6 +1126,22 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .mw-theme-btn { transition: none; }
+}
+
+/* Matches .mw-nav-github's own mobile shrink (further up, alongside
+   the rest of the wrapped .mw-nav rules) -- kept as its own block
+   here rather than joined into that one because this rule's base
+   (unshrunk) definition sits below that block in the file, and an
+   override needs to come after the rule it overrides to win the
+   cascade at equal specificity. Without this, .mw-theme-btn was the
+   one item in the row still sized for desktop (6px padding, 15px icon
+   vs. every pill's 4px/10px here), which made flex-wrap group items
+   into rows of uneven height and put the row split at an
+   unpredictable width instead of a clean one driven only by how many
+   items fit. */
+@media (max-width: 600px) {
+  .mw-theme-btn { padding: 4px; }
+  .mw-theme-btn svg { width: 14px; height: 14px; }
 }
 
 /* Site-wide footer -- same rule as .mw-nav above: this page does not
