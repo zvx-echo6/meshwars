@@ -53,6 +53,19 @@
         <button type="button" class="adm-nav-item" data-section="players">
           Players <span class="adm-nav-badge" id="nav-players"></span>
         </button>
+        <!-- Account-shaped, not player-shaped: everything else in this
+             nav is reached through a player. This section is the one
+             door onto an account with NO linked player at all (released
+             by "Release account link" above, or never claimed) -- see
+             admin.js's loadAccounts()/renderAccounts() for the full
+             reasoning. The badge counts accounts with no linked player,
+             not the total, the same "surface a problem, not a size"
+             role nav-attention's own badge plays on Overview -- this is
+             the one nav item on the whole page whose number is a count
+             of orphans, not a count of everything in the section. -->
+        <button type="button" class="adm-nav-item" data-section="accounts">
+          Accounts <span class="adm-nav-badge" id="nav-accounts"></span>
+        </button>
         <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
         <button type="button" class="adm-nav-item" data-section="nets">Nets</button>
         <button type="button" class="adm-nav-item" data-section="paint">Paint</button>
@@ -83,6 +96,15 @@
           <input type="text" id="player-search" class="adm-search" autocomplete="off"
                  placeholder="search by name or team" />
           <div id="players"></div>
+        </section>
+
+        <section class="adm-section" data-section="accounts" hidden>
+          <h2 class="adm-h2">Accounts <span class="adm-count" id="accounts-count"></span></h2>
+          <p class="adm-hint">Every account, not just the ones with a linked player. An account with no linked player is reached from here only &mdash; released by "Release account link" on a player above, or never claimed after signing in. Deleting an account removes it and its sign-in identities and sessions; if a player is linked, that player is tombstoned exactly the way "Delete player" leaves it.</p>
+          <input type="text" id="account-search" class="adm-search" autocomplete="off"
+                 placeholder="search by player name or account id" />
+          <label class="adm-check-label"><input type="checkbox" id="account-orphans-only" class="adm-check" /> No linked player only</label>
+          <div id="accounts"></div>
         </section>
 
         <section class="adm-section" data-section="checkins" hidden>
@@ -333,6 +355,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260905-4"></script>
+  <script src="/static/admin.js?v=20260905-5"></script>
 </body>
 </html>

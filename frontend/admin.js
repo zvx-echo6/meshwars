@@ -23,6 +23,7 @@
 let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/account
 let allPlayers = [];
 let expanded = new Set();   // player ids left open across a refresh
+let allAccounts = [];       // GET /api/admin/accounts -- every account, not just linked ones
 
 // Flips true the moment any /api/admin/* call first succeeds, and back
 // to false whenever showNoAccess() runs. This is the one piece of
@@ -624,6 +625,109 @@ async function loadPlayers() {
     allPlayers = await api('/api/admin/players');
     renderPlayers();
     setStatus('Loaded ' + allPlayers.length + ' players', false);
+  } catch (e) {
+    setStatus('Load failed: ' + e.message, true);
+  }
+}
+
+// ---- accounts -----------------------------------------------------------
+//
+// The account-shaped counterpart to Players above. GET
+// /api/admin/players lists every PLAYER and only ever reaches an
+// account by way of the player it happens to be linked to -- an
+// account with no linked player at all (released by "Release account
+// link" above, or never claimed after signing in) is invisible there.
+// GET /api/admin/accounts (app/admin_api.py) fixes that by listing
+// `account` directly; this section is its only consumer. Flat rows,
+// same .adm-row/.adm-mono/.adm-badge shape the Roles section below
+// already uses for one-row-per-account, rather than the expandable
+// .adm-player treatment Players uses -- there is exactly one action
+// here (delete), not a growing list of per-row controls, so a second
+// nested-detail affordance would add a click for no reason.
+
+function accountConfirmPhrase(a) {
+  // Mirrors app/admin_api.py's _admin_account_no_player_confirm()
+  // exactly. See that function's own docstring for why an orphan's
+  // confirmation is "DELETE ACCOUNT <id>" rather than a fixed literal:
+  // this page can show several orphans at once, and a fixed phrase
+  // would let one get pasted onto the wrong row without the text
+  // itself ever forcing a look at which row is actually being
+  // confirmed.
+  return a.player ? a.player.display_name : ('DELETE ACCOUNT ' + a.account_id);
+}
+
+function renderAccounts() {
+  const host = document.getElementById('accounts');
+  const q = (document.getElementById('account-search').value || '').trim().toLowerCase();
+  const orphansOnly = document.getElementById('account-orphans-only').checked;
+  host.replaceChildren();
+
+  const shown = allAccounts.filter((a) => {
+    if (orphansOnly && a.player) return false;
+    if (!q) return true;
+    if (String(a.account_id).includes(q)) return true;
+    return !!(a.player && a.player.display_name.toLowerCase().includes(q));
+  });
+
+  const orphanTotal = allAccounts.filter((a) => !a.player).length;
+  document.getElementById('accounts-count').textContent =
+    (shown.length === allAccounts.length
+      ? allAccounts.length + ' accounts'
+      : shown.length + ' of ' + allAccounts.length) +
+    (orphanTotal ? ', ' + orphanTotal + ' with no linked player' : '');
+
+  if (!shown.length) {
+    host.appendChild(el('div', { className: 'adm-row', text: 'No accounts match.' }));
+    return;
+  }
+
+  shown.forEach((a) => {
+    const row = el('div', { className: 'adm-row' });
+    row.appendChild(el('span', {
+      className: a.player ? 'adm-player-name' : '',
+      text: a.player ? a.player.display_name : 'no linked player',
+    }));
+    row.appendChild(el('span', { className: 'adm-mono', text: 'id ' + a.account_id }));
+    if (a.role) {
+      row.appendChild(el('span', {
+        className: 'adm-badge' + (a.role === 'operator' ? ' adm-badge-ok' : ''),
+        text: a.role,
+      }));
+    }
+    row.appendChild(el('span', {
+      className: 'adm-player-meta',
+      text: a.sign_in_methods + (a.sign_in_methods === 1 ? ' sign-in method' : ' sign-in methods') +
+        ' · created ' + fmtTs(a.created_at) + ' · last signed in ' + ago(a.last_login_at),
+    }));
+    row.appendChild(btn('Delete account', 'adm-btn-danger', async (b) => {
+      const who = a.player ? a.player.display_name : ('account ' + a.account_id);
+      const expected = accountConfirmPhrase(a);
+      const typed = window.prompt(
+        (a.player
+          ? ('Deleting removes the account, not what ' + who + ' earned — their squares, ' +
+             'capture history, month awards, and check-in awards all stay. ' + who +
+             ' is tombstoned the same way "Delete player" leaves them.\n\n')
+          : ('This account has no linked player — there is nothing to tombstone, only the ' +
+             'account itself and its sign-in identities and sessions go away.\n\n')) +
+        'Type ' + expected + ' to confirm.'
+      );
+      if (!typed) return;
+      b.disabled = true;
+      try {
+        await post('/api/admin/account/delete', { account_id: a.account_id, display_name: typed });
+        setStatus('Deleted account ' + a.account_id, false);
+        await refreshAll();
+      } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+    }));
+    host.appendChild(row);
+  });
+}
+
+async function loadAccounts() {
+  try {
+    allAccounts = await api('/api/admin/accounts');
+    renderAccounts();
+    setStatus('Loaded ' + allAccounts.length + ' accounts', false);
   } catch (e) {
     setStatus('Load failed: ' + e.message, true);
   }
@@ -1470,11 +1574,17 @@ function badge(id, value, bad) {
 
 async function refreshAll() {
   const loads = [
-    loadPlayers(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
+    loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
   ];
   if (myRole === 'operator') loads.push(loadRoles());
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
+  // Orphan count, not total account count -- see this badge's own
+  // comment in admin.html for why: the nav should surface a problem
+  // (accounts nothing else can reach), not restate a size Players'
+  // own badge already gives a close approximation of.
+  const orphanCount = allAccounts.filter((a) => !a.player).length;
+  badge('nav-accounts', orphanCount, orphanCount > 0);
 }
 
 function showNoAccess(message) {
@@ -1567,6 +1677,8 @@ document.querySelectorAll('.adm-nav-item').forEach((b) => {
   b.addEventListener('click', () => show(b.dataset.section));
 });
 document.getElementById('player-search').addEventListener('input', renderPlayers);
+document.getElementById('account-search').addEventListener('input', renderAccounts);
+document.getElementById('account-orphans-only').addEventListener('change', renderAccounts);
 document.getElementById('ci-award').addEventListener('click', function () { awardCheckin(this); });
 document.getElementById('nc-save').addEventListener('click', function () { saveConfig(this); });
 document.getElementById('pt-save').addEventListener('click', function () { savePaint(this); });

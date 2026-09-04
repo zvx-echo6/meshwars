@@ -84,6 +84,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from .account_api import (
     _ACCOUNT_SCOPED_TABLES,
     _PLAYER_SCOPED_TABLES,
+    _door_counts,
     _tombstone_display_name,
 )
 from .auth import new_rate_limit_bucket
@@ -397,6 +398,96 @@ async def admin_players(request: Request):
                     }
                     for k in keys
                 ],
+            })
+        return out
+    finally:
+        conn.close()
+
+
+@router.get("/api/admin/accounts")
+async def admin_accounts(request: Request):
+    """Every account on this deployment -- the account-shaped
+    counterpart GET /api/admin/players just above has never had. That
+    route lists every PLAYER, and only ever reaches an account BY WAY
+    OF the player it happens to be linked to (`account_id` on each row,
+    there purely so this file's own unlink-account route has something
+    to pass back) -- an account with no linked player at all is
+    invisible there, and reachable nowhere else in this admin surface.
+    That state is real and already reachable two ways: POST
+    /api/admin/player/unlink-account deliberately creates it, and any
+    account that signs in but never finishes POST /api/join or POST
+    /api/account/link-key starts there and can sit there indefinitely.
+    This route is the fix: list every row in `account` directly, not
+    every row reachable through `player`.
+
+    Never the account's email/OAuth identities, password hash, TOTP
+    secret, or session tokens -- none of that is safe to hand to the
+    browser, the same "never the key hash itself, only enough to
+    identify it" rule GET /api/admin/players already applies to
+    api_key.key_hash just above. What IS safe and useful for an
+    operator deciding what to do with a row:
+
+      - account_id, so this can be passed straight to POST
+        /api/admin/account/delete below.
+      - The linked player's id and CURRENT display_name, if any --
+        None when the account is orphaned, which is the one fact this
+        whole route exists to surface. This is the SAME display_name
+        column POST /api/admin/account/delete's own confirmation check
+        reads, never a name captured or cached anywhere else, so what
+        this listing shows an operator to type can never go stale
+        against what that route will actually check it against.
+      - role (account.role) -- None for an ordinary account, 'admin'
+        or 'operator' for a role holder; the same column
+        /api/admin/roles already reads and the same value
+        POST /api/admin/account/delete's own role guard checks below,
+        surfaced here purely so an operator can see at a glance which
+        rows that guard will refuse to an admin.
+      - sign_in_methods -- how many DOORS this account can currently be
+        reached through (every account_identity provider it holds,
+        plus one more if it has a password set), via
+        app/account_api.py's own _door_counts() -- the same helper GET
+        /api/account's own Security panel already builds its
+        per-identity "can this be removed" answer from, reused here
+        rather than a second count that could drift from it. Never
+        WHICH providers or WHAT email address -- a bare count is
+        enough for an operator to tell "this account still has ways to
+        sign in" from "this is a dead husk with nothing behind it",
+        without exposing anything about who it belongs to.
+      - created_at / last_login_at (account's own columns) -- when it
+        first appeared and when it was last actually used, so a
+        long-dead orphan reads differently on sight from one created
+        five minutes ago by someone mid-join.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+
+    conn = connect()
+    try:
+        accounts = conn.execute(
+            "SELECT account_id, created_at, last_login_at, role FROM account "
+            " ORDER BY account_id"
+        ).fetchall()
+        out = []
+        for a in accounts:
+            player_row = conn.execute(
+                "SELECT player_id, display_name FROM player WHERE account_id = ?",
+                (a["account_id"],),
+            ).fetchone()
+            per_provider, has_password = _door_counts(conn, a["account_id"])
+            out.append({
+                "account_id": a["account_id"],
+                "player": (
+                    {
+                        "player_id": player_row["player_id"],
+                        "display_name": player_row["display_name"],
+                    }
+                    if player_row is not None else None
+                ),
+                "role": a["role"],
+                "sign_in_methods": sum(per_provider.values()) + (1 if has_password else 0),
+                "created_at": a["created_at"],
+                "last_login_at": a["last_login_at"],
             })
         return out
     finally:
@@ -1408,6 +1499,231 @@ async def admin_player_unlink_account(request: Request):
         },
         status_code=200,
     )
+
+
+def _admin_account_no_player_confirm(account_id: int) -> str:
+    """The confirmation text POST /api/admin/account/delete below
+    requires when its target account has no linked player to name --
+    the account-shaped counterpart to app/account_api.py's own
+    _NO_PLAYER_CONFIRM_PHRASE (DELETE /api/account's fixed fallback for
+    the identical "nothing to name" situation, reached only ever
+    against the caller's OWN account).
+
+    Deliberately NOT that same fixed literal, and not a fixed literal
+    at all: DELETE /api/account is safe with one constant phrase
+    because a signed-in caller only ever has ONE account to delete --
+    their own -- so there is nothing for the phrase to disambiguate
+    between. This route is reached from a LIST (GET /api/admin/accounts
+    above) that can show several orphaned accounts side by side, which
+    is exactly the situation a fixed phrase is dangerous in: an
+    operator working down that list could paste the same
+    "DELETE MY ACCOUNT"-shaped literal against every row in turn
+    without the text itself ever forcing them to look at which row
+    they are confirming. Folding the target's own account_id into the
+    required text closes that gap the same way the display_name check
+    already does for a linked account -- producing a correct answer
+    for THIS row requires having actually read THIS row -- at the
+    small, deliberate cost of an operator typing an id instead of a
+    fixed phrase for the no-player case specifically.
+    """
+    return f"DELETE ACCOUNT {account_id}"
+
+
+@router.post("/api/admin/account/delete")
+async def admin_account_delete(request: Request):
+    """Permanently remove an ACCOUNT -- the account-shaped door onto
+    the exact same act POST /api/admin/player/delete already performs
+    from the player side. See that route's own docstring for the full
+    "delete the person, keep the team" model and the table-by-table
+    reasoning (_PLAYER_SCOPED_TABLES, _ACCOUNT_SCOPED_TABLES, and
+    _tombstone_display_name() -- all imported from
+    app/account_api.py, same as that route, not redefined here, so
+    there remains exactly one definition of what "deletion" means in
+    this codebase); only what genuinely differs from reaching this
+    through a player_id is documented below.
+
+    ---- why this route exists at all ----------------------------------
+
+    Every admin/operator action before this one is PLAYER-shaped:
+    every route lives under /api/admin/player/*, reached by naming a
+    player_id. An account with no linked player -- released by POST
+    /api/admin/player/unlink-account above, or simply never claimed by
+    a finished join -- has no player_id to name, so it was reachable by
+    NOTHING: not listed (see GET /api/admin/accounts above, its own fix
+    for the same gap), not actionable, its sign-in identities and
+    sessions left sitting there indefinitely. This route closes that
+    door the same way the listing route opens it: by acting on
+    `account` directly, never by way of `player`.
+
+    ---- what is different from POST /api/admin/player/delete ----------
+
+    - The target is `account_id`, not `player_id` -- the caller names
+      the account, not a player. The target's LINKED player, if any
+      (looked up here, never passed in), is tombstoned exactly the way
+      player/delete tombstones its own target: every
+      _PLAYER_SCOPED_TABLES row for it hard-deleted, then `player`
+      itself overwritten via _tombstone_display_name() and disabled.
+      An orphaned account simply has no player row to run that half
+      against -- the account-scoped half below is the entire operation
+      for it, same as DELETE /api/account's own "no linked player"
+      case.
+    - Confirmation is still typing something that proves the operator
+      means THIS target specifically, not a generic "yes, delete" --
+      the same purpose the display_name check already serves
+      everywhere else in this file. When a player is linked, that is
+      exactly the same check, unchanged: the player's CURRENT
+      display_name, case-sensitive, no trimming. When the account is
+      orphaned, there is no display_name to check, so the confirmation
+      is instead "DELETE ACCOUNT <account_id>" -- see
+      _admin_account_no_player_confirm() just above for why this is a
+      per-target literal rather than reusing app/account_api.py's own
+      fixed _NO_PLAYER_CONFIRM_PHRASE.
+
+    ---- the same role guard, carried across ----------------------------
+
+    Identical rule to POST /api/admin/player/delete's own "an admin
+    cannot use this route to reach a role-holder" (see that route's
+    docstring for the full reasoning, reused here verbatim, right down
+    to the 409-not-401-not-403 shape): once the target account is
+    resolved, if it holds a role (admin or operator) AND the caller's
+    own rank is exactly "admin" (never "operator"), the deletion is
+    refused before anything is written. This route is a second door
+    onto the same role-holding accounts /api/admin/roles/* already
+    keeps out of an admin's reach -- skipping this check here, on the
+    theory that an account-shaped route is somehow a different act
+    from a player-shaped one, would silently reopen exactly the
+    escalation that guard exists to close, just reached by account_id
+    instead of player_id. An operator may still delete a role-holding
+    account through this route, the same as through player/delete.
+
+    The caller's rank is read via `_role_guard(request,
+    return_role=True)`, the same single read player/delete's own
+    docstring explains at length -- reused here rather than a second,
+    separate query against `account.role`.
+
+    ---- atomicity -------------------------------------------------------
+
+    One WriteSession, same primitive player/delete uses: every
+    player-scoped delete (if a player is linked), the tombstone UPDATE
+    (if any), every account-scoped delete, and the account row itself
+    commit together in one COMMIT, or -- on any exception -- none of
+    them happen at all.
+    """
+    guard = await _role_guard(request, return_role=True)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session, caller_role = guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    account_id = body.get("account_id") if isinstance(body, dict) else None
+    confirm = body.get("display_name") if isinstance(body, dict) else None
+    if not isinstance(account_id, int) or isinstance(account_id, bool):
+        return JSONResponse({"error": "account_id is required"}, status_code=400)
+    if not isinstance(confirm, str) or not confirm:
+        return JSONResponse({"error": "display_name is required"}, status_code=400)
+
+    now = int(time.time())
+    async with WriteSession() as conn:
+        account_row = conn.execute(
+            "SELECT role FROM account WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        if account_row is None:
+            return JSONResponse({"error": "account not found"}, status_code=404)
+
+        player_row = conn.execute(
+            "SELECT player_id, display_name FROM player WHERE account_id = ?",
+            (account_id,),
+        ).fetchone()
+
+        if player_row is not None:
+            if confirm != player_row["display_name"]:
+                return JSONResponse(
+                    {"error": "display name does not match"}, status_code=409
+                )
+        else:
+            expected = _admin_account_no_player_confirm(account_id)
+            if confirm != expected:
+                return JSONResponse(
+                    {
+                        "error": f'type "{expected}" in display_name to confirm -- '
+                        "this account has no linked player to name"
+                    },
+                    status_code=409,
+                )
+
+        # See this route's own docstring, "the same role guard, carried
+        # across", and POST /api/admin/player/delete's "an admin cannot
+        # use this route to reach a role-holder" for the full
+        # reasoning -- identical rule, just checked directly against
+        # the target account this route was already given, rather than
+        # one resolved from a player row first.
+        if caller_role == "admin" and account_row["role"] is not None:
+            return JSONResponse(
+                {
+                    "error": f"that account holds the {account_row['role']} role — "
+                    "an admin cannot delete an account that holds a role; "
+                    "an operator can still do this"
+                },
+                status_code=409,
+            )
+
+        # See app/account_api.py's "account deletion" section comment
+        # for why each table below is here and why `player` survives,
+        # tombstoned, instead of being deleted too.
+        counts: dict[str, int] = {}
+        player_id = player_row["player_id"] if player_row is not None else None
+        display_name = player_row["display_name"] if player_row is not None else None
+
+        if player_id is not None:
+            for table in _PLAYER_SCOPED_TABLES:
+                c = conn.execute(
+                    f"DELETE FROM {table} WHERE player_id = ?", (player_id,)
+                )
+                counts[table] = c.rowcount
+            conn.execute(
+                "UPDATE player SET display_name = ?, disabled_at = ?, account_id = NULL "
+                "WHERE player_id = ?",
+                (_tombstone_display_name(player_id), now, player_id),
+            )
+
+        for table in _ACCOUNT_SCOPED_TABLES:
+            c = conn.execute(
+                f"DELETE FROM {table} WHERE account_id = ?", (account_id,)
+            )
+            counts[table] = c.rowcount
+        conn.execute("DELETE FROM account WHERE account_id = ?", (account_id,))
+
+        detail = f"account_id={account_id}"
+        if player_id is not None:
+            detail += f" player_id={player_id} ({display_name}, also tombstoned)"
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="account_delete",
+            detail=detail, now=now,
+        )
+
+    # Same reasoning as player/delete: a deleted account's player, if
+    # any, may still hold a key cached as live at the ingest endpoint --
+    # invalidate it immediately rather than waiting out the cache TTL.
+    if player_id is not None:
+        ingestor = request.app.state.mc_ingestor
+        ingestor.invalidate_player(player_id)
+
+    log.info(
+        "admin: deleted account %d%s: %s",
+        account_id,
+        f" (also tombstoned player {player_id})" if player_id is not None else "",
+        counts,
+    )
+    return {
+        "deleted": True,
+        "account_id": account_id,
+        "player_id": player_id,
+        "display_name": display_name,
+        "counts": counts,
+    }
 
 
 # ---- public API clients ------------------------------------------------
