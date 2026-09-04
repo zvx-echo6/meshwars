@@ -289,14 +289,18 @@ function renderAttention(list) {
       body.appendChild(el('p', { className: 'adm-hint', text: g.fix }));
       g.items.forEach((a) => {
         const row = el('div', { className: 'adm-row' });
-        row.appendChild(el('strong', { text: a.player }));
-        row.appendChild(el('span', { text: a.detail }));
-        row.appendChild(btn('Open', 'adm-btn-quiet', () => {
+        const info = el('div', { className: 'adm-row-info' });
+        info.appendChild(el('strong', { text: a.player }));
+        info.appendChild(el('span', { text: a.detail }));
+        row.appendChild(info);
+        const actions = el('div', { className: 'adm-row-actions' });
+        actions.appendChild(btn('Open', 'adm-btn-quiet', () => {
           expanded.add(a.player_id);
           renderPlayers();
           const node = document.getElementById('player-' + a.player_id);
           if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }));
+        row.appendChild(actions);
         // checkin_unreachable used to offer an inline "Register" box here
         // that called POST /api/admin/checkin/binding to hand-set a
         // fallback check-in name. That route is gone -- the fix now is
@@ -331,17 +335,20 @@ function renderSeasons(boards) {
   boards.forEach((b) => {
     if (!b.season_id) return;
     const row = el('div', { className: 'adm-row' });
-    row.appendChild(el('strong', { text: b.board === 'mc' ? 'MeshCore' : 'Meshtastic' }));
-    row.appendChild(el('span', { text: 'season ' + b.season_id }));
-    row.appendChild(el('span', { text: b.squares + ' squares held' }));
-    row.appendChild(el('span', { text: 'ends ' + fmtTs(b.ends_at) }));
+    const info = el('div', { className: 'adm-row-info' });
+    info.appendChild(el('strong', { text: b.board === 'mc' ? 'MeshCore' : 'Meshtastic' }));
+    info.appendChild(el('span', { text: 'season ' + b.season_id }));
+    info.appendChild(el('span', { text: b.squares + ' squares held' }));
+    info.appendChild(el('span', { text: 'ends ' + fmtTs(b.ends_at) }));
+    row.appendChild(info);
 
+    const actions = el('div', { className: 'adm-row-actions' });
     const days = el('input', { type: 'number', value: '30' });
     days.style.width = '5rem';
-    row.appendChild(el('span', { text: 'extend by' }));
-    row.appendChild(days);
-    row.appendChild(el('span', { text: 'days' }));
-    row.appendChild(btn('Apply', 'adm-btn-quiet', async (bt) => {
+    actions.appendChild(el('span', { text: 'extend by' }));
+    actions.appendChild(days);
+    actions.appendChild(el('span', { text: 'days' }));
+    actions.appendChild(btn('Apply', 'adm-btn-quiet', async (bt) => {
       const n = parseInt(days.value, 10);
       if (!n || n < 1) { setStatus('Enter a number of days', true); return; }
       bt.disabled = true;
@@ -355,6 +362,7 @@ function renderSeasons(boards) {
         bt.disabled = false;
       }
     }));
+    row.appendChild(actions);
     host.appendChild(row);
   });
 }
@@ -363,9 +371,12 @@ function renderSeasons(boards) {
 
 function renderRadio(p, r) {
   const row = el('div', { className: 'adm-row' });
-  row.appendChild(el('span', { className: 'adm-mono', text: r.protocol + ':' + r.node_ref }));
-  row.appendChild(el('span', { text: 'bound ' + fmtTs(r.bound_at) }));
-  row.appendChild(btn('Remove', 'adm-btn-quiet', async (b) => {
+  const info = el('div', { className: 'adm-row-info' });
+  info.appendChild(el('span', { className: 'adm-mono', text: r.protocol + ':' + r.node_ref }));
+  info.appendChild(el('span', { text: 'bound ' + fmtTs(r.bound_at) }));
+  row.appendChild(info);
+  const actions = el('div', { className: 'adm-row-actions' });
+  actions.appendChild(btn('Remove', 'adm-btn-quiet', async (b) => {
     const typed = window.prompt('Type ' + p.display_name + ' to confirm removing ' + r.node_ref);
     if (!typed) return;
     b.disabled = true;
@@ -378,20 +389,24 @@ function renderRadio(p, r) {
       await refreshAll();
     } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
   }));
+  row.appendChild(actions);
   return row;
 }
 
 function renderKey(k) {
   const row = el('div', { className: 'adm-row' });
-  row.appendChild(el('span', { className: 'adm-mono', text: k.key_hash_prefix }));
-  row.appendChild(el('span', { text: 'issued ' + fmtTs(k.issued_at) }));
-  row.appendChild(el('span', { text: 'last used ' + fmtTs(k.last_seen_at) }));
-  row.appendChild(el('span', {
+  const info = el('div', { className: 'adm-row-info' });
+  info.appendChild(el('span', { className: 'adm-mono', text: k.key_hash_prefix }));
+  info.appendChild(el('span', { text: 'issued ' + fmtTs(k.issued_at) }));
+  info.appendChild(el('span', { text: 'last used ' + fmtTs(k.last_seen_at) }));
+  info.appendChild(el('span', {
     className: 'adm-badge ' + (k.revoked ? 'adm-badge-bad' : 'adm-badge-ok'),
     text: k.revoked ? 'revoked' : 'active',
   }));
+  row.appendChild(info);
   if (!k.revoked) {
-    row.appendChild(btn('Revoke', 'adm-btn-quiet', async (b) => {
+    const actions = el('div', { className: 'adm-row-actions' });
+    actions.appendChild(btn('Revoke', 'adm-btn-quiet', async (b) => {
       b.disabled = true;
       try {
         await post('/api/admin/revoke', { key_hash_prefix: k.key_hash_prefix });
@@ -399,6 +414,7 @@ function renderKey(k) {
         await refreshAll();
       } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
     }));
+    row.appendChild(actions);
   }
   return row;
 }
@@ -695,9 +711,9 @@ function recoveryConfirmPhrase(a, actionPhrase) {
 // reasoning. Clearing restores the account to whoever can still prove
 // they hold ITS OTHER credentials; it never lets the operator sign in
 // as them.
-function appendAccountRecoveryActions(row, a) {
+function appendAccountRecoveryActions(actions, a) {
   if (a.totp_active) {
-    row.appendChild(btn('Disable two-factor', 'adm-btn-danger', async (b) => {
+    actions.appendChild(btn('Disable two-factor', 'adm-btn-danger', async (b) => {
       const who = a.player ? a.player.display_name : ('account ' + a.account_id);
       const expected = recoveryConfirmPhrase(a, 'DISABLE TWO-FACTOR');
       const typed = window.prompt(
@@ -727,7 +743,7 @@ function appendAccountRecoveryActions(row, a) {
   const doorCount = (a.identity_providers || []).length + (a.has_password ? 1 : 0);
 
   if (a.has_password && doorCount > 1) {
-    row.appendChild(btn('Clear password', 'adm-btn-danger', async (b) => {
+    actions.appendChild(btn('Clear password', 'adm-btn-danger', async (b) => {
       const who = a.player ? a.player.display_name : ('account ' + a.account_id);
       const expected = recoveryConfirmPhrase(a, 'CLEAR PASSWORD');
       const typed = window.prompt(
@@ -747,7 +763,7 @@ function appendAccountRecoveryActions(row, a) {
   }
 
   (doorCount > 1 ? (a.identity_providers || []) : []).forEach((provider) => {
-    row.appendChild(btn('Remove ' + provider, 'adm-btn-danger', async (b) => {
+    actions.appendChild(btn('Remove ' + provider, 'adm-btn-danger', async (b) => {
       const who = a.player ? a.player.display_name : ('account ' + a.account_id);
       const expected = recoveryConfirmPhrase(a, 'REMOVE SIGN-IN');
       const typed = window.prompt(
@@ -777,12 +793,12 @@ function appendAccountRecoveryActions(row, a) {
 // only ever runs when myRole === 'operator' -- an admin's own session
 // would just 401 on either route, so an admin never even sees a
 // control that would fail.
-function appendAccountRoleActions(row, a) {
+function appendAccountRoleActions(actions, a) {
   if (myRole !== 'operator') return;
   const who = a.player ? a.player.display_name : ('account ' + a.account_id);
 
   if (!a.role) {
-    row.appendChild(btn('Grant admin', 'adm-btn', async (b) => {
+    actions.appendChild(btn('Grant admin', 'adm-btn', async (b) => {
       b.disabled = true;
       try {
         await post('/api/admin/roles/grant', { account_id: a.account_id });
@@ -799,7 +815,7 @@ function appendAccountRoleActions(row, a) {
   // demote them, and granting onto an existing admin is a no-op this
   // row has no need to offer. Revoke has no such restriction in either
   // direction (see that route's own docstring).
-  row.appendChild(btn('Revoke', 'adm-btn-danger', async (b) => {
+  actions.appendChild(btn('Revoke', 'adm-btn-danger', async (b) => {
     // A plain confirm, not the typed confirmation the recovery actions
     // below use -- revoke only strips an elevated role, leaving the
     // account, its data, and its ordinary sign-in untouched (unlike
@@ -845,16 +861,17 @@ function renderAccounts() {
 
   shown.forEach((a) => {
     const row = el('div', { className: 'adm-row' });
+    const info = el('div', { className: 'adm-row-info' });
     // No linked player is the one state Players can never surface at
     // all (see this section's own docstring) -- a badge here, not a
     // plain unstyled name-shaped blank, so it reads as a state rather
     // than an absence of one.
-    row.appendChild(a.player
+    info.appendChild(a.player
       ? el('span', { className: 'adm-player-name', text: a.player.display_name })
       : el('span', { className: 'adm-badge adm-badge-attn', text: 'no linked player' }));
-    row.appendChild(el('span', { className: 'adm-mono', text: 'id ' + a.account_id }));
+    info.appendChild(el('span', { className: 'adm-mono', text: 'id ' + a.account_id }));
     if (a.role) {
-      row.appendChild(el('span', {
+      info.appendChild(el('span', {
         className: 'adm-badge' + (a.role === 'operator' ? ' adm-badge-ok' : ''),
         text: a.role,
       }));
@@ -876,10 +893,16 @@ function renderAccounts() {
         ? document.createTextNode('last signed in ' + ago(a.last_login_at))
         : el('span', { className: 'adm-badge adm-badge-attn', text: 'never signed in' }),
     ]);
-    row.appendChild(meta);
-    appendAccountRoleActions(row, a);
-    appendAccountRecoveryActions(row, a);
-    row.appendChild(btn('Delete account', 'adm-btn-danger', async (b) => {
+    info.appendChild(meta);
+    row.appendChild(info);
+
+    // All of a row's buttons -- role, recovery, delete -- land in one
+    // actions group so they wrap onto a second line as a unit, never
+    // individually (see .adm-row-actions in admin.css).
+    const actions = el('div', { className: 'adm-row-actions' });
+    appendAccountRoleActions(actions, a);
+    appendAccountRecoveryActions(actions, a);
+    actions.appendChild(btn('Delete account', 'adm-btn-danger', async (b) => {
       const who = a.player ? a.player.display_name : ('account ' + a.account_id);
       const expected = accountConfirmPhrase(a);
       const typed = window.prompt(
@@ -899,6 +922,7 @@ function renderAccounts() {
         await refreshAll();
       } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
     }));
+    row.appendChild(actions);
     host.appendChild(row);
   });
 }
@@ -1606,16 +1630,19 @@ async function loadApiClients() {
     }
     list.forEach((c) => {
       const row = el('div', { className: 'adm-row' });
-      row.appendChild(el('span', { className: 'adm-mono', text: c.key_hash_prefix }));
-      row.appendChild(el('strong', { text: c.label }));
-      row.appendChild(el('span', { text: 'issued ' + fmtTs(c.created_at) }));
-      row.appendChild(el('span', { text: 'last used ' + fmtTs(c.last_seen_at) }));
-      row.appendChild(el('span', {
+      const info = el('div', { className: 'adm-row-info' });
+      info.appendChild(el('span', { className: 'adm-mono', text: c.key_hash_prefix }));
+      info.appendChild(el('strong', { text: c.label }));
+      info.appendChild(el('span', { text: 'issued ' + fmtTs(c.created_at) }));
+      info.appendChild(el('span', { text: 'last used ' + fmtTs(c.last_seen_at) }));
+      info.appendChild(el('span', {
         className: 'adm-badge ' + (c.revoked ? 'adm-badge-bad' : 'adm-badge-ok'),
         text: c.revoked ? 'revoked' : 'active',
       }));
+      row.appendChild(info);
       if (!c.revoked) {
-        row.appendChild(btn('Revoke', 'adm-btn-quiet', async (b) => {
+        const actions = el('div', { className: 'adm-row-actions' });
+        actions.appendChild(btn('Revoke', 'adm-btn-quiet', async (b) => {
           if (!window.confirm('Revoke "' + c.label + '"? Anything using it stops within a minute.')) return;
           b.disabled = true;
           try {
@@ -1623,6 +1650,7 @@ async function loadApiClients() {
             await loadApiClients();
           } catch (e) { window.alert('Failed: ' + e.message); b.disabled = false; }
         }));
+        row.appendChild(actions);
       }
       host.appendChild(row);
     });

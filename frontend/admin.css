@@ -601,6 +601,37 @@ body {
   border-top: 1px solid var(--mw-line);
 }
 
+/* Facts (name, ids, badges, the meta line) live in their own group,
+   same purpose .adm-net-info serves for nets below -- they wrap freely
+   on their own line lengths without dragging the action buttons
+   around. */
+.adm-row-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Every button a row appends used to land as a direct sibling of its
+   facts in .adm-row above -- each button was its own flex item on that
+   one wrapping container, so it wrapped on its own: one row kept all
+   its buttons inline, the next dropped one, another dropped all three,
+   and the list read as ragged rather than as a table. Actions now live
+   in one group instead, so .adm-row's own flex-wrap carries the whole
+   group to a new line together, never mid-group -- right-aligned via
+   margin-left: auto when it fits beside the facts, full-width beneath
+   them at phone width (see the 620px rule below, matching
+   .adm-player-meta's same breakpoint). */
+.adm-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
 .adm-mono {
   font-family: ui-monospace, Menlo, monospace;
   font-size: 0.75rem;
@@ -789,4 +820,8 @@ body {
      the viewport instead of wrapping under the name. */
   .adm-player-row { flex-wrap: wrap; }
   .adm-player-meta { margin-left: 0; width: 100%; }
+  /* Same push: an actions group that wrapped onto its own line by
+     itself would otherwise still hug the right edge via its
+     margin-left: auto, ending up an odd short line off to one side. */
+  .adm-row-actions { margin-left: 0; width: 100%; }
 }
