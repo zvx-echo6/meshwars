@@ -52,6 +52,24 @@ SESSION_COOKIE_NAME = "mw_session"
 # two.
 _TOKEN_BYTES = 32
 
+# Grace period before a dead account_session row (expired, or revoked)
+# is actually deleted -- same 3600s (1 hour) figure app/oauth_api.py's
+# _sweep_stale_rows() and app/totp_api.py's _sweep_stale_challenges()
+# already use for the identical "hashed single-use/session ticket,
+# dead for a while, sweep it" shape, reused here rather than invented
+# fresh so this codebase keeps one answer to "how long is a dead
+# auth-ticket row kept around before deletion," not three. The grace
+# itself protects nothing about a LIVE session (see
+# _sweep_stale_sessions()'s own comment: the WHERE clause already
+# can't touch a live row regardless of this value) -- it exists purely
+# so a row that just went revoked or just expired is not yanked out
+# from under a request that is mid-flight against it right this
+# instant (an operator glancing at the table moments after a logout,
+# a racing read against the write that revoked it), while still
+# keeping the window a permanent record could theoretically be
+# inspected in to about an hour, not indefinitely.
+_SWEEP_GRACE_SECONDS = 3600  # 1 hour
+
 
 # ---- result types -------------------------------------------------------
 
@@ -94,6 +112,55 @@ class SessionPrincipal:
 
 # ---- create / verify / touch --------------------------------------------
 
+def _sweep_stale_sessions(conn: sqlite3.Connection, now: int) -> None:
+    """Deletes account_session rows that are definitively dead --
+    expired, or revoked -- and have been for at least
+    _SWEEP_GRACE_SECONDS. This is the privacy-hardening half of that
+    table's own comment in app/db.py: before this, a session row was
+    only ever flagged (revoked_at set on logout; expires_at simply
+    passing on its own) and never actually removed, so one row
+    accumulated per login, per device, forever. Nothing here changes
+    what a live session's own visible behaviour is -- see
+    app/account_api.py's _sessions_out(), which already filters to
+    `revoked_at IS NULL AND expires_at > now` and so already stops
+    showing a session the instant it dies, well before this sweep ever
+    gets to it.
+
+    Same inline shape app/oauth_api.py's _sweep_stale_rows() and
+    app/totp_api.py's _sweep_stale_challenges() already use for their
+    own tables: called from create_session() below, in the SAME
+    WriteSession transaction as the INSERT that is already happening,
+    not from a timer or a cron. That is deliberate here specifically
+    because create_session() is the lowest-frequency write this module
+    makes -- once per login, bounded by how often real people actually
+    sign in -- unlike verify_session() below, which runs on
+    essentially every authenticated request and is exactly the path a
+    sweep must NOT be added to (an unconditional DELETE on every
+    request would make the sweep itself a latency cost on the
+    request that has nothing to do with cleanup). A deployment that
+    sees a login once a week sweeps once a week; one that never sees a
+    login never runs this at all.
+
+    The WHERE clause is written so the grace period can only ever
+    delay a delete, never widen it into a live row: `expires_at`
+    is compared against `cutoff` (now - grace), not `now`, so a row
+    only matches the first arm once it has been expired for a full
+    grace period, and a session whose expires_at is still in the
+    future -- the definition of "live" -- can never satisfy
+    `expires_at < cutoff` no matter how large or small the grace
+    constant is. Likewise the second arm requires revoked_at to be
+    NOT NULL before it is compared at all, so a never-revoked row
+    can never match it either. There is no value of now or grace that
+    makes this delete a live session (expires_at in the future AND
+    revoked_at NULL) -- both arms are structurally false for it.
+    """
+    cutoff = now - _SWEEP_GRACE_SECONDS
+    conn.execute(
+        "DELETE FROM account_session WHERE expires_at < ? OR (revoked_at IS NOT NULL AND revoked_at < ?)",
+        (cutoff, cutoff),
+    )
+
+
 async def create_session(
     account_id: int, *, device_label: str | None
 ) -> str:
@@ -114,6 +181,13 @@ async def create_session(
     (see that table's own comment in app/db.py) means there is no path
     left, anywhere, that stores an address, so create_session() simply
     has no parameter for one to be passed through.
+
+    Also sweeps this table's own long-dead rows (see
+    _sweep_stale_sessions() above for the predicate and why this is
+    the right trigger point) in the same transaction as the INSERT
+    below -- login is the one write this module makes often enough to
+    keep the table from growing unboundedly, and rare enough that
+    running a DELETE alongside it is not a cost anyone would notice.
     """
     raw_token = secrets.token_urlsafe(_TOKEN_BYTES)
     token_hash = hash_secret(raw_token)
@@ -126,6 +200,7 @@ async def create_session(
             ") VALUES (?, ?, ?, ?, ?, ?)",
             (token_hash, account_id, now, expires_at, now, device_label),
         )
+        _sweep_stale_sessions(conn, now)
     return raw_token
 
 

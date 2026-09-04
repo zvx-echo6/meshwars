@@ -412,6 +412,143 @@ def test_require_session_revoked_token_is_401(db_path):
     assert exc_info.value.status_code == 401
 
 
+# ---- stale-row sweep (app/sessions.py's _sweep_stale_sessions) -----------
+#
+# The sweep only ever runs inline inside create_session() (see that
+# function's own docstring for why login is the trigger point, not a
+# timer) -- so every test below drives it the same way: force a
+# target row into whatever dead-and-old shape it wants to test, then
+# call create_session() again (for an unrelated account, so its own
+# fresh row can never be the one under test) to fire the sweep, and
+# only then assert on the target row.
+
+def test_sweep_removes_a_long_expired_session(db_path):
+    account_id = _make_account(db_path)
+    raw_token = _run(create_session(account_id, device_label=None))
+    token_hash = _run(verify_session(raw_token)).token_hash
+
+    # Expired well past the grace period -- definitively dead.
+    conn = sqlite3.connect(db_path)
+    stale_cutoff = int(time.time()) - 7200  # 2 hours ago, grace is 1 hour
+    conn.execute(
+        "UPDATE account_session SET expires_at = ? WHERE token_hash = ?",
+        (stale_cutoff, token_hash),
+    )
+    conn.commit()
+    conn.close()
+
+    other_account = _make_account(db_path)
+    _run(create_session(other_account, device_label=None))  # fires the sweep
+
+    assert _row_for_token(db_path, token_hash) is None
+
+
+def test_sweep_removes_a_revoked_session_once_past_grace(db_path):
+    account_id = _make_account(db_path)
+    raw_token = _run(create_session(account_id, device_label=None))
+    token_hash = _run(verify_session(raw_token)).token_hash
+    _run(revoke_session(token_hash))
+
+    # Push revoked_at back past the grace period by hand -- a real
+    # logout only just happened, but the sweep should treat a logout
+    # from long ago the same as one from just now, once grace elapses.
+    conn = sqlite3.connect(db_path)
+    old_revoke = int(time.time()) - 7200  # 2 hours ago, grace is 1 hour
+    conn.execute(
+        "UPDATE account_session SET revoked_at = ? WHERE token_hash = ?",
+        (old_revoke, token_hash),
+    )
+    conn.commit()
+    conn.close()
+
+    other_account = _make_account(db_path)
+    _run(create_session(other_account, device_label=None))  # fires the sweep
+
+    assert _row_for_token(db_path, token_hash) is None
+
+
+def test_sweep_leaves_a_revoked_session_inside_grace(db_path):
+    account_id = _make_account(db_path)
+    raw_token = _run(create_session(account_id, device_label=None))
+    token_hash = _run(verify_session(raw_token)).token_hash
+    _run(revoke_session(token_hash))  # revoked_at = now, well inside grace
+
+    other_account = _make_account(db_path)
+    _run(create_session(other_account, device_label=None))  # fires the sweep
+
+    # Still present -- the grace period exists precisely so a session
+    # that just went dead is not yanked out from under a concurrent
+    # reader.
+    assert _row_for_token(db_path, token_hash) is not None
+
+
+def test_sweep_never_removes_a_live_session(db_path, monkeypatch):
+    """A live session (expires_at in the future, revoked_at NULL) must
+    survive the sweep no matter what -- checked here even with the
+    grace period forced to zero, since the WHERE clause itself, not
+    the grace constant, is what protects a live row (see
+    _sweep_stale_sessions()'s own comment on why no value of grace can
+    make it match).
+    """
+    import app.sessions as sessions_module
+    monkeypatch.setattr(sessions_module, "_SWEEP_GRACE_SECONDS", 0)
+
+    account_id = _make_account(db_path)
+    raw_token = _run(create_session(account_id, device_label=None))
+    token_hash = _run(verify_session(raw_token)).token_hash
+
+    other_account = _make_account(db_path)
+    _run(create_session(other_account, device_label=None))  # fires the sweep
+
+    assert _row_for_token(db_path, token_hash) is not None
+    assert _run(verify_session(raw_token)).status == "ok"
+
+
+def test_swept_session_fails_authentication_the_same_way_a_revoked_one_does(db_path):
+    """Once a dead row is actually deleted, presenting its old cookie
+    must be indistinguishable, to the caller, from that session having
+    been revoked -- both go through require_session()'s single
+    `result.status != "ok"` check into the exact same 401
+    {"error": "unauthorized"} response (see require_session()'s own
+    docstring: it never reveals which failure mode applied). This test
+    proves that holds for "not_found because the row was swept," not
+    just "not_found because the token was never real."
+    """
+    account_id = _make_account(db_path)
+    raw_token = _run(create_session(account_id, device_label=None))
+    token_hash = _run(verify_session(raw_token)).token_hash
+
+    conn = sqlite3.connect(db_path)
+    stale_cutoff = int(time.time()) - 7200
+    conn.execute(
+        "UPDATE account_session SET expires_at = ? WHERE token_hash = ?",
+        (stale_cutoff, token_hash),
+    )
+    conn.commit()
+    conn.close()
+
+    other_account = _make_account(db_path)
+    _run(create_session(other_account, device_label=None))  # fires the sweep
+    assert _row_for_token(db_path, token_hash) is None  # row is really gone
+
+    # A revoked session hits 401 via SessionResult("revoked", ...).
+    revoked_account = _make_account(db_path)
+    revoked_raw = _run(create_session(revoked_account, device_label=None))
+    revoked_hash = _run(verify_session(revoked_raw)).token_hash
+    _run(revoke_session(revoked_hash))
+
+    swept_result = _run(verify_session(raw_token))
+    assert swept_result.status == "not_found"
+
+    with pytest.raises(HTTPException) as swept_exc:
+        _run(require_session(_request_with_cookie(raw_token)))
+    with pytest.raises(HTTPException) as revoked_exc:
+        _run(require_session(_request_with_cookie(revoked_raw)))
+
+    assert swept_exc.value.status_code == revoked_exc.value.status_code == 401
+    assert swept_exc.value.detail == revoked_exc.value.detail == "unauthorized"
+
+
 # ---- privacy-hardening migration (db._migrate_session_privacy) -----------
 #
 # These build the OLD pre-migration table shape by hand (SCHEMA itself

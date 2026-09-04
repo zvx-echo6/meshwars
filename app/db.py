@@ -1422,7 +1422,7 @@ CREATE TABLE IF NOT EXISTS account_identity (
 );
 CREATE INDEX IF NOT EXISTS idx_account_identity_account ON account_identity(account_id);
 
--- One row per login session, active or historical. token_hash is a
+-- One row per login session. token_hash is a
 -- SHA-256 digest of the actual session token (app/sessions.py reuses
 -- app/mc_ingest.py's hash_secret() for this -- see that module's own
 -- comment for why this app deliberately never grows a second hasher
@@ -1446,7 +1446,12 @@ CREATE INDEX IF NOT EXISTS idx_account_identity_account ON account_identity(acco
 -- (every session on the account) -- checked ahead of expires_at on
 -- every verify, so a revoked-but-not-yet-expired token stops working
 -- on the very next request, rather than waiting out its natural
--- sliding expiry.
+-- sliding expiry. Neither revoked_at nor a passed expires_at leaves
+-- the row sitting here forever, either -- app/sessions.py's
+-- create_session() sweeps rows that are expired or revoked, past a
+-- grace period, in the same transaction as every new login (see that
+-- module's _sweep_stale_sessions() for the predicate and why login is
+-- the trigger, not a timer).
 --
 -- device_label is NOT a security control -- nothing here pins a
 -- session to it, and nothing rejects a request whose device changed.
