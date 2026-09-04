@@ -19,12 +19,11 @@ body {
 }
 
 .join-wrap {
-  /* Fluid up to the same real maximum as /about (landing.css), so the
-     header and the explanatory "Where it's played" panel can use a wide
-     screen's extra width. The join flow itself does NOT grow with this
-     -- see #join-flow-panel below, which stays capped at the original
-     comfortable reading width and centered inside whatever room this
-     wrapper has. */
+  /* Matches rules.css's own .rules-wrap -- this page now carries the
+     same page-header-plus-search-plus-contents-rail format /docs,
+     /rules and /account use (rules.css's .rules-header/.rules-layout/
+     .rules-toc, loaded here alongside this file), and a 210px rail
+     plus a reading column need the same room those pages give it. */
   max-width: 1160px;
   margin: 0 auto;
   padding: calc(var(--mw-nav-h) + 24px) 16px 64px;
@@ -36,36 +35,45 @@ body {
   font-size: 0.875rem;
 }
 
+/* The reading column next to the rail (rules.css's .rules-toc is the
+   other .rules-layout child). */
+.join-body { max-width: 100%; }
+
+/* No boxed card any more -- Matt does not want bordered, rounded-corner
+   panels around plain content or forms. These now read the way
+   rules.css's own <section>s do: a form or some prose under a gold
+   heading with a 2px gold rule, separated from the next one by a thin
+   bottom border rather than a background/border/radius box. The
+   orange .join-warning-box callouts inside these panels are a genuinely
+   separate component and keep their own box -- see that rule below. */
 .join-panel {
-  background: var(--mw-panel);
-  border: 1px solid var(--mw-line);
-  border-radius: 8px;
-  padding: 16px 18px;
-  margin-bottom: 16px;
+  padding-bottom: 28px;
+  margin-bottom: 28px;
+  border-bottom: 1px solid var(--mw-line);
+  /* Every one of these sections is now also a rail/search jump target
+     (its <h2> carries no id of its own -- the id lives on the section,
+     same as /docs's and /rules's id-less top-level h2s), so it needs
+     its own scroll-margin-top to clear the fixed .mw-nav bar on
+     arrival, the same as .rules-body section does for those two pages. */
+  scroll-margin-top: calc(var(--mw-nav-h) + 20px);
+}
+.join-panel:last-child {
+  border-bottom: 0;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
-/* The join flow (and the panels below it) keep the page's original
-   comfortable reading width -- stretching form fields and copy rows
-   out to the wide .join-wrap maximum above would be worse, not better.
-   Centered so the extra width on a wide screen becomes breathing room
-   around the flow rather than being fed to the fields themselves. */
-#join-flow-panel,
-#status-check-panel,
-#working-check-panel {
-  max-width: 560px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-/* Small teaser line above the flow, right-aligned, so a returning
-   player sees in one glance that there's a faster path than reading
-   the whole numbered sequence -- links down to #status-check-panel,
-   which now lives at the bottom of the page. */
+/* Small teaser lines above the flow, so a returning player sees in one
+   glance that there's a faster path than reading the whole numbered
+   sequence -- the first links down to #status-check-panel, which lives
+   further down the page; the second sends an already-signed-in visitor
+   to /account instead. Plain paragraphs under the page header now,
+   rather than a narrow right-aligned strip -- that alignment matched
+   the old centered, capped-width join flow, which this page no longer
+   has. */
 .join-check-teaser {
-  max-width: 560px;
-  margin: 0 auto 12px;
-  text-align: right;
-  font-size: 0.75rem;
+  margin: 0 0 8px;
+  font-size: 0.8125rem;
   color: var(--mw-text-5);
 }
 .join-check-teaser a {
@@ -79,15 +87,23 @@ body {
    this page -- see frontend/join.js's own module docstring for why it
    moved to frontend/account.js, which now owns the CSS for all of it
    (account.css). This page kept only .join-panel-title below, still
-   used by #join-flow-panel/#status-check-panel/#working-check-panel. */
-
+   used by #join-flow-panel/#status-check-panel/#working-check-panel.
+   Was a plain <div>, small and uppercase, until this page grew the
+   same contents rail /docs, /rules and /account use: the rail needs a
+   real heading, so every one of these is now an <h2> in join.html --
+   same size/weight/rule as rules.css's own .rules-body h2, so a
+   heading reads the same whether it's reached on /join or /rules.
+   (/join has no search box of its own -- Matt: it's a form you work
+   through, not something to search -- but the rail's need for a real
+   heading predates and is independent of that.) */
 .join-panel-title {
-  font-weight: 700;
-  font-size: 0.75rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--mw-accent);
-  margin-bottom: 8px;
+  font-size: 1.375rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  color: var(--mw-gold-light);
+  margin: 0 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--mw-gold);
 }
 
 .join-panel-subtitle {
@@ -571,20 +587,17 @@ body {
 }
 
 /* ---- Check my setup (#status-check-panel) -------------------------------
-   Deliberately styled as its own distinct block -- a slightly brighter
-   border -- and placed at the BOTTOM of the page, after the join flow
-   and the "how do I know it's working" panel, so a first-time visitor
-   reads the flow top to bottom without it in the way. A returning
-   player reaches it in one click via .join-check-teaser at the top of
-   the page or the link inside #working-check-panel, both of which
-   target this panel's id. */
-.status-check-panel {
-  border-color: var(--mw-accent);
-  margin-top: 8px;
-  /* Keeps the fixed .mw-nav bar from covering the top of this panel
-     when the browser jumps here via an anchor link. */
-  scroll-margin-top: calc(var(--mw-nav-h) + 16px);
-}
+   Placed at the BOTTOM of the page, after the join flow and the "how
+   do I know it's working" panel, so a first-time visitor reads the
+   flow top to bottom without it in the way. A returning player reaches
+   it in one click via .join-check-teaser at the top of the page, the
+   rail, or the link inside #working-check-panel, all of which target
+   this panel's id -- .join-panel's own scroll-margin-top (above)
+   already keeps the fixed nav bar clear on arrival, same as every
+   other panel. Nothing left for a rule here to do -- the ".status-"
+   class name is kept in the markup only because so many of this
+   panel's own descendant selectors below (.status-team, .status-result,
+   .status-radios, ...) are already scoped off it. */
 
 /* #working-check-panel ("How do I know it's working?") reuses the
    .join-warning-box/.copy-row styling defined above -- nothing

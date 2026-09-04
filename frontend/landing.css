@@ -32,6 +32,32 @@ body {
   padding: calc(var(--mw-nav-h) + 16px) 16px 64px;
 }
 
+/* ---- page header ---------------------------------------------------------
+   .landing-header/.landing-title/.landing-sub: the plain "large gold
+   title plus a one-line subtitle" header rules.css's own .rules-header/
+   .rules-title/.rules-sub define -- used as-is by /results (this file
+   is the only stylesheet that page loads besides theme.css/results.css,
+   neither of which carry a header treatment of their own). /about
+   doesn't use these three classes at all; its own header is the hero
+   lockup below instead. */
+.landing-header { margin-bottom: 32px; }
+
+.landing-title {
+  font-size: clamp(2rem, 6vw, 2.75rem);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: var(--mw-gold-light);
+  margin: 0 0 8px;
+}
+
+.landing-sub {
+  color: var(--mw-text-2);
+  font-size: 1rem;
+  line-height: 1.55;
+  margin: 0;
+  max-width: 62ch;
+}
+
 /* ---- hero --------------------------------------------------------------
    The page's one hero moment: nav mark stays a small wordmark, this is
    the full lockup, shown once, centered, over the topographic texture
@@ -114,23 +140,41 @@ body {
   color: var(--mw-text-5);
 }
 
-/* ---- panels ------------------------------------------------------------ */
+/* ---- panels ------------------------------------------------------------
+   No boxed cards -- Matt does not want bordered, rounded-corner panels
+   around plain content. These now read the way rules.css's own
+   <section>s do: prose under a gold heading with a 2px gold rule,
+   separated from the next one by a thin bottom border rather than a
+   background/border/radius box. The hero and the stat tiles above
+   (.landing-hero/.landing-stat) and the protocol cards inside "The two
+   protocols" below (.protocol-card) are deliberately NOT included here
+   -- those are genuinely their own component, not a content section,
+   and stay boxed. */
 .landing-panel {
-  background: var(--mw-panel);
-  border: 1px solid var(--mw-line);
-  border-radius: 8px;
-  padding: 20px 22px;
-  margin-bottom: 24px;
+  padding-bottom: 28px;
+  margin-bottom: 28px;
+  border-bottom: 1px solid var(--mw-line);
+}
+.landing-panel:last-child {
+  border-bottom: 0;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
+/* This page's own <section> h2 -- same size/weight/rule as rules.css's
+   .rules-body h2, so a heading reads the same whether it's reached on
+   /about or /rules. Was a plain <div>, uppercase and smaller, until
+   this page grew the same contents rail /docs, /rules and /account use
+   -- search and the rail both need a real heading with an id
+   (frontend/page-search.js only indexes h2/h3), so every one of these
+   is now an <h2 id> instead, id'd in about.html. */
 .landing-panel-title {
+  font-size: 1.375rem;
   font-weight: 800;
-  font-size: 0.875rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  letter-spacing: 0.03em;
   color: var(--mw-gold-light);
-  margin-bottom: 16px;
-  padding-bottom: 10px;
+  margin: 0 0 14px;
+  padding-bottom: 8px;
   border-bottom: 2px solid var(--mw-gold);
 }
 
@@ -433,35 +477,18 @@ body {
 }
 
 /* ---- wide-screen layout -------------------------------------------------
-   Above this breakpoint the page has room for two columns, so it reads
-   as a page rather than one long strip. CSS multicol rather than a grid:
-   the six .landing-panel sections vary a lot in height (a one-paragraph
-   "Where it's played" next to the long "How scoring works" list), and a
-   two-column grid pairs them up by index -- row height is forced to the
-   taller of each pair, leaving a large dead gap under the shorter one.
-   Multicol instead flows content down the first column and only spills
-   into the second once the first is full (auto-balanced), so short and
-   long sections don't leave gaps around each other. break-inside: avoid
-   keeps a single section from being split across the column gap. The
-   header and the live-numbers band use column-span: all to sit above
-   both columns rather than being flowed as multicol content themselves.
-   Collapsing back below the breakpoint returns to a plain single column
-   in DOM order, so the reading order is unaffected either way. */
-@media (min-width: 900px) {
-  .landing-wrap {
-    column-count: 2;
-    column-gap: 28px;
-  }
-  .landing-header {
-    column-span: all;
-  }
-  .landing-stats {
-    column-span: all;
-  }
-  .landing-panel {
-    break-inside: avoid;
-  }
-}
+   This page used to flow its .landing-panel sections into two CSS
+   multicol columns above this breakpoint. It now carries the same
+   sticky contents-rail layout /docs, /rules and /account use instead
+   (rules.css's .rules-layout, wrapping the search box and every panel
+   below the hero/stats band) -- that grid supplies its own 210px rail
+   plus a single reading column at this same breakpoint, so
+   .landing-wrap itself no longer needs to be a multicol container, and
+   .landing-header/.landing-stats (the hero and the live-numbers band,
+   both still direct children of .landing-wrap, ahead of the rail
+   layout) no longer need column-span: all to sit above columns that
+   don't exist any more. */
+.landing-body { max-width: 100%; }
 
 /* -------------------------------------------------------------------------
 /* -------------------------------------------------------------------------

@@ -71,7 +71,8 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/join.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/join.css?v=20260904-3" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -101,6 +102,11 @@
 
   <main class="join-wrap">
 
+    <header class="rules-header">
+      <h1 class="rules-title">Join</h1>
+      <p class="rules-sub">Register your Meshtastic or MeshCore radio, pick a team, and start claiming ground &mdash; then come back to the same page any time to check your setup or add another radio.</p>
+    </header>
+
     <p class="join-check-teaser">Already registered and want to add a radio, or check your setup? <a href="#status-check-panel">Jump down here</a>.</p>
 
     <!-- Already have an account? There is nothing to sign in to HERE
@@ -114,8 +120,29 @@
          they already did. -->
     <p class="join-check-teaser">Already have a MeshWars account? <a href="/account">Sign in and join from there</a> instead — no invite code needed.</p>
 
+    <!-- Sticky contents rail (rules.css's .rules-layout/.rules-toc,
+         shared with /docs, /rules and /account) -- this page is a form
+         you work through step by step, not searched, so it carries the
+         rail alone, no search box. The rail below doubles as step
+         progress: this page's flow really is "fill in the join form,
+         then follow your protocol's setup steps, then come back later
+         to check on things," and the rail lists it in that same
+         order. -->
+    <div class="rules-layout">
+      <nav class="rules-toc" aria-label="Sections">
+        <p class="rules-toc-title">Contents</p>
+        <ul>
+        <li><a href="#join-flow-panel">Join MeshWars</a></li>
+        <li><a href="#working-check-panel">How do I know it's working?</a></li>
+        <li><a href="#status-check-panel">Check your setup, or add a radio</a></li>
+        <li><a href="#play-area-panel">Where it's played</a></li>
+        </ul>
+      </nav>
+
+      <div class="join-body">
+
     <section id="join-flow-panel" class="join-panel">
-      <div class="join-panel-title">Join MeshWars</div>
+      <h2 class="join-panel-title">Join MeshWars</h2>
 
       <ol class="join-flow">
 
@@ -379,7 +406,7 @@
     </section>
 
     <section id="working-check-panel" class="join-panel">
-      <div class="join-panel-title">How do I know it's working?</div>
+      <h2 class="join-panel-title">How do I know it's working?</h2>
 
       <!-- Protocol-aware, same toggle as the join-flow steps above
            (join.js's setupProtocolToggle()) -- MeshCore and Meshtastic
@@ -402,7 +429,7 @@
     </section>
 
     <section id="status-check-panel" class="join-panel status-check-panel">
-      <div class="join-panel-title">Already registered? Check your setup, or add a radio</div>
+      <h2 class="join-panel-title">Already registered? Check your setup, or add a radio</h2>
       <p class="hint">Paste your API key below to check your setup, add another radio to your account, or remove one &mdash; any time, not just once at signup.</p>
 
       <!-- Protocol-aware, same toggle as the join-flow steps above
@@ -558,12 +585,15 @@
       </div>
     </section>
 
-    <section class="join-panel join-play-area">
-      <div class="join-panel-title">Where it's played</div>
+    <section id="play-area-panel" class="join-panel join-play-area">
+      <h2 class="join-panel-title">Where it's played</h2>
       <p>MeshWars is currently scoped for the western US and Texas. See the <a href="/about">About page</a> for which mesh communities are currently playing, and how to reach an operator if you'd like to join or need help.</p>
       <div id="play-area-map" role="img" aria-label="Map of the MeshWars play area"></div>
       <p class="mw-play-area-note">The outline is the live play area, read from the server &mdash; pings outside it are not scored. <a href="/">Open the board</a>.</p>
     </section>
+
+      </div>
+    </div>
 
   </main>
 
@@ -571,7 +601,7 @@
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
   <script src="/static/play-area-map.js?v=20260827-1"></script>
-  <script src="/static/join.js?v=20260904-1" type="module"></script>
+  <script src="/static/join.js?v=20260904-3" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

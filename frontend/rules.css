@@ -117,15 +117,13 @@
 /* ---- the prose ------------------------------------------------------ */
 .rules-body { max-width: 100%; }
 
-/* The measure is set on the text elements rather than on .rules-body,
-   so it is counted in the size the text is actually set at -- a ch on
-   the container is a wider character than a ch in a 0.9375rem
-   paragraph, which is how the column ended up running past eighty
-   characters a line. Tables are left out on purpose: they are read
-   across, not along, and want the full column. */
-.rules-body p,
-.rules-body .rules-list,
-.rules-body .rules-honors dd { max-width: 68ch; }
+/* No separate measure on the text. The gold rule under every h2 spans the
+   whole content column -- 870px at the 1160px wrapper, once the 210px rail
+   and its 48px gap are taken out -- and prose capped at 68ch stopped some
+   360px short of it. That left every section looking ragged: a full-width
+   heading over a short paragraph over a full-width table, three different
+   right edges down the page. Text, lists and tables now all run to the
+   column, so the section reads as one block under its own rule. */
 
 .rules-body section {
   padding-bottom: 28px;
@@ -307,7 +305,6 @@
   color: var(--mw-text-6);
   font-size: 0.8125rem;
   line-height: 1.55;
-  max-width: 68ch;
 }
 
 .rules-footnote a { color: var(--mw-gold); font-weight: 600; text-decoration: none; }

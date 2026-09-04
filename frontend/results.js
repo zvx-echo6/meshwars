@@ -248,6 +248,13 @@ function renderTeamAwards(byTeam, standings) {
 // never sets it, and a frozen month renders byte for byte as it always
 // has -- the badge, the notice and the extra class are all empty
 // strings unless the flag put them there.
+// Turns a month string ("2026-08") into a stable id both the rail's
+// own links and each month's <section> use -- letters/digits/hyphen
+// only, so it's a safe id and URL fragment with no escaping needed.
+function monthId(month) {
+  return `month-${month}`;
+}
+
 function renderMonth(m, board) {
   const preview = m.preview === true;
   const cls = preview ? 'rs-month rs-month-preview' : 'rs-month';
@@ -259,7 +266,7 @@ function renderMonth(m, board) {
     : '';
   const standings = m.standings || [];
   const { league, byTeam } = splitAwards(m.awards || []);
-  return `<section class="${cls}">
+  return `<section class="${cls}" id="${escapeHtml(monthId(m.month))}">
     <h2 class="rs-month-title">${escapeHtml(monthTitle(m.month))}${badge}</h2>${notice}
     <h3 class="rs-sub">Standings</h3>
     ${renderStandings(standings)}
@@ -267,6 +274,65 @@ function renderMonth(m, board) {
     ${renderHonors(league, board, m.month)}
     ${renderTeamAwards(byTeam, standings)}
   </section>`;
+}
+
+// ---- contents rail (built from the rendered months, not hand-typed) ---
+//
+// Unlike /docs and /rules, whose section list is fixed at publish time
+// (a hand-typed <li> list, marked by their own copy of this scroll-spy),
+// this page's months are rendered client-side and change every time the
+// board toggle switches -- so the rail has to be built (and its
+// scroll-spy rebuilt) AFTER load() below has actually rendered them,
+// never at page load. Hidden entirely when there is nothing to list
+// (no months yet, or the "couldn't load" error state) rather than
+// showing an empty rail.
+let rsTocObserver = null;
+function buildResultsToc(months) {
+  const nav = document.getElementById('rs-toc');
+  const list = document.getElementById('rs-toc-list');
+  if (!nav || !list) return;
+
+  nav.hidden = !months.length;
+  list.replaceChildren(...months.map((m) => {
+    const li = document.createElement('li');
+    const a = document.createElement('a');
+    a.href = '#' + monthId(m.month);
+    a.textContent = monthTitle(m.month);
+    li.appendChild(a);
+    return li;
+  }));
+
+  if (rsTocObserver) {
+    rsTocObserver.disconnect();
+    rsTocObserver = null;
+  }
+  const links = Array.from(list.querySelectorAll('a[href^="#"]'));
+  const sections = links
+    .map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1))))
+    .filter(Boolean);
+  if (!sections.length || !('IntersectionObserver' in window)) return;
+
+  const byId = new Map(links.map((a) => [decodeURIComponent(a.hash.slice(1)), a]));
+  const visible = new Set();
+  function mark() {
+    if (!visible.size) return;
+    const top = sections.find((s) => visible.has(s.id));
+    if (!top) return;
+    for (const a of links) a.classList.remove('current');
+    const a = byId.get(top.id);
+    if (a) a.classList.add('current');
+  }
+  rsTocObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) visible.add(e.target.id);
+      else visible.delete(e.target.id);
+    }
+    mark();
+  }, {
+    rootMargin: '-80px 0px -55% 0px',
+    threshold: 0,
+  });
+  for (const s of sections) rsTocObserver.observe(s);
 }
 
 // The month in progress carries no result -- see app/results.py for why.
@@ -287,6 +353,7 @@ function renderOpenMonth(data) {
 async function load(board) {
   const spec = BOARDS[board] || BOARDS.meshcore;
   monthsEl.innerHTML = '<p class="rs-loading">Loading results&hellip;</p>';
+  buildResultsToc([]);
   try {
     const res = await fetch(spec.endpoint);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -296,6 +363,7 @@ async function load(board) {
     monthsEl.innerHTML = months.length
       ? open + months.map((m) => renderMonth(m, board)).join('')
       : open + '<p class="rs-empty">No month has finished yet. The first result lands when this one does.</p>';
+    buildResultsToc(months);
   } catch (err) {
     monthsEl.innerHTML = `<p class="rs-empty">Couldn't load results: ${escapeHtml(err.message)}</p>`;
   }

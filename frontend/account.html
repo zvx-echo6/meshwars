@@ -42,11 +42,19 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260904-1" />
   <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
+  <!-- This page has no search box (Matt: your own settings, not
+       something to search), but it still loads search.css for two
+       things unrelated to the search box itself: the generic
+       h2[id]/h3[id] scroll-margin-top rule the account-toc rail's own
+       jumps depend on (account.css carries no equivalent), and
+       .docs-search-landed, the brief highlight account.js's own
+       refreshAccountNav() still applies by hand on a direct #anchor
+       page load. Do not remove this link without replacing both. -->
   <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
   <link rel="stylesheet" href="/static/signin.css?v=20260904-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260904-3" />
+  <link rel="stylesheet" href="/static/account.css?v=20260904-5" />
   <link rel="stylesheet" href="/static/totp.css?v=20260903-1" />
 </head>
 <body>
@@ -159,16 +167,16 @@
         <div id="account-owes-password-form-slot"></div>
       </div>
 
-      <!-- Client-side search (frontend/page-search.js, shared with
-           /docs and /rules) plus the same contents rail those two
-           pages use (rules.css's .rules-layout/.rules-toc) -- Matt
-           asked for this page restructured to match those two rather
-           than grow a tabbed pattern of its own. Both banners above
-           stay OUTSIDE this layout, full width, ahead of it -- the
-           owes-password prompt in particular has to stay visible and
-           unavoidable no matter where the reader has scrolled to via
-           the rail, so it can never live inside the part the rail
-           navigates.
+      <!-- Sticky contents rail (rules.css's .rules-layout/.rules-toc,
+           shared with /docs and /rules) -- Matt asked for this page
+           restructured to match those two rather than grow a tabbed
+           pattern of its own. This is your own settings, not something
+           to search, so unlike /docs and /rules it carries the rail
+           alone, no search box. Both banners above stay OUTSIDE this
+           layout, full width, ahead of it -- the owes-password prompt
+           in particular has to stay visible and unavoidable no matter
+           where the reader has scrolled to via the rail, so it can
+           never live inside the part the rail navigates.
 
            Unlike docs.html/rules.html (whose section list is fixed at
            publish time, so their rail is a hand-typed <li> list),
@@ -181,18 +189,6 @@
            function's own comment for why: a rail full of links into
            sections that don't exist would be exactly the thing Matt
            didn't want in their place. -->
-      <div class="docs-search-wrap">
-        <label class="docs-search-label" for="docs-search-input">Search this page</label>
-        <div class="docs-search-box">
-          <input type="text" id="docs-search-input" class="docs-search-input"
-                 placeholder="Try &ldquo;rotate key&rdquo; or &ldquo;switch team&rdquo;"
-                 autocomplete="off" role="combobox" aria-expanded="false"
-                 aria-controls="docs-search-results" aria-autocomplete="list" />
-          <span class="docs-search-hint" id="docs-search-hint" aria-hidden="true">/</span>
-        </div>
-        <ul id="docs-search-results" class="docs-search-results" role="listbox" hidden></ul>
-      </div>
-
       <div class="rules-layout">
         <nav class="rules-toc" aria-label="Sections">
           <p class="rules-toc-title">Contents</p>
@@ -207,7 +203,7 @@
            doesn't care (Security). This is the one panel that decides
            which of those two states the rest of the page is in. -->
       <section class="account-panel">
-        <h2 id="player" class="account-title">Player</h2>
+        <h2 id="player" class="account-group-title">Player</h2>
         <div id="account-player-linked" hidden>
           <p class="account-hint">This account is connected to a MeshWars player.</p>
           <p id="account-player-name" class="account-player-line"></p>
@@ -664,7 +660,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260904-5" type="module"></script>
+  <script src="/static/account.js?v=20260904-6" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

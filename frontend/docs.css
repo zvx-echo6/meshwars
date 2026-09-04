@@ -60,7 +60,6 @@
   color: var(--mw-text-2);
   font-size: 0.9375rem;
   line-height: 1.6;
-  max-width: 68ch;
 }
 .docs-trouble dd p { margin: 0 0 10px; }
 .docs-trouble dd p:last-child { margin-bottom: 0; }
@@ -74,7 +73,6 @@
   color: var(--mw-text-2);
   font-size: 0.9375rem;
   line-height: 1.6;
-  max-width: 68ch;
 }
 
 .docs-changelog li {

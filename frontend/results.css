@@ -1,20 +1,27 @@
-/* /results -- monthly standings and honors. Sits on top of theme.css
-   and landing.css, which already supply the page frame, the nav and the
-   type scale; everything here is specific to a month block. Colours come
+/* /results -- monthly standings and honors. Sits on top of theme.css,
+   landing.css (page frame, nav, type scale, and now the shared
+   .landing-header/.landing-title/.landing-sub page-header treatment)
+   and rules.css (the sticky contents rail listing months, added
+   below); everything here is specific to a month block. Colours come
    from theme.css tokens, except the team dots, which are gameplay
    colours and are set inline by results.js the same way the map does. */
 
-/* landing.css turns .landing-wrap into two columns above 900px, which
-   is right for About's short independent panels and wrong here: a month
-   is one tall block of a wide table plus a wide honors list, and multicol
-   flowed the honors into the second column, outside the card that owns
-   them. This page opts back out and narrows instead, so a month stays
-   one unbroken card at a comfortable measure. break-inside is belt and
-   braces for any future column context. */
-.rs-wrap { max-width: 860px; }
+/* Widened from the original 860px to make room for rules.css's own
+   210px rail plus its 48px gap alongside the reading column -- see the
+   rail block below. A month is one tall block of a wide table plus a
+   wide honors list; break-inside is belt and braces against any future
+   column context that might try to split one across a gap. */
+.rs-wrap { max-width: 1100px; }
 
-@media (min-width: 900px) {
-  .rs-wrap { column-count: 1; }
+/* results.js's buildResultsToc() hides #rs-toc (via the `hidden`
+   attribute) rather than leaving it an empty rail when there are no
+   months to list yet -- but a `hidden` (display:none) grid item drops
+   out of .rules-layout's grid entirely rather than just leaving its
+   210px column blank, so without this #rs-months would be auto-placed
+   INTO that first, narrow column instead of the wide one next to it.
+   This makes it span both whenever the rail beside it isn't there. */
+#rs-toc[hidden] + #rs-months {
+  grid-column: 1 / -1;
 }
 
 .rs-month { break-inside: avoid; }
@@ -51,13 +58,21 @@
   outline-offset: -2px;
 }
 
-/* ---- one month ------------------------------------------------------ */
+/* ---- one month ------------------------------------------------------
+   Deliberately still a boxed card, unlike the plain content sections
+   /about, /join and /account moved away from -- a month is its own
+   discrete, self-contained record (like a stat tile), not a run of
+   prose under a heading, so it keeps its border and background. */
 .rs-month {
   background: var(--mw-panel);
   border: 1px solid var(--mw-line);
   border-radius: 8px;
   padding: 20px 22px;
   margin-bottom: 24px;
+  /* Each month is now also a rail jump target (id'd by results.js) --
+     clears the fixed nav bar on arrival, same as .rules-body section
+     does for /docs and /rules. */
+  scroll-margin-top: calc(var(--mw-nav-h) + 20px);
 }
 
 .rs-month-title {

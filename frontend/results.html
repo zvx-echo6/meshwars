@@ -71,8 +71,9 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/results.css?v=20260831-6" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/results.css?v=20260904-1" />
 </head>
 <body>
 
@@ -107,13 +108,29 @@
       <button type="button" class="rs-board-btn active" data-board="meshcore">MeshCore</button>
     </div>
 
-    <div id="rs-months" aria-live="polite">
-      <p class="rs-loading">Loading results&hellip;</p>
+    <!-- No search box on this page -- Matt was explicit that results is
+         a short stack of month tables rendered from the API, not
+         something read and searched, so only the sticky contents rail
+         applies here (rules.css's .rules-layout/.rules-toc). Unlike
+         /docs and /rules, whose section list is fixed at publish time,
+         the months below are rendered client-side by results.js and
+         change with the board toggle, so results.js builds and
+         rebuilds <ul id="rs-toc-list"> itself rather than it being
+         hand-typed here -- see that file's own buildResultsToc(). -->
+    <div class="rules-layout">
+      <nav class="rules-toc" aria-label="Months" id="rs-toc" hidden>
+        <p class="rules-toc-title">Contents</p>
+        <ul id="rs-toc-list"></ul>
+      </nav>
+
+      <div id="rs-months" aria-live="polite">
+        <p class="rs-loading">Loading results&hellip;</p>
+      </div>
     </div>
 
   </main>
 
-  <script src="/static/results.js?v=20260831-5" type="module"></script>
+  <script src="/static/results.js?v=20260904-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

@@ -39,13 +39,14 @@
 
 /* The reading column next to the rail (rules.css's .rules-toc is the
    other .rules-layout child). Deliberately NOT .rules-body -- that
-   class carries rules.css's own prose styling (gold-underlined h2s,
-   a border under every section, paragraph line-height tuned for
-   running text) built for /docs and /rules reading straight through,
-   which would visually collide with this page's existing boxed
-   .account-panel treatment instead of just sitting next to it. This
-   page keeps its own panel look; only the rail/search chrome around
-   it is shared. */
+   class carries rules.css's own heading/paragraph sizing tuned for
+   running prose, which this page's mix of hints, tables and forms
+   doesn't need verbatim. What it DOES now share with .rules-body,
+   restyled below rather than reused wholesale: no boxed cards (Matt
+   does not want bordered, rounded-corner panels for plain content),
+   and every heading -- .account-group-title at h2, .account-title at
+   h3 -- carrying the same gold-rule-under-a-gold-heading treatment
+   rules.css's own h2/h3 use. */
 .account-body { max-width: 100%; }
 
 .account-hint {
@@ -54,34 +55,39 @@
   margin: 4px 0 0;
 }
 
+/* No box any more -- Matt does not want bordered, rounded-corner cards
+   around plain content. Used to carry its own background/border/radius;
+   now it's spacing only, and the section reads as prose under its own
+   heading (.account-title, below) the same way a run of <h3> subsections
+   inside one rules.css <section> does. The heading's own margin-top
+   supplies the gap above each panel's content, so there is nothing left
+   for this rule to do except stop one panel's content from crowding the
+   next heading. */
 .account-panel {
-  background: var(--mw-panel);
-  border: 1px solid var(--mw-line);
-  border-radius: 8px;
-  padding: 16px 18px;
-  margin-bottom: 16px;
+  margin-bottom: 4px;
 }
 
-/* A panel's own title -- one level below .account-group-title. Was a
-   plain <div> until this page grew the same contents rail /docs and
-   /rules use (see .account-wrap's own comment): search and the rail
-   both need a real heading with an id to link to (frontend/page-search.js
-   only indexes h2/h3), so every one of these is now an <h2> (the
-   ungated Player panel, which has no surrounding group of its own) or
-   an <h3> (every panel inside a group) instead, id'd in account.html.
-   margin-top is reset here because a heading element carries its own
-   user-agent default top margin that a <div> never did -- without
-   this, every panel would have gained a gap above its title it didn't
-   have before, a purely cosmetic regression the tag change alone
-   would otherwise cause. */
+/* A panel's own title -- one level below .account-group-title, both
+   now styled like rules.css's h2/h3 (gold heading, no box) rather than
+   the small uppercase label this used to be. Was a plain <div> until
+   this page grew the same contents rail /docs and /rules use (see
+   .account-wrap's own comment): the rail needs a real heading with an
+   id to link to, so every one of these is now an <h3> inside a group
+   (every panel below Player), id'd in account.html -- the Player
+   heading itself is an <h2> and uses .account-group-title instead, the
+   same class every other top-level group heading ("Radios &
+   troubleshooting", "Play", "Security") already carries, so all four
+   rail-level headings share one look. (/account has no search box of
+   its own -- Matt: it's your own settings, not something to search --
+   but the rail's need for a real id'd heading predates and is
+   independent of that.) */
 .account-title {
-  margin-top: 0;
+  margin: 28px 0 8px;
   font-weight: 700;
-  font-size: 0.75rem;
-  letter-spacing: 0.05em;
+  font-size: 0.9375rem;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--mw-accent);
-  margin-bottom: 8px;
+  color: var(--mw-gold);
 }
 
 /* The Player panel's "Join MeshWars" flow (#account-join-panel in
@@ -130,9 +136,10 @@
    wrong, it's a required next step, the same "important, not an
    error" register --mw-accent-wash/-line already carries for a
    currently-selected control (see theme.css's own comments on those
-   two variables). A thicker-than-usual border and its own vertical
-   rhythm (more padding than .account-panel) are what make it read as
-   "at the top for a reason" next to the plain panels below it -- and
+   two variables). This is the one place on the page that still keeps
+   a bordered box on purpose -- a required onboarding step, not a plain
+   content section, so it reads as "at the top for a reason" next to
+   the unboxed panels below it -- and
    there is deliberately no close/dismiss control anywhere in this
    rule or the markup it styles (frontend/account.html). The relocated
    #account-password-form (see account.js's own comment on the move)
@@ -347,21 +354,34 @@
 
 /* ---- Group headings ---------------------------------------------------
    One level above .account-title: groups a run of .account-panel
-   sections under a single label ("Radios & troubleshooting", "Play",
-   "Security") so the page reads as a small number of clear areas
-   instead of one long undifferentiated list of panels. Bigger and
-   plainer than .account-title on purpose -- a panel title is a label
-   for what's inside ONE box; this is a label for several. */
+   sections under a single label ("Player", "Radios & troubleshooting",
+   "Play", "Security") so the page reads as a small number of clear
+   areas instead of one long undifferentiated list of panels. These are
+   this page's h2s -- the same rail-level heading rules.css's own
+   .rules-body h2 carries (gold-light, 2px gold rule underneath), so
+   the same look applies whether the heading is reached by scrolling
+   /rules or /account. Bigger than .account-title on purpose -- a panel
+   title labels what's inside one h3 subsection; this labels a run of
+   several. */
 .account-group-title {
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--mw-text-1);
-  margin: 28px 0 10px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--mw-line-strong);
+  font-size: 1.375rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  color: var(--mw-gold-light);
+  margin: 40px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--mw-gold);
 }
-.account-group-title:first-of-type {
-  margin-top: 20px;
+/* Player is the very first thing on the page, so it doesn't want the
+   extra top margin every later group heading uses to separate itself
+   from the group before it. Targeted by id rather than :first-of-type:
+   these four headings sit at three different nesting depths (Player
+   inside its own <section>; Radios/Play inside #account-player-groups;
+   Security a direct child of .account-body), so :first-of-type -- which
+   only ever looks at siblings under the SAME parent -- would also zero
+   out Radios and Security, which is not what this is for. */
+#player.account-group-title {
+  margin-top: 0;
 }
 
 .account-group-note {

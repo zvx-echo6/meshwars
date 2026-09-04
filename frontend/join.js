@@ -48,6 +48,12 @@
  * rather than caching it in a variable, same reasoning: there is
  * already exactly one place this key lives on the page, and it should
  * stay that way.
+ *
+ * This page also carries the same sticky contents rail /docs, /rules
+ * and /account use (join.html's .rules-layout/.rules-toc) -- see
+ * boot()'s own setupScrollSpy() call near the bottom of this file.
+ * Unlike those three pages, it does not carry a search box: this page
+ * is a form you work through step by step, not something to search.
  */
 
 // Same roster/colors as frontend/mc.js -- duplicated rather than
@@ -1463,6 +1469,46 @@ function setupStatusKeyToggle() {
   });
 }
 
+// ---- contents-rail scroll-spy (copied from rules.js/docs.js/about.js) --
+// This page's own <h2>s carry no id of their own -- the id lives on
+// each wrapping <section> instead (#join-flow-panel, etc.), same as
+// /docs's and /rules's id-less top-level h2s -- but the rail's <a
+// href>s and this observer both work off the section ids in join.html
+// directly, so that difference never has to be resolved here.
+function setupScrollSpy() {
+  const links = Array.from(document.querySelectorAll('.rules-toc a[href^="#"]'));
+  const sections = links
+    .map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1))))
+    .filter(Boolean);
+
+  if (!sections.length || !('IntersectionObserver' in window)) return;
+
+  const byId = new Map(links.map((a) => [decodeURIComponent(a.hash.slice(1)), a]));
+  const visible = new Set();
+
+  function mark() {
+    if (!visible.size) return;
+    const top = sections.find((s) => visible.has(s.id));
+    if (!top) return;
+    for (const a of links) a.classList.remove('current');
+    const a = byId.get(top.id);
+    if (a) a.classList.add('current');
+  }
+
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) visible.add(e.target.id);
+      else visible.delete(e.target.id);
+    }
+    mark();
+  }, {
+    rootMargin: '-80px 0px -55% 0px',
+    threshold: 0,
+  });
+
+  for (const s of sections) io.observe(s);
+}
+
 function boot() {
   buildTeamPicker();
   mcPicker = createNodePicker('mc');
@@ -1486,6 +1532,7 @@ function boot() {
   document.getElementById('status-team-switch-btn').addEventListener('click', handleTeamSwitchBtnClick);
   document.getElementById('status-team-confirm-btn').addEventListener('click', handleTeamSwitchConfirm);
   document.getElementById('status-team-cancel-btn').addEventListener('click', closeTeamSwitchPicker);
+  setupScrollSpy();
 }
 
 boot();

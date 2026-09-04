@@ -17,14 +17,11 @@
  * app/account_api.py, app/nodes_api.py, app/mc_api.py,
  * app/checkin_api.py, app/join_api.py, and app/oauth_api.py.
  * Self-contained, same as every other page script in this codebase: no
- * build step, no shared import from another page's script, with two
- * exceptions -- frontend/signin-email.js, the one every page offering
+ * build step, no shared import from another page's script, with one
+ * exception -- frontend/signin-email.js, the one every page offering
  * sign-in shares (see that module's own header comment for why, same
  * exception frontend/nav-auth.js already is for the nav bar's
- * signed-in state), and frontend/page-search.js, shared with /docs and
- * /rules for the contents-rail search box those two pages already had
- * and this one now matches -- see PAGE STRUCTURE below and that
- * module's own header comment.
+ * signed-in state).
  *
  * All of the routes above except the sign-in ones are session-cookie
  * authenticated with NO X-API-Key header -- see each router's own
@@ -53,24 +50,24 @@
  * explanation, the Join flow, and the connect-by-key form instead of
  * any of those sections erroring out.
  *
- * PAGE STRUCTURE: this page now carries the same contents rail and
- * search box /docs and /rules already had (account.html's
- * .rules-layout/.rules-toc/.docs-search-wrap), rather than one long
- * scroll of panels -- see frontend/page-search.js's own header comment
- * for the search half of that. What's specific to THIS page is that
- * its section list isn't fixed: the whole page starts hidden behind
- * #account-content until GET /api/account resolves, and even once it
- * doesn't, an account with no linked player never shows the Radios &
- * troubleshooting or Play groups at all (applyPlayerGate()). Indexing
- * or railing the page at load, the way docs.js/rules.js do once and
- * never again, would search and rail-link straight into an empty or
- * gated-off page. So buildAccountToc() (this page's own rail builder,
- * unlike docs/rules' hand-typed <li> list) and the search module's
- * rebuildIndex() are both re-run through refreshAccountNav() -- once
- * applyPlayerGate() has just decided what's visible, and again once
- * loadPlayerSections()'s own fetches have actually landed real content
- * to search. See refreshAccountNav()'s own comment for the exact list
- * of call sites and why each one is there.
+ * PAGE STRUCTURE: this page carries the same sticky contents rail
+ * /docs and /rules already had (account.html's
+ * .rules-layout/.rules-toc), rather than one long scroll of panels.
+ * Unlike those two pages, and unlike /about and /join, it has no
+ * search box -- this is a reader's own settings, not something to
+ * search. What's specific to THIS page is that its section list isn't
+ * fixed: the whole page starts hidden behind #account-content until
+ * GET /api/account resolves, and even once it doesn't, an account with
+ * no linked player never shows the Radios & troubleshooting or Play
+ * groups at all (applyPlayerGate()). Railing the page at load, the way
+ * docs.js/rules.js do once and never again, would rail-link straight
+ * into an empty or gated-off page. So buildAccountToc() (this page's
+ * own rail builder, unlike docs/rules' hand-typed <li> list) is
+ * re-run through refreshAccountNav() -- once applyPlayerGate() has
+ * just decided what's visible, and again once loadPlayerSections()'s
+ * own fetches have actually landed real content. See
+ * refreshAccountNav()'s own comment for the exact list of call sites
+ * and why each one is there.
  *
  * SECURITY: every dynamic value rendered here (provider labels, masked
  * emails, player name/team, session user-agent/ip, server error text,
@@ -93,22 +90,6 @@ import {
   showAuthErrorFromQuery,
   PASSWORD_SIGNIN_AVAILABLE,
 } from './signin-email.js?v=20260904-1';
-import { setupPageSearch } from './page-search.js?v=20260904-1';
-
-// The search box's own wiring (index build, matching, results listbox)
-// -- shared with /docs and /rules, see page-search.js's own header
-// comment. handleInitialHash is off here because, unlike those two
-// pages, this page's content is still `hidden` behind #account-content
-// the instant this module runs (GET /api/account hasn't resolved yet);
-// see that option's own doc comment in page-search.js for what this
-// page does instead, and PAGE STRUCTURE above for the rest of the
-// design. .account-body is this page's own reading column, set up in
-// account.html right where docs.html/rules.html each set up their own
-// .docs-body/.rules-body.
-const accountSearch = setupPageSearch({
-  headingsRoot: document.querySelector('.account-body'),
-  handleInitialHash: false,
-});
 
 // No local PROVIDER_LABELS map here -- app/oauth.py's PROVIDER_LABELS
 // is the single source of truth, and every API response this page
@@ -699,31 +680,30 @@ function setupAccountScrollSpy() {
   for (const s of sections) accountTocObserver.observe(s);
 }
 
-// Re-scans the DOM for both the rail and the search index -- call this
-// any time a whole heading could have appeared or disappeared
-// (applyPlayerGate(), below) or a panel's own text could have changed
-// enough to be worth re-searching (loadPlayerSections() finishing,
-// refreshAccountCore() re-rendering Security). Cheap enough (a few
-// dozen DOM nodes at most) to call generously rather than trying to
-// track precisely which of the two -- rail shape vs. search text --
-// actually needs it at each call site.
+// Re-scans the DOM for the rail -- call this any time a whole heading
+// could have appeared or disappeared (applyPlayerGate(), below) or the
+// rail's own link set could otherwise be stale (loadPlayerSections()
+// finishing, refreshAccountCore() re-rendering Security). Cheap enough
+// (a few dozen DOM nodes at most) to call generously rather than
+// trying to track precisely which call site actually needs it.
 let handledInitialHash = false;
 function refreshAccountNav() {
   buildAccountToc();
   setupAccountScrollSpy();
-  accountSearch.rebuildIndex();
 
-  // A direct #anchor load (e.g. a link to /account#security) can't
-  // rely on page-search.js's own built-in version of this (see
-  // handleInitialHash: false above) -- the browser's native on-load
-  // anchor scroll, and page-search.js's landing-highlight alongside
-  // it, both need the target to already be visible the instant the
-  // page loads, and #account-content is still `hidden` at that instant
-  // here, waiting on GET /api/account. So this does it by hand
-  // instead, the first time this page's real content is actually
-  // showing (right here) -- once only, so a later rebuild (e.g. after
-  // Join succeeds) doesn't re-jump a reader who has since scrolled
-  // somewhere else on their own.
+  // A direct #anchor load (e.g. a link to /account#security) needs
+  // handling by hand: the browser's own native on-load anchor scroll
+  // needs the target to already be visible the instant the page loads,
+  // and #account-content is still `hidden` at that instant, waiting on
+  // GET /api/account. So this does it by hand instead, the first time
+  // this page's real content is actually showing (right here) -- once
+  // only, so a later rebuild (e.g. after Join succeeds) doesn't re-jump
+  // a reader who has since scrolled somewhere else on their own. The
+  // brief highlight this applies (.docs-search-landed, from search.css
+  // -- still loaded by this page for exactly this and its scroll-margin
+  // rule, see account.html's own comment on that link) is the same one
+  // a search result jump uses on /docs, /rules and /account did before
+  // Matt had the search box itself removed from this page.
   if (!handledInitialHash && location.hash.length > 1) {
     handledInitialHash = true;
     const id = decodeURIComponent(location.hash.slice(1));

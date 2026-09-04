@@ -71,7 +71,18 @@
        EVERY /static CSS/JS reference on this page whenever any of those files
        change -- do not touch the pinned external Leaflet CDN links. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
+  <!-- This page has no search box (Matt: it's read top to bottom, not
+       searched), but it still loads search.css -- that file's generic
+       h2[id]/h3[id] scroll-margin-top rule is the only thing that keeps
+       a contents-rail jump from tucking a heading under the fixed nav
+       bar, and neither this page's own stylesheet (landing.css) nor
+       rules.css (loaded above for .rules-layout/.rules-toc) carries an
+       equivalent rule of its own. Do not remove this link without
+       giving .landing-panel-title (or its h2) that scroll-margin-top
+       another way first. -->
+  <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -122,13 +133,38 @@
       </div>
     </div>
 
+    <!-- Sticky contents rail (rules.css's .rules-layout/.rules-toc,
+         shared with /docs, /rules and /account) -- this page is read
+         top to bottom, not searched, so it carries the rail alone, no
+         search box. The panel titles below are still real <h2 id>
+         headings rather than plain <div>s, so the rail can link to
+         them. -->
+    <div class="rules-layout">
+      <nav class="rules-toc" aria-label="Sections">
+        <p class="rules-toc-title">Contents</p>
+        <ul>
+        <li><a href="#what">What the game is</a></li>
+        <li><a href="#teams">The seven teams</a></li>
+        <li><a href="#scoring">How scoring works</a></li>
+        <li><a href="#net">Net check-ins</a></li>
+        <li><a href="#places">Places worth going</a></li>
+        <li><a href="#months">Every month has a winner</a></li>
+        <li><a href="#protocols">The two protocols</a></li>
+        <li><a href="#join">How to join</a></li>
+        <li><a href="#where">Where it's played</a></li>
+        <li><a href="#links">Links</a></li>
+        </ul>
+      </nav>
+
+      <div class="landing-body">
+
     <section class="landing-panel">
-      <div class="landing-panel-title">What the game is</div>
+      <h2 id="what" class="landing-panel-title">What the game is</h2>
       <p>Players are on one of seven teams. The map is divided into squares roughly 300 meters across. You claim a square for your team by being in it and hearing the mesh from it. Teams take squares from each other. A season runs six months and the team holding the most squares at the end wins &mdash; but every calendar month inside it has its own winner and its own honors, so there is always something close to play for. See the <a href="/results">results</a>.</p>
     </section>
 
     <section class="landing-panel landing-teams">
-      <div class="landing-panel-title">The seven teams</div>
+      <h2 id="teams" class="landing-panel-title">The seven teams</h2>
       <div class="team-chips">
         <span class="team-chip" style="--chip-color:#ff4136">RED</span>
         <span class="team-chip" style="--chip-color:#2ecc40">GREEN</span>
@@ -142,14 +178,14 @@
     </section>
 
     <section class="landing-panel">
-      <div class="landing-panel-title">How scoring works</div>
+      <h2 id="scoring" class="landing-panel-title">How scoring works</h2>
       <p>You claim a square by reaching the mesh from inside it. Each mesh node your ping reaches is worth a tenth of a point, up to one point per ping &mdash; and a ping that reaches nobody claims nothing, because being somewhere is not enough.</p>
       <p>Squares change hands when a team matches or out-scores whoever is holding one, scores fade over time so held ground has to be revisited, and a square that just changed hands is protected for fifteen minutes.</p>
       <p>The exact numbers, the cooldowns and every other mechanic are in the <a href="/rules">rules</a>.</p>
     </section>
 
     <section class="landing-panel">
-      <div class="landing-panel-title">Net check-ins</div>
+      <h2 id="net" class="landing-panel-title">Net check-ins</h2>
       <p>There's a <a href="https://freq51.net/weeklynet" target="_blank" rel="noopener noreferrer">weekly net</a> on Wednesday evenings, 17:00 to 23:59 Boise time. Checking in during that window earns your team 25 points, on top of any ground you hold &mdash; a check-in before 17:00 or after midnight doesn't count.</p>
       <p>You can check in once per net. Posting five times doesn't earn five times &mdash; it earns once, same as everyone else.</p>
       <p>Turn up week after week and each check-in is worth more, from 25 points up to 50 for a run of six nets or longer. Miss one and you start again &mdash; though a week where the net doesn't happen at all costs you nothing. The <a href="/rules">rules</a> have the full table.</p>
@@ -158,7 +194,7 @@
     </section>
 
     <section class="landing-panel">
-      <div class="landing-panel-title">Places worth going</div>
+      <h2 id="places" class="landing-panel-title">Places worth going</h2>
       <p>Summits, parks and landmarks are real destinations, not squares picked at random &mdash; summits from Summits On The Air, parks from Parks On The Air, landmarks from OpenStreetMap. Reach one with a scoring ping and it earns your team Explorer points on top of the square itself.</p>
       <p>What a place is worth depends on how far it made you go, not what kind of place it is. Somewhere inside a town's own limits is worth a nickel whether it's a park or a landmark &mdash; step outside and it's worth more. A summit is scored on its elevation instead, wherever it stands, because the climb to the top doesn't change depending on where a town line was drawn around its base.</p>
       <p>There's a weekly cap per person, so a town's worth of easy visits can't out-earn one real trip. Landmarks and small parks also rotate week to week, so what's worth chasing near you can change &mdash; summits and the bigger parks are always live. The <a href="/rules">rules</a> have the full point table and how the rotation works.</p>
@@ -166,13 +202,13 @@
     </section>
 
     <section class="landing-panel">
-      <div class="landing-panel-title">Every month has a winner</div>
+      <h2 id="months" class="landing-panel-title">Every month has a winner</h2>
       <p>A six-month season is a long time to wait to find out how you did, so each calendar month closes with its own <a href="/results">result</a>. A month is judged on that month alone &mdash; ground held and points earned between its own dates &mdash; not on the season standings, so falling behind early never puts the next month out of reach.</p>
       <p>Alongside the team standings, each month hands out honors &mdash; for taking the most ground off other teams, winning the most back, touring the most landmarks, hopping the most parks, tagging the most peaks, and claiming the most ground out past the towns. Every one of them is defined in the <a href="/rules">rules</a>.</p>
     </section>
 
     <section class="landing-panel">
-      <div class="landing-panel-title">The two protocols</div>
+      <h2 id="protocols" class="landing-panel-title">The two protocols</h2>
       <div class="protocol-cards">
         <div class="protocol-card protocol-card-live">
           <div class="protocol-card-title">MeshCore <span class="protocol-live-badge">Live</span></div>
@@ -186,19 +222,19 @@
     </section>
 
     <section class="landing-panel">
-      <div class="landing-panel-title">How to join</div>
+      <h2 id="join" class="landing-panel-title">How to join</h2>
       <p>Registration and MeshMapper setup happen on the join page. <a href="/join">Join MeshWars</a> to get started.</p>
     </section>
 
     <section class="landing-panel">
-      <div class="landing-panel-title">Where it's played</div>
+      <h2 id="where" class="landing-panel-title">Where it's played</h2>
       <p>MeshWars is currently scoped for the western US and Texas. If you'd like to join the fun or need help, please reach out to malice in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a>.</p>
       <div id="play-area-map" role="img" aria-label="Map of the MeshWars play area"></div>
       <p class="mw-play-area-note">The outline is the live play area, read from the server &mdash; pings outside it are not scored. <a href="/">Open the board</a>.</p>
     </section>
 
     <section class="landing-panel">
-      <div class="landing-panel-title">Links</div>
+      <h2 id="links" class="landing-panel-title">Links</h2>
       <p><strong>This is the current list of where MeshWars is actually playable.</strong> The docs, rules and join pages describe how coverage works without naming a community directly, and point back here for what's live right now &mdash; so this list, not those pages, is the one to check for the current answer. The rest are the open source projects MeshWars is built with.</p>
       <ul class="landing-links">
         <li>
@@ -236,6 +272,8 @@
       </ul>
     </section>
 
+      </div>
+    </div>
 
     <p class="landing-disclaimer">
       <strong>MeshWars reads two specific communities, not the mesh at large.</strong>
@@ -250,7 +288,7 @@
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
   <script src="/static/play-area-map.js?v=20260827-1"></script>
-  <script src="/static/about.js?v=20260825-1" type="module"></script>
+  <script src="/static/about.js?v=20260904-2" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>
