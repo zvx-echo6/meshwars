@@ -1663,6 +1663,32 @@ async def admin_roles_grant(request: Request) -> JSONResponse:
     handing out the token (a decision Matt makes deliberately each time,
     not a button in this panel).
 
+    Targets by `display_name`: GET /api/admin/roles shows an operator
+    a player's name, not the raw account id underneath it, so the name
+    is what the operator actually has in hand. Resolved the exact way
+    app/join_api.py's own signup uniqueness check resolves one --
+    stripped in Python, then compared case-insensitively in SQL
+    (LOWER() on both sides) -- so a name join() would refuse as
+    "taken" is the same name this route finds, with no drift between
+    the two checks.
+
+    `account_id` is still accepted too, for any caller that already
+    has it. When both are given they must resolve to the same
+    account, or the request is refused outright (400) rather than one
+    silently winning -- a name and an id pointing at two different
+    accounts is a caller bug, not something to guess through.
+
+    Two name-specific refusals, both 404, kept distinct from each
+    other and from the plain "account not found" below so an operator
+    is never left guessing which of three things went wrong:
+      - no player carries that name at all, or
+      - that player exists but its `account_id` is NULL -- an
+        unclaimed, key-only player (see app/join_api.py's own note on
+        an anonymous Meshtastic join never linking an account). There
+        is no account to grant a role to; the operator is told that
+        plainly rather than getting a "not found" indistinguishable
+        from a typo.
+
     Refuses (409) an account that already holds the operator role --
     granting 'admin' onto it would silently DEMOTE an operator to
     admin, which is not what "grant" means and must never happen by
@@ -1681,12 +1707,62 @@ async def admin_roles_grant(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad request"}, status_code=400)
-    target_account_id = body.get("account_id") if isinstance(body, dict) else None
-    if not isinstance(target_account_id, int) or isinstance(target_account_id, bool):
-        return JSONResponse({"error": "account_id is required"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    raw_account_id = body.get("account_id")
+    given_account_id: int | None = None
+    if raw_account_id is not None:
+        if not isinstance(raw_account_id, int) or isinstance(raw_account_id, bool):
+            return JSONResponse({"error": "account_id must be an integer"}, status_code=400)
+        given_account_id = raw_account_id
+
+    raw_name = body.get("display_name")
+    given_name: str | None = None
+    if raw_name is not None:
+        if not isinstance(raw_name, str):
+            return JSONResponse({"error": "display_name must be a string"}, status_code=400)
+        stripped = raw_name.strip()
+        if stripped:
+            given_name = stripped
+
+    if given_account_id is None and given_name is None:
+        return JSONResponse(
+            {"error": "account_id or display_name is required"}, status_code=400
+        )
 
     now = int(time.time())
     async with WriteSession() as conn:
+        target_account_id = given_account_id
+        if given_name is not None:
+            # Same match app/join_api.py's own dup check uses at its
+            # step-3 uniqueness gate: stripped in Python above, then
+            # LOWER() on both sides in SQL -- keep the two in lockstep,
+            # not two independently-drifting ideas of "same name".
+            player_row = conn.execute(
+                "SELECT account_id FROM player WHERE LOWER(display_name) = LOWER(?)",
+                (given_name,),
+            ).fetchone()
+            if player_row is None:
+                return JSONResponse(
+                    {"error": f'no player named "{given_name}"'}, status_code=404
+                )
+            name_account_id = player_row["account_id"]
+            if name_account_id is None:
+                return JSONResponse(
+                    {
+                        "error": f'"{given_name}" is not linked to any account — '
+                                 "there is nothing to grant a role to"
+                    },
+                    status_code=404,
+                )
+            if given_account_id is not None and given_account_id != name_account_id:
+                return JSONResponse(
+                    {"error": "account_id and display_name refer to different accounts"},
+                    status_code=400,
+                )
+            target_account_id = name_account_id
+
         row = conn.execute(
             "SELECT role FROM account WHERE account_id = ?", (target_account_id,)
         ).fetchone()
@@ -1695,7 +1771,7 @@ async def admin_roles_grant(request: Request) -> JSONResponse:
 
         if row["role"] == "operator":
             return JSONResponse(
-                {"error": "that account already holds the operator role -- "
+                {"error": "that account already holds the operator role — "
                           "revoke it first if a demotion to admin is intended"},
                 status_code=409,
             )

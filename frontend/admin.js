@@ -24,6 +24,12 @@ let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/accou
 let allPlayers = [];
 let expanded = new Set();   // player ids left open across a refresh
 
+// Flips true the moment any /api/admin/* call first succeeds, and back
+// to false whenever showNoAccess() runs. This is the one piece of
+// state that can tell apart the two things a 404 means below -- see
+// api()'s own comment for why the response body cannot.
+let panelLoaded = false;
+
 // Same seven teams settings.teams_list serves and the join page's own
 // team-picker offers (frontend/join.js's TEAM_ORDER) -- duplicated
 // rather than imported, same reasoning as everywhere else on this site
@@ -89,13 +95,48 @@ async function api(path, options) {
   let body = null;
   try { body = await resp.json(); } catch (e) { /* no body */ }
   if (!resp.ok) {
-    if (resp.status === 401 || resp.status === 404) {
-      // The session expired, was revoked, or this account's role was
+    if (resp.status === 401) {
+      // The session expired or was revoked, or this account's role was
       // pulled out from under it mid-visit (an operator can revoke
       // their own role, or another operator's) -- reload straight into
       // the access screen rather than leaving stale panels on screen
       // that will now 401 on every action.
       showNoAccess();
+    } else if (resp.status === 404) {
+      // 404 is ambiguous by design, and deliberately so: app/admin_api.py's
+      // _role_guard() returns the exact same status and the same generic
+      // {"error": "not found"} body whether this deployment has no admin
+      // surface at all (no token set, no account holds a role) or the
+      // route below the guard simply did not find the thing it was asked
+      // for -- a player, a key, a net. Making those distinguishable would
+      // mean the server marking "this route exists but the guard failed"
+      // in the body or the status, which is precisely the information the
+      // 404 is designed to withhold from a probe (see _role_guard's own
+      // docstring). So the two cases have to be told apart here, from
+      // something the server never has to say: whether an admin call has
+      // ever actually succeeded in this visit. Before that (panelLoaded
+      // is still false, e.g. the very first load), a 404 can only mean
+      // the surface itself was never there, so it blanks to the access
+      // screen exactly as before. After that (the panel is already up),
+      // a 404 is an ordinary lookup miss on a route that already passed
+      // the guard -- leave the panel up and let the caller's own
+      // try/catch show body.error, same as any other failed lookup.
+      //
+      // The one case this does not resolve cleanly: an operator revoking
+      // the very last role-holding account (their own, or the only other
+      // one) while someone else is mid-visit. From that instant the
+      // surface really is disabled, but panelLoaded is already true, so
+      // the next action here reads as an ordinary "not found" rather than
+      // a sign-out. That is judged acceptable rather than worth chasing:
+      // it is a narrow race, it never claims success (every route 404s
+      // the same way, so nothing looks like it silently worked), and the
+      // Refresh button (below) re-runs checkAccess() rather than just
+      // refreshAll(), so the next manual refresh resolves it to the
+      // correct access-revoked screen instead of leaving stale
+      // "not found" text on screen indefinitely.
+      if (!panelLoaded) {
+        showNoAccess();
+      }
     } else if (resp.status === 403) {
       // Same idea, for the one guard failure that carries its own
       // message: TOTP was disabled mid-visit (app/admin_api.py's
@@ -107,6 +148,7 @@ async function api(path, options) {
     }
     throw new Error((body && body.error) || ('HTTP ' + resp.status));
   }
+  panelLoaded = true;
   return body;
 }
 
@@ -905,14 +947,27 @@ async function savePaint(b) {
 
   const source = document.getElementById('pt-source').value;
   if (source !== loadedPaintSource) {
-    // Switching which source paints the Meshtastic board -- named
+    // Switching which source(s) paint the Meshtastic board -- named
     // confirmation, same "type it to confirm" shape every destructive
     // action in this file already uses, not a bare OK/Cancel a tired
     // operator could click through without reading.
-    const label = source === 'freqmapper' ? 'FreqMapper' : 'Meshview';
+    //
+    // Wording differs for "both" versus the two exclusive values,
+    // since the consequence is different: switching INTO both starts a
+    // second painter alongside whichever one was already running (no
+    // source stops); switching OUT of both to a single value stops
+    // whichever painter is being left. Neither case has a "which one
+    // wins" question to explain -- there is no arbitration between the
+    // two, the board's existing capture cooldowns handle any overlap.
+    const PAINT_LABELS = { meshview: 'Meshview', freqmapper: 'FreqMapper', both: 'Both' };
+    const label = PAINT_LABELS[source] || source;
+    const detail = source === 'both'
+      ? 'This starts both Meshview and FreqMapper painting live Meshtastic territory at once.'
+      : loadedPaintSource === 'both'
+        ? ('This stops the other source and leaves only ' + label + ' painting live Meshtastic territory.')
+        : ('This switches which source paints live Meshtastic territory to ' + label + '.');
     const typed = window.prompt(
-      'This switches which source paints live Meshtastic territory.\n\n' +
-      'Type ' + label + ' to confirm switching to it.'
+      detail + '\n\n' + 'Type ' + label + ' to confirm switching to it.'
     );
     if (typed !== label) {
       out.textContent = typed === null ? '' : 'Not confirmed -- no change made.';
@@ -1357,17 +1412,24 @@ async function loadRoles() {
 }
 
 async function grantAdmin(b) {
-  const input = document.getElementById('rl-account-id');
+  const input = document.getElementById('rl-display-name');
   const out = document.getElementById('rl-grant-result');
   out.replaceChildren();
-  const accountId = parseInt(input.value, 10);
-  if (!accountId || accountId < 1) { out.textContent = 'Enter a valid account id.'; return; }
+  const name = input.value.trim();
+  if (!name) { out.textContent = 'Enter a player name.'; return; }
   b.disabled = true;
   try {
-    const r = await post('/api/admin/roles/grant', { account_id: accountId });
-    out.textContent = r.changed
-      ? ('Account ' + accountId + ' now holds the admin role.')
-      : ('Account ' + accountId + ' already held the admin role.');
+    // POST /api/admin/roles/grant uses 404 for two ordinary lookup
+    // misses -- "no such player by that name" / "that player has no
+    // linked account" (see that route's own docstring) -- not for
+    // session loss. The shared post()/api() above now tells those
+    // apart correctly (see api()'s own comment): this call only runs
+    // once the panel is already up, so a 404 here surfaces body.error
+    // through the catch below instead of blanking the panel.
+    const body = await post('/api/admin/roles/grant', { display_name: name });
+    out.textContent = body.changed
+      ? ('"' + name + '" now holds the admin role.')
+      : ('"' + name + '" already held the admin role.');
     input.value = '';
     await loadRoles();
   } catch (e) {
@@ -1417,6 +1479,7 @@ async function refreshAll() {
 
 function showNoAccess(message) {
   myRole = null;
+  panelLoaded = false;
   document.getElementById('app').hidden = true;
   document.getElementById('login').hidden = false;
   document.getElementById('login-err').textContent = message || '';
@@ -1486,7 +1549,19 @@ async function signOut() {
 document.getElementById('signout-btn').addEventListener('click', signOut);
 document.getElementById('refresh-btn').addEventListener('click', function () {
   setStatus('Refreshing...', false);
-  refreshAll().then(() => setStatus('Up to date', false));
+  // Goes through checkAccess(), not straight to refreshAll() -- this
+  // doubles as the recovery path for the one gap api()'s panelLoaded
+  // gate (above) leaves open: the admin surface being disabled
+  // entirely mid-visit. checkAccess() re-asks GET /api/account, which
+  // reflects a pulled role immediately, so a manual refresh always
+  // lands on the correct screen (the real access-revoked message, or
+  // the panel with fresh data) instead of ever leaving stale "not
+  // found" text on screen from a guess this file cannot make on its
+  // own. When access still holds, checkAccess() runs the exact same
+  // showApp() -> refreshAll() path this used to call directly.
+  checkAccess().then(() => {
+    if (myRole) setStatus('Up to date', false);
+  });
 });
 document.querySelectorAll('.adm-nav-item').forEach((b) => {
   b.addEventListener('click', () => show(b.dataset.section));

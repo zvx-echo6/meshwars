@@ -393,6 +393,144 @@ def test_operator_can_grant_admin_and_it_is_audited(client, db_path):
     assert rows[-1] == (operator_id, "role_granted", f"account_id={target_id} role=admin")
 
 
+# ===========================================================================
+# Grant by display_name -- the panel's Roles list only ever shows a
+# player's name, so the Grant control targets by name, resolved to the
+# account behind it. See app/admin_api.py's admin_roles_grant() own
+# docstring for the exact match rule (stripped in Python, LOWER() on
+# both sides in SQL) it shares with app/join_api.py's own signup
+# uniqueness check.
+# ===========================================================================
+
+
+def test_grant_by_display_name_succeeds(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    target_id = _make_account(db_path)
+    _link_player(db_path, target_id, "Malice")
+    _login_as(client, operator_id)
+
+    resp = client.post("/api/admin/roles/grant", json={"display_name": "Malice"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"account_id": target_id, "role": "admin", "changed": True}
+    assert _role_of(db_path, target_id) == "admin"
+
+    rows = _admin_action_log_rows(db_path)
+    assert rows[-1] == (operator_id, "role_granted", f"account_id={target_id} role=admin")
+
+
+def test_grant_by_display_name_is_case_insensitive_and_trims_whitespace(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    target_id = _make_account(db_path)
+    _link_player(db_path, target_id, "Malice")
+    _login_as(client, operator_id)
+
+    resp = client.post("/api/admin/roles/grant", json={"display_name": "  mALICE  "})
+
+    assert resp.status_code == 200
+    assert resp.json()["account_id"] == target_id
+    assert _role_of(db_path, target_id) == "admin"
+
+
+def test_grant_404s_for_an_unknown_display_name(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    _login_as(client, operator_id)
+
+    resp = client.post("/api/admin/roles/grant", json={"display_name": "NoSuchPlayer"})
+
+    assert resp.status_code == 404
+    assert resp.json() == {"error": 'no player named "NoSuchPlayer"'}
+
+
+def test_grant_404s_for_a_display_name_with_no_linked_account(client, db_path):
+    # An unclaimed, key-only player -- e.g. an anonymous Meshtastic join
+    # that has never been linked via POST /api/account/link-key (see
+    # app/join_api.py's own note on that path). player.account_id is
+    # NULL, so there is no account to grant a role to.
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player(display_name, team, created_at, account_id) "
+        "VALUES ('Drifter', 'RED', ?, NULL)",
+        (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    _login_as(client, operator_id)
+
+    resp = client.post("/api/admin/roles/grant", json={"display_name": "Drifter"})
+
+    assert resp.status_code == 404
+    assert resp.json() == {
+        "error": '"Drifter" is not linked to any account — there is nothing to grant a role to'
+    }
+
+
+def test_grant_by_display_name_still_refuses_to_demote_an_operator(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    other_operator_id = _make_account(db_path, role="operator")
+    _link_player(db_path, other_operator_id, "BigBoss")
+    _login_as(client, operator_id)
+
+    resp = client.post("/api/admin/roles/grant", json={"display_name": "BigBoss"})
+
+    assert resp.status_code == 409
+    assert _role_of(db_path, other_operator_id) == "operator"  # unchanged, not demoted
+
+
+def test_grant_by_display_name_is_a_no_op_for_an_account_already_admin(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    already_admin_id = _make_account(db_path, role="admin")
+    _link_player(db_path, already_admin_id, "Regular")
+    _login_as(client, operator_id)
+
+    resp = client.post("/api/admin/roles/grant", json={"display_name": "Regular"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"account_id": already_admin_id, "role": "admin", "changed": False}
+    assert _role_of(db_path, already_admin_id) == "admin"
+
+
+def test_grant_refuses_when_account_id_and_display_name_disagree(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    target_id = _make_account(db_path)
+    other_id = _make_account(db_path)
+    _link_player(db_path, target_id, "Malice")
+    _login_as(client, operator_id)
+
+    resp = client.post(
+        "/api/admin/roles/grant", json={"account_id": other_id, "display_name": "Malice"}
+    )
+
+    assert resp.status_code == 400
+    assert _role_of(db_path, target_id) is None
+    assert _role_of(db_path, other_id) is None
+
+
+def test_grant_accepts_matching_account_id_and_display_name(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    target_id = _make_account(db_path)
+    _link_player(db_path, target_id, "Malice")
+    _login_as(client, operator_id)
+
+    resp = client.post(
+        "/api/admin/roles/grant", json={"account_id": target_id, "display_name": "Malice"}
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"account_id": target_id, "role": "admin", "changed": True}
+
+
+def test_grant_requires_account_id_or_display_name(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    _login_as(client, operator_id)
+
+    resp = client.post("/api/admin/roles/grant", json={})
+
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "account_id or display_name is required"}
+
+
 def test_operator_can_revoke_an_admin(client, db_path):
     operator_id = _make_account(db_path, role="operator", totp_active=True)
     admin_id = _make_account(db_path, role="admin")

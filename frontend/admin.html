@@ -198,15 +198,16 @@
 
         <section class="adm-section" data-section="paint" hidden>
           <h2 class="adm-h2">Paint</h2>
-          <p class="adm-hint">Which source paints the Meshtastic board, plus FreqMapper's own connector and scoring. Exactly one source paints Meshtastic territory at a time; meshview keeps providing node names and roster either way. Read fresh by both pollers on their next cycle &mdash; no restart.</p>
+          <p class="adm-hint">Which source paints the Meshtastic board, plus FreqMapper's own connector and scoring. Meshview, FreqMapper, or both can paint at once &mdash; when both are selected, each paints independently and the board's existing capture cooldowns handle a cell either one touches, same as they do for any two players. Meshview keeps providing node names and roster either way. Read fresh by both pollers on their next cycle &mdash; no restart.</p>
 
           <h3 class="adm-h3">Meshtastic paint source</h3>
-          <p class="adm-hint">Meshview paints from the position packets it already polls. FreqMapper paints from independently-verified reception events instead &mdash; it reports no per-event station count, so its scoring below is a flat award rather than a per-station one. Switching this changes where live Meshtastic territory comes from; saving asks you to confirm which source you are switching to.</p>
+          <p class="adm-hint">Meshview paints from the position packets it already polls. FreqMapper paints from independently-verified reception events instead &mdash; it reports no per-event station count, so its scoring below is a flat award rather than a per-station one. Both is the default: both painters run, unconditionally, with no priority between them. Switching this changes where live Meshtastic territory comes from; saving asks you to confirm which source you are switching to.</p>
           <div class="adm-form">
             <label class="adm-field-label">Paint source
               <select id="pt-source">
                 <option value="meshview">Meshview</option>
                 <option value="freqmapper">FreqMapper</option>
+                <option value="both">Both</option>
               </select>
             </label>
           </div>
@@ -322,7 +323,7 @@
           <div id="roles-list"></div>
           <h3 class="adm-h3">Grant admin</h3>
           <div class="adm-form">
-            <input type="number" id="rl-account-id" min="1" step="1" autocomplete="off" placeholder="account id" />
+            <input type="text" id="rl-display-name" maxlength="32" autocomplete="off" placeholder="player name" />
             <button type="button" id="rl-grant" class="adm-btn">Grant admin</button>
           </div>
           <div id="rl-grant-result" class="adm-result"></div>
@@ -332,6 +333,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260904-3"></script>
+  <script src="/static/admin.js?v=20260905-3"></script>
 </body>
 </html>
