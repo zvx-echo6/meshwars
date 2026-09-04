@@ -433,10 +433,28 @@ def _render_qr_svg(uri: str) -> str:
     reliably regardless of the page's own light/dark theme -- see the
     enrollment route's own docstring for why an inline <svg>, not a
     data: URI or a rendered PNG.
+
+        omitsize=True is the load-bearing argument, not a tidiness one.
+    Without it segno emits width/height attributes and NO viewBox, and
+    frontend/totp.css sizes the svg to a fixed 176px. An SVG with no
+    viewBox does not scale its contents to its element box -- the box
+    shrinks and the drawing stays in its own coordinate space, so it is
+    CLIPPED. A real otpauth URI renders at version 8, 49 modules, 265px
+    natural, which meant a visitor saw the top-left 66 percent of the
+    code: finder pattern present at top-left, the top-right and
+    bottom-left ones cropped off entirely. No scanner can read that, and
+    it looks like a corrupt QR rather than a cropped one, which is what
+    sent an earlier fix after the otpauth label instead.
+
+    omitsize drops width/height and emits a viewBox, so the CSS size
+    scales the whole symbol.
     """
     qr = segno.make(uri, error="m")
     buf = io.BytesIO()
-    qr.save(buf, kind="svg", xmldecl=False, svgns=True, scale=5, border=2, dark="#000000", light="#ffffff")
+    qr.save(
+        buf, kind="svg", xmldecl=False, svgns=True, scale=5, border=2,
+        dark="#000000", light="#ffffff", omitsize=True,
+    )
     return buf.getvalue().decode("utf-8")
 
 
