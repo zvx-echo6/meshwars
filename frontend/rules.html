@@ -73,6 +73,7 @@
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
   <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
 </head>
 <body>
 
@@ -101,6 +102,23 @@
       <h1 class="rules-title">Rules</h1>
       <p class="rules-sub">Every mechanic, written out. Nothing here is a summary of something else &mdash; these are the numbers the server actually uses.</p>
     </header>
+
+    <!-- Client-side search (frontend/page-search.js, shared with
+         /docs and /account). Built from this page's own DOM at load,
+         so it can never fall out of sync with the content -- see that
+         module's own header comment for how the index is built and
+         why. -->
+    <div class="docs-search-wrap">
+      <label class="docs-search-label" for="docs-search-input">Search this page</label>
+      <div class="docs-search-box">
+        <input type="text" id="docs-search-input" class="docs-search-input"
+               placeholder="Try &ldquo;streaks&rdquo; or &ldquo;places worth going&rdquo;"
+               autocomplete="off" role="combobox" aria-expanded="false"
+               aria-controls="docs-search-results" aria-autocomplete="list" />
+        <span class="docs-search-hint" id="docs-search-hint" aria-hidden="true">/</span>
+      </div>
+      <ul id="docs-search-results" class="docs-search-results" role="listbox" hidden></ul>
+    </div>
 
     <div class="rules-layout">
       <nav class="rules-toc" aria-label="Sections">
@@ -219,7 +237,7 @@
           <h2>Places Worth Going</h2>
           <p>Some squares aren't just squares. A summit, a park or a landmark inside one makes that square worth more than the ground around it. None of it is invented for the game: summits come from Summits On The Air, parks from Parks On The Air and the national protected-areas database PAD-US, and landmarks from OpenStreetMap.</p>
 
-          <h3>Scored by effort, not by category</h3>
+          <h3 id="places-scoring">Scored by effort, not by category</h3>
           <p>What a place is worth depends on how far it made you go, not what kind of place it is. Anywhere inside a town's own limits, a park or a landmark is worth five points, the same nickel whether you drove up to it or walked to the courthouse. Step outside a town and the category starts to matter. A summit is scored differently from both &mdash; see below.</p>
           <table class="rules-table rules-table-compare">
             <thead><tr><th></th><th>Inside a town</th><th>Outside a town</th></tr></thead>
@@ -232,7 +250,7 @@
           <p>A summit is the one place whose value is never flat and never falls back to the in-town nickel: it scores by elevation everywhere, inside a town or out. It slides evenly from 50 points at 6,000 feet and below to 100 points at 9,000 feet and above &mdash; a peak at 7,500 feet is worth 75. A peak is a peak whether or not you can park a car next to it: unlike a park or a landmark, being inside a town's limits does not flatten a summit's value, because the climb it took to reach the top doesn't change depending on where the town line was drawn around its base.</p>
           <p>That is on purpose. A summit you can park a car next to and a hot spring at the end of an hour of dirt road are both "a summit" and "a landmark" by category, but they are not the same errand. Scoring by effort instead of by category means the game rewards the drive, not the label, while a town's own parks and landmarks are worth showing up for but not worth grinding.</p>
 
-          <h3>The weekly cap</h3>
+          <h3 id="places-weekly-cap">The weekly cap</h3>
           <table class="rules-table">
             <tbody>
               <tr><th>Per place</th><td>one credit, per person, per week</td></tr>
@@ -246,15 +264,15 @@
           <p>Points go to your own Explorer Score and to your team's total, the same shape check-in points already have.</p>
           <p><strong>Explorer is not a monthly honor.</strong> It is the name of an activity and of a ranking &mdash; the Explorer tab under Top Operators, alongside Wardrivers and NetOps. Your Explorer Score runs the length of the season and counts toward your total score, so it is never reset or scored month by month the way the honors below are. The monthly honors built on places count visits instead of points: Tourist, Park Hopper and Peak Tagger.</p>
 
-          <h3>Which square scores</h3>
+          <h3 id="places-which-square">Which square scores</h3>
           <p>A landmark or a summit scores the single square its point falls in. A park with a mapped boundary at least the size of a grid square scores every square more than half inside that boundary &mdash; skirt its edge and only the squares mostly inside it count. A park smaller than a square, or without a boundary on file at all, scores the square containing its point instead, the same as a landmark. Close to two in five parks have no boundary data on file; those still score, just by that simpler rule.</p>
           <p>One square can carry more than one place &mdash; a landmark standing inside a large park, say. <strong>Only the most valuable one scores.</strong> Places do not stack: the lesser place is dropped rather than paid alongside the better one, because one trip to one square is one errand and it pays once. That holds even if the more valuable place gets capped by what's left of your week &mdash; the cheaper place on the square still doesn't step in. If you already collected that square's place this week, it simply pays nothing on a repeat visit. Two places of exactly equal value on one square always resolve to the same winner, every week and for every player.</p>
 
-          <h3>What makes the list</h3>
+          <h3 id="places-list">What makes the list</h3>
           <p>The list is deliberately narrow, and three things you might expect on it are not. Trailheads are left off because a trailhead is where you start going somewhere, not somewhere to go. Fire lookouts are left off because the peak a lookout stands on is already the summit you get credit for, and scoring both would pay you twice for one walk &mdash; for the same reason, a landmark sitting within about a hundred metres of a scoring summit is dropped in favour of the summit.</p>
           <p>Summits have to have a real name. Roughly a fifth of the source list records unnamed peaks by their height instead of a name, or by a placeholder like "Peak 8", and those are left out &mdash; unless the number is 13,000 feet or more, where a peak genuinely is known by its elevation.</p>
 
-          <h3>The weekly rotation</h3>
+          <h3 id="places-rotation">The weekly rotation</h3>
           <p>Summits and every park with a real, mapped boundary are always live. Landmarks, and the small parks whose mapped boundary doesn't fill a whole square, rotate instead: only some of them are live in any given week, chosen the same way for every player, with a minimum spacing between live picks so a dense downtown can't be farmed by visiting one block. A park with no boundary on file isn't treated as small for rotation, even though it scores like one &mdash; the game doesn't actually know its size, so it stays always active instead of guessing, the same as a summit.</p>
           <p>The rotation turns over on the same weekly reset as the net and everything else &mdash; one clock for the whole game. A landmark that's live this week may not be next week, and that's deliberate: the point is to keep sending you somewhere new, not to hand out a fixed list once and let it go stale.</p>
         </section>
@@ -312,23 +330,23 @@
           <h2>Fair play</h2>
           <p>A few mechanics exist to keep the game about reaching the mesh. All of them are narrow on purpose.</p>
 
-          <h3>How precise your position has to be</h3>
+          <h3 id="fairplay-precision">How precise your position has to be</h3>
           <p>A Meshtastic radio can be set to report its position roughly rather than exactly, and some are shipped that way. A rough position can put you anywhere inside a box a kilometre or more across, which is several squares wide &mdash; so a position that is not precise enough to say which square you were in claims nothing at all.</p>
           <p>Squares are about 300 metres, so a position has to be good to roughly 180 metres or better to count. In the Meshtastic app that is the channel's position precision setting: leave it at full precision, or at least at the step that says within 182 metres. A packet that does not say how precise it is gets the same answer, because there is nothing to check &mdash; and the packets that omit it are the ones carrying no usable position in the first place.</p>
           <p>This is a Meshtastic setting and it has no MeshCore equivalent. If you register a radio, drive somewhere with coverage, and nothing appears on the map, this is the first thing to look at.</p>
 
-          <h3>Aircraft and impossible jumps</h3>
+          <h3 id="fairplay-aircraft">Aircraft and impossible jumps</h3>
           <p>A radio at altitude reaches an absurd number of nodes, which would make the exploration awards meaningless. MeshWars works out your speed between consecutive positions &mdash; and the two boards act on that number differently, because they can afford to.</p>
           <p><strong>On MeshCore</strong>, faster than roughly 100 mph is marked as airborne. Those squares <strong>still count as territory</strong> &mdash; the radio genuinely reached those nodes, and that is what territory measures. What they do not count toward is Places Worth Going, and the awards built on reach and effort: Tourist, Park Hopper, Peak Tagger and Frontier. Nothing is taken away and nobody is penalised. Above roughly 900 mph the jump is read as a bad GPS fix rather than a flight, so a phone that briefly locates you in the next county does not disqualify a legitimate remote claim.</p>
           <p><strong>On Meshtastic</strong>, there is no airborne marking at all. A position that would have needed more than roughly 200 mph since your last one is thrown out instead, and claims nothing. The bar is deliberately far above MeshCore's: refusing a position costs you a square where labelling one does not, and two positions a few seconds apart in neighbouring squares can read as a surprisingly high speed from the grid alone. A refused position is also not used as the starting point for the next check, so one bad fix cannot make your next honest ping look like the impossible one.</p>
           <p>Nothing catches a hovering aircraft; that is a known gap.</p>
 
-          <h3>Automated check-ins</h3>
+          <h3 id="fairplay-automated-checkins">Automated check-ins</h3>
           <p>Quick Fingers is an award for reacting quickly to an event that happens on a schedule, which is an open invitation to a cron job. So it ships with its own defence.</p>
           <p>A person posting from a phone lands somewhere different each week &mdash; scattered across minutes. A script fires at the same offset every time, to within a second or two. MeshWars looks at how much a player's check-in timing varies across the month, and when it barely varies at all over enough nets, that player is quietly skipped for Quick Fingers.</p>
           <p>That is the whole extent of it. It is not a penalty, it is not an accusation, and it affects nothing else &mdash; the check-in still earns its points, the streak still counts, every other award is unaffected. A false positive costs somebody one novelty award, whereas punishing anyone on the strength of a statistical hunch would mean settling arguments that cannot actually be settled.</p>
 
-          <h3>Sharing keys</h3>
+          <h3 id="fairplay-sharing-keys">Sharing keys</h3>
           <p>A contact key bound to one player cannot earn for another. If a ping arrives under one player's API key carrying a radio registered to somebody else, it is dropped and logged rather than credited to either of them.</p>
         </section>
 
@@ -359,6 +377,6 @@
 
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
-  <script src="/static/rules.js?v=20260824-1" type="module"></script>
+  <script src="/static/rules.js?v=20260904-1" type="module"></script>
 </body>
 </html>

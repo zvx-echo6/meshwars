@@ -73,7 +73,8 @@
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
   <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/docs.css?v=20260902-1" />
+  <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/docs.css?v=20260904-1" />
 </head>
 <body>
 
@@ -103,9 +104,11 @@
       <p class="rules-sub">How to set up a radio, manage your account, read the board and the results page, and fix the common problems. This is the how-to reference, not the rulebook -- for how scoring, capture and the honors actually work, see <a href="/rules">Rules</a>.</p>
     </header>
 
-    <!-- Client-side search (docs.js). Built from this page's own DOM at
-         load, so it can never fall out of sync with the content -- see
-         docs.js's module comment for how the index is built and why. -->
+    <!-- Client-side search (frontend/page-search.js, shared with
+         /rules and /account). Built from this page's own DOM at load,
+         so it can never fall out of sync with the content -- see that
+         module's own header comment for how the index is built and
+         why. -->
     <div class="docs-search-wrap">
       <label class="docs-search-label" for="docs-search-input">Search this page</label>
       <div class="docs-search-box">
@@ -434,7 +437,7 @@
     </div>
   </main>
 
-  <script src="/static/docs.js?v=20260902-1" type="module"></script>
+  <script src="/static/docs.js?v=20260904-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

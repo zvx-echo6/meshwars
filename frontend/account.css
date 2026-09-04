@@ -17,11 +17,36 @@
    cosmetic one. */
 [hidden] { display: none !important; }
 
+/* Widened to match rules.css's own .rules-wrap -- this page now carries
+   the same contents-rail-plus-search layout /docs and /rules use
+   (rules.css's .rules-layout/.rules-toc, loaded here alongside this
+   file), and a 210px rail plus a reading column need more room than
+   the single narrow column this page used to be. The two states that
+   are NOT that two-column layout -- the loading hint and the signed-out
+   sign-in panel, both direct children of this wrap -- get their own
+   narrower measure below instead of stretching full width. */
 .account-wrap {
-  max-width: 640px;
+  max-width: 1160px;
   margin: 0 auto;
   padding: calc(var(--mw-nav-h) + 24px) 16px 64px;
 }
+
+#account-loading,
+#account-signed-out {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+/* The reading column next to the rail (rules.css's .rules-toc is the
+   other .rules-layout child). Deliberately NOT .rules-body -- that
+   class carries rules.css's own prose styling (gold-underlined h2s,
+   a border under every section, paragraph line-height tuned for
+   running text) built for /docs and /rules reading straight through,
+   which would visually collide with this page's existing boxed
+   .account-panel treatment instead of just sitting next to it. This
+   page keeps its own panel look; only the rail/search chrome around
+   it is shared. */
+.account-body { max-width: 100%; }
 
 .account-hint {
   font-size: 0.8125rem;
@@ -37,7 +62,20 @@
   margin-bottom: 16px;
 }
 
+/* A panel's own title -- one level below .account-group-title. Was a
+   plain <div> until this page grew the same contents rail /docs and
+   /rules use (see .account-wrap's own comment): search and the rail
+   both need a real heading with an id to link to (frontend/page-search.js
+   only indexes h2/h3), so every one of these is now an <h2> (the
+   ungated Player panel, which has no surrounding group of its own) or
+   an <h3> (every panel inside a group) instead, id'd in account.html.
+   margin-top is reset here because a heading element carries its own
+   user-agent default top margin that a <div> never did -- without
+   this, every panel would have gained a gap above its title it didn't
+   have before, a purely cosmetic regression the tag change alone
+   would otherwise cause. */
 .account-title {
+  margin-top: 0;
   font-weight: 700;
   font-size: 0.75rem;
   letter-spacing: 0.05em;
@@ -743,6 +781,23 @@
   font-size: 0.8125rem;
   cursor: default;
 }
+/* The candidate that's already the caller's OWN radio -- neither an
+   available pick (.account-checkin-confirm-btn) nor someone else's
+   (.account-checkin-candidate-claimed above): stays clickable (accept
+   already treats re-confirming your own radio as a no-op success), so
+   it keeps the pointer cursor and a friendly border rather than the
+   claimed style's flat, disabled look. */
+.account-checkin-candidate-mine {
+  background: var(--mw-page);
+  color: var(--mw-friendly);
+  border: 1px solid var(--mw-friendly);
+  border-radius: 4px;
+  padding: 8px 14px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.account-checkin-candidate-mine:hover { background: var(--mw-line); }
 
 /* ---- My stats ------------------------------------------------------------ */
 .account-stats-card {

@@ -1,14 +1,24 @@
 // =====================================================================
-// frontend/rules.js -- the contents rail on /rules.
+// frontend/rules.js -- the contents rail on /rules, plus wiring up the
+// client-side search box.
 //
-// One job: keep the rail marking where you are. In a document this long
-// the rail answers "where am I" more often than "take me somewhere", and
-// a list of twelve identical links answers neither.
-//
+// RAIL: one job -- keep it marking where you are. In a document this
+// long the rail answers "where am I" more often than "take me
+// somewhere", and a list of twelve identical links answers neither.
 // IntersectionObserver rather than a scroll handler: the browser does
 // the work off the main thread and hands back only the crossings, so
 // there is no listener firing on every frame of a long scroll.
+//
+// SEARCH: the index build, matching/scoring, snippet construction and
+// the results listbox live in frontend/page-search.js, shared with
+// /docs and /account -- see that module's own header comment for the
+// full design, including why /rules's own top-level <h2>s (which carry
+// no id of their own -- the id lives on the wrapping <section> instead,
+// e.g. <section id="basics"><h2>The basics</h2>) are still indexable
+// without this page's existing markup having to change at all.
 // =====================================================================
+import { setupPageSearch } from './page-search.js?v=20260904-1';
+
 const links = Array.from(document.querySelectorAll('.rules-toc a[href^="#"]'));
 const sections = links
   .map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1))))
@@ -47,3 +57,9 @@ if (sections.length && 'IntersectionObserver' in window) {
 
   for (const s of sections) io.observe(s);
 }
+
+// ---- search -------------------------------------------------------------
+// Built once, at load, straight from .rules-body -- this page's content
+// never changes shape after load, so there is no need to ever call the
+// returned rebuildIndex().
+setupPageSearch({ headingsRoot: document.querySelector('.rules-body') });

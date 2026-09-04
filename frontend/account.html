@@ -43,8 +43,10 @@
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
+  <link rel="stylesheet" href="/static/rules.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
   <link rel="stylesheet" href="/static/signin.css?v=20260904-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/account.css?v=20260904-3" />
   <link rel="stylesheet" href="/static/totp.css?v=20260903-1" />
 </head>
 <body>
@@ -157,13 +159,55 @@
         <div id="account-owes-password-form-slot"></div>
       </div>
 
+      <!-- Client-side search (frontend/page-search.js, shared with
+           /docs and /rules) plus the same contents rail those two
+           pages use (rules.css's .rules-layout/.rules-toc) -- Matt
+           asked for this page restructured to match those two rather
+           than grow a tabbed pattern of its own. Both banners above
+           stay OUTSIDE this layout, full width, ahead of it -- the
+           owes-password prompt in particular has to stay visible and
+           unavoidable no matter where the reader has scrolled to via
+           the rail, so it can never live inside the part the rail
+           navigates.
+
+           Unlike docs.html/rules.html (whose section list is fixed at
+           publish time, so their rail is a hand-typed <li> list),
+           this page's own section list is data-dependent -- an
+           account with no linked player never shows Radios &amp;
+           troubleshooting or Play at all (applyPlayerGate() below).
+           So the <ul> here starts empty and is populated by
+           account.js's own buildAccountToc(), which only ever lists a
+           heading that's both there and currently visible -- see that
+           function's own comment for why: a rail full of links into
+           sections that don't exist would be exactly the thing Matt
+           didn't want in their place. -->
+      <div class="docs-search-wrap">
+        <label class="docs-search-label" for="docs-search-input">Search this page</label>
+        <div class="docs-search-box">
+          <input type="text" id="docs-search-input" class="docs-search-input"
+                 placeholder="Try &ldquo;rotate key&rdquo; or &ldquo;switch team&rdquo;"
+                 autocomplete="off" role="combobox" aria-expanded="false"
+                 aria-controls="docs-search-results" aria-autocomplete="list" />
+          <span class="docs-search-hint" id="docs-search-hint" aria-hidden="true">/</span>
+        </div>
+        <ul id="docs-search-results" class="docs-search-results" role="listbox" hidden></ul>
+      </div>
+
+      <div class="rules-layout">
+        <nav class="rules-toc" aria-label="Sections">
+          <p class="rules-toc-title">Contents</p>
+          <ul class="account-toc-list"></ul>
+        </nav>
+
+        <div class="account-body">
+
       <!-- ===================================================================
            PLAYER. First, always -- everything below either depends on a
            linked player existing (the two gated groups further down) or
            doesn't care (Security). This is the one panel that decides
            which of those two states the rest of the page is in. -->
       <section class="account-panel">
-        <div class="account-title">Player</div>
+        <h2 id="player" class="account-title">Player</h2>
         <div id="account-player-linked" hidden>
           <p class="account-hint">This account is connected to a MeshWars player.</p>
           <p id="account-player-name" class="account-player-line"></p>
@@ -258,10 +302,10 @@
              narrative -- see what's registered, run the full diagnostic,
              confirm a node by name if one isn't binding on its own, then
              drill into check-ins specifically for the fix. -->
-        <h2 class="account-group-title">Radios &amp; troubleshooting</h2>
+        <h2 id="radios" class="account-group-title">Radios &amp; troubleshooting</h2>
 
         <section class="account-panel">
-          <div class="account-title">My radios</div>
+          <h3 id="my-radios" class="account-title">My radios</h3>
           <p class="account-hint">Every radio bound to your player, on either protocol. Meshtastic radios have to be registered here; MeshCore ones usually bind themselves the first time you wardrive with MeshMapper's Include Contact Key setting on.</p>
           <ul id="account-radios-list" class="account-radios-list"></ul>
           <div id="account-radios-error" class="account-error" role="alert" hidden></div>
@@ -310,7 +354,7 @@
              confirmation" section for the start/status/accept/cancel
              cycle both protocols share underneath this one form. -->
         <section class="account-panel">
-          <div class="account-title">Confirm my node</div>
+          <h3 id="confirm-node" class="account-title">Confirm my node</h3>
           <p class="account-hint">Proves a specific radio is really yours before we bind it to your account. Pick your radio type, then follow the instructions below.</p>
 
           <div id="account-checkin-confirm-error" class="account-error" role="alert" hidden></div>
@@ -344,7 +388,7 @@
         </section>
 
         <section class="account-panel">
-          <div class="account-title">Troubleshooting / setup check</div>
+          <h3 id="troubleshooting" class="account-title">Troubleshooting / setup check</h3>
           <p class="account-hint">Checks whether MeshWars is actually receiving anything from your radios, and tells you what's wrong if it isn't. You're signed in, so this runs without needing to paste your API key.</p>
           <button type="button" id="account-status-check-btn">Check now</button>
           <div id="account-status-error" class="account-error" role="alert" hidden></div>
@@ -352,7 +396,7 @@
         </section>
 
         <section class="account-panel">
-          <div class="account-title">Why my check-ins may not be counting</div>
+          <h3 id="checkin-health" class="account-title">Why my check-ins may not be counting</h3>
           <p class="account-hint">Looks at each bound MeshCore contact and says exactly why it does or doesn't resolve to you right now.</p>
           <button type="button" id="account-checkin-health-btn">Check now</button>
           <div id="account-checkin-health-error" class="account-error" role="alert" hidden></div>
@@ -363,16 +407,16 @@
              PLAY. The status/payoff cluster -- headline numbers first,
              then the one dial a player can turn (team), then the two
              read-only records (history, then honors). -->
-        <h2 class="account-group-title">Play</h2>
+        <h2 id="play" class="account-group-title">Play</h2>
 
         <section class="account-panel">
-          <div class="account-title">My stats</div>
+          <h3 id="stats" class="account-title">My stats</h3>
           <div id="account-stats-error" class="account-error" role="alert" hidden></div>
           <div id="account-stats-result" class="account-stats-result"></div>
         </section>
 
         <section class="account-panel">
-          <div class="account-title">My team</div>
+          <h3 id="team" class="account-title">My team</h3>
           <p id="account-team-current" class="account-player-line"></p>
           <p id="account-team-locked-hint" class="account-hint" hidden></p>
           <div id="account-team-error" class="account-error" role="alert" hidden></div>
@@ -394,13 +438,13 @@
         </section>
 
         <section class="account-panel">
-          <div class="account-title">My check-in history</div>
+          <h3 id="checkin-history" class="account-title">My check-in history</h3>
           <div id="account-checkins-error" class="account-error" role="alert" hidden></div>
           <div id="account-checkins-result"></div>
         </section>
 
         <section class="account-panel">
-          <div class="account-title">My honors</div>
+          <h3 id="honors" class="account-title">My honors</h3>
           <div id="account-honors-error" class="account-error" role="alert" hidden></div>
           <ul id="account-honors-list" class="account-honors-list"></ul>
         </section>
@@ -413,17 +457,17 @@
            (sign-in methods, password), then contact email (recovery),
            then the API key (the machine credential), then sessions (active
            logins) at the very end, same as before this page grew. -->
-      <h2 class="account-group-title">Security</h2>
+      <h2 id="security" class="account-group-title">Security</h2>
 
       <section class="account-panel">
-        <div class="account-title">Sign-in methods</div>
+        <h3 id="signin-methods" class="account-title">Sign-in methods</h3>
         <p class="account-hint">Each of these is an independent way into this same account — add another any time from the join page.</p>
         <div id="account-identities-error" class="account-error" role="alert" hidden></div>
         <ul id="account-identities" class="account-identities"></ul>
       </section>
 
       <section class="account-panel">
-        <div class="account-title">Password</div>
+        <h3 id="password" class="account-title">Password</h3>
         <p id="account-password-hint" class="account-hint"></p>
         <div id="account-password-error" class="account-error" role="alert" hidden></div>
         <div id="account-password-success" class="account-hint" hidden></div>
@@ -450,7 +494,7 @@
       </section>
 
       <section id="account-totp-panel" class="account-panel">
-        <div class="account-title">Two-factor authentication</div>
+        <h3 id="totp" class="account-title">Two-factor authentication</h3>
 
         <!-- Not offered at all -- settings.account_totp_encryption_key
              is unset on this deployment (GET /api/account's
@@ -526,11 +570,49 @@
         </div>
       </section>
 
+      <!-- Admin access -- the panel's own entry point. Visible to every
+           account (the claim form is how a role is REACHED, so it can't
+           be gated on already holding one); the button to the actual
+           panel only ever appears once GET /api/account reports a role
+           (account.js's renderAdminSection()) -- see
+           app/admin_api.py's own module docstring for the full claim
+           design (token + active two-factor, mirrors link-key). -->
+      <section id="account-admin-panel" class="account-panel">
+        <h3 id="admin" class="account-title">Admin access</h3>
+
+        <!-- Already holds a role. -->
+        <div id="account-admin-has-role" hidden>
+          <p id="account-admin-role-line" class="account-hint"></p>
+          <a href="/admin" id="account-admin-panel-link" class="account-link-btn">Open the admin panel</a>
+        </div>
+
+        <!-- No role yet -- the claim form. -->
+        <div id="account-admin-claim" hidden>
+          <p class="account-hint">Claim the operator role with the admin token given to you out of band. Two-factor authentication must be enabled first — the highest-privilege role in this app never sits on a single factor.</p>
+          <p id="account-admin-claim-needs-totp" class="account-hint" hidden>Enable two-factor authentication above before claiming a role.</p>
+          <div id="account-admin-claim-error" class="account-error" role="alert" hidden></div>
+          <div id="account-admin-claim-success" class="account-hint" hidden></div>
+          <form id="account-admin-claim-form" class="account-connect-form" novalidate autocomplete="off">
+            <label class="account-field">
+              <span>Admin token</span>
+              <input type="password" id="f-account-admin-token" autocomplete="off" />
+            </label>
+            <button type="submit" id="account-admin-claim-submit">Claim operator role</button>
+          </form>
+        </div>
+      </section>
+
       <section class="account-panel">
-        <div class="account-title">Contact email</div>
+        <h3 id="contact-email" class="account-title">Contact email</h3>
         <p class="account-hint">A recovery address MeshWars can reach you at — separate from any sign-in method, and never usable to sign in on its own.</p>
         <p id="account-contact-email-current" class="account-hint"></p>
         <div id="account-contact-email-error" class="account-error" role="alert" hidden></div>
+        <!-- POST /api/account/contact-email/use-identity -- hidden by default,
+             shown only by renderContactEmail() (account.js) when there is no
+             contact email saved yet AND at least one sign-in identity on the
+             account is provider-verified. No form: this action takes no
+             body at all, the address is chosen server-side. -->
+        <button type="button" id="account-contact-email-use-identity-btn" hidden>Use my verified email</button>
         <form id="account-contact-email-form" class="account-contact-email-form" novalidate autocomplete="off">
           <label class="account-field account-field-grow">
             <span>Email</span>
@@ -541,7 +623,7 @@
       </section>
 
       <section id="account-key-panel" class="account-panel" hidden>
-        <div class="account-title">API key</div>
+        <h3 id="api-key" class="account-title">API key</h3>
         <p class="account-hint">Rotating your key immediately breaks anything still using the old one — including MeshMapper. You will need to paste the new key into MeshMapper's Settings, then API Endpoints, before wardriving works again.</p>
         <div id="account-rotate-key-error" class="account-error" role="alert" hidden></div>
         <button type="button" id="account-rotate-key-btn">Rotate key</button>
@@ -559,7 +641,7 @@
       </section>
 
       <section class="account-panel">
-        <div class="account-title">Sessions</div>
+        <h3 id="sessions" class="account-title">Sessions</h3>
         <p class="account-hint">Every device currently signed in to this account.</p>
         <ul id="account-sessions" class="account-sessions"></ul>
         <div id="account-session-error" class="account-error" role="alert" hidden></div>
@@ -569,11 +651,14 @@
         </div>
       </section>
 
+        </div>
+      </div>
+
     </section>
 
   </main>
 
-  <script src="/static/account.js?v=20260904-1" type="module"></script>
+  <script src="/static/account.js?v=20260904-4" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

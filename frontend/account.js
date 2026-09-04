@@ -12,15 +12,19 @@
  * /api/account/stats, GET /api/account/checkins, GET
  * /api/account/honors, DELETE /api/account/identity/{provider},
  * POST/DELETE /api/account/password, POST /api/account/contact-email,
- * and POST /api/account/rotate-key -- all documented in
+ * POST /api/account/contact-email/use-identity, and POST
+ * /api/account/rotate-key -- all documented in
  * app/account_api.py, app/nodes_api.py, app/mc_api.py,
  * app/checkin_api.py, app/join_api.py, and app/oauth_api.py.
  * Self-contained, same as every other page script in this codebase: no
- * build step, no shared import from another page's script, with the
- * one exception every page offering sign-in shares --
- * frontend/signin-email.js, see that module's own header comment for
- * why (same exception frontend/nav-auth.js already is for the nav
- * bar's signed-in state).
+ * build step, no shared import from another page's script, with two
+ * exceptions -- frontend/signin-email.js, the one every page offering
+ * sign-in shares (see that module's own header comment for why, same
+ * exception frontend/nav-auth.js already is for the nav bar's
+ * signed-in state), and frontend/page-search.js, shared with /docs and
+ * /rules for the contents-rail search box those two pages already had
+ * and this one now matches -- see PAGE STRUCTURE below and that
+ * module's own header comment.
  *
  * All of the routes above except the sign-in ones are session-cookie
  * authenticated with NO X-API-Key header -- see each router's own
@@ -49,6 +53,25 @@
  * explanation, the Join flow, and the connect-by-key form instead of
  * any of those sections erroring out.
  *
+ * PAGE STRUCTURE: this page now carries the same contents rail and
+ * search box /docs and /rules already had (account.html's
+ * .rules-layout/.rules-toc/.docs-search-wrap), rather than one long
+ * scroll of panels -- see frontend/page-search.js's own header comment
+ * for the search half of that. What's specific to THIS page is that
+ * its section list isn't fixed: the whole page starts hidden behind
+ * #account-content until GET /api/account resolves, and even once it
+ * doesn't, an account with no linked player never shows the Radios &
+ * troubleshooting or Play groups at all (applyPlayerGate()). Indexing
+ * or railing the page at load, the way docs.js/rules.js do once and
+ * never again, would search and rail-link straight into an empty or
+ * gated-off page. So buildAccountToc() (this page's own rail builder,
+ * unlike docs/rules' hand-typed <li> list) and the search module's
+ * rebuildIndex() are both re-run through refreshAccountNav() -- once
+ * applyPlayerGate() has just decided what's visible, and again once
+ * loadPlayerSections()'s own fetches have actually landed real content
+ * to search. See refreshAccountNav()'s own comment for the exact list
+ * of call sites and why each one is there.
+ *
  * SECURITY: every dynamic value rendered here (provider labels, masked
  * emails, player name/team, session user-agent/ip, server error text,
  * diagnosis/explanation copy, confirm-my-node candidate names) is set
@@ -70,6 +93,22 @@ import {
   showAuthErrorFromQuery,
   PASSWORD_SIGNIN_AVAILABLE,
 } from './signin-email.js?v=20260904-1';
+import { setupPageSearch } from './page-search.js?v=20260904-1';
+
+// The search box's own wiring (index build, matching, results listbox)
+// -- shared with /docs and /rules, see page-search.js's own header
+// comment. handleInitialHash is off here because, unlike those two
+// pages, this page's content is still `hidden` behind #account-content
+// the instant this module runs (GET /api/account hasn't resolved yet);
+// see that option's own doc comment in page-search.js for what this
+// page does instead, and PAGE STRUCTURE above for the rest of the
+// design. .account-body is this page's own reading column, set up in
+// account.html right where docs.html/rules.html each set up their own
+// .docs-body/.rules-body.
+const accountSearch = setupPageSearch({
+  headingsRoot: document.querySelector('.account-body'),
+  handleInitialHash: false,
+});
 
 // No local PROVIDER_LABELS map here -- app/oauth.py's PROVIDER_LABELS
 // is the single source of truth, and every API response this page
@@ -577,6 +616,126 @@ async function handleConnectSubmit(e) {
   }
 }
 
+// ---- Contents rail (built from the DOM, not hand-typed) ---------------
+//
+// docs.html/rules.html each hand-type their own <li> list because
+// their section list never changes after load -- rules.js/docs.js just
+// mark position in it. This page's section list DOES change (see PAGE
+// STRUCTURE at the top of this file), so the rail markup in
+// account.html starts as an empty <ul class="account-toc-list"> and
+// this function is what fills it in: every <h2 id> under .account-body
+// that isn't currently sitting under a `hidden` ancestor, in document
+// order. Only h2's -- the rail is one entry per top-level area (Player,
+// Radios & troubleshooting, Play, Security), the same granularity
+// docs.html/rules.html's own rails use; a panel's own <h3> is reachable
+// through search instead, same as an <h3> subsection is on those two
+// pages.
+function buildAccountToc() {
+  const tocList = document.querySelector('.account-toc-list');
+  if (!tocList) return;
+
+  const headings = Array.from(document.querySelectorAll('.account-body h2[id]'))
+    .filter((h) => !h.closest('[hidden]'));
+
+  tocList.replaceChildren(...headings.map((h) => {
+    const li = document.createElement('li');
+    const a = document.createElement('a');
+    a.href = '#' + h.id;
+    a.textContent = (h.textContent || '').trim();
+    li.appendChild(a);
+    return li;
+  }));
+}
+
+// ---- contents-rail scroll-spy (copied from rules.js/docs.js) ----------
+//
+// Same job, same IntersectionObserver approach as those two pages' own
+// copies -- see rules.js's own header comment for why an observer
+// rather than a scroll handler. The one difference: this page's own
+// buildAccountToc() above can replace the rail's <a> elements at
+// runtime (a group appearing once a player links, or Security's own
+// content changing under refreshAccountCore()), so unlike the other
+// two pages' one-time IIFE, this is a function this page calls again
+// each time that could have happened -- disconnecting whatever
+// observer it made last time first, so a stale one is never still
+// watching sections that just got rebuilt out from under it.
+let accountTocObserver = null;
+function setupAccountScrollSpy() {
+  if (accountTocObserver) {
+    accountTocObserver.disconnect();
+    accountTocObserver = null;
+  }
+
+  const links = Array.from(document.querySelectorAll('.rules-toc a[href^="#"]'));
+  const sections = links
+    .map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1))))
+    .filter(Boolean);
+
+  if (!sections.length || !('IntersectionObserver' in window)) return;
+
+  const byId = new Map(links.map((a) => [decodeURIComponent(a.hash.slice(1)), a]));
+  const visible = new Set();
+
+  function mark() {
+    if (!visible.size) return;
+    const top = sections.find((s) => visible.has(s.id));
+    if (!top) return;
+    for (const a of links) a.classList.remove('current');
+    const a = byId.get(top.id);
+    if (a) a.classList.add('current');
+  }
+
+  accountTocObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) visible.add(e.target.id);
+      else visible.delete(e.target.id);
+    }
+    mark();
+  }, {
+    rootMargin: '-80px 0px -55% 0px',
+    threshold: 0,
+  });
+
+  for (const s of sections) accountTocObserver.observe(s);
+}
+
+// Re-scans the DOM for both the rail and the search index -- call this
+// any time a whole heading could have appeared or disappeared
+// (applyPlayerGate(), below) or a panel's own text could have changed
+// enough to be worth re-searching (loadPlayerSections() finishing,
+// refreshAccountCore() re-rendering Security). Cheap enough (a few
+// dozen DOM nodes at most) to call generously rather than trying to
+// track precisely which of the two -- rail shape vs. search text --
+// actually needs it at each call site.
+let handledInitialHash = false;
+function refreshAccountNav() {
+  buildAccountToc();
+  setupAccountScrollSpy();
+  accountSearch.rebuildIndex();
+
+  // A direct #anchor load (e.g. a link to /account#security) can't
+  // rely on page-search.js's own built-in version of this (see
+  // handleInitialHash: false above) -- the browser's native on-load
+  // anchor scroll, and page-search.js's landing-highlight alongside
+  // it, both need the target to already be visible the instant the
+  // page loads, and #account-content is still `hidden` at that instant
+  // here, waiting on GET /api/account. So this does it by hand
+  // instead, the first time this page's real content is actually
+  // showing (right here) -- once only, so a later rebuild (e.g. after
+  // Join succeeds) doesn't re-jump a reader who has since scrolled
+  // somewhere else on their own.
+  if (!handledInitialHash && location.hash.length > 1) {
+    handledInitialHash = true;
+    const id = decodeURIComponent(location.hash.slice(1));
+    const target = document.getElementById(id);
+    if (target && !target.closest('[hidden]')) {
+      target.scrollIntoView({ block: 'start' });
+      target.classList.add('docs-search-landed');
+      setTimeout(() => target.classList.remove('docs-search-landed'), 1600);
+    }
+  }
+}
+
 // ---- Player-section gate ---------------------------------------------
 //
 // Everything scoped to a linked player (radios, troubleshooting,
@@ -591,6 +750,13 @@ function applyPlayerGate(hasPlayer) {
   document.getElementById('account-player-groups').hidden = !hasPlayer;
   document.getElementById('account-no-player-note').hidden = hasPlayer;
   document.getElementById('account-key-panel').hidden = !hasPlayer;
+
+  // The rail and the search index both depend on exactly what this
+  // just decided (Radios & troubleshooting / Play appear or vanish as
+  // a pair) -- refresh right here, once, rather than trusting every
+  // caller of applyPlayerGate() to remember to do it separately. See
+  // refreshAccountNav()'s own comment for the rest of its call sites.
+  refreshAccountNav();
 }
 
 // ---- Sessions (GET /api/account's own sessions array) ---------------------
@@ -1355,10 +1521,27 @@ function renderCheckinConfirmCandidates(data) {
       // Visibly disabled and labelled, not just left off the list --
       // the player still needs to see it was heard, and understand why
       // it's not clickable, rather than wonder if their node is
-      // missing entirely.
+      // missing entirely. already_claimed means claimed by SOMEONE
+      // ELSE -- the caller's own radio is never flagged this way (see
+      // app/checkin_api.py's _node_ref_owners docstring), so this
+      // label is never wrong about whose it is.
       claimBtn.textContent = 'Already registered to someone else';
       claimBtn.disabled = true;
       claimBtn.className = 'account-checkin-candidate-claimed';
+    } else if (cand.already_yours) {
+      // The third state neither of the other two branches covers:
+      // this candidate is already bound to the CALLER themself (a
+      // prior accept, or data that came across already bound). Not an
+      // available pick, and definitely not described as another
+      // player's -- stays clickable rather than disabled, since
+      // accept already treats re-confirming a radio the caller already
+      // owns as a no-op success (app/checkin_api.py's confirm_accept
+      // docstring), so clicking through just re-confirms what's
+      // already true.
+      claimBtn.textContent = 'Already registered to you';
+      claimBtn.className = 'account-checkin-candidate-mine';
+      const identifier = isMt ? cand.node_ref : cand.public_key;
+      claimBtn.addEventListener('click', () => handleCheckinConfirmAccept(data.protocol, identifier, claimBtn));
     } else {
       claimBtn.textContent = 'This is mine';
       claimBtn.className = 'account-checkin-confirm-btn';
@@ -2260,15 +2443,120 @@ async function handleTotpDisableSubmit(e) {
 }
 
 // ============================================================================
-// SECURITY: contact email (POST /api/account/contact-email)
+// SECURITY: admin access (POST /api/admin/roles/claim) -- the panel's own
+// entry point, and the claim flow that mirrors POST /api/account/link-key
+// (see app/admin_api.py's own module docstring for the full design).
 // ============================================================================
 
-function renderContactEmail(contactEmail) {
-  const current = document.getElementById('account-contact-email-current');
-  if (!contactEmail) {
-    current.textContent = 'No contact email set.';
+const ADMIN_ROLE_LABELS = { admin: 'admin', operator: 'operator' };
+
+function renderAdminSection(account) {
+  const hasRoleEl = document.getElementById('account-admin-has-role');
+  const claimEl = document.getElementById('account-admin-claim');
+  const needsTotpEl = document.getElementById('account-admin-claim-needs-totp');
+  hasRoleEl.hidden = true;
+  claimEl.hidden = true;
+
+  if (account.role) {
+    hasRoleEl.hidden = false;
+    document.getElementById('account-admin-role-line').textContent =
+      'This account holds the ' + (ADMIN_ROLE_LABELS[account.role] || account.role) + ' role.';
     return;
   }
+
+  // No role yet -- the claim form. Shown to every account (there is
+  // nothing to gate it on: the claim form is how a role is REACHED),
+  // but the submit button stays disabled without active two-factor --
+  // app/admin_api.py's POST /api/admin/roles/claim refuses the claim
+  // server-side either way, this is just not making someone type a
+  // token only to learn that after the fact.
+  claimEl.hidden = false;
+  const totpOn = !!(account.totp && account.totp.enabled);
+  needsTotpEl.hidden = totpOn;
+  document.getElementById('account-admin-claim-submit').disabled = !totpOn;
+}
+
+function showAdminClaimError(message) {
+  const el = document.getElementById('account-admin-claim-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+async function handleAdminClaimSubmit(e) {
+  e.preventDefault();
+  document.getElementById('account-admin-claim-error').hidden = true;
+  document.getElementById('account-admin-claim-success').hidden = true;
+
+  const input = document.getElementById('f-account-admin-token');
+  const token = input.value;
+  if (!token) {
+    showAdminClaimError('Enter the admin token.');
+    return;
+  }
+
+  const submitBtn = document.getElementById('account-admin-claim-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/admin/roles/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (res.status === 404) {
+      showAdminClaimError('Admin access is not configured on this deployment.');
+      return;
+    }
+    if (!res.ok) {
+      showAdminClaimError((data && data.error) || 'That token was not accepted. Check it and try again.');
+      return;
+    }
+    input.value = '';
+    document.getElementById('account-admin-claim-success').hidden = false;
+    document.getElementById('account-admin-claim-success').textContent = 'You now hold the operator role.';
+    await refreshAccountCore();
+  } catch (err) {
+    showAdminClaimError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+// ============================================================================
+// SECURITY: contact email (POST /api/account/contact-email, and the
+// one-click POST /api/account/contact-email/use-identity below it)
+// ============================================================================
+
+// `identities` (GET /api/account's own identities list, always passed
+// alongside contactEmail by every caller below) is what decides whether
+// the "Use my verified email" button shows at all -- it is never worth
+// offering when nothing on the account has email_verified true, since
+// POST /api/account/contact-email/use-identity would just 409. This is
+// purely a UI nicety: the backend enforces the same rule itself either
+// way, this only saves a person a click that could never succeed.
+function renderContactEmail(contactEmail, identities) {
+  const current = document.getElementById('account-contact-email-current');
+  const useBtn = document.getElementById('account-contact-email-use-identity-btn');
+  const hasVerifiedIdentity = Array.isArray(identities) && identities.some((i) => i.email_verified);
+
+  if (!contactEmail) {
+    // "No contact email set." used to be the whole story here, but for
+    // an account signed in through a verified provider identity that's
+    // misleading -- MeshWars already holds a reachable, verified
+    // address, it just hasn't been copied onto this separate
+    // contact_email column yet (see app/db.py's account.contact_email
+    // comment for why that's deliberately its own field, never derived
+    // from account_identity automatically). Say so, and offer the
+    // one-click fix instead of only the blank manual box.
+    current.textContent = hasVerifiedIdentity
+      ? 'No contact email saved yet — but this account has a verified sign-in email. Use it below, or enter a different address.'
+      : 'No contact email set.';
+    if (useBtn) useBtn.hidden = !hasVerifiedIdentity;
+    return;
+  }
+
+  if (useBtn) useBtn.hidden = true;
   current.textContent = contactEmail.verified
     ? `${contactEmail.email} — verified.`
     : `${contactEmail.email} — not verified yet. Check your inbox for the verification link, or save again to resend it.`;
@@ -2311,11 +2599,52 @@ async function handleContactEmailSubmit(e) {
       return;
     }
     input.value = '';
-    renderContactEmail({ email: data.email, verified: data.verified });
+    setLastAccountContactEmail({ email: data.email, verified: data.verified });
   } catch (err) {
     showContactEmailError('Could not reach the server. Check your connection and try again.');
   } finally {
     submitBtn.disabled = false;
+  }
+}
+
+// Records the outcome of either contact-email route into lastAccountData
+// (so the identities list stays alongside it for renderContactEmail's
+// own hasVerifiedIdentity check) and re-renders from that single copy,
+// rather than each handler re-deriving what to pass -- both
+// handleContactEmailSubmit and handleUseIdentityEmailClick funnel their
+// success response through here.
+function setLastAccountContactEmail(contactEmail) {
+  if (lastAccountData) {
+    lastAccountData = Object.assign({}, lastAccountData, { contact_email: contactEmail });
+  }
+  renderContactEmail(contactEmail, lastAccountData ? lastAccountData.identities : []);
+}
+
+// One click, no form: POST /api/account/contact-email/use-identity
+// takes no body at all (see that route's own docstring for why -- the
+// address is chosen server-side from the account's own verified
+// identity, never something this page supplies), so there is nothing
+// to validate here beyond disabling the button while the request is in
+// flight.
+async function handleUseIdentityEmailClick() {
+  const el = document.getElementById('account-contact-email-error');
+  el.hidden = true;
+
+  const btn = document.getElementById('account-contact-email-use-identity-btn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/account/contact-email/use-identity', { method: 'POST' });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showContactEmailError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      return;
+    }
+    setLastAccountContactEmail({ email: data.email, verified: data.verified });
+  } catch (err) {
+    showContactEmailError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -2386,12 +2715,26 @@ async function handleRotateKeyConfirm() {
 // ============================================================================
 
 function loadPlayerSections() {
-  loadRadios();
-  loadCheckinConfirmStatus();
-  loadStats();
-  loadTeamStatus();
-  loadCheckins();
-  loadHonors();
+  // Each of the six is already independent and already fails quietly
+  // on its own (see the comment above) -- Promise.all here doesn't
+  // change any of that, it only gives refreshAccountNav() below a
+  // single moment to wait for: once every one of them has either
+  // rendered or given up, re-scan the DOM for search. Without this,
+  // the search index built right after applyPlayerGate() (see that
+  // function's own comment) would only ever see these panels' static
+  // hint text -- none of the radios list, stats, team, check-ins or
+  // honors this call is about to fill in, because those fetches are
+  // still in flight at that point. .catch() covers the case where one
+  // of the six actually throws instead of failing quietly, so a
+  // rejected promise there can't stop this from ever re-scanning.
+  Promise.all([
+    loadRadios(),
+    loadCheckinConfirmStatus(),
+    loadStats(),
+    loadTeamStatus(),
+    loadCheckins(),
+    loadHonors(),
+  ]).catch(() => {}).then(refreshAccountNav);
 }
 
 // ---- Completing a pending link (GET /api/account/pending + POST
@@ -2447,7 +2790,14 @@ async function refreshAccountCore() {
     renderPasswordSection(data);
     renderOwesPasswordBanner(data);
     renderTotpSection(data);
-    renderContactEmail(data.contact_email);
+    renderAdminSection(data);
+    renderContactEmail(data.contact_email, data.identities);
+    // None of the six re-renders above ever add or remove a whole
+    // panel -- Security's own headings never change shape here -- but
+    // several of them (identities, sessions) do change the TEXT search
+    // reads back out of the DOM, so the index is worth refreshing even
+    // though the rail itself never needs to be.
+    refreshAccountNav();
   } catch (err) {
     // Leave whatever was already rendered in place.
   }
@@ -2497,7 +2847,8 @@ async function loadAccount() {
   renderPasswordSection(finalData);
   renderOwesPasswordBanner(finalData);
   renderTotpSection(finalData);
-  renderContactEmail(finalData.contact_email);
+  renderAdminSection(finalData);
+  renderContactEmail(finalData.contact_email, finalData.identities);
 
   const hasPlayer = !!finalData.player;
   applyPlayerGate(hasPlayer);
@@ -2554,7 +2905,10 @@ function boot() {
   document.getElementById('account-totp-disable-cancel-btn').addEventListener('click', handleTotpDisableCancel);
   document.getElementById('account-totp-disable-form').addEventListener('submit', handleTotpDisableSubmit);
 
+  document.getElementById('account-admin-claim-form').addEventListener('submit', handleAdminClaimSubmit);
+
   document.getElementById('account-contact-email-form').addEventListener('submit', handleContactEmailSubmit);
+  document.getElementById('account-contact-email-use-identity-btn').addEventListener('click', handleUseIdentityEmailClick);
 
   document.getElementById('account-rotate-key-btn').addEventListener('click', handleRotateKeyBtnClick);
   document.getElementById('account-rotate-key-cancel-btn').addEventListener('click', handleRotateKeyCancel);
