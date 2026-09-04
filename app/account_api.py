@@ -224,38 +224,85 @@ def _has_verified_identity_email(conn, account_id: int) -> bool:
     )
 
 
-def _owes_password(conn, account_id: int) -> bool:
-    """Does this account currently OWE a password -- Matt's rule: "if
-    an account has an email on file, it must have a password; if it
-    has no email, nothing is required." True exactly when the account
-    has a verified identity email (_has_verified_identity_email above)
-    and no password row yet.
+def _has_non_email_identity(conn, account_id: int) -> bool:
+    """True if this account holds an account_identity row from any
+    provider OTHER than 'email' -- a working sign-in door that does
+    not depend on any mail ever arriving (an OAuth "sign in with
+    <provider>" button always works, regardless of the state of this
+    account's inbox). Derived from the identity rows themselves
+    (provider != 'email') rather than a hardcoded list of OAuth
+    provider names, so a provider added later (see app/db.py's
+    account_identity comment for the current roster) is picked up here
+    with no edit to this function.
+    """
+    return (
+        conn.execute(
+            "SELECT 1 FROM account_identity WHERE account_id = ? AND provider != 'email' LIMIT 1",
+            (account_id,),
+        ).fetchone()
+        is not None
+    )
 
-    This is deliberately the SAME condition POST /api/account/password
-    already requires before it will let a password be set (see that
-    route's own docstring) -- not a coincidence, the whole point: the
-    "may set a password" guard and the "must have one" rule share one
-    clause (_has_verified_identity_email), so an account can never be
-    compelled to do something it is refused the ability to do. The
-    other clause, "no password row yet," is what keeps this from firing
-    forever once the requirement has been satisfied once.
+
+def _owes_password(conn, account_id: int) -> bool:
+    """Does this account currently OWE a password -- Matt's rule,
+    narrowed: an email link must never be an account's ONLY way in.
+    True exactly when the account has a verified identity email
+    (_has_verified_identity_email above), no password row yet, and no
+    OTHER usable sign-in door (_has_non_email_identity above).
+
+    This used to fire on "has a verified email" alone, on the reasoning
+    that mail can be delayed or lost, so relying on it is fragile. But
+    someone who signed in with, say, GitHub can always get back in
+    through GitHub -- the verified email on their identity row merely
+    arrived along with their OAuth profile, it was never their way in.
+    Asking them for a password buys nothing: they already have a door
+    that does not depend on mail arriving. So the condition is now
+    about the account's WHOLE set of doors, not just whether an email
+    happens to be on file -- _has_non_email_identity backs off the
+    moment any other provider identity exists, no matter when it was
+    linked relative to the email one.
+
+    This is deliberately a SUBSET of the condition POST
+    /api/account/password already requires before it will let a
+    password be set (see that route's own docstring): that route only
+    checks _has_verified_identity_email, this checks that PLUS two more
+    (narrower) clauses. Narrowing which accounts owe a password can
+    never widen which accounts are refused the ability to set one --
+    so an account can still never be compelled to do something it is
+    refused the ability to do. The "no password row yet" clause is what
+    keeps this from firing forever once the requirement has been
+    satisfied once.
 
     Evaluated fresh on every read (GET /api/account calls this, not a
     flag stamped at sign-up) because it is a STANDING condition, not a
-    one-time sign-up step: an account created via, say, a GitHub
-    identity with no verified email owes nothing on day one, but if
-    that person later links an identity that arrives with a verified
-    email (a second OAuth provider, or email magic-link sign-in), this
-    starts returning True from that moment on -- there is no separate
-    "first login after linking" hook to keep in sync, because nothing
-    is cached; the next GET /api/account just sees it.
+    one-time sign-up step, and it moves in BOTH directions over an
+    account's life: one whose only door is email owes a password, stops
+    owing the instant it links an OAuth provider, and owes again if
+    that provider is later unlinked (app/account_api.py's own unlink
+    route) leaving email alone once more. There is no "first login
+    after linking" hook to keep in sync, because nothing is cached --
+    the next GET /api/account just sees it.
+
+    An earlier draft of this paragraph gave an example that cannot
+    happen: an account created through GitHub that "later links a
+    verified email AND has no other provider identity". The GitHub
+    identity IS the other provider identity, and _has_non_email_identity
+    does not care whether it carries a verified email, so such an
+    account can never begin owing while that row exists. Worth stating
+    plainly, because the same mistake was sitting in a test that tried
+    to prove the standing property with exactly that setup.
 
     The single authoritative helper for this question -- every caller
     that needs to know "does this account owe a password" (currently
     just GET /api/account) reuses this rather than re-deriving the
     condition inline.
     """
-    return _has_verified_identity_email(conn, account_id) and not _has_password(conn, account_id)
+    return (
+        _has_verified_identity_email(conn, account_id)
+        and not _has_password(conn, account_id)
+        and not _has_non_email_identity(conn, account_id)
+    )
 
 
 def _door_counts(conn, account_id: int) -> tuple[dict[str, int], bool]:

@@ -144,9 +144,11 @@
       <!-- ===================================================================
            OWES-PASSWORD PROMPT. Rendered only when GET /api/account's
            owes_password comes back true (app/account_api.py's
-           _owes_password() -- a verified sign-in email on file with no
-           password set yet). Deliberately at the very top, above even
-           Player, and deliberately NOT dismissible (no close button) --
+           _owes_password() -- a verified sign-in email on file, no
+           password set yet, and no OTHER sign-in identity linked, so
+           that email link is this account's ONLY way in). Deliberately
+           at the very top, above even Player, and deliberately NOT
+           dismissible (no close button) --
            this is a required onboarding step, not a tip. It is NOT a
            second password form: account.js's renderOwesPasswordBanner()
            physically relocates the one-and-only #account-password-form
@@ -168,7 +170,7 @@
       <div id="account-owes-password-banner" class="account-owes-password-banner" hidden role="alert">
         <div class="account-owes-password-copy">
           <div class="account-owes-password-title">Set a password for this account</div>
-          <p>This account has a verified email address on file, so MeshWars expects it to be reachable directly by email — that only works once a password is set. Set one now so you're never locked out waiting on an email that might not arrive, or stuck if you ever lose access to the sign-in method you used today.</p>
+          <p>Right now the only way into this account is a link sent to your email — if that mail is ever delayed, blocked, or lost, you won't be able to sign in. Set a password now so you have a second way in that doesn't depend on mail arriving.</p>
         </div>
         <div id="account-owes-password-form-slot"></div>
       </div>
@@ -429,7 +431,7 @@
                  that move. -->
             <div id="account-wizard-step-password" class="account-wizard-step" hidden>
               <h3 id="account-wizard-heading-password" class="account-title" tabindex="-1">Set a password</h3>
-              <p class="account-hint">This account has a verified email address on file, so MeshWars expects it to be reachable directly by email — that only works once a password is set.</p>
+              <p class="account-hint">Right now the only way into this account is a link sent to your email. Set a password so you're not locked out if that mail is ever delayed or lost.</p>
               <!-- Wizard-local copies of #account-password-error/-success
                    below (Security > Password). The relocated
                    #account-password-form lands in the slot right after
@@ -832,7 +834,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260904-14" type="module"></script>
+  <script src="/static/account.js?v=20260904-15" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

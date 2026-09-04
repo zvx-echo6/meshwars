@@ -2653,8 +2653,10 @@ function renderPasswordSection(account) {
 
 // Shows/hides the non-dismissible top-of-page prompt (GET /api/account's
 // owes_password -- see app/account_api.py's _owes_password() for the
-// exact rule: a verified sign-in email on file, no password yet) and
-// physically relocates the ONE #account-password-form between its
+// exact rule: a verified sign-in email on file, no password yet, and no
+// OTHER sign-in identity linked -- i.e. that email link is this
+// account's only way in) and physically relocates the ONE
+// #account-password-form between its
 // possible homes -- #account-owes-password-form-slot (the banner, while
 // owed), right after #account-password-form-anchor (its normal spot in
 // the Security > Password panel, once it isn't), and now a third,

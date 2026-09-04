@@ -638,12 +638,21 @@ def test_get_account_identity_cannot_be_removed_at_the_last_door(client, db_path
 # =========================================================================
 # GET /api/account -- owes_password (app/account_api.py's _owes_password())
 #
-# Matt's rule: "if an account has an email on file, it must have a
-# password; if it has no email, nothing is required." Deliberately the
-# SAME condition POST /api/account/password's own guard checks --
-# _has_verified_identity_email() -- so an account can never be told to
-# do something it is refused the ability to do. "Email on file" means
-# an account_identity row with email_verified=1 ONLY -- a verified
+# Narrowed rule: an email link must never be an account's ONLY way in.
+# An account owes a password only when it has a verified identity email
+# (an account_identity row, email_verified=1 -- a verified
+# account.contact_email deliberately does NOT count, see below), no
+# password row yet, AND no OTHER-provider identity linked. Someone who
+# can also sign in through GitHub/Google/Discord/etc. already has a
+# door that does not depend on mail arriving, so nothing is owed even
+# with a verified email identity sitting on the account -- see
+# app/account_api.py's _owes_password()/_has_non_email_identity()
+# docstrings for the reasoning. Still deliberately shares
+# _has_verified_identity_email() with POST /api/account/password's own
+# guard, so an account can never be told to do something it is refused
+# the ability to do -- narrowing only shrinks the owing set further
+# inside what that route already permits. "Email on file" means an
+# account_identity row with email_verified=1 ONLY -- a verified
 # account.contact_email deliberately does NOT count (it is never
 # usable to sign in at all; see app/db.py's account.contact_email
 # MIGRATIONS comment and the CRITICAL/NON-NEGOTIABLE comment on
@@ -652,19 +661,37 @@ def test_get_account_identity_cannot_be_removed_at_the_last_door(client, db_path
 # sign in).
 # =========================================================================
 
-def test_owes_password_true_with_verified_identity_and_no_password(client, db_path):
+def test_owes_password_true_with_email_identity_and_no_password(client, db_path):
+    # provider="email" specifically -- an account_identity row from any
+    # OTHER provider is a working door of its own and would sink this
+    # under the new rule (see the tests below), so this is the one case
+    # that must genuinely owe: email is this account's only door.
     account_id, _ = _login(client, db_path)
-    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+    _add_identity(db_path, account_id, provider="email", email="dev@example.com", email_verified=1)
 
     body = client.get("/api/account").json()
 
     assert body["owes_password"] is True
 
 
-def test_owes_password_false_with_verified_identity_and_password(client, db_path):
+def test_owes_password_false_with_email_identity_and_password(client, db_path):
     account_id, _ = _login(client, db_path)
-    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+    _add_identity(db_path, account_id, provider="email", email="dev@example.com", email_verified=1)
     _set_password(db_path, account_id, "a-fine-password")
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is False
+
+
+def test_owes_password_false_with_an_oauth_identity_also_linked(client, db_path):
+    # The new half of the rule, pinned directly: a verified email
+    # identity with no password would have owed under the old rule, but
+    # this account also holds a GitHub identity -- a door that works
+    # regardless of the state of its inbox -- so nothing is owed.
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="email", email="dev@example.com", email_verified=1)
+    _add_identity(db_path, account_id, provider="github", subject="gh-sub-1", email=None, email_verified=0)
 
     body = client.get("/api/account").json()
 
@@ -712,24 +739,32 @@ def test_owes_password_false_with_verified_contact_email_and_no_verified_identit
 
 
 def test_owes_password_is_a_standing_condition_not_only_at_signup(client, db_path):
-    # Matt's corrected example: an account created via a GitHub identity
-    # with no verified email owes nothing at signup; if that person
-    # LATER links an identity that arrives with a verified email (a
-    # second OAuth provider, or email magic-link sign-in), the
-    # requirement applies from that moment -- evaluated fresh on every
-    # GET /api/account, not stamped once at account creation.
+    # An account starts with no identities at all -- signup itself owes
+    # nothing, since there is no email door yet. It later links an
+    # EMAIL-provider identity that arrives verified -- because that is
+    # its only identity, it is now this account's only door, and the
+    # requirement applies from that moment. Deliberately does not give
+    # this account a non-email identity anywhere in its life: under the
+    # new rule any such identity is a permanent door of its own (see
+    # test_owes_password_false_with_an_oauth_identity_also_linked
+    # above), so one linked at signup would keep this account from ever
+    # owing regardless of what gets linked afterward -- which would
+    # prove nothing about freshness. The point here is narrower and
+    # still real: owes_password is evaluated fresh on every GET
+    # /api/account, not stamped once at account creation, so this
+    # LATER link is picked up on the very next read with no separate
+    # "first login after linking" hook to keep in sync.
     account_id, _ = _login(client, db_path)
-    _add_identity(db_path, account_id, provider="github", subject="gh-sub-1", email=None, email_verified=0)
     assert client.get("/api/account").json()["owes_password"] is False
 
-    _add_identity(db_path, account_id, provider="google", email="dev@example.com", email_verified=1)
+    _add_identity(db_path, account_id, provider="email", email="dev@example.com", email_verified=1)
 
     assert client.get("/api/account").json()["owes_password"] is True
 
 
 def test_owes_password_cleared_by_setting_a_password(client, db_path):
     account_id, _ = _login(client, db_path)
-    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+    _add_identity(db_path, account_id, provider="email", email="dev@example.com", email_verified=1)
     assert client.get("/api/account").json()["owes_password"] is True
 
     resp = client.post("/api/account/password", json={"new_password": "a-fine-password"})
@@ -744,7 +779,7 @@ def test_owing_a_password_is_not_an_authorization_gate(client, db_path):
     # the password it owes, and sign out -- none of that may be
     # refused while owes_password is True.
     account_id, _ = _login(client, db_path)
-    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+    _add_identity(db_path, account_id, provider="email", email="dev@example.com", email_verified=1)
 
     read_resp = client.get("/api/account")
     assert read_resp.status_code == 200

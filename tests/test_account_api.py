@@ -125,6 +125,43 @@ def _make_player(path: str, *, account_id: int | None = None, display_name="Test
     return player_id
 
 
+def _add_identity(
+    path: str,
+    account_id: int,
+    provider: str,
+    *,
+    subject: str | None = None,
+    email: str = "jdoe@example.com",
+    email_verified: bool = True,
+) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO account_identity(provider, subject, account_id, email, email_verified, linked_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            provider,
+            subject or f"{provider}-sub-{account_id}",
+            account_id,
+            email,
+            1 if email_verified else 0,
+            int(time.time()),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _add_password(path: str, account_id: int) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO account_password(account_id, salt, n, r, p, dklen, hash, created_at, updated_at) "
+        "VALUES (?, 'salt', 1, 1, 1, 32, 'hash', ?, ?)",
+        (account_id, int(time.time()), int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+
 def _login(client: TestClient, db_path: str, *, account_id: int | None = None) -> tuple[int, str]:
     """Create an account (unless given) and a session for it, and set
     that session's cookie on `client` for subsequent requests. Returns
@@ -219,6 +256,55 @@ def test_get_account_masks_identity_emails(client, db_path):
     assert identity["email"] == "j***@example.com"
     assert "jdoe" not in identity["email"]
     assert identity["email_verified"] is True
+
+
+# ---- GET /api/account: owes_password (app/account_api.py's
+# _owes_password()) -- narrowed rule: an account owes a password only
+# when a verified email identity is its ONLY door (no password row yet,
+# and no OTHER-provider identity that would get it back in without
+# mail). ---------------------------------------------------------------
+
+def test_owes_password_true_when_email_is_the_only_verified_door(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, "email", subject="jdoe@example.com")
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is True
+
+
+def test_owes_password_false_when_an_oauth_identity_is_also_linked(client, db_path):
+    """Same verified email identity as the case above, but this account
+    also holds a GitHub identity -- a working door that does not depend
+    on mail, so nothing is owed even though email_verified is still 1
+    and there is still no password row.
+    """
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, "email", subject="jdoe@example.com")
+    _add_identity(db_path, account_id, "github", subject="gh-456", email_verified=False)
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is False
+
+
+def test_owes_password_false_when_only_an_oauth_identity_is_linked(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, "discord", subject="disc-789", email_verified=False)
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is False
+
+
+def test_owes_password_false_once_a_password_is_already_set(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, "email", subject="jdoe@example.com")
+    _add_password(db_path, account_id)
+
+    body = client.get("/api/account").json()
+
+    assert body["owes_password"] is False
 
 
 # ---- POST /api/account/link-key -------------------------------------------
