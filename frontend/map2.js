@@ -2269,10 +2269,17 @@ function buildCellPopupHtml(cellId, detail, c) {
   const captures = Array.isArray(detail.recent_captures) ? detail.recent_captures : [];
   const captureRows = captures.length
     ? captures.map((cap) => {
-      const who = cap.by_display_name ? escapeHtml(cap.by_display_name) : 'unknown player';
+      // Logged out, the capturing player's name is withheld (see
+      // app/mc_api.py's cell redaction) -- so show the team alone rather
+      // than a placeholder standing in for a person. "ORANGE" is the whole
+      // truth we have; "unknown player for ORANGE" implies we are hiding a
+      // specific someone and reads as a defect rather than a boundary.
+      const attribution = cap.by_display_name
+        ? `${escapeHtml(cap.by_display_name)} for ${escapeHtml(cap.by_team)}`
+        : escapeHtml(cap.by_team);
       const fromNote = cap.from_team ? ` (from ${escapeHtml(cap.from_team)})` : '';
       return `<div class="mc-popup-capture-row">
-          ${escapeHtml(formatTs(cap.ts))} &mdash; ${who} for ${escapeHtml(cap.by_team)}${fromNote}
+          ${escapeHtml(formatTs(cap.ts))} &mdash; ${attribution}${fromNote}
         </div>`;
     }).join('')
     : '<div class="mc-popup-capture-row mc-popup-empty">No capture history.</div>';

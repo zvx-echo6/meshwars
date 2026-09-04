@@ -138,17 +138,44 @@ class EmailSendError(Exception):
     """
 
 
-def _send_sync(to_address: str, link_url: str) -> None:
+# The two things a mailed link can be for. They are NOT interchangeable
+# wording on the same event: one hands over a session, the other confirms
+# that an address reaches the person who typed it. A confirmation mail that
+# says "click here to sign in" is both wrong and alarming -- the recipient
+# is being told a link will log somebody in, when it will not.
+PURPOSE_SIGN_IN = "sign_in"
+PURPOSE_VERIFY_CONTACT = "verify_contact"
+
+_MAIL_COPY = {
+    PURPOSE_SIGN_IN: (
+        "Your MeshWars sign-in link",
+        "Click the link below to sign in to MeshWars:",
+    ),
+    PURPOSE_VERIFY_CONTACT: (
+        "Confirm your MeshWars contact address",
+        "Click the link below to confirm this address for MeshWars. "
+        "It is where we can reach you -- it will not sign you in:",
+    ),
+}
+
+
+def _send_sync(to_address: str, link_url: str, purpose: str = PURPOSE_SIGN_IN) -> None:
     """The actual blocking SMTP conversation -- stdlib smtplib only, no
     third-party mail library. Never call this directly from async code;
     see send_magic_link_email() below and this module's own docstring.
+
+    `purpose` selects the subject and body. It defaults to sign-in because
+    that was this function's only behaviour before contact-address
+    confirmation reused it, and a caller that forgets to say what it is
+    sending should get the older, narrower wording rather than silence.
     """
+    subject, lead = _MAIL_COPY[purpose]
     msg = EmailMessage()
-    msg["Subject"] = "Your MeshWars sign-in link"
+    msg["Subject"] = subject
     msg["From"] = settings.smtp_from_address
     msg["To"] = to_address
     msg.set_content(
-        "Click the link below to sign in to MeshWars:\n\n"
+        f"{lead}\n\n"
         f"{link_url}\n\n"
         "This link expires in a few minutes and can only be used once. "
         "If you didn't request it, you can safely ignore this message."
@@ -175,15 +202,23 @@ def _send_sync(to_address: str, link_url: str) -> None:
             smtp.send_message(msg)
 
 
-async def send_magic_link_email(to_address: str, link_url: str) -> None:
-    """Sends the sign-in mail, off the event loop (asyncio.to_thread --
-    see this module's own docstring for why that is not optional here).
+async def send_magic_link_email(
+    to_address: str, link_url: str, purpose: str = PURPOSE_SIGN_IN
+) -> None:
+    """Sends a mailed link, off the event loop (asyncio.to_thread -- see
+    this module's own docstring for why that is not optional here).
     Raises EmailSendError on any failure, after logging it -- callers
     must catch this and respond to the ORIGINAL caller exactly as if it
     had succeeded (see EmailSendError's own docstring).
+
+    `purpose` picks the wording: PURPOSE_SIGN_IN for a link that hands
+    over a session, PURPOSE_VERIFY_CONTACT for one that only confirms an
+    address is reachable. Both were once the same mail, so a contact
+    confirmation arrived telling the recipient it would sign them in --
+    untrue, and exactly the shape a phishing attempt takes.
     """
     try:
-        await asyncio.to_thread(_send_sync, to_address, link_url)
+        await asyncio.to_thread(_send_sync, to_address, link_url, purpose)
     except Exception as e:
         log.exception("email_login: failed to send magic-link mail to %s", _mask_for_log(to_address))
         raise EmailSendError(str(e)) from e
