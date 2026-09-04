@@ -180,7 +180,8 @@
    label; 700 makes it read as a name, and carries the colour at this
    size besides.
 
-   PURPLE alone uses the -text variant -- see theme.css for why. */
+   PURPLE alone uses the -text variant -- see theme.css for why.
+
    The about page names the same seven in its own sentence and loads
    this stylesheet, so its .landing-panel prose is carried here rather
    than restating the seven hues in landing.css. */
