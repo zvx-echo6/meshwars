@@ -12,8 +12,10 @@ key-only player onto it (POST /api/account/link-key), log out (POST
 /api/account/logout[-all]), mint a fresh player API key while revoking
 every old one (POST /api/account/rotate-key), set/change/remove a
 sign-in password (POST/DELETE /api/account/password), set a contact-only
-email address (POST /api/account/contact-email), and disconnect a
-sign-in identity (DELETE /api/account/identity/{provider}). See
+email address (POST /api/account/contact-email) or copy the account's
+own already-verified identity email onto it server-side instead of
+typing one (POST /api/account/contact-email/use-identity), and
+disconnect a sign-in identity (DELETE /api/account/identity/{provider}). See
 app/sessions.py's own module docstring for how a session comes to exist
 in the first place -- nothing in this router creates one. The two
 routes a mailed link has to reach WITHOUT a session
@@ -90,6 +92,7 @@ from .config import settings
 from .db import WriteSession, connect
 from .email_login import (
     EmailSendError,
+    PURPOSE_VERIFY_CONTACT,
     email_login_enabled,
     looks_like_email,
     normalize_email,
@@ -420,7 +423,7 @@ def _sessions_out(conn, account_id: int, *, current_token_hash: str) -> list[dic
 async def get_account(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
     """The full account read -- identities, linked player, active
     sessions, and account-security state (has_password, contact_email,
-    owes_password).
+    owes_password, role).
 
     `owes_password` (see _owes_password()'s own docstring for the full
     rule) is carried here, not in SessionPrincipal/require_session():
@@ -432,6 +435,17 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
     route (checkin, player, key rotation, ...) for a value only the
     account page reads, and would invite exactly the kind of
     route-gating this feature deliberately does not do.
+
+    `role` (account.role -- see that column's own MIGRATIONS comment in
+    app/db.py) is None for an ordinary player and 'admin' or 'operator'
+    for a role-holding account. Read here the same reasoning
+    owes_password already established: this is display-only, never an
+    authorization decision -- frontend/account.js reads it purely to
+    decide whether to SHOW the admin panel button (see that file's
+    renderAdminSection()), and every real admin/operator route still
+    re-checks the session's actual role itself through
+    app/admin_api.py's _role_guard() on every request, never trusting
+    what this endpoint last reported.
     """
     conn = connect()
     try:
@@ -442,6 +456,10 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
         contact_email = _contact_email_out(conn, session.account_id)
         owes_password = _owes_password(conn, session.account_id)
         totp = _totp_out(conn, session.account_id)
+        role_row = conn.execute(
+            "SELECT role FROM account WHERE account_id = ?", (session.account_id,)
+        ).fetchone()
+        role = role_row["role"] if role_row is not None else None
     finally:
         conn.close()
 
@@ -455,6 +473,7 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
             "contact_email": contact_email,
             "owes_password": owes_password,
             "totp": totp,
+            "role": role,
         },
         status_code=200,
     )
@@ -476,10 +495,19 @@ async def link_key(
     here (most likely: they meant to use a different account, or
     someone else already claimed their key) can actually tell what
     happened:
-      - this account already has a linked player (one account, one
-        player, at most -- see app/db.py's player.account_id and its
-        UNIQUE index)
+      - this account already has a linked player -- a DIFFERENT one
+        than the key names (one account, one player, at most -- see
+        app/db.py's player.account_id and its UNIQUE index)
       - that key's player already belongs to a DIFFERENT account
+
+    If the key names the player ALREADY linked to THIS account, that
+    is not a conflict at all -- the desired end state already holds
+    (a retried request, a second click, the same key submitted twice).
+    Same "a retried request should just succeed" reasoning
+    app/nodes_api.py's POST /api/nodes and app/checkin_api.py's
+    confirm_accept already apply for their own already-bound cases:
+    treated as success, no second account_link_event written (the
+    original one, from whenever it was first linked, still stands).
     """
     ip = get_client_ip(request)
     if _link_key_addr_limiter.limited(
@@ -528,6 +556,14 @@ async def link_key(
             "SELECT player_id FROM player WHERE account_id = ?", (session.account_id,)
         ).fetchone()
         if existing is not None:
+            if existing["player_id"] == player_id:
+                # This key's player is already linked to THIS account --
+                # the desired end state already holds (most likely a
+                # retried request: see this route's own docstring). Not
+                # a conflict, no write, no second account_link_event --
+                # just report the same success a fresh link would have.
+                player = _player_out(conn, player_id)
+                return JSONResponse({"player": player}, status_code=200)
             return JSONResponse(
                 {"error": "this account already has a linked player"}, status_code=409
             )
@@ -979,7 +1015,11 @@ async def set_contact_email(
 
     link_url = f"{settings.oauth_public_base_url.rstrip('/')}/auth/contact-email/verify?token={raw_token}"
     try:
-        await send_magic_link_email(email, link_url)
+        # PURPOSE_VERIFY_CONTACT, not the sign-in wording: this link
+        # confirms an address is reachable, it does not hand over a
+        # session. Saying "click here to sign in" here would be false,
+        # and false in the direction phishing goes.
+        await send_magic_link_email(email, link_url, PURPOSE_VERIFY_CONTACT)
     except EmailSendError:
         # Logged inside send_magic_link_email() itself. Not surfaced to
         # the caller as a distinct error -- the address is saved either
@@ -992,6 +1032,165 @@ async def set_contact_email(
         pass
 
     return JSONResponse({"ok": True, "email": _mask_email(email), "verified": False}, status_code=200)
+
+
+def _pick_identity_email_for_contact(conn, account_id: int) -> str | None:
+    """Deterministic choice of WHICH verified identity email
+    POST /api/account/contact-email/use-identity (below) copies onto
+    account.contact_email, for the case -- uncommon, but not
+    impossible -- that an account holds more than one account_identity
+    row with email_verified = 1 (a person who has linked both Google
+    and GitHub, each with its own provider-verified address). This is
+    the ONE place that picks, so "which address did it use" can never
+    depend on which route happened to ask, or on SQLite's own row
+    order.
+
+    Ordered by last_login_at DESC first: the identity a person most
+    recently actually signed IN through is the address most likely to
+    still be one they read today, ahead of one linked once, long ago,
+    and never used again. This is deliberately not "most recently
+    linked" (linked_at) as the primary key -- linking and using are
+    different facts, and a stale identity someone linked years ago but
+    keeps re-authenticating through should still win over one they
+    added last week and have not touched since. linked_at DESC is only
+    the first tiebreaker, for two identities that have never been
+    logged into again since being linked (both still carry the
+    timestamp _link_identity() stamped onto last_login_at at link time
+    -- see that function's own comment in app/oauth_api.py) -- whichever
+    was linked more recently wins that tie. provider ASC is the final,
+    purely mechanical tiebreak so the choice can never depend on
+    SQLite's own return order for two rows tied on both timestamps
+    (two identities linked in the same second, e.g. by a test or a
+    migration backfill).
+    """
+    row = conn.execute(
+        "SELECT email FROM account_identity"
+        " WHERE account_id = ? AND email_verified = 1"
+        "   AND email IS NOT NULL AND email != ''"
+        " ORDER BY last_login_at DESC, linked_at DESC, provider ASC"
+        " LIMIT 1",
+        (account_id,),
+    ).fetchone()
+    return row["email"] if row is not None else None
+
+
+@router.post("/api/account/contact-email/use-identity")
+async def use_identity_email_as_contact(
+    session: SessionPrincipal = Depends(require_session),
+) -> JSONResponse:
+    """One-click twin of POST /api/account/contact-email, above, for the
+    specific gap that motivated it: an account that signed in through
+    GitHub/Google/etc already has a verified email the MOMENT that
+    identity is linked (a provider vouched for it at OAuth time -- see
+    _has_verified_identity_email()'s own docstring on why that is a
+    fundamentally stronger claim than a typed string), but
+    account.contact_email is a wholly separate column (see that
+    column's own MIGRATIONS comment in app/db.py) that starts NULL and,
+    until this route existed, could only ever be filled in by a person
+    typing an address the system already held, verified, and then
+    proving control of it a second time by mail. This route closes that
+    gap by copying the account's own verified identity email onto
+    contact_email SERVER-SIDE.
+
+    Deliberately takes NO request body at all -- not Request, not a
+    parsed JSON dict, nothing is read off the wire here. The address to
+    copy is resolved entirely from this session's OWN account_identity
+    rows via _pick_identity_email_for_contact() above; there is no
+    field anywhere on this route a caller could set to name a
+    different address, including one supplied in a request body --
+    FastAPI never parses a body this route declares no parameter for,
+    so anything a caller sends is inert. This is the whole point, not
+    an oversight: if the client could name the address, this endpoint
+    would become a way to set an arbitrary contact_email while skipping
+    the manual route's mail-and-click proof entirely -- see that
+    route's own docstring for why an unverified, caller-typed address
+    is normally never trusted without one.
+
+    Also never hands the real address back to the browser in the
+    clear: the response below masks it through the same _mask_email()
+    every other read in this module uses (see that function's own
+    docstring) -- this route lets the browser trigger the copy without
+    ever needing to know the address itself, which is exactly why GET
+    /api/account cannot simply prefill the contact-email form client-
+    side in the first place.
+
+    Refused with 409 -- the same status set_password() above uses for
+    its own "not eligible yet" guard -- when no identity on the account
+    carries email_verified = 1: there is nothing to copy, and silently
+    doing nothing would leave a caller unsure whether the click did
+    anything at all.
+
+    ---- does the copied address count as verified? ----
+
+    Yes: contact_email_verified_at is stamped in the SAME write as
+    contact_email, immediately -- never left for a mailed link to
+    confirm later. This is a deliberate departure from
+    set_contact_email()'s own "always stored unverified, even when
+    re-setting the same address" rule just above, and it is not the
+    same question with the same answer twice:
+
+    - That route's address is a bare, caller-TYPED string with no proof
+      behind it at the moment it is saved. Proof is exactly what
+      account_contact_email_token's mailed link supplies, and there is
+      no way to skip that step for an address this app has never
+      independently confirmed the caller controls.
+    - THIS route's address is never caller-supplied at all -- it is
+      read straight out of account_identity, where email_verified = 1
+      already means an OAuth provider (or this app's own magic-link
+      flow, for provider='email') put that exact address through ITS
+      OWN proof-of-control step before the row was ever written.
+      Mailing a second confirmation link to an address a provider
+      already vouched for would not raise assurance about anything --
+      this app already trusts that same fact enough to use it as the
+      gate for "must set a password" (_has_verified_identity_email(),
+      _owes_password(), above) and enough to auto-link a brand-new
+      sign-in onto this very account (resolve_oauth_callback's case 3,
+      app/oauth_api.py) -- it would only be a redundant round-trip to
+      an inbox already proven reachable, for no additional confidence.
+
+    This is NOT a backdoor around the sign-in exclusion those same
+    comments guard, and nothing about it changes here: contact_email
+    remains, exactly as before, never read by resolve_oauth_callback's
+    case-3 matching query or by POST /auth/password/start (this route
+    writes account.contact_email/contact_email_verified_at ONLY, never
+    account_identity), and the copy runs one-way, FROM the trusted
+    table TO the untrusted-by-that-comparison one -- contact_email's
+    own read paths (an operator's view, a future contact-only
+    notification) are the only things that will ever see the result.
+
+    No account_contact_email_token row is written either -- that table
+    exists to bridge the gap between "a person typed an address" and "a
+    person can read mail sent to it," and this route has no such gap
+    left to bridge once it runs.
+    """
+    now = int(time.time())
+    async with WriteSession() as conn:
+        email = _pick_identity_email_for_contact(conn, session.account_id)
+        if email is None:
+            return JSONResponse(
+                {
+                    "error": "no verified sign-in email to copy -- link and verify a "
+                    "sign-in provider first, or set a contact email manually"
+                },
+                status_code=409,
+            )
+
+        conn.execute(
+            "UPDATE account SET contact_email = ?, contact_email_verified_at = ? "
+            "WHERE account_id = ?",
+            (email, now, session.account_id),
+        )
+        conn.execute(
+            "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+            "VALUES (?, 'contact_email_set', ?, 'user', ?)",
+            (session.account_id, f"email={email} source=identity_copy", now),
+        )
+
+    return JSONResponse(
+        {"ok": True, "email": _mask_email(email), "verified": True}, status_code=200
+    )
+
+
 # ---- player-facing data: stats / honors / checkins / checkin-health ------
 #
 # Everything below is scoped to the signed-in account's OWN linked

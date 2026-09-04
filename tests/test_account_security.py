@@ -856,8 +856,16 @@ def _enable_email(monkeypatch) -> None:
 def _stub_send(monkeypatch, *, raises: bool = False):
     calls = []
 
-    async def _fake(to_address: str, link_url: str) -> None:
-        calls.append((to_address, link_url))
+    async def _fake(to_address: str, link_url: str, purpose: str = "sign_in") -> None:
+        # `purpose` (app/email_login.py's PURPOSE_SIGN_IN/PURPOSE_VERIFY_CONTACT)
+        # picks mail wording only -- nothing this stub or the tests
+        # below need to branch on -- but the real send_magic_link_email()
+        # takes it as a third positional argument, so this fake must
+        # accept it too or every caller above that reaches a real send
+        # (POST /api/account/contact-email, which always passes
+        # PURPOSE_VERIFY_CONTACT) throws a TypeError before ever
+        # reaching the assertions those tests actually care about.
+        calls.append((to_address, link_url, purpose))
         if raises:
             from app.email_login import EmailSendError
             raise EmailSendError("boom")
@@ -1000,6 +1008,211 @@ def test_verified_contact_email_does_not_auto_link_a_new_provider_identity(clien
 
     assert outcome["case"] == "pending"
     assert outcome.get("account_id") != account_id
+
+
+# =========================================================================
+# POST /api/account/contact-email/use-identity -- the server-side copy
+# of an already-verified identity email onto contact_email, so a
+# GitHub/Google/etc account is never asked to type in an address the
+# system already holds, verified. No email is sent by this route (see
+# its own docstring for why a second mailed proof would be redundant),
+# so unlike the block above these tests never need _enable_email()/
+# _stub_send() at all -- there is no SMTP path to configure or stub.
+# =========================================================================
+
+def test_use_identity_email_copies_a_verified_identity_email(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+
+    resp = client.post("/api/account/contact-email/use-identity")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    # Masked in the response, same as every other read/write of an
+    # address in this module (_mask_email()) -- the raw address is
+    # never sent back to the browser by this route either.
+    assert body["email"] == "d***@example.com"
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT contact_email, contact_email_verified_at FROM account WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == "dev@example.com"
+    assert row[1] is not None
+
+
+def test_use_identity_email_unverified_identity_is_not_copied(client, db_path):
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=0)
+
+    resp = client.post("/api/account/contact-email/use-identity")
+
+    assert resp.status_code == 409
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT contact_email FROM account WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] is None
+
+
+def test_use_identity_email_refused_with_no_verified_identity_at_all(client, db_path):
+    _login(client, db_path)  # no account_identity rows at all
+
+    resp = client.post("/api/account/contact-email/use-identity")
+
+    assert resp.status_code == 409
+    assert "error" in resp.json()
+
+
+def test_use_identity_email_ignores_a_client_supplied_address(client, db_path):
+    """The whole safety property this route exists to hold: nothing a
+    caller puts in the request body can steer which address gets
+    copied. Posting a body naming a DIFFERENT, unverified address must
+    have zero effect -- the account's own verified identity email wins
+    regardless of what arrives on the wire.
+    """
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+
+    resp = client.post(
+        "/api/account/contact-email/use-identity",
+        json={"email": "attacker-controlled@example.com"},
+    )
+
+    assert resp.status_code == 200
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT contact_email FROM account WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == "dev@example.com"
+
+
+def test_use_identity_email_picks_most_recently_used_identity_when_several_are_verified(client, db_path):
+    """Documents and pins the deterministic tiebreak
+    (_pick_identity_email_for_contact()'s own docstring): with more than
+    one verified identity, the one most recently LOGGED INTO wins, not
+    merely the one linked most recently or first alphabetically.
+    """
+    account_id, _ = _login(client, db_path)
+    now = int(time.time())
+    _add_identity(
+        db_path, account_id, provider="github", email="old@example.com",
+        email_verified=1, linked_at=now - 1000,
+    )
+    _add_identity(
+        db_path, account_id, provider="google", email="newer@example.com",
+        email_verified=1, linked_at=now - 500,
+    )
+    # Bump github's last_login_at PAST google's own (still at its
+    # link-time default) -- github was linked first but used more
+    # recently, so it must be the one that wins.
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE account_identity SET last_login_at = ? WHERE account_id = ? AND provider = 'github'",
+        (now, account_id),
+    )
+    conn.execute(
+        "UPDATE account_identity SET last_login_at = ? WHERE account_id = ? AND provider = 'google'",
+        (now - 500, account_id),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.post("/api/account/contact-email/use-identity")
+
+    assert resp.status_code == 200
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT contact_email FROM account WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == "old@example.com"
+
+
+def test_use_identity_email_verified_immediately_no_mail_round_trip(client, db_path):
+    """Pins the deliberate departure from the manual route: a copied
+    identity email is trusted on the provider's own already-completed
+    proof of control, so contact_email_verified_at is stamped in the
+    SAME write, never left NULL for a mailed link to confirm later
+    (see use_identity_email_as_contact()'s own docstring for the full
+    reasoning). email_login is deliberately left unconfigured for this
+    test -- if this route ever regressed to requiring the mail path, it
+    would 404 here the same way set_contact_email() does.
+    """
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+
+    resp = client.post("/api/account/contact-email/use-identity")
+
+    assert resp.status_code == 200
+    assert resp.json()["verified"] is True
+
+    body = client.get("/api/account").json()
+    assert body["contact_email"]["verified"] is True
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT contact_email_verified_at FROM account WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] is not None
+    # And no verification token was created for it -- there is nothing
+    # left to redeem.
+    conn = sqlite3.connect(db_path)
+    token_count = conn.execute(
+        "SELECT COUNT(*) FROM account_contact_email_token WHERE account_id = ?", (account_id,)
+    ).fetchone()[0]
+    conn.close()
+    assert token_count == 0
+
+
+def test_use_identity_email_manual_path_still_works_unchanged(client, db_path, monkeypatch):
+    """The one-click route above is additive -- POST /api/account/
+    contact-email (a caller-typed address, mailed for verification)
+    must still behave exactly as before, unaffected by this route's
+    existence.
+    """
+    _enable_email(monkeypatch)
+    calls = _stub_send(monkeypatch)
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+
+    resp = client.post("/api/account/contact-email", json={"email": "typed@example.com"})
+
+    assert resp.status_code == 200
+    assert resp.json()["verified"] is False
+    assert len(calls) == 1
+    assert calls[0][0] == "typed@example.com"
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT contact_email, contact_email_verified_at FROM account WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == "typed@example.com"
+    assert row[1] is None
+
+
+def test_get_account_still_masks_identity_emails(client, db_path):
+    """Guards the masking this whole feature depends on staying in
+    place (_mask_email(), app/account_api.py) -- GET /api/account must
+    never hand back a linked identity's real address, only the masked
+    form, even though POST /api/account/contact-email/use-identity now
+    reads that same real address server-side to do its copy.
+    """
+    account_id, _ = _login(client, db_path)
+    _add_identity(db_path, account_id, provider="github", email="dev@example.com", email_verified=1)
+
+    body = client.get("/api/account").json()
+
+    assert len(body["identities"]) == 1
+    assert body["identities"][0]["email"] == "d***@example.com"
+    raw = str(client.get("/api/account").content)
+    assert "dev@example.com" not in raw
 
 
 # =========================================================================

@@ -311,28 +311,37 @@ def _fresh_candidates(raw: list[dict], baseline: dict) -> list[dict]:
     return out
 
 
-def _claimed_node_refs(conn, protocol: str, node_refs: set[str]) -> set[str]:
-    """Which of `node_refs` are already in player_node under `protocol`
-    ('mc' or 'mt'), for ANY player -- app/checkin_api.py's confirm/
-    status uses this to set each candidate's already_claimed flag so
-    the UI can grey out a node someone else already owns, without this
-    route itself ever refusing to SHOW it (that refusal belongs to
-    accept's own conflict check, below, at the moment someone actually
-    tries to claim it). Protocol is a parameter, not hardcoded, because
-    this one function now backs both confirm/status branches below --
-    'mc' node_refs and 'mt' node_refs are never comparable (the same
-    8-hex string can independently exist, unrelated, in each protocol's
-    own namespace), so which column value to filter on has to come from
-    the caller, not be assumed.
+def _node_ref_owners(conn, protocol: str, node_refs: set[str]) -> dict[str, int]:
+    """Which player, if any, already holds each of `node_refs` in
+    player_node under `protocol` ('mc' or 'mt') -- app/checkin_api.py's
+    confirm/status uses this to classify each candidate into the three
+    states the UI has to tell apart: unclaimed (absent from this
+    mapping entirely), already the CALLER's own (mapped to the
+    caller's own player_id -- not an error, never something to grey
+    out: see already_yours below), or already someone ELSE's (mapped
+    to a different player_id -- already_claimed). Returning the owning
+    player_id, not just a membership set, is what lets the caller tell
+    those last two apart; a plain "is this ref claimed by anyone"
+    boolean can't, which was the bug -- a candidate that was the
+    caller's OWN radio used to come back flagged already_claimed same
+    as a stranger's, and the UI greyed it out as someone else's. This
+    route itself never refuses to SHOW any of the three (that refusal
+    belongs to accept's own conflict check, below, at the moment
+    someone actually tries to claim it). Protocol is a parameter, not
+    hardcoded, because this one function now backs both confirm/status
+    branches below -- 'mc' node_refs and 'mt' node_refs are never
+    comparable (the same 8-hex string can independently exist,
+    unrelated, in each protocol's own namespace), so which column value
+    to filter on has to come from the caller, not be assumed.
     """
     if not node_refs:
-        return set()
+        return {}
     placeholders = ",".join("?" for _ in node_refs)
     rows = conn.execute(
-        f"SELECT node_ref FROM player_node WHERE protocol = ? AND node_ref IN ({placeholders})",
+        f"SELECT node_ref, player_id FROM player_node WHERE protocol = ? AND node_ref IN ({placeholders})",
         (protocol, *node_refs),
     ).fetchall()
-    return {r["node_ref"] for r in rows}
+    return {r["node_ref"]: r["player_id"] for r in rows}
 
 
 def _clear_confirm_windows(conn, player_id: int) -> None:
@@ -540,7 +549,7 @@ async def confirm_status(
                 )
 
             candidates = _fresh_candidates(raw, baseline)
-            claimed = _claimed_node_refs(conn, "mc", {c["public_key"][:8] for c in candidates})
+            owners = _node_ref_owners(conn, "mc", {c["public_key"][:8] for c in candidates})
 
             out_candidates = [
                 {
@@ -549,7 +558,16 @@ async def confirm_status(
                     "name": c["name"],
                     "role": c["role"],
                     "last_heard": c["last_heard_epoch"],
-                    "already_claimed": c["public_key"][:8] in claimed,
+                    # already_claimed means claimed by SOMEONE ELSE --
+                    # the caller's own radio is never flagged this way
+                    # (see _node_ref_owners' own docstring for why).
+                    "already_claimed": owners.get(c["public_key"][:8]) not in (None, player_id),
+                    # The third state already_claimed alone can't
+                    # express: this exact candidate is already bound to
+                    # the CALLER themself (a prior accept, days-old data
+                    # that came across in a copy, whatever) -- not
+                    # available, but not somebody else's either.
+                    "already_yours": owners.get(c["public_key"][:8]) == player_id,
                 }
                 for c in candidates
             ]
@@ -592,14 +610,17 @@ async def confirm_status(
         # match mt_confirm_scan_all_connectors returns IS proof, by
         # construction (see app/checkin.py's Meshtastic node-
         # confirmation section header for why).
-        claimed = _claimed_node_refs(conn, "mt", {m["node_ref"] for m in raw})
+        owners = _node_ref_owners(conn, "mt", {m["node_ref"] for m in raw})
         out_candidates = [
             {
                 "node_ref": m["node_ref"],
                 "node_id": m["node_id"],
                 "name": m.get("name"),
                 "last_heard": m["last_heard_epoch"],
-                "already_claimed": m["node_ref"] in claimed,
+                # Same already_claimed/already_yours split as the mc
+                # branch above -- see _node_ref_owners' own docstring.
+                "already_claimed": owners.get(m["node_ref"]) not in (None, player_id),
+                "already_yours": owners.get(m["node_ref"]) == player_id,
             }
             for m in raw
         ]
