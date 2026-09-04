@@ -203,42 +203,6 @@ body {
 .landing-list li { margin-bottom: 8px; }
 .landing-list li:last-child { margin-bottom: 0; }
 
-/* ---- scoring sequence ----------------------------------------------------
-   "How scoring works" is an <ol> in the markup (order is meaningful --
-   it reads as how the game works, step by step) styled as a numbered
-   sequence with a visible numeral badge per step rather than a plain
-   bullet, with more breathing room between steps than the flat
-   .landing-list rhythm used elsewhere. */
-.landing-scoring {
-  list-style: none;
-  counter-reset: landing-scoring;
-  padding-left: 0;
-}
-.landing-scoring li {
-  counter-increment: landing-scoring;
-  position: relative;
-  padding-left: 40px;
-  margin-bottom: 16px;
-}
-.landing-scoring li:last-child { margin-bottom: 0; }
-.landing-scoring li::before {
-  content: counter(landing-scoring);
-  position: absolute;
-  left: 0;
-  top: -1px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: var(--mw-page);
-  border: 1px solid var(--mw-gold);
-  color: var(--mw-gold-light);
-  font-size: 0.75rem;
-  font-weight: 800;
-}
-
 /* ---- protocol cards ----------------------------------------------------- */
 .protocol-cards {
   display: grid;
