@@ -32,7 +32,7 @@
  *
  * This page is now ALSO where joining for the first time happens, for
  * an account with no linked player -- see the Player panel's
- * #account-join-panel (handleJoinSubmit() below) and
+ * #account-wizard (handleJoinSubmit() below) and
  * app/join_api.py's join() docstring for the full picture. Sign-in
  * used to live on frontend/join.js's own page instead, above the
  * anonymous invite-code flow -- which meant an already-signed-in
@@ -379,20 +379,32 @@ function renderIdentities(identities) {
 
 // ---- Player (GET /api/account's own player field, or null) ---------------
 
+// Split from the visibility toggle below (updatePlayerLinkedCopy vs
+// renderPlayer) so the wizard can refresh the linked-state copy the
+// instant a player exists without also flipping #account-player-linked
+// into view before the wizard is actually done showing it (the
+// one-time key reveal, and the conditional password step) -- see
+// finishWizard()'s own comment. Every OTHER caller here (loadAccount(),
+// handleTeamSwitchConfirm()) wants both together, which is exactly
+// what renderPlayer() below still does.
+function updatePlayerLinkedCopy(player) {
+  document.getElementById('account-player-name').replaceChildren(
+    document.createTextNode('Name: '),
+    (() => {
+      const strong = document.createElement('strong');
+      strong.textContent = player.display_name;
+      strong.style.color = TEAM_COLORS[player.team] || 'inherit';
+      return strong;
+    })(),
+  );
+  document.getElementById('account-player-team').textContent = `Team: ${player.team}`;
+}
+
 function renderPlayer(player) {
   const linkedEl = document.getElementById('account-player-linked');
   const unlinkedEl = document.getElementById('account-player-unlinked');
   if (player) {
-    document.getElementById('account-player-name').replaceChildren(
-      document.createTextNode('Name: '),
-      (() => {
-        const strong = document.createElement('strong');
-        strong.textContent = player.display_name;
-        strong.style.color = TEAM_COLORS[player.team] || 'inherit';
-        return strong;
-      })(),
-    );
-    document.getElementById('account-player-team').textContent = `Team: ${player.team}`;
+    updatePlayerLinkedCopy(player);
     linkedEl.hidden = false;
     unlinkedEl.hidden = true;
   } else {
@@ -401,22 +413,85 @@ function renderPlayer(player) {
   }
 }
 
-// ---- Join (POST /api/join, session-authenticated) ------------------------
+// ---- Sign-up wizard (#account-wizard) -------------------------------------
 //
-// The whole "register for the first time" flow, moved here from
-// frontend/join.js -- see this file's own module docstring for why.
-// Collects only display name + team + protocol: no invite-code field
-// (a signed-in caller is never asked for one -- see app/join_api.py's
-// join() docstring for the server-side gate this relies on, which is
-// what actually enforces it; this form simply never renders a field
-// for something the endpoint would ignore anyway), and no radio picker
-// either -- #account-add-radio-form just below (Radios &
-// troubleshooting, revealed the instant this succeeds by
-// applyPlayerGate()) already exists for adding a radio to a linked
-// player, so a second, join-specific copy of that picker would be the
-// exact kind of duplicated join logic this change was told not to
-// introduce.
+// One step visible at a time -- see account.html's own comment on
+// #account-wizard for the full design rationale. Two paths share the
+// same fork (#account-wizard-step-fork): Path A adopts an existing
+// player by key (#account-connect-form, POST /api/account/link-key,
+// unchanged from before this screen split) in one step; Path B
+// registers a new player (#account-join-form, POST /api/join, also
+// unchanged) across three steps -- name, team, then radio type + Join.
+// Both paths, on success, hand off to finishWizard() below, which
+// decides whether a password step is still owed before the wizard can
+// actually close.
+//
+// The whole "register for the first time" flow was moved here from
+// frontend/join.js originally -- see this file's own module docstring
+// for why. Collects only display name + team + protocol: no
+// invite-code field (a signed-in caller is never asked for one -- see
+// app/join_api.py's join() docstring for the server-side gate this
+// relies on), and no radio picker either -- #account-add-radio-form
+// further down (Radios & troubleshooting, revealed the instant either
+// path succeeds by applyPlayerGate()) already exists for adding a
+// radio to a linked player, so a second, join-specific copy of that
+// picker would be the exact kind of duplicated join logic this was
+// told not to introduce.
 let selectedJoinTeam = null;
+let wizardPasswordActive = false;
+
+const WIZARD_STEP_IDS = {
+  fork: 'account-wizard-step-fork',
+  key: 'account-wizard-step-key',
+  'key-done': 'account-wizard-step-key-done',
+  name: 'account-wizard-step-name',
+  team: 'account-wizard-step-team',
+  join: 'account-wizard-step-join',
+  // Keeps its original id -- account.html's own comment on
+  // #account-join-result explains why (the one-time key display,
+  // untouched from before this screen split).
+  done: 'account-join-result',
+  password: 'account-wizard-step-password',
+};
+const WIZARD_HEADING_IDS = {
+  fork: 'account-wizard-heading-fork',
+  key: 'account-wizard-heading-key',
+  'key-done': 'account-wizard-heading-key-done',
+  name: 'account-wizard-heading-name',
+  team: 'account-wizard-heading-team',
+  join: 'account-wizard-heading-join',
+  done: 'account-wizard-heading-done',
+  password: 'account-wizard-heading-password',
+};
+
+// The two "it worked" steps (done/key-done) are a contradiction next to
+// #account-wizard-intro-hint's "No player is connected to this account
+// yet." right above the whole wizard -- see account.html's own comment
+// on that paragraph. Every other step still wants it: an account with
+// no player really doesn't have one yet.
+const WIZARD_STEPS_WITH_PLAYER = new Set(['key-done', 'done', 'password']);
+
+// Shows exactly one wizard step and hides the rest, then moves focus to
+// that step's own heading (an <h3> for every step except Team, whose
+// heading is a <legend> -- both are tabindex="-1" in account.html
+// specifically so this can focus them; neither is in the normal tab
+// order otherwise). Satisfies the "move focus to the new step's
+// heading or first field" rule for ordinary forward/back navigation --
+// the separate "move focus to the offending field" rule for a failed
+// validation is handled by the individual handleWizard*Continue()
+// functions below instead, since only they know which field failed.
+function showWizardStep(step) {
+  Object.values(WIZARD_STEP_IDS).forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.hidden = true;
+  });
+  const target = document.getElementById(WIZARD_STEP_IDS[step]);
+  if (target) target.hidden = false;
+  const introHint = document.getElementById('account-wizard-intro-hint');
+  if (introHint) introHint.hidden = WIZARD_STEPS_WITH_PLAYER.has(step);
+  const heading = document.getElementById(WIZARD_HEADING_IDS[step]);
+  if (heading) heading.focus();
+}
 
 // Same swatch markup/behavior as buildTeamSwitchPicker() further down
 // (account-team-switch's own picker), simplified: no "current team"
@@ -426,7 +501,10 @@ let selectedJoinTeam = null;
 // into one shared builder with buildTeamSwitchPicker() -- the two
 // diverge enough (disabled state, confirm step, target picker id) that
 // sharing one function would need as many branches as just having two
-// short ones.
+// short ones. The picker itself sits inside a <fieldset>/<legend> in
+// account.html (#account-wizard-step-team) so the group has a real
+// accessible name -- these swatches don't need role="radio" of their
+// own on top of that.
 function buildJoinTeamPicker() {
   const wrap = document.getElementById('account-join-team-picker');
   if (!wrap) return;
@@ -459,6 +537,107 @@ function clearJoinError() {
   el.hidden = true;
 }
 
+function showConnectError(message) {
+  const el = document.getElementById('account-connect-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearConnectError() {
+  const el = document.getElementById('account-connect-error');
+  el.textContent = '';
+  el.hidden = true;
+}
+
+// ---- Wizard navigation (fork + back/continue on every step) --------------
+
+function handleWizardForkKey() {
+  clearConnectError();
+  showWizardStep('key');
+}
+function handleWizardForkNew() {
+  clearJoinError();
+  showWizardStep('name');
+}
+function handleWizardKeyBack() {
+  clearConnectError();
+  showWizardStep('fork');
+}
+function handleWizardNameBack() {
+  clearJoinError();
+  showWizardStep('fork');
+}
+function handleWizardNameContinue() {
+  clearJoinError();
+  const nameInput = document.getElementById('f-account-join-name');
+  if (!nameInput.value.trim()) {
+    showJoinError('Enter a display name.');
+    nameInput.focus();
+    return;
+  }
+  showWizardStep('team');
+}
+function handleWizardTeamBack() {
+  clearJoinError();
+  showWizardStep('name');
+}
+function handleWizardTeamContinue() {
+  clearJoinError();
+  if (!selectedJoinTeam) {
+    showJoinError('Choose a team.');
+    const firstSwatch = document.querySelector('#account-join-team-picker .account-team-swatch');
+    if (firstSwatch) firstSwatch.focus();
+    return;
+  }
+  showWizardStep('join');
+}
+function handleWizardJoinBack() {
+  clearJoinError();
+  showWizardStep('team');
+}
+function handleWizardDoneContinue() {
+  finishWizard();
+}
+function handleWizardKeyDoneContinue() {
+  finishWizard();
+}
+
+// ---- Wizard completion: the conditional password step --------------------
+//
+// Called once either path succeeds (end of handleJoinSubmit()/
+// handleConnectSubmit() below). Reads the SAME owes_password signal
+// #account-owes-password-banner already reads (GET /api/account,
+// app/account_api.py's _owes_password()) -- not re-derived here, just
+// read off the freshly-fetched lastAccountData each caller sets first.
+// If it's owed, the wizard's last step IS the password form (relocated
+// here by renderOwesPasswordBanner() below, in place of its usual
+// banner slot, for exactly as long as wizardPasswordActive is true);
+// handlePasswordSubmit()'s own success path calls completeWizard() once
+// that's done. If it's not owed, there's nothing left to do, so this
+// closes the wizard immediately.
+function finishWizard() {
+  if (lastAccountData && lastAccountData.owes_password) {
+    wizardPasswordActive = true;
+    renderOwesPasswordBanner(lastAccountData);
+    showWizardStep('password');
+    return;
+  }
+  completeWizard();
+}
+
+// Closes the wizard: suppresses wizardPasswordActive (idempotent if it
+// was never set), puts #account-password-form back in its normal home
+// if the password step had it, and flips the Player panel over to its
+// ordinary "linked" summary -- the same renderPlayer() every other
+// caller on this page already uses.
+function completeWizard() {
+  wizardPasswordActive = false;
+  if (lastAccountData) renderOwesPasswordBanner(lastAccountData);
+  if (lastAccountData && lastAccountData.player) renderPlayer(lastAccountData.player);
+}
+
+// ---- Join (POST /api/join, session-authenticated) ------------------------
+
 async function handleJoinSubmit(e) {
   e.preventDefault();
   clearJoinError();
@@ -467,10 +646,15 @@ async function handleJoinSubmit(e) {
   const displayName = nameInput.value.trim();
   if (!displayName) {
     showJoinError('Enter a display name.');
+    showWizardStep('name');
+    nameInput.focus();
     return;
   }
   if (!selectedJoinTeam) {
     showJoinError('Choose a team.');
+    showWizardStep('team');
+    const firstSwatch = document.querySelector('#account-join-team-picker .account-team-swatch');
+    if (firstSwatch) firstSwatch.focus();
     return;
   }
   const protocol = document.getElementById('f-account-join-protocol').value;
@@ -498,6 +682,16 @@ async function handleJoinSubmit(e) {
         : `Join failed (status ${res.status}).`;
       showJoinError(message);
       submitBtn.disabled = false;
+      // "that name is taken" (app/join_api.py's join(), 409 -- checked
+      // at submit time, i.e. from the Join step, not the Name step
+      // where the name was actually entered) is the one server-side
+      // rejection a visitor can actually act on -- send them back to
+      // fix the field it's actually about, same as a client-side
+      // validation failure on this same field does just above.
+      if (data && data.error === 'that name is taken') {
+        showWizardStep('name');
+        nameInput.focus();
+      }
       return;
     }
 
@@ -514,29 +708,37 @@ async function handleJoinSubmit(e) {
     document.getElementById('account-join-success').textContent =
       `You're registered for team ${data.team}. Copy your API key below -- this is the only time it will ever be shown.`;
     document.getElementById('account-join-key-slot').replaceChildren(buildCopyRow(data.key));
-    document.getElementById('account-join-result').hidden = false;
+    showWizardStep('done');
 
-    // Re-fetch the canonical player object rather than building one
+    // Re-fetch the canonical account object rather than building one
     // from /api/join's own response shape (display_name/team/protocol/
     // key -- built for the anonymous flow's key-display step, not a
-    // player_id) -- same "re-fetch after a mutation" pattern
-    // loadAccount() already uses after maybeCompletePendingLink(). The
-    // new player is already linked to this account server-side, in
+    // player_id or owes_password) -- same "re-fetch after a mutation"
+    // pattern loadAccount() already uses after maybeCompletePendingLink().
+    // The new player is already linked to this account server-side, in
     // the SAME transaction that created it (see join()'s own
     // docstring) -- there is no separate link-key step to perform
     // here the way an anonymous join needs a follow-up bindPickedMcNode()/
     // bindPickedMtNode() call for a picked radio; there is no radio
     // picked here at all (see this section's own header comment).
+    // Deliberately does NOT call renderPlayer() here -- that would flip
+    // #account-player-unlinked (and the "You're in" key reveal it still
+    // holds) out of view immediately, before anyone could read or copy
+    // the key. Only the linked-state copy is refreshed now; the
+    // visibility flip waits for completeWizard(), once the wizard is
+    // actually done (see finishWizard()'s own comment).
     try {
       const accRes = await fetch('/api/account');
       if (accRes.ok) {
         const accData = await accRes.json();
-        renderPlayer(accData.player);
+        lastAccountData = accData;
+        updatePlayerLinkedCopy(accData.player);
       }
     } catch (err) {
       // The success line above already told them it worked; a failed
-      // refresh here just means the Player panel's linked-state copy
-      // catches up on the next page load instead of immediately.
+      // refresh here just means owes_password (and so which step the
+      // "Continue" button below leads to) is decided from a slightly
+      // stale lastAccountData instead of a fresh one.
     }
     applyPlayerGate(true);
     loadPlayerSections();
@@ -546,16 +748,34 @@ async function handleJoinSubmit(e) {
   }
 }
 
-function showConnectError(message) {
-  const el = document.getElementById('account-connect-error');
-  el.textContent = message;
-  el.hidden = false;
-}
+// ---- Connect by key (POST /api/account/link-key, session-authenticated) --
 
-function clearConnectError() {
-  const el = document.getElementById('account-connect-error');
-  el.textContent = '';
-  el.hidden = true;
+// Translates POST /api/account/link-key's own error codes
+// (app/account_api.py's link_key()) into copy a visitor can actually
+// act on, instead of showing the raw wire value verbatim. "unauthorized"
+// deliberately covers BOTH a key that doesn't exist and one that was
+// revoked -- see that route's own comment on why those two must stay
+// indistinguishable from the response alone (anti-enumeration); this
+// keeps that same one-message-for-both shape, it just phrases it for a
+// person instead of echoing the status word.
+function humanizeConnectError(data) {
+  const code = data && typeof data.error === 'string' ? data.error : null;
+  switch (code) {
+    case 'api_key is required':
+      return 'Enter your API key.';
+    case 'unauthorized':
+      return "That key doesn't match a player, or it's been revoked. Double-check it and try again.";
+    case 'forbidden':
+      return 'That key has been disabled.';
+    case 'this account already has a linked player':
+      return 'This account is already connected to a player.';
+    case "that key's player is already linked to a different account":
+      return "That key's player is already connected to a different account.";
+    case 'rate limited':
+      return 'Too many attempts. Wait a moment and try again.';
+    default:
+      return code || 'Something went wrong. Try again in a moment.';
+  }
 }
 
 async function handleConnectSubmit(e) {
@@ -566,6 +786,7 @@ async function handleConnectSubmit(e) {
   const rawKey = input.value.trim();
   if (!rawKey) {
     showConnectError('Enter your API key.');
+    input.focus();
     return;
   }
 
@@ -580,16 +801,38 @@ async function handleConnectSubmit(e) {
     let data = null;
     try { data = await res.json(); } catch (err) { data = null; }
     if (!res.ok) {
-      const message = (data && typeof data.error === 'string')
-        ? data.error
-        : 'Something went wrong. Try again in a moment.';
-      showConnectError(message);
+      showConnectError(humanizeConnectError(data));
+      input.focus();
       return;
     }
     input.value = '';
-    renderPlayer(data.player);
+    if (data.player) updatePlayerLinkedCopy(data.player);
     applyPlayerGate(!!data.player);
     if (data.player) loadPlayerSections();
+
+    // Confirms what just happened -- naming the adopted player -- on
+    // its own step (#account-wizard-step-key-done) rather than letting
+    // the form silently vanish into the linked-state summary with no
+    // feedback at all.
+    const successEl = document.getElementById('account-connect-success');
+    successEl.textContent = data.player
+      ? `Connected as ${data.player.display_name}, team ${data.player.team}.`
+      : 'Connected.';
+    showWizardStep('key-done');
+
+    // Same reasoning as handleJoinSubmit() above: re-fetch so
+    // finishWizard() reads a current owes_password rather than
+    // whatever loadAccount() saw before this account had a player
+    // (owes_password never actually depends on player state -- see
+    // app/account_api.py's _owes_password() docstring -- but a fresh
+    // read costs nothing and keeps this from silently relying on that
+    // staying true).
+    try {
+      const accRes = await fetch('/api/account');
+      if (accRes.ok) lastAccountData = await accRes.json();
+    } catch (err) {
+      // Fall through on whatever lastAccountData already held.
+    }
   } catch (err) {
     showConnectError('Could not reach the server. Check your connection and try again.');
   } finally {
@@ -2061,8 +2304,35 @@ async function loadHonors() {
 // SECURITY: password (POST/DELETE /api/account/password)
 // ============================================================================
 
+// The form itself is one shared DOM node that physically relocates
+// between three homes (see renderOwesPasswordBanner() below), but its
+// error/success elements are NOT part of that moved node -- each home
+// needs its own feedback shown where that home actually is. The
+// Security-panel pair (#account-password-error/-success) covers both
+// the banner and the plain Security-panel case (the banner sits at the
+// very top of the same scroll position the page loads at, so a
+// Security-panel-anchored message reads as "the thing that just
+// happened" either way); the wizard step is the one home far enough
+// down/away from Security that it needs its own pair
+// (#account-wizard-password-error/-success in account.html) so a
+// rejected submit shows up in the step the user is actually looking
+// at, not off in a panel they haven't scrolled to. wizardPasswordActive
+// (set/cleared by finishWizard()/completeWizard() above) says which
+// pair is live at call time.
+function passwordErrorEl() {
+  return document.getElementById(
+    wizardPasswordActive ? 'account-wizard-password-error' : 'account-password-error'
+  );
+}
+
+function passwordSuccessEl() {
+  return document.getElementById(
+    wizardPasswordActive ? 'account-wizard-password-success' : 'account-password-success'
+  );
+}
+
 function showPasswordError(message) {
-  const el = document.getElementById('account-password-error');
+  const el = passwordErrorEl();
   el.textContent = message;
   el.hidden = false;
 }
@@ -2070,6 +2340,8 @@ function showPasswordError(message) {
 function clearPasswordMessages() {
   document.getElementById('account-password-error').hidden = true;
   document.getElementById('account-password-success').hidden = true;
+  document.getElementById('account-wizard-password-error').hidden = true;
+  document.getElementById('account-wizard-password-success').hidden = true;
 }
 
 // Reflects whether this account is even eligible to have a password
@@ -2115,23 +2387,36 @@ function renderPasswordSection(account) {
 // Shows/hides the non-dismissible top-of-page prompt (GET /api/account's
 // owes_password -- see app/account_api.py's _owes_password() for the
 // exact rule: a verified sign-in email on file, no password yet) and
-// physically relocates the ONE #account-password-form between its two
+// physically relocates the ONE #account-password-form between its
 // possible homes -- #account-owes-password-form-slot (the banner, while
-// owed) and right after #account-password-form-anchor (its normal spot
-// in the Security > Password panel, once it isn't). This is a DOM move
+// owed), right after #account-password-form-anchor (its normal spot in
+// the Security > Password panel, once it isn't), and now a third,
+// #account-wizard-password-form-slot, for exactly as long as the
+// sign-up wizard's own password step is showing it (wizardPasswordActive,
+// set/cleared by finishWizard()/completeWizard() above). That third
+// case takes priority over the banner while it's active -- the banner
+// is suppressed rather than shown empty-and-duplicated next to the
+// wizard's own copy of the same prompt. This is a DOM move
 // (appendChild/insertAdjacentElement re-parent the existing node), not a
 // clone: the form's fields, its submit handler (handlePasswordSubmit,
 // wired up once in boot() below), and every other listener on it stay
 // attached exactly as they were -- there is exactly one set-password
-// form and one handler in this file, just two places it can visually
-// sit. Idempotent: calling this again with the account in the same
-// owed/not-owed state just re-parents the node to where it already is,
-// which is harmless.
+// form and one handler in this file, just three places it can visually
+// sit. Idempotent: calling this again with the account (and
+// wizardPasswordActive) in the same state just re-parents the node to
+// where it already is, which is harmless.
 function renderOwesPasswordBanner(account) {
   const banner = document.getElementById('account-owes-password-banner');
   const slot = document.getElementById('account-owes-password-form-slot');
+  const wizardSlot = document.getElementById('account-wizard-password-form-slot');
   const anchor = document.getElementById('account-password-form-anchor');
   const form = document.getElementById('account-password-form');
+
+  if (wizardPasswordActive && account.owes_password) {
+    banner.hidden = true;
+    wizardSlot.appendChild(form);
+    return;
+  }
 
   banner.hidden = !account.owes_password;
   if (account.owes_password) {
@@ -2150,6 +2435,7 @@ async function handlePasswordSubmit(e) {
   const newPassword = newPasswordInput.value;
   if (!newPassword) {
     showPasswordError('Enter a password.');
+    newPasswordInput.focus();
     return;
   }
 
@@ -2158,6 +2444,7 @@ async function handlePasswordSubmit(e) {
   if (!currentField.hidden) {
     if (!currentPasswordInput.value) {
       showPasswordError('Enter your current password.');
+      currentPasswordInput.focus();
       return;
     }
     body.current_password = currentPasswordInput.value;
@@ -2179,10 +2466,22 @@ async function handlePasswordSubmit(e) {
     }
     newPasswordInput.value = '';
     currentPasswordInput.value = '';
-    const successEl = document.getElementById('account-password-success');
+    const successEl = passwordSuccessEl();
     successEl.textContent = 'Password saved.';
     successEl.hidden = false;
     await refreshAccountCore();
+    // If this submit was the wizard's own password step (finishWizard()
+    // put us here because owes_password was true right after joining/
+    // adopting), that's the last thing the wizard was waiting on --
+    // close it now. refreshAccountCore() just re-read owes_password as
+    // false and already re-parented #account-password-form back to its
+    // normal Security-panel home via renderOwesPasswordBanner() above;
+    // completeWizard() below is what flips the Player panel over to its
+    // ordinary "linked" summary. A no-op for every OTHER caller of this
+    // form (the top banner, the plain Security panel edit) --
+    // wizardPasswordActive is only ever true while the wizard step is
+    // showing it.
+    if (wizardPasswordActive) completeWizard();
   } catch (err) {
     showPasswordError('Could not reach the server. Check your connection and try again.');
   } finally {
@@ -2202,7 +2501,7 @@ async function handlePasswordRemove() {
       showPasswordError((data && data.error) || 'Something went wrong. Try again in a moment.');
       return;
     }
-    const successEl = document.getElementById('account-password-success');
+    const successEl = passwordSuccessEl();
     successEl.textContent = data.warning_last_door
       ? 'Password removed. This account now has only one way to sign in.'
       : 'Password removed.';
@@ -2881,6 +3180,16 @@ function boot() {
   document.getElementById('account-connect-form').addEventListener('submit', handleConnectSubmit);
   buildJoinTeamPicker();
   document.getElementById('account-join-form').addEventListener('submit', handleJoinSubmit);
+  document.getElementById('account-wizard-fork-key-btn').addEventListener('click', handleWizardForkKey);
+  document.getElementById('account-wizard-fork-new-btn').addEventListener('click', handleWizardForkNew);
+  document.getElementById('account-wizard-key-back-btn').addEventListener('click', handleWizardKeyBack);
+  document.getElementById('account-wizard-key-done-continue-btn').addEventListener('click', handleWizardKeyDoneContinue);
+  document.getElementById('account-wizard-name-back-btn').addEventListener('click', handleWizardNameBack);
+  document.getElementById('account-wizard-name-continue-btn').addEventListener('click', handleWizardNameContinue);
+  document.getElementById('account-wizard-team-back-btn').addEventListener('click', handleWizardTeamBack);
+  document.getElementById('account-wizard-team-continue-btn').addEventListener('click', handleWizardTeamContinue);
+  document.getElementById('account-wizard-join-back-btn').addEventListener('click', handleWizardJoinBack);
+  document.getElementById('account-wizard-done-continue-btn').addEventListener('click', handleWizardDoneContinue);
   document.getElementById('account-logout-btn').addEventListener('click', handleLogout);
   document.getElementById('account-logout-all-btn').addEventListener('click', handleLogoutAll);
   setupEmailSignInForm(document.getElementById('account-signin-email-form'), {

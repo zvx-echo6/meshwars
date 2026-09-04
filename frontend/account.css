@@ -90,18 +90,6 @@
   color: var(--mw-gold);
 }
 
-/* The Player panel's "Join MeshWars" flow (#account-join-panel in
-   account.html, #account-player-unlinked) sits above the older
-   "connect an existing key" form as two distinct options, not one
-   continuous form -- this border is the only thing marking that seam;
-   everything else (spacing, field styling) already comes from the
-   shared rules below. */
-#account-join-panel {
-  padding-bottom: 14px;
-  margin-bottom: 14px;
-  border-bottom: 1px solid var(--mw-line);
-}
-
 .account-error {
   background: #2a1414;
   border: 1px solid #663333;
@@ -301,6 +289,76 @@
 .account-connect-form button:disabled,
 #account-logout-btn:disabled,
 #account-logout-all-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- Player: sign-up wizard (#account-wizard, account.js's
+   showWizardStep()) --------------------------------------------------
+   One step visible at a time -- see account.html's own comment on
+   #account-wizard for why. Deliberately no card/box treatment, same as
+   every other panel on this page: a step is just its heading
+   (.account-title, reused) plus whatever field it holds, spaced the
+   same as the rest of the page. This block only adds the bits that are
+   new -- the required-field marker, the progress line, the fork's two
+   choice buttons, and the back/continue action row. */
+.account-required-mark {
+  display: inline;
+  margin-left: 6px;
+  color: var(--mw-hostile);
+  font-weight: 700;
+}
+.account-wizard-progress {
+  margin: 0;
+  font-size: 0.6875rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+}
+/* Team step's heading is a <legend>, not an <h3> -- browsers give
+   legend its own UA padding/border that .account-title never accounts
+   for, so it's zeroed out here rather than baking a legend-specific
+   exception into .account-title itself. */
+.account-wizard-team-fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+.account-wizard-team-fieldset legend.account-title {
+  padding: 0;
+}
+.account-wizard-fork-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+.account-wizard-choice-btn {
+  flex: 1 1 200px;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 10px 16px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.account-wizard-choice-btn:hover { background: var(--mw-line); }
+.account-wizard-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 14px;
+}
+/* .account-connect-form button (above) outranks a plain .account-link-btn
+   on specificity alone, since every Back button here sits inside a
+   .account-connect-form -- without this, Back would render as a solid
+   button instead of the plain text link every Cancel control elsewhere
+   on this page uses. */
+.account-wizard-actions button.account-link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-weight: 400;
+}
 
 /* ---- Sessions -------------------------------------------------------- */
 
@@ -869,6 +927,35 @@
 .account-team-swatch.active { background: var(--swatch-color); color: #0a0a0a; }
 .account-team-swatch:disabled { opacity: 0.4; cursor: default; }
 .account-team-confirm { margin-top: 10px; }
+
+/* The join wizard's team picker (#account-join-team-picker) sits inside
+   <form class="account-connect-form"> (the wizard steps this appears
+   in are all one form -- see account.html's own comment on
+   #account-wizard). `.account-connect-form button` (specificity 0,1,1)
+   and `.account-connect-form button:hover` (0,2,1) both outrank the
+   plain `.account-team-swatch`/`:hover`/`.active`/`:disabled` rules
+   above (0,1,0 / 0,2,0 / 0,2,0 / 0,2,0) -- every swatch rendered flat
+   grey instead of its team colour, and clicking one showed no
+   selected state at all for as long as the pointer stayed put,
+   because the generic hover rule beat .active outright. These re-
+   declare the exact same four rules one selector level more specific
+   (scoped through .account-team-picker, the swatches' own wrapper) so
+   they win regardless of which form a picker happens to sit inside,
+   without an !important arms race against .account-connect-form's own
+   rules -- and without affecting the OTHER #account-team-picker (My
+   team > Switch team), which never had this collision (not nested in
+   any .account-connect-form) and reads identically either way since
+   these declarations match its base rules exactly. Order preserved
+   from above: hover, then active, then disabled, so an equal-specificity
+   collision between THESE three still resolves the same way. */
+.account-team-picker .account-team-swatch {
+  background: var(--mw-page);
+  color: var(--swatch-color);
+  border: 1px solid var(--swatch-color);
+}
+.account-team-picker .account-team-swatch:hover { background: var(--mw-raised); }
+.account-team-picker .account-team-swatch.active { background: var(--swatch-color); color: #0a0a0a; }
+.account-team-picker .account-team-swatch:disabled { opacity: 0.4; cursor: default; }
 
 /* ---- My check-in history / honors ---------------------------------------- */
 .account-honors-list {

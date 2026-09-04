@@ -54,7 +54,7 @@
        page load. Do not remove this link without replacing both. -->
   <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
   <link rel="stylesheet" href="/static/signin.css?v=20260904-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260904-5" />
+  <link rel="stylesheet" href="/static/account.css?v=20260904-6" />
   <link rel="stylesheet" href="/static/totp.css?v=20260903-1" />
 </head>
 <body>
@@ -210,74 +210,190 @@
           <p id="account-player-team" class="account-player-line"></p>
         </div>
         <div id="account-player-unlinked" hidden>
-          <p class="account-hint">No player is connected to this account yet.</p>
+          <!-- Hidden once either wizard path succeeds (account.js's
+               showWizardStep()) -- otherwise it sits directly above a
+               screen that just said "You're registered for team RED" /
+               "Connected as ..." and directly contradicts it. -->
+          <p id="account-wizard-intro-hint" class="account-hint">No player is connected to this account yet.</p>
 
           <!-- ===============================================================
-               JOIN. The whole "register for the first time" flow now lives
-               HERE, not on /join -- see account.js's own module docstring
-               for why: /join used to be where this happened, but that meant
-               an already-signed-in visitor landed on a page asking them to
-               sign in a SECOND time, above a form that still demanded an
-               invite code they had already cleared a stronger bar than.
+               SIGN-UP WIZARD. One decision per screen -- Matt's own fix for
+               "it's not clear you MUST enter a username / pick a team / set
+               a password": a field alone on a screen is self-evidently
+               required, which two forms stacked on one screen never made
+               clear. Fork first (already have a key, or new here); the
+               "new" path is display name, then team, then radio type +
+               Join, each its own screen with a visible Required marker and
+               a Back control (account.js's showWizardStep() and its
+               handleWizard*() handlers). Radio type rides along on the
+               LAST screen rather than getting one of its own -- see that
+               step's own hint for why (it's not saved to the player at
+               all).
 
-               No invite-code field here at all -- POST /api/join, called
-               with this page's own session cookie
-               (credentials: 'same-origin', the default for a same-origin
-               fetch), never asks a signed-in caller for one; the session
-               itself is what the server checks instead
-               (app/join_api.py's join(), Depends(optional_session)). See
-               that route's own docstring for the exact gate: an account
-               that already has a linked player is refused here (409) the
-               same way POST /api/account/link-key already refuses a
-               second one -- "Join" only ever applies once.
+               Still exactly the same two endpoints as before this change --
+               POST /api/join (#account-join-form, unchanged body shape) and
+               POST /api/account/link-key (#account-connect-form, unchanged
+               body shape) -- and exactly the same two error elements and
+               handlers (showJoinError/clearJoinError, showConnectError/
+               clearConnectError, all in account.js), just revealed one step
+               at a time instead of as two forms stacked on one screen. No
+               invite-code field anywhere in here -- see this comment's own
+               prior wording, still true: a signed-in caller is never asked
+               for one (app/join_api.py's join(), Depends(optional_session)),
+               and an account that already has a linked player is refused
+               here (409) the same way POST /api/account/link-key already
+               refuses a second one. Only display name + team + protocol are
+               collected on the new-player path -- no radio picker, no
+               MeshMapper walkthrough, both duplicated nowhere here; Radios &
+               troubleshooting below (revealed by applyPlayerGate() the
+               instant either path succeeds) already has an "Add radio" form
+               built for exactly this. -->
+          <div id="account-wizard" class="account-wizard">
 
-               Only display name + team + protocol are collected -- no
-               radio picker, no MeshMapper walkthrough, both duplicated
-               nowhere here. Radios & troubleshooting below (revealed by
-               applyPlayerGate() the instant this succeeds) already has an
-               "Add radio" form built for exactly this -- see
-               #account-add-radio-form further down this page -- there is
-               no reason for a second, join-specific copy of it. -->
-          <div id="account-join-panel">
-            <p class="account-hint">Registering for the first time? Pick a display name and team, then press Join -- no invite code needed.</p>
-            <div id="account-join-error" class="account-error" role="alert" hidden></div>
+            <!-- Step 1: the fork. -->
+            <div id="account-wizard-step-fork" class="account-wizard-step">
+              <h3 id="account-wizard-heading-fork" class="account-title" tabindex="-1">Have you played MeshWars before?</h3>
+              <div class="account-wizard-fork-actions">
+                <button type="button" id="account-wizard-fork-key-btn" class="account-wizard-choice-btn">I have an API key</button>
+                <button type="button" id="account-wizard-fork-new-btn" class="account-wizard-choice-btn">I'm new here</button>
+              </div>
+            </div>
+
+            <!-- Path A: adopt an existing player by key. One screen. -->
+            <div id="account-wizard-step-key" class="account-wizard-step" hidden>
+              <h3 id="account-wizard-heading-key" class="account-title" tabindex="-1">Connect your API key</h3>
+              <p class="account-hint">Enter the API key you were given the first time you joined.</p>
+              <div id="account-connect-error" class="account-error" role="alert" hidden></div>
+              <form id="account-connect-form" class="account-connect-form" novalidate autocomplete="off">
+                <label class="account-field">
+                  <span>API key<span class="account-required-mark">Required</span></span>
+                  <input type="password" id="f-account-key" autocomplete="off" required />
+                </label>
+                <div class="account-wizard-actions">
+                  <button type="button" id="account-wizard-key-back-btn" class="account-link-btn">Back</button>
+                  <button type="submit" id="account-connect-submit">Connect</button>
+                </div>
+              </form>
+            </div>
+
+            <!-- Confirms Path A -- naming the adopted player -- before the
+                 wizard hands off to finishWizard(). Nothing to enter here,
+                 just an explicit "Continue" the way #account-join-result
+                 below has one, rather than the panel silently vanishing
+                 into the linked-state summary. -->
+            <div id="account-wizard-step-key-done" class="account-wizard-step" hidden>
+              <h3 id="account-wizard-heading-key-done" class="account-title" tabindex="-1">Connected</h3>
+              <p id="account-connect-success" class="account-hint"></p>
+              <div class="account-wizard-actions">
+                <button type="button" id="account-wizard-key-done-continue-btn">Continue</button>
+              </div>
+            </div>
+
+            <!-- Path B: register for the first time. Still ONE form and ONE
+                 submit (#account-join-form / POST /api/join) -- the three
+                 divs below are STEPS inside it, shown one at a time, not
+                 three separate forms. #account-join-error sits directly in
+                 the form, outside every step div, so it stays put and
+                 keeps working unchanged across all three (showJoinError/
+                 clearJoinError, unchanged from before this screen split). -->
             <form id="account-join-form" class="account-connect-form" novalidate autocomplete="off">
-              <label class="account-field">
-                <span>Display name</span>
-                <input type="text" id="f-account-join-name" maxlength="32" autocomplete="off" required />
-              </label>
-              <div id="account-join-team-picker" class="account-team-picker"></div>
-              <label class="account-field account-field-compact">
-                <span>Radio type</span>
-                <select id="f-account-join-protocol">
-                  <option value="mc" selected>MeshCore</option>
-                  <option value="mt">Meshtastic</option>
-                </select>
-              </label>
-              <button type="submit" id="account-join-submit">Join</button>
+              <div id="account-join-error" class="account-error" role="alert" hidden></div>
+
+              <div id="account-wizard-step-name" class="account-wizard-step" hidden>
+                <p class="account-wizard-progress">Step 1 of 3</p>
+                <h3 id="account-wizard-heading-name" class="account-title" tabindex="-1">Pick a display name</h3>
+                <label class="account-field">
+                  <span>Display name<span class="account-required-mark">Required</span></span>
+                  <input type="text" id="f-account-join-name" maxlength="32" autocomplete="off" required />
+                </label>
+                <p class="account-hint">Must be unique — if someone already has it, you'll be asked to pick another.</p>
+                <div class="account-wizard-actions">
+                  <button type="button" id="account-wizard-name-back-btn" class="account-link-btn">Back</button>
+                  <button type="button" id="account-wizard-name-continue-btn">Continue</button>
+                </div>
+              </div>
+
+              <div id="account-wizard-step-team" class="account-wizard-step" hidden>
+                <p class="account-wizard-progress">Step 2 of 3</p>
+                <fieldset class="account-wizard-team-fieldset">
+                  <legend id="account-wizard-heading-team" class="account-title" tabindex="-1">Choose a team<span class="account-required-mark">Required</span></legend>
+                  <div id="account-join-team-picker" class="account-team-picker"></div>
+                </fieldset>
+                <div class="account-wizard-actions">
+                  <button type="button" id="account-wizard-team-back-btn" class="account-link-btn">Back</button>
+                  <button type="button" id="account-wizard-team-continue-btn">Continue</button>
+                </div>
+              </div>
+
+              <div id="account-wizard-step-join" class="account-wizard-step" hidden>
+                <p class="account-wizard-progress">Step 3 of 3</p>
+                <h3 id="account-wizard-heading-join" class="account-title" tabindex="-1">Radio type, then join</h3>
+                <label class="account-field account-field-compact">
+                  <span>Radio type</span>
+                  <select id="f-account-join-protocol">
+                    <option value="mc" selected>MeshCore</option>
+                    <option value="mt">Meshtastic</option>
+                  </select>
+                </label>
+                <p class="account-hint">This only decides whether we show you MeshCore setup steps next — it isn't saved to your player, so don't worry about getting it exactly right.</p>
+                <div class="account-wizard-actions">
+                  <button type="button" id="account-wizard-join-back-btn" class="account-link-btn">Back</button>
+                  <button type="submit" id="account-join-submit">Join</button>
+                </div>
+              </div>
             </form>
 
             <!-- Shown once POST /api/join above succeeds -- the key is
                  shown exactly once, same one-time-shown rule
                  frontend/join.js's own module docstring states for the
                  identical key there, reusing this page's own
-                 buildCopyRow() rather than a second key-display widget. -->
-            <div id="account-join-result" hidden>
+                 buildCopyRow() rather than a second key-display widget.
+                 Advancing past this step is gated on the explicit
+                 "I've saved my key" click below (handleWizardDoneContinue()
+                 in account.js) -- same reasoning
+                 #account-totp-recovery-ack-btn's "I've saved these codes"
+                 uses for the identical one-time-secret problem in the
+                 Two-factor panel further down this page: a background
+                 GET /api/account refetch happens right after this step is
+                 shown (to learn owes_password for finishWizard() below),
+                 and that refetch must NEVER be what decides this key
+                 disappears -- only this button does. -->
+            <div id="account-join-result" class="account-wizard-step" hidden>
+              <h3 id="account-wizard-heading-done" class="account-title" tabindex="-1">You're in</h3>
               <p id="account-join-success" class="account-hint"></p>
               <div id="account-join-key-slot"></div>
               <p class="account-hint">Setting up MeshMapper or the Meshtastic app for the first time? The <a href="/docs">Docs page</a> walks through it.</p>
+              <div class="account-wizard-actions">
+                <button type="button" id="account-wizard-done-continue-btn">I've saved my key</button>
+              </div>
             </div>
-          </div>
 
-          <p class="account-hint account-group-note">Already played before and have your API key? Connect it below to claim your existing player instead.</p>
-          <div id="account-connect-error" class="account-error" role="alert" hidden></div>
-          <form id="account-connect-form" class="account-connect-form" novalidate autocomplete="off">
-            <label class="account-field">
-              <span>API key</span>
-              <input type="password" id="f-account-key" autocomplete="off" required />
-            </label>
-            <button type="submit" id="account-connect-submit">Connect</button>
-          </form>
+            <!-- Conditional last step -- GET /api/account's own
+                 owes_password (app/account_api.py's _owes_password()), the
+                 SAME signal #account-owes-password-banner above reads.
+                 account.js's finishWizard() relocates the ONE
+                 #account-password-form here, in place of its usual banner
+                 slot, for as long as this step is showing -- see
+                 renderOwesPasswordBanner()'s own comment for the rest of
+                 that move. -->
+            <div id="account-wizard-step-password" class="account-wizard-step" hidden>
+              <h3 id="account-wizard-heading-password" class="account-title" tabindex="-1">Set a password</h3>
+              <p class="account-hint">This account has a verified email address on file, so MeshWars expects it to be reachable directly by email — that only works once a password is set.</p>
+              <!-- Wizard-local copies of #account-password-error/-success
+                   below (Security > Password). The relocated
+                   #account-password-form lands in the slot right after
+                   these, but its errors/success are reported in the panel
+                   it happens to be visiting -- account.js's
+                   showPasswordError()/handlePasswordSubmit() pick this
+                   pair instead of the Security-panel pair while
+                   wizardPasswordActive is true, so a rejected submit here
+                   shows up in this step, not scrolled off in Security. -->
+              <div id="account-wizard-password-error" class="account-error" role="alert" hidden></div>
+              <p id="account-wizard-password-success" class="account-hint" hidden></p>
+              <div id="account-wizard-password-form-slot"></div>
+            </div>
+
+          </div>
         </div>
       </section>
 
@@ -475,11 +591,11 @@
         <div id="account-password-form-anchor"></div>
         <form id="account-password-form" class="account-password-form" novalidate hidden>
           <label class="account-field" id="account-password-current-field" hidden>
-            <span>Current password</span>
+            <span>Current password<span class="account-required-mark">Required</span></span>
             <input type="password" id="f-account-current-password" autocomplete="current-password" />
           </label>
           <label class="account-field">
-            <span id="account-password-new-label">New password</span>
+            <span><span id="account-password-new-label">New password</span><span class="account-required-mark">Required</span></span>
             <input type="password" id="f-account-new-password" autocomplete="new-password" />
           </label>
           <div class="account-password-actions">
@@ -665,7 +781,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260904-7" type="module"></script>
+  <script src="/static/account.js?v=20260904-10" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>
