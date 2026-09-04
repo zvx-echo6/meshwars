@@ -181,21 +181,26 @@
    size besides.
 
    PURPLE alone uses the -text variant -- see theme.css for why. */
-.rules-body .team { font-weight: 700; }
-.rules-body .team-red    { color: var(--mw-team-red); }
-.rules-body .team-green  { color: var(--mw-team-green); }
-.rules-body .team-blue   { color: var(--mw-team-blue); }
-.rules-body .team-purple { color: var(--mw-team-purple-text); }
-.rules-body .team-yellow { color: var(--mw-team-yellow); }
-.rules-body .team-orange { color: var(--mw-team-orange); }
-.rules-body .team-pink   { color: var(--mw-team-pink); }
+   The about page names the same seven in its own sentence and loads
+   this stylesheet, so its .landing-panel prose is carried here rather
+   than restating the seven hues in landing.css. */
+.rules-body .team,
+.landing-panel .team { font-weight: 700; }
+.rules-body .team-red,    .landing-panel .team-red    { color: var(--mw-team-red); }
+.rules-body .team-green,  .landing-panel .team-green  { color: var(--mw-team-green); }
+.rules-body .team-blue,   .landing-panel .team-blue   { color: var(--mw-team-blue); }
+.rules-body .team-purple, .landing-panel .team-purple { color: var(--mw-team-purple-text); }
+.rules-body .team-yellow, .landing-panel .team-yellow { color: var(--mw-team-yellow); }
+.rules-body .team-orange, .landing-panel .team-orange { color: var(--mw-team-orange); }
+.rules-body .team-pink,   .landing-panel .team-pink   { color: var(--mw-team-pink); }
 
 /* Readers who ask for less colour get the sentence back in body text
    rather than seven hues at reduced saturation -- the point of the
    colour is the match to the map, and a muted near-match is worse than
    none. */
 @media (prefers-contrast: more) {
-  .rules-body .team { color: var(--mw-text-1); }
+  .rules-body .team,
+  .landing-panel .team { color: var(--mw-text-1); }
 }
 
 .rules-body a {

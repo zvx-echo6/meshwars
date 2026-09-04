@@ -203,45 +203,6 @@ body {
 .landing-list li { margin-bottom: 8px; }
 .landing-list li:last-child { margin-bottom: 0; }
 
-/* ---- team chips ----------------------------------------------------------
-   The seven map team colours, read directly from frontend/mc.js's
-   TEAM_COLORS (not redefined here) and passed in per-chip via the
-   --chip-color custom property on each .team-chip element in the
-   markup. This is the game's most visually distinctive feature and
-   previously only appeared as a line of body text -- now it gets a
-   dedicated, glanceable row. */
-.team-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.team-chip {
-  --chip-color: var(--mw-text-6);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  background: #141414;
-  border: 1px solid var(--chip-color);
-  border-radius: 999px;
-  padding: 6px 14px 6px 10px;
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--chip-color);
-}
-
-.team-chip::before {
-  content: "";
-  display: block;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--chip-color);
-  box-shadow: 0 0 6px var(--chip-color);
-}
-
 /* ---- scoring sequence ----------------------------------------------------
    "How scoring works" is an <ol> in the markup (order is meaningful --
    it reads as how the game works, step by step) styled as a numbered
