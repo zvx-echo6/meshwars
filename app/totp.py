@@ -269,7 +269,17 @@ def provisioning_uri(*, secret: bytes, account_label: str, issuer: str) -> str:
     and one that ignores them is unaffected either way, so there is no
     downside to being explicit.
     """
-    label = urllib.parse.quote(f"{issuer}:{account_label}")
+    # The separator between issuer and account must be a LITERAL colon,
+    # not %3A. Google's Key URI grammar permits either, but every
+    # canonical example and every mainstream app (Google Authenticator,
+    # Aegis, 1Password) emits the literal form, and a parser that splits
+    # the label on ":" to recover the issuer sees a percent-encoded one
+    # as part of one long account name instead -- Ente Auth rejected a
+    # %3A-encoded label outright, which is what prompted this. `safe`
+    # therefore keeps ":" and "@" unescaped (the spec's own example
+    # carries a bare "john.doe@email.com"); anything genuinely needing
+    # escaping, a space in an issuer above all, still is.
+    label = urllib.parse.quote(f"{issuer}:{account_label}", safe=":@")
     params = {
         "secret": secret_to_base32(secret),
         "issuer": issuer,

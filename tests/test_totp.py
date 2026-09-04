@@ -197,6 +197,35 @@ def test_provisioning_uri_shape():
     assert secret_to_base32(secret) in uri
 
 
+def test_provisioning_uri_label_separator_is_a_literal_colon():
+    """Ente Auth refused a QR whose label carried a percent-encoded
+    separator. Google's Key URI grammar permits both ":" and "%3A", but
+    every canonical example and every mainstream authenticator emits the
+    literal form, and a parser that recovers the issuer by splitting on
+    ":" reads a %3A-encoded label as one long account name with no
+    issuer at all. The original shape test asserted every query
+    parameter and never the separator, which is exactly how this
+    shipped -- so it is pinned here.
+    """
+    secret = generate_secret()
+    uri = provisioning_uri(secret=secret, account_label="dev@example.com", issuer="MeshWars")
+    assert uri.startswith("otpauth://totp/MeshWars:dev@example.com?"), uri
+    assert "%3A" not in uri
+    assert "%40" not in uri
+
+
+def test_provisioning_uri_still_escapes_what_genuinely_needs_it():
+    """Keeping ":" and "@" literal must not turn off escaping wholesale
+    -- a space in an issuer or account still has to be encoded, or the
+    URI breaks at the first whitespace.
+    """
+    secret = generate_secret()
+    uri = provisioning_uri(secret=secret, account_label="a b@c.co", issuer="Mesh Wars")
+    label = uri.split("otpauth://totp/", 1)[1].split("?", 1)[0]
+    assert " " not in label
+    assert label == "Mesh%20Wars:a%20b@c.co", label
+
+
 # ---- recovery codes -------------------------------------------------------
 
 def test_generate_recovery_codes_count_and_shape():
