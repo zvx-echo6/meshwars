@@ -22,13 +22,32 @@ are:
   instant.
 - Every list route documents its own limit and never returns more.
 - Read-only. Nothing here writes.
-- A key is required, in an `X-API-Key` header. Not because the data is
-  secret -- the site shows all of it -- but because an anonymous
-  surface cannot be reasoned about: with keys, a misbehaving
-  integration can be identified and revoked on its own rather than by
-  blocking an address that might be a whole mesh community behind one
-  NAT. Keys are issued from the admin panel and only their hash is
-  stored, so a lost key is replaced, never recovered.
+- A key is required, in an `X-API-Key` header. Mostly this is not
+  because the data is secret but because an anonymous surface cannot be
+  reasoned about: with keys, a misbehaving integration can be
+  identified and revoked on its own rather than by blocking an address
+  that might be a whole mesh community behind one NAT. Keys are issued
+  from the admin panel and only their hash is stored, so a lost key is
+  replaced, never recovered.
+
+  The one deliberate exception: /api/v1/cells/{cell_id} and
+  /api/v1/captures return a captured square's player display name
+  (`recent_captures[]`/`captures[].player`), which the site itself
+  withholds from an anonymous visitor -- GET /cell/{cell_id} and
+  GET /api/mc/cell/{cell_id} strip `by_display_name` unless
+  app/sessions.py's optional_session() resolves a real signed-in
+  account (see mc_api._redact_cell_detail()). That is Matt's privacy
+  rule, "identity can be public, location can be public, the link
+  between them requires a session" -- and an integration key is a
+  session in the sense that matters here: it is issued personally by
+  the operator, so it is accountable rather than anonymous, and
+  revocable per key, the same way a signed-in account is tied to a
+  person rather than an address. See commit 007db35 ("stop the public
+  API linking a person to a place"), which hardened every other person-
+  to-place route on the site and explicitly left this one alone for
+  that reason. So these two routes are NOT a parity gap to be closed;
+  do not redact them into matching the anonymous site shape without
+  checking with Matt first.
 
 It reads through the same *_for() helpers the site's own routes use
 rather than issuing its own copies of those queries, so a figure a bot
@@ -631,7 +650,16 @@ async def v1_board(request: Request, board: str = "meshcore") -> JSONResponse:
 @router.get("/api/v1/cells/{cell_id}")
 async def v1_cell(request: Request, cell_id: str, board: str = "meshcore") -> JSONResponse:
     """One square: who holds it, every team's score on it, when it last
-    changed hands, and the repeaters heard from it."""
+    changed hands, and the repeaters heard from it.
+
+    Returns `recent_captures[].by_display_name` unredacted -- this
+    route deliberately does NOT call mc_api._redact_cell_detail() the
+    way GET /cell/{cell_id} and GET /api/mc/cell/{cell_id} do for an
+    anonymous caller. That is not an oversight; see this module's own
+    docstring's "one deliberate exception" paragraph for why an
+    X-API-Key holder is treated as accountable rather than anonymous
+    for this specific field.
+    """
     proto, err = _guard(request, board)
     if err:
         return err
@@ -652,6 +680,14 @@ async def v1_captures(request: Request, board: str = "meshcore",
     took a square from BLUE". Pass the newest `ts` you have seen back as
     `since` and you get only what is new; the ordering guarantees you
     can.
+
+    `player` (the capturing player's display_name, LEFT JOINed straight
+    off mc_tile_capture_log) is returned unconditionally -- deliberately
+    not gated the way the site's own cell popup gates the equivalent
+    `by_display_name` field for an anonymous visitor. See this module's
+    own docstring's "one deliberate exception" paragraph: an X-API-Key
+    is accountable rather than anonymous, so it is treated the same as
+    a signed-in session for this one field.
     """
     proto, err = _guard(request, board)
     if err:

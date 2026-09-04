@@ -498,7 +498,9 @@ async def teams_list() -> dict:
 
 
 @router.get("/team/{node_ref}")
-async def team_lookup(node_ref: str) -> dict:
+async def team_lookup(
+    node_ref: str, session: SessionPrincipal = Depends(require_session)
+) -> dict:
     """Look up a single Meshtastic radio's registered player and team.
 
     Accepts the same input shapes app/node_ref.py already defines for
@@ -508,6 +510,27 @@ async def team_lookup(node_ref: str) -> dict:
     node_seen. Both of those only ever made sense against the old
     auto-enrolling roster; player_node.node_ref is the canonical identity
     now, and it is always stored in exactly this one normalized form.
+
+    Privacy-hardening: this route had NO auth at all until this pass --
+    unlike /find just below (session-gated from the start of this pass)
+    and /api/mc/find in app/mc_api.py, it was missed the first time
+    through even though it answers the exact same question those two
+    do, just keyed by node reference instead of by display name: given
+    a node, who is this and what team are they on. That is precisely
+    the person-to-place link /get-nodes' own docstring in this file
+    describes as "kept behind a login" -- Matt's rule is "identity can
+    be public, location can be public, the link between them cannot,"
+    and node references are broadcast in the clear over the mesh AND
+    only 8 hex characters, so this route was both fully enumerable and
+    reachable by anyone with a radio, with no session and no rate limit
+    standing in the way. Gated behind app/sessions.py's require_session()
+    now, same dependency and same 401 failure shape as /find and
+    /api/mc/find -- there is deliberately no unauthenticated variant,
+    same reasoning as those two. `session` is unused beyond proving one
+    exists. Checked frontend/mc.js (the one file that names this route)
+    and app/api.py's own docs page before making this change: neither
+    calls it, mc.js only mentions it in a comment, so gating it changes
+    no page's behavior.
     """
     ref = normalize_node_ref(node_ref)
     if ref is None:
@@ -1138,6 +1161,13 @@ def mount(app: FastAPI) -> None:
         @app.get("/docs", response_class=HTMLResponse, include_in_schema=False)
         async def docs_page(request: Request):
             return _templated_html_page(request, frontend_dir / "docs.html", "docs page not bundled")
+
+        # Not in the top nav (no sign-off for a new nav entry) -- linked
+        # instead from the site footer. Same top-level-page pattern as
+        # every other route in this block.
+        @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+        async def privacy_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "privacy.html", "privacy page not bundled")
 
         # Alias for / (frontend/map2.html, same handler target as index()
         # above) -- kept working for anyone who already has this URL

@@ -1,7 +1,7 @@
 """Tests for the privacy-hardening pass: "identity can be public,
 location can be public, the link between them cannot" (Matt's rule).
 
-Covers the four routes that pass touched:
+Covers the routes that pass touched:
 
 - GET /api/mc/find, GET /find -- exist solely to answer "where is this
   person"; now require a session (app/sessions.py's require_session),
@@ -18,6 +18,20 @@ Covers the four routes that pass touched:
   upstream feeds, so this endpoint never withheld them); only the
   `team` field, which JOINS a node to a registered player, is stripped
   unauthenticated.
+- GET /team/{node_ref} -- a second, follow-up pass: this one was missed
+  the first time through even though it answers the exact same
+  person-to-place question /find and /api/mc/find do, just keyed by
+  node reference instead of display name. Now gated behind
+  require_session() the same way, no unauthenticated variant, same 401
+  shape.
+- GET /api/v1/cells/{cell_id}, GET /api/v1/captures -- checked as part
+  of the same follow-up pass and found NOT to be a gap: an
+  X-API-Key holder is deliberately treated as accountable rather than
+  anonymous for these two routes (see app/public_api.py's module
+  docstring, "one deliberate exception" paragraph, and commit 007db35's
+  message). The tests below guard that intent -- proving the display
+  name still rides along with a valid key -- so a future pass does not
+  "fix" this into a parity gap that was never a bug.
 - The public roster (GET /api/mc/players) and other unrelated public
   routes must keep working with no session at all -- the failure mode
   this file guards against as much as the gating itself is
@@ -27,12 +41,12 @@ Real file-backed sqlite database, same fixture shape and reasoning as
 tests/test_account_api.py/tests/test_sessions.py: app/db.py's
 connect()/WriteSession open a fresh connection per call, so ":memory:"
 would not share data between the setup code here and the route code
-under test. A bare FastAPI app around app/mc_api.py's and app/api.py's
-real routers (same "FastAPI-around-one-router" spirit as
-tests/test_auth.py's _client_for/tests/test_account_api.py's `client`)
-exercises the actual Depends(require_session)/Depends(optional_session)
-wiring end to end over real HTTP, not just the dependency functions in
-isolation.
+under test. A bare FastAPI app around app/mc_api.py's, app/api.py's and
+app/public_api.py's real routers (same "FastAPI-around-one-router"
+spirit as tests/test_auth.py's _client_for/tests/test_account_api.py's
+`client`) exercises the actual Depends(require_session)/
+Depends(optional_session)/_guard() wiring end to end over real HTTP,
+not just the dependency functions in isolation.
 """
 from __future__ import annotations
 
@@ -47,9 +61,11 @@ from fastapi.testclient import TestClient
 import app.api as api_module
 import app.db as db
 import app.mc_api as mc_api_module
+import app.public_api as public_api_module
 from app.api import _node_hex
 from app.auth import http_exception_as_error_body
 from app.db import MIGRATIONS, SCHEMA
+from app.mc_ingest import hash_secret
 from app.sessions import SESSION_COOKIE_NAME, create_session
 
 NOW = int(time.time())
@@ -86,6 +102,7 @@ def client(db_path):
     app = FastAPI()
     app.include_router(mc_api_module.router)
     app.include_router(api_module.router)
+    app.include_router(public_api_module.router)
     app.add_exception_handler(HTTPException, http_exception_as_error_body)
     return TestClient(app)
 
@@ -99,14 +116,25 @@ def _reset_rate_limiters_and_cache():
     test in this file and this file's own rate-limit test would trip
     (or fail to trip) depending on test order. Same pattern
     tests/test_account_api.py's own _reset_link_key_rate_limiter uses.
+
+    app/public_api.py's own `_key_cache` (raw key -> label, 60s TTL) and
+    `_hits` (its per-key/per-address rate bucket) are the same kind of
+    module-level singleton: left dirty, a key inserted into one test's
+    tmp_path database would still resolve from a previous test's cache
+    entry, or a previous test's request count would carry into this
+    one's rate-limit budget.
     """
     mc_api_module._find_addr_rate_limiter._hits.clear()
     api_module._find_addr_rate_limiter._hits.clear()
     mc_api_module._BOARD_CACHE.clear()
+    public_api_module._key_cache.clear()
+    public_api_module._hits.clear()
     yield
     mc_api_module._find_addr_rate_limiter._hits.clear()
     api_module._find_addr_rate_limiter._hits.clear()
     mc_api_module._BOARD_CACHE.clear()
+    public_api_module._key_cache.clear()
+    public_api_module._hits.clear()
 
 
 # ---- DB setup helpers -----------------------------------------------------
@@ -187,6 +215,22 @@ def _node_seen(path: str, season_id: int, node_id: int, name: str, lat: float, l
     conn.close()
 
 
+def _api_key(path: str, label: str = "test integration") -> str:
+    """Insert a valid, unrevoked app/public_api.py key and return the
+    raw value -- only its hash is ever stored, same as app/db.py's
+    api_client table comment says, so the raw value has to be handed
+    back here rather than looked up later."""
+    raw_key = "test-key-" + label.replace(" ", "-")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO api_client(key_hash, label, created_at) VALUES (?,?,?)",
+        (hash_secret(raw_key), label, NOW),
+    )
+    conn.commit()
+    conn.close()
+    return raw_key
+
+
 def _bind_node(path: str, protocol: str, node_ref: str, player_id: int) -> None:
     conn = sqlite3.connect(path)
     conn.execute(
@@ -258,6 +302,51 @@ def test_find_is_rate_limited_per_address_even_with_a_session(
     assert r2.status_code == 404
     assert r3.status_code == 429
     assert r3.json() == {"error": "rate limited"}
+
+
+# ---- /team/{node_ref}: same person-to-place link as /find, caught later --
+#
+# player_node.node_ref is stored in app/node_ref.py's canonical bare
+# lowercase form (no leading "!") -- _bind_node below stores that form
+# directly, while the route itself is queried with the "!"-prefixed
+# form _node_hex() returns, the same way a real caller would type it;
+# normalize_node_ref() inside the route is what reconciles the two.
+
+def test_team_lookup_requires_a_session(client, db_path):
+    node_ref = _node_hex(1)
+    _player(db_path, 1, "RED", "wanderer")
+    _bind_node(db_path, "mt", node_ref.lstrip("!"), 1)
+
+    resp = client.get(f"/team/{node_ref}")
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+
+
+def test_team_lookup_works_with_a_session(client, db_path):
+    _login(client, db_path)
+    node_ref = _node_hex(1)
+    _player(db_path, 1, "RED", "wanderer")
+    _bind_node(db_path, "mt", node_ref.lstrip("!"), 1)
+    season_id = _mc_season(db_path, "mt")
+    _mc_tile(db_path, season_id, "100_-200", "RED", 1)
+
+    resp = client.get(f"/team/{node_ref}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["found"] is True
+    assert body["display_name"] == "wanderer"
+    assert body["team"] == "RED"
+    assert body["tiles_owned"] == 1
+
+
+def test_team_lookup_still_requires_a_session_for_an_unregistered_node(client, db_path):
+    """A session is required before the route will even say whether a
+    node is registered -- refusing has to happen before the "not a
+    registered player radio" branch runs, not after, or an
+    unauthenticated caller could still use the found/not-found split to
+    enumerate which node references are real."""
+    resp = client.get(f"/team/{_node_hex(999)}")
+    assert resp.status_code == 401
 
 
 # ---- /api/mc/cell/{id}, /cell/{id}: team-level public, WHO gated ---------
@@ -364,6 +453,59 @@ def test_get_nodes_coverage_is_always_public_and_team_colored(client, db_path):
     coverage = resp.json()["coverage"]
     assert len(coverage) == 1
     assert coverage[0]["owner_team"] == "GREEN"
+
+
+# ---- /api/v1/cells/{id}, /api/v1/captures: key-holders are NOT anonymous --
+#
+# Investigated as part of this same pass and found not to be a gap:
+# app/public_api.py's module docstring ("one deliberate exception"
+# paragraph) and commit 007db35's message both say plainly that an
+# X-API-Key is issued personally by the operator and is accountable
+# rather than anonymous -- the same trust /find and the cell routes
+# above extend to a signed-in session, this surface extends to a valid
+# key instead. These two tests guard that intent by proving the
+# behaviour a future pass might mistake for the same bug as /team/
+# above and "fix" into a parity gap that was never real.
+
+def test_v1_cell_returns_captor_display_name_with_a_valid_key(client, db_path):
+    cell_id = "500_-700"
+    raw_key = _api_key(db_path)
+    _player(db_path, 1, "RED", "capturer")
+    season_id = _mc_season(db_path, "mc")
+    _mc_tile(db_path, season_id, cell_id, "RED", 1)
+    _mc_capture_log(db_path, season_id, cell_id, by_player_id=1, by_team="RED", from_team=None)
+
+    resp = client.get(f"/api/v1/cells/{cell_id}", headers={"X-API-Key": raw_key})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cell"]["recent_captures"][0]["by_display_name"] == "capturer"
+
+
+def test_v1_captures_returns_player_display_name_with_a_valid_key(client, db_path):
+    cell_id = "500_-700"
+    raw_key = _api_key(db_path)
+    _player(db_path, 1, "RED", "capturer")
+    season_id = _mc_season(db_path, "mc")
+    _mc_tile(db_path, season_id, cell_id, "RED", 1)
+    _mc_capture_log(db_path, season_id, cell_id, by_player_id=1, by_team="RED", from_team=None)
+
+    resp = client.get("/api/v1/captures", headers={"X-API-Key": raw_key})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["captures"][0]["player"] == "capturer"
+
+
+def test_v1_cell_requires_a_key_at_all(client, db_path):
+    """Unrelated to the display-name question above -- this is the
+    _guard() gate every /api/v1/* route already had before this pass
+    and still has; included so this file's own coverage of these two
+    routes doesn't read as if a key were optional."""
+    cell_id = "500_-700"
+    season_id = _mc_season(db_path, "mc")
+    _mc_tile(db_path, season_id, cell_id, "RED", 1)
+
+    resp = client.get(f"/api/v1/cells/{cell_id}")
+    assert resp.status_code == 401
 
 
 # ---- guard against over-gating: the public roster and board stay open ----
