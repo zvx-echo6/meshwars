@@ -14,10 +14,123 @@
    hidden regardless of what else an element's own rules say. */
 [hidden] { display: none !important; }
 
+/* Every `width: 100%` field in this file (.adm-search, .adm-form's own
+   inputs, .adm-textarea) is sized against its parent's CONTENT box by
+   default -- a text input's own padding and border then add on top of
+   that 100%, past the parent's edge. Invisible at desktop width where
+   there is slack to absorb it; at 390px it is exactly what pushed the
+   player search box past the viewport. One reset, not a per-field
+   fix -- .adm-textarea/.adm-mono-block already set this locally
+   further down, which stays, redundant but harmless, rather than
+   something to go back and strip. */
+*, *::before, *::after { box-sizing: border-box; }
+
 :root {
-  --ok:   #4caf50;
-  --warn: #d9a441;
-  --bad:  #d05a3f;
+/* ---- severity, from theme tokens only --------------------------------
+   The three tones a status can carry, always derived from theme.css's
+   own --mw-friendly/--mw-hostile -- never a literal hex, so a skin
+   moves these the same way it moves everything else (see theme.css's
+   own note on why: a colour typed here cannot be reached by a skin
+   block). Two things on purpose:
+
+   - No third brand hue. "Attention" (a state worth noticing, not yet a
+     problem -- never signed in, no linked player) is hostile at a
+     fraction of its strength, not an invented amber: the brief is
+     explicit that severity must stay off the accent hue, and inventing
+     a third colour instead would just be drift with extra steps.
+   - A -text sibling for each. --mw-friendly and --mw-hostile are wash
+     tones -- legible as a fill or a border, not as small body text on
+     a near-black panel (checked: ~2:1 contrast, a fail). theme.css
+     already solved this exact problem once, for --mw-team-purple, with
+     a lightened text-only sibling; these three are that same fix
+     applied to status colour instead of a team colour. Fills/borders
+     use the bare token; anything read as text uses -text. */
+  --adm-ok:        var(--mw-friendly);
+  --adm-ok-text:   color-mix(in srgb, var(--mw-friendly), white 55%);
+  --adm-bad:       var(--mw-hostile);
+  --adm-bad-text:  color-mix(in srgb, var(--mw-hostile), white 45%);
+  --adm-attn:      color-mix(in srgb, var(--mw-hostile), var(--mw-text-6) 55%);
+  --adm-attn-text: color-mix(in srgb, var(--mw-hostile), white 70%);
+}
+
+/* ---- buttons -----------------------------------------------------------
+   Three tiers, not one. Every action on this page used to render as the
+   browser's own unstyled <button> -- .adm-btn-wide (sign-in) was the
+   only rule any button here had, and .adm-btn-quiet/.adm-btn-danger
+   were class names admin.js already applied with nothing in this file
+   to back them. That is the actual reason "Delete account" and "Grant
+   admin" read as identical weight: neither had a LOOK at all, so there
+   was nothing for severity to be encoded in.
+
+   The base tier picks up the sitewide "plain button" language
+   account.css and join.css already use everywhere else (raised
+   surface, accent-coloured label, line-strong border) rather than
+   inventing a fourth version of the same button -- this is what keeps
+   the panel looking like the rest of the site instead of a redesign.
+   Quiet drops the fill for a lower-emphasis action (Edit, Cancel,
+   Refresh, Sign out). Danger is the one tier that leaves the accent
+   hue entirely: hostile border over an accent-deep wash, the same pair
+   .landing-warning-box already uses elsewhere on the site to flag a
+   warning, so a destructive action reads as a different KIND of
+   button, not just a redder one -- severity structural, never gold. */
+.adm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.adm-btn:hover { background: var(--mw-line); }
+.adm-btn:disabled { opacity: 0.5; cursor: default; }
+
+.adm-btn-quiet {
+  background: none;
+  color: var(--mw-text-4);
+  border-color: var(--mw-line);
+  font-weight: 600;
+}
+.adm-btn-quiet:hover {
+  background: var(--mw-raised);
+  color: var(--mw-text-1);
+  border-color: var(--mw-line-strong);
+}
+
+.adm-btn-danger {
+  background: var(--mw-accent-deep);
+  color: var(--mw-text-1);
+  border-color: var(--mw-hostile);
+}
+.adm-btn-danger:hover {
+  background: color-mix(in srgb, var(--mw-hostile) 22%, var(--mw-accent-deep));
+}
+
+/* Explicit rather than relying on the user-agent default -- every
+   control in this section now carries its own background/border, and
+   a default ring can go missing against a custom one depending on
+   browser. Same shape rules.css already uses for its own
+   :focus-visible (2px, var(--mw-gold), offset) -- one focus language
+   across the site, not a second one starting here. */
+.adm-btn:focus-visible,
+.adm-nav-item:focus-visible,
+.adm-about > summary:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--mw-gold);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .adm-btn, .adm-btn-quiet, .adm-btn-danger, .adm-nav-item, .adm-about > summary {
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
 }
 
 body {
@@ -80,14 +193,27 @@ body {
   margin: 2px 0 20px;
 }
 
+/* The one small-caps eyebrow style, used wherever a control needs a
+   caption: a login field, a player sub-heading (Team/Radios/Keys), a
+   settings field's own label. Three separate copies of this same
+   declaration used to drift slightly from each other (0.09em here,
+   0.06em over in the settings-field version) for no reason any of them
+   stated -- one shared rule, grouped by selector rather than a fourth
+   class added to two dozen existing elements, with only the
+   per-context layout kept below it. */
+.adm-login-label,
+.adm-sub-title,
+.adm-field-label {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+}
+
 .adm-login-label {
   display: block;
   text-align: left;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--mw-text-6);
   margin-bottom: 5px;
 }
 
@@ -95,7 +221,7 @@ body {
 .adm-btn-wide { width: 100%; justify-content: center; padding: 9px; }
 
 .adm-login-err {
-  color: var(--bad);
+  color: var(--adm-bad-text);
   font-size: 0.8125rem;
   margin: 10px 0 0;
   min-height: 1em;
@@ -141,10 +267,25 @@ body {
    line has room to say something useful rather than being clipped. */
 .adm-topbar-status {
   flex: 1;
+  min-width: 0;
   color: var(--mw-text-6);
   font-size: 0.8125rem;
   text-align: right;
   margin-right: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Real buttons now (see the ---- buttons ---- block above) push this
+   bar past 390px if every element keeps its full-size label -- the
+   crest, wordmark, role badge and two buttons alone are close to that
+   budget before the status line's own text is even counted. Narrower
+   labels and a tighter rhythm, same controls, nothing hidden. */
+@media (max-width: 480px) {
+  .adm-topbar { gap: 6px; padding: 8px 10px; }
+  .adm-topbar-title { display: none; }
+  .adm-topbar .adm-btn { padding: 6px 10px; font-size: 0.75rem; }
 }
 
 .adm-body {
@@ -200,7 +341,7 @@ body {
 }
 
 .adm-nav-item.active .adm-nav-badge { color: var(--mw-gold); }
-.adm-nav-badge.adm-nav-badge-bad { color: var(--bad); }
+.adm-nav-badge.adm-nav-badge-bad { color: var(--adm-bad-text); }
 
 .adm-main { padding: 18px 22px 80px; }
 
@@ -231,19 +372,64 @@ body {
   font-weight: 600;
   letter-spacing: 0;
   color: var(--mw-text-6);
+  font-variant-numeric: tabular-nums;
 }
 
-.adm-hint { color: var(--mw-text-6); font-size: 0.8125rem; margin: 0 0 14px; line-height: 1.5; }
-.adm-status-bad { color: var(--bad); }
+.adm-hint { color: var(--mw-text-6); font-size: 0.8125rem; margin: 0 0 14px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+
+/* ---- read-once copy ---------------------------------------------------
+   Every section used to open with several lines of .adm-hint explaining
+   how the feature works -- read once on a first visit, then permanent
+   furniture an operator scrolls past on every visit after. A native
+   <details>, closed by default: the explanation is still one click
+   away, but it no longer costs vertical space to someone who already
+   knows what Nets or Notice does. Reuses the same disclosure triangle
+   .adm-caret already draws for a player row or an attention group --
+   one open/close language across the page, not a second one starting
+   here. A warning that sits directly above the one control it governs
+   (an empty start date, a blank paint-from date) is left as a plain
+   .adm-hint outside this -- that copy is read at the moment it matters,
+   not before it, so hiding it would cost more than it saves. */
+.adm-about {
+  margin: 0 0 14px;
+}
+.adm-about > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+}
+.adm-about > summary::-webkit-details-marker { display: none; }
+.adm-about > summary::before { content: '\25B8'; font-size: 0.7em; color: var(--mw-text-6); }
+.adm-about[open] > summary::before { content: '\25BE'; }
+.adm-about > summary:hover { color: var(--mw-text-4); }
+.adm-about > summary:hover::before { color: var(--mw-text-4); }
+.adm-about > .adm-hint { margin: 8px 0 0; }
+
+.adm-status-bad { color: var(--adm-bad-text); }
 /* Same tone --dot-warn/.adm-tile-warn already use for --warn, applied
    to plain text -- mirrors .adm-status-bad's existing text-color use of
    --bad, just for the warn tier (checkin nets: unresolved sender
    counts). No new color, just a second text-tone class alongside the
    one that already exists. */
-.adm-status-warn { color: var(--warn); }
+.adm-status-warn { color: var(--adm-attn-text); }
 
 @media (max-width: 720px) {
-  .adm-body { grid-template-columns: 1fr; }
+  /* minmax(0, 1fr), not bare 1fr -- the desktop track above is already
+     minmax(0, 1fr) for exactly this reason. A grid track's automatic
+     minimum otherwise tracks the MAX-CONTENT width of whichever child
+     placed in it is least willing to wrap (a connector URL in .adm-mono,
+     a long net info row) -- nav and main share this one column at
+     mobile width, so an unwrappable string anywhere in main was
+     stretching the whole column, and the sidebar along with it, past
+     the viewport on Nets/Paint/Players. */
+  .adm-body { grid-template-columns: minmax(0, 1fr); }
   .adm-nav {
     flex-direction: row;
     flex-wrap: wrap;
@@ -287,9 +473,9 @@ body {
   margin-top: 2px;
 }
 
-.adm-tile-ok   .adm-tile-value { color: var(--ok); }
-.adm-tile-warn .adm-tile-value { color: var(--warn); }
-.adm-tile-bad  .adm-tile-value { color: var(--bad); }
+.adm-tile-ok   .adm-tile-value { color: var(--adm-ok-text); }
+.adm-tile-warn .adm-tile-value { color: var(--adm-attn-text); }
+.adm-tile-bad  .adm-tile-value { color: var(--adm-bad-text); }
 
 /* ---- needs attention ------------------------------------------------- */
 /* Grouped by PROBLEM. Fourteen people with the same unreachable radio
@@ -339,8 +525,8 @@ body {
   align-self: center;
 }
 
-.adm-dot-bad  { background: var(--bad); }
-.adm-dot-warn { background: var(--warn); }
+.adm-dot-bad  { background: var(--adm-bad); }
+.adm-dot-warn { background: var(--adm-attn); }
 .adm-dot-info { background: var(--mw-text-6); }
 
 
@@ -368,7 +554,7 @@ body {
 
 .adm-caret { color: var(--mw-text-6); width: 10px; flex: none; font-size: 0.75rem; }
 .adm-player-name { font-weight: 700; color: var(--mw-text-1); }
-.adm-player-meta { color: var(--mw-text-6); font-size: 0.8125rem; margin-left: auto; }
+.adm-player-meta { color: var(--mw-text-6); font-size: 0.8125rem; margin-left: auto; font-variant-numeric: tabular-nums; }
 
 .adm-badge {
   font-size: 0.6875rem;
@@ -380,8 +566,13 @@ body {
   color: var(--mw-text-4);
 }
 
-.adm-badge-ok  { color: var(--ok);  border-color: var(--ok); }
-.adm-badge-bad { color: var(--bad); border-color: var(--bad); }
+.adm-badge-ok   { color: var(--adm-ok-text);   border-color: var(--adm-ok-text); }
+.adm-badge-bad  { color: var(--adm-bad-text);  border-color: var(--adm-bad-text); }
+/* A notice, not yet a problem -- never signed in, no linked player,
+   zero of something that should have a nonzero count. Deliberately
+   lighter-weight than -bad: this tier says "look here," -bad says
+   "this is broken." */
+.adm-badge-attn { color: var(--adm-attn-text); border-color: var(--adm-attn-text); }
 
 .adm-player-detail {
   padding: 4px 0 16px 20px;
@@ -389,14 +580,25 @@ body {
   margin-left: 4px;
 }
 
+/* A row's actions wrap onto their own line when they do not fit, and the
+   gap between wrapped items was the same 8px as the space between one row
+   and the next -- so a Delete belonging to the row above sat as close to
+   the next account's name as to its own. On a phone, where every row wraps,
+   there was nothing at all marking where one account ended. That is a
+   misclick on an irreversible control, not a tidiness problem, so rows are
+   separated by a rule and given more room between them than within them. */
 .adm-row {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 5px 0;
+  padding: 10px 0;
   font-size: 0.8125rem;
   color: var(--mw-text-4);
+}
+
+.adm-row + .adm-row {
+  border-top: 1px solid var(--mw-line);
 }
 
 .adm-mono {
@@ -432,14 +634,7 @@ body {
   border-radius: 4px;
 }
 
-.adm-sub-title {
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--mw-text-6);
-  margin: 12px 0 4px;
-}
+.adm-sub-title { margin: 12px 0 4px; }
 
 /* Destructive actions live behind the expansion and behind their own
    heading, so nothing irreversible sits one stray click from a row you
@@ -463,7 +658,7 @@ body {
   border-color: var(--mw-gold);
 }
 
-.adm-result { margin-top: 8px; font-size: 0.8125rem; color: var(--mw-text-3); }
+.adm-result { margin-top: 8px; font-size: 0.8125rem; color: var(--mw-text-3); font-variant-numeric: tabular-nums; }
 
 .adm-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
 /* Direct child only. As a plain descendant selector this also matched
@@ -511,11 +706,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--mw-text-6);
 }
 .adm-field-label input,
 .adm-field-label select { width: 9rem; }
@@ -582,9 +772,21 @@ body {
   margin: 2px 0 0;
   font-size: 0.75rem;
   color: var(--mw-text-6);
+  font-variant-numeric: tabular-nums;
+  /* A poll error can carry a connector URL with no natural break point
+     -- normal wrapping only breaks at spaces/hyphens, so one long URL
+     was enough to push this line (and the panel) past the viewport at
+     390px. Breaks mid-word only as a last resort, never for ordinary
+     text. */
+  overflow-wrap: anywhere;
 }
-.adm-net-health.adm-status-bad { color: var(--bad); }
+.adm-net-health.adm-status-bad { color: var(--adm-bad-text); }
 
 @media (max-width: 620px) {
+  /* flex-wrap on the row too -- width: 100% alone does not drop a flex
+     item onto its own line, only flex-wrap on the row does that; the
+     meta line (radio count/badge, joined date) was overflowing past
+     the viewport instead of wrapping under the name. */
+  .adm-player-row { flex-wrap: wrap; }
   .adm-player-meta { margin-left: 0; width: 100%; }
 }

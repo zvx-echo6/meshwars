@@ -10,7 +10,7 @@
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260905-2" />
 </head>
 <body>
 
@@ -95,8 +95,11 @@
 
         <section class="adm-section" data-section="accounts" hidden>
           <h2 class="adm-h2">Accounts <span class="adm-count" id="accounts-count"></span></h2>
-          <p class="adm-hint">Every account, not just the ones with a linked player. An account with no linked player is reached from here only &mdash; released by "Release account link" on a player above, or never claimed after signing in. Deleting an account removes it and its sign-in identities and sessions; if a player is linked, that player is tombstoned exactly the way "Delete player" leaves it. Disable two-factor, clear password, and remove a sign-in method are recovery actions, not deletion &mdash; each only clears a credential so the account's holder can get back in through whatever they still have; none of them lets an operator sign in as the account, and each is offered only when the account actually has that credential to clear.</p>
-          <p class="adm-hint">An account's role, if any, shows as a badge on its row, with Grant admin or Revoke alongside it &mdash; operator-only, both here and on the server, so an admin's own session never even sees the controls. Granting always mints admin; becoming an operator has exactly one door, claimed on the account page with the admin token and an active two-factor code, never a grant from this panel.</p>
+          <details class="adm-about">
+            <summary>About accounts</summary>
+            <p class="adm-hint">Every account, not just the ones with a linked player. An account with no linked player is reached from here only &mdash; released by "Release account link" on a player above, or never claimed after signing in. Deleting an account removes it and its sign-in identities and sessions; if a player is linked, that player is tombstoned exactly the way "Delete player" leaves it. Disable two-factor, clear password, and remove a sign-in method are recovery actions, not deletion &mdash; each only clears a credential so the account's holder can get back in through whatever they still have; none of them lets an operator sign in as the account, and each is offered only when the account actually has that credential to clear.</p>
+            <p class="adm-hint">An account's role, if any, shows as a badge on its row, with Grant admin or Revoke alongside it &mdash; operator-only, both here and on the server, so an admin's own session never even sees the controls. Granting always mints admin; becoming an operator has exactly one door, claimed on the account page with the admin token and an active two-factor code, never a grant from this panel.</p>
+          </details>
           <input type="text" id="account-search" class="adm-search" autocomplete="off"
                  placeholder="search by player name or account id" />
           <label class="adm-check-label"><input type="checkbox" id="account-orphans-only" class="adm-check" /> No linked player only</label>
@@ -106,7 +109,10 @@
 
         <section class="adm-section" data-section="checkins" hidden>
           <h2 class="adm-h2">Check-ins</h2>
-          <p class="adm-hint">Credit a check-in somebody earned but did not receive. Points and streak are worked out exactly as the poller would have on the night, so it is worth what it should be &mdash; the monthly honors read these rows and cannot tell it was added by hand.</p>
+          <details class="adm-about">
+            <summary>About check-ins</summary>
+            <p class="adm-hint">Credit a check-in somebody earned but did not receive. Points and streak are worked out exactly as the poller would have on the night, so it is worth what it should be &mdash; the monthly honors read these rows and cannot tell it was added by hand.</p>
+          </details>
           <div class="adm-form">
             <input type="text" id="ci-player" autocomplete="off" placeholder="player name, exactly" />
             <input type="text" id="ci-date" autocomplete="off" placeholder="2026-08-19" />
@@ -121,10 +127,13 @@
 
         <section class="adm-section" data-section="nets" hidden>
           <h2 class="adm-h2">Nets</h2>
-          <p class="adm-hint">Every weekly net the poller watches, on either board, plus the settings that apply to all of them at once. Nets are found differently depending on their connector kind &mdash; a MeshCore net (CoreScope or Beacon) is scoped to one channel on its connector, a Meshtastic net (Meshview or MQTT) is found by its hashtag appearing in a message on any channel &mdash; so the form below shows different fields per connector kind rather than one merged form. MQTT is a live broker subscription rather than a poll, so a broker outage shows up here as a poll error just like any other connector.</p>
+          <details class="adm-about">
+            <summary>About nets</summary>
+            <p class="adm-hint">Every weekly net the poller watches, on either board, plus the settings that apply to all of them at once. Nets are found differently depending on their connector kind &mdash; a MeshCore net (CoreScope or Beacon) is scoped to one channel on its connector, a Meshtastic net (Meshview or MQTT) is found by its hashtag appearing in a message on any channel &mdash; so the form below shows different fields per connector kind rather than one merged form. MQTT is a live broker subscription rather than a poll, so a broker outage shows up here as a poll error just like any other connector.</p>
+            <p class="adm-hint">Settings below apply to every net at once, read fresh on the poller's next cycle &mdash; no restart.</p>
+          </details>
 
           <h3 class="adm-h3">Settings</h3>
-          <p class="adm-hint">Applies to every net at once. Read fresh on the poller's next cycle &mdash; no restart.</p>
           <div class="adm-form">
             <label class="adm-check-label"><input type="checkbox" id="nc-enabled" class="adm-check" /> Enabled &mdash; poller runs</label>
           </div>
@@ -217,10 +226,16 @@
 
         <section class="adm-section" data-section="paint" hidden>
           <h2 class="adm-h2">Paint</h2>
-          <p class="adm-hint">Which source paints the Meshtastic board, plus FreqMapper's own connector and scoring. Meshview, FreqMapper, or both can paint at once &mdash; when both are selected, each paints independently and the board's existing capture cooldowns handle a cell either one touches, same as they do for any two players. Meshview keeps providing node names and roster either way. Read fresh by both pollers on their next cycle &mdash; no restart.</p>
+          <details class="adm-about">
+            <summary>About paint</summary>
+            <p class="adm-hint">Which source paints the Meshtastic board, plus FreqMapper's own connector and scoring. Meshview, FreqMapper, or both can paint at once &mdash; when both are selected, each paints independently and the board's existing capture cooldowns handle a cell either one touches, same as they do for any two players. Meshview keeps providing node names and roster either way. Read fresh by both pollers on their next cycle &mdash; no restart.</p>
+          </details>
 
           <h3 class="adm-h3">Meshtastic paint source</h3>
-          <p class="adm-hint">Meshview paints from the position packets it already polls. FreqMapper paints from independently-verified reception events instead &mdash; it reports no per-event station count, so its scoring below is a flat award rather than a per-station one. Both is the default: both painters run, unconditionally, with no priority between them. Switching this changes where live Meshtastic territory comes from; saving asks you to confirm which source you are switching to.</p>
+          <details class="adm-about">
+            <summary>About paint source</summary>
+            <p class="adm-hint">Meshview paints from the position packets it already polls. FreqMapper paints from independently-verified reception events instead &mdash; it reports no per-event station count, so its scoring below is a flat award rather than a per-station one. Both is the default: both painters run, unconditionally, with no priority between them. Switching this changes where live Meshtastic territory comes from; saving asks you to confirm which source you are switching to.</p>
+          </details>
           <div class="adm-form">
             <label class="adm-field-label">Paint source
               <select id="pt-source">
@@ -283,7 +298,10 @@
 
         <section class="adm-section" data-section="months" hidden>
           <h2 class="adm-h2">Months</h2>
-          <p class="adm-hint">Months close on their own from ordinary traffic. Use this only to recompute one that closed while history was wrong, or to close one the service was down for. A month still being played is refused.</p>
+          <details class="adm-about">
+            <summary>About months</summary>
+            <p class="adm-hint">Months close on their own from ordinary traffic. Use this only to recompute one that closed while history was wrong, or to close one the service was down for. A month still being played is refused.</p>
+          </details>
           <div class="adm-form">
             <input type="text" id="mo-month" autocomplete="off" placeholder="2026-08" />
             <select id="mo-proto">
@@ -297,7 +315,10 @@
 
         <section class="adm-section" data-section="places" hidden>
           <h2 class="adm-h2">Places</h2>
-          <p class="adm-hint">Previews the weekly rotation draw for Places Worth Going &mdash; landmarks and small parks, deterministic from the week alone. This does not persist anything; the real draw for the current week resolves itself the first time a scoring ping or the map needs it. Leave the week blank for the current week, or give any date and it snaps to that date's Wednesday.</p>
+          <details class="adm-about">
+            <summary>About places</summary>
+            <p class="adm-hint">Previews the weekly rotation draw for Places Worth Going &mdash; landmarks and small parks, deterministic from the week alone. This does not persist anything; the real draw for the current week resolves itself the first time a scoring ping or the map needs it. Leave the week blank for the current week, or give any date and it snaps to that date's Wednesday.</p>
+          </details>
           <div class="adm-form">
             <input type="text" id="pl-week" autocomplete="off" placeholder="2026-08-19 (optional)" />
             <button type="button" id="pl-preview" class="adm-btn">Preview draw</button>
@@ -307,7 +328,10 @@
 
         <section class="adm-section" data-section="notice" hidden>
           <h2 class="adm-h2">Notice</h2>
-          <p class="adm-hint">A one-time message shown to players on their first map load. Plain text only &mdash; line breaks are kept, nothing else is. A player who dismisses it never sees it again unless the version key below changes; bumping the key re-shows it to everyone, including anyone who already dismissed the last one. History lives in the repo's CHANGELOG, not here &mdash; saving replaces whatever notice was here before.</p>
+          <details class="adm-about">
+            <summary>About notice</summary>
+            <p class="adm-hint">A one-time message shown to players on their first map load. Plain text only &mdash; line breaks are kept, nothing else is. A player who dismisses it never sees it again unless the version key below changes; bumping the key re-shows it to everyone, including anyone who already dismissed the last one. History lives in the repo's CHANGELOG, not here &mdash; saving replaces whatever notice was here before.</p>
+          </details>
           <p class="adm-result" id="nt-current">Loading&hellip;</p>
           <div class="adm-form">
             <input type="text" id="nt-version" autocomplete="off" maxlength="40" placeholder="version key, e.g. 2026-08-25" />
@@ -326,7 +350,10 @@
 
         <section class="adm-section" data-section="keys" hidden>
           <h2 class="adm-h2">API keys</h2>
-          <p class="adm-hint">Keys for the public read API at <code>/api/v1</code> &mdash; one per integration, so a misbehaving bot can be revoked on its own. Read-only: these cannot post wardriving data.</p>
+          <details class="adm-about">
+            <summary>About API keys</summary>
+            <p class="adm-hint">Keys for the public read API at <code>/api/v1</code> &mdash; one per integration, so a misbehaving bot can be revoked on its own. Read-only: these cannot post wardriving data.</p>
+          </details>
           <div class="adm-form">
             <input type="text" id="apikey-label" autocomplete="off" maxlength="80"
                    placeholder="what is it for, e.g. freq51 discord bot" />
@@ -340,6 +367,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260905-7"></script>
+  <script src="/static/admin.js?v=20260905-8"></script>
 </body>
 </html>

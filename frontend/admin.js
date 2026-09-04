@@ -81,6 +81,20 @@ function bytes(n) {
   return (n / 1e6).toFixed(0) + ' MB';
 }
 
+// Joins several "facts" onto one line with the same "  ·  " separator
+// already used throughout this file (the health line, a net's poll
+// status) -- but each fact is its own node, so one of them can be an
+// .adm-badge instead of plain text when it is a state worth noticing
+// (never signed in, zero of something) rather than an ordinary detail.
+// A badge only ever stands in for the one fact it replaces, never for
+// the line -- a chip encodes state, it does not replace a sentence.
+function appendFacts(container, nodes) {
+  nodes.forEach((node, i) => {
+    if (i > 0) container.appendChild(document.createTextNode('  ·  '));
+    container.appendChild(node);
+  });
+}
+
 function setStatus(msg, bad) {
   const s = document.getElementById('status');
   s.textContent = msg;
@@ -605,10 +619,17 @@ function renderPlayers() {
     row.appendChild(el('span', { className: 'adm-badge', text: p.team }));
     if (p.disabled) row.appendChild(el('span', { className: 'adm-badge adm-badge-bad', text: 'disabled' }));
     const radios = (p.radios || []).length;
-    row.appendChild(el('span', {
-      className: 'adm-player-meta',
-      text: radios + (radios === 1 ? ' radio' : ' radios') + ' · joined ' + fmtTs(p.created_at),
-    }));
+    const meta = el('span', { className: 'adm-player-meta' });
+    appendFacts(meta, [
+      // No radio at all is why "never connected a radio" is one of the
+      // Overview attention groups -- worth the same weight here, not
+      // just buried as "0 radios" in a run of grey text.
+      radios === 0
+        ? el('span', { className: 'adm-badge adm-badge-attn', text: 'no radios' })
+        : document.createTextNode(radios + (radios === 1 ? ' radio' : ' radios')),
+      document.createTextNode('joined ' + fmtTs(p.created_at)),
+    ]);
+    row.appendChild(meta);
     row.addEventListener('click', () => {
       if (expanded.has(p.player_id)) expanded.delete(p.player_id);
       else expanded.add(p.player_id);
@@ -824,10 +845,13 @@ function renderAccounts() {
 
   shown.forEach((a) => {
     const row = el('div', { className: 'adm-row' });
-    row.appendChild(el('span', {
-      className: a.player ? 'adm-player-name' : '',
-      text: a.player ? a.player.display_name : 'no linked player',
-    }));
+    // No linked player is the one state Players can never surface at
+    // all (see this section's own docstring) -- a badge here, not a
+    // plain unstyled name-shaped blank, so it reads as a state rather
+    // than an absence of one.
+    row.appendChild(a.player
+      ? el('span', { className: 'adm-player-name', text: a.player.display_name })
+      : el('span', { className: 'adm-badge adm-badge-attn', text: 'no linked player' }));
     row.appendChild(el('span', { className: 'adm-mono', text: 'id ' + a.account_id }));
     if (a.role) {
       row.appendChild(el('span', {
@@ -835,11 +859,24 @@ function renderAccounts() {
         text: a.role,
       }));
     }
-    row.appendChild(el('span', {
-      className: 'adm-player-meta',
-      text: a.sign_in_methods + (a.sign_in_methods === 1 ? ' sign-in method' : ' sign-in methods') +
-        ' · created ' + fmtTs(a.created_at) + ' · last signed in ' + ago(a.last_login_at),
-    }));
+    const meta = el('span', { className: 'adm-player-meta' });
+    appendFacts(meta, [
+      // Zero doors in is an account nobody can sign into -- a real
+      // problem, not a routine fact, so it gets -bad rather than
+      // sitting in the same grey run every other count here does.
+      a.sign_in_methods === 0
+        ? el('span', { className: 'adm-badge adm-badge-bad', text: '0 sign-in methods' })
+        : document.createTextNode(a.sign_in_methods +
+            (a.sign_in_methods === 1 ? ' sign-in method' : ' sign-in methods')),
+      document.createTextNode('created ' + fmtTs(a.created_at)),
+      // Never signed in is a notice, not an error -- a fresh grant or a
+      // just-claimed account looks exactly like this on its first
+      // visit, so -attn rather than -bad.
+      a.last_login_at
+        ? document.createTextNode('last signed in ' + ago(a.last_login_at))
+        : el('span', { className: 'adm-badge adm-badge-attn', text: 'never signed in' }),
+    ]);
+    row.appendChild(meta);
     appendAccountRoleActions(row, a);
     appendAccountRecoveryActions(row, a);
     row.appendChild(btn('Delete account', 'adm-btn-danger', async (b) => {
