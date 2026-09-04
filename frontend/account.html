@@ -588,9 +588,14 @@
           <a href="/admin" id="account-admin-panel-link" class="account-link-btn">Open the admin panel</a>
         </div>
 
-        <!-- No role yet -- the claim form. -->
+        <!-- The claim form: shown for no role (a first claim) and for
+             admin (elevating to operator) -- hidden for operator, since
+             there is nothing above it to claim. account.js's
+             renderAdminSection() picks which hint below to show and
+             toggles this block's visibility for all three states. -->
         <div id="account-admin-claim" hidden>
-          <p class="account-hint">Claim the operator role with the admin token given to you out of band. Two-factor authentication must be enabled first — the highest-privilege role in this app never sits on a single factor.</p>
+          <p id="account-admin-claim-hint" class="account-hint" hidden>Claim the operator role with the admin token given to you out of band. Two-factor authentication must be enabled first — the highest-privilege role in this app never sits on a single factor.</p>
+          <p id="account-admin-claim-admin-hint" class="account-hint" hidden>This account already holds the admin role. Entering the admin token below along with a current two-factor code elevates it to operator. Two-factor authentication must be enabled first — the highest-privilege role in this app never sits on a single factor.</p>
           <p id="account-admin-claim-needs-totp" class="account-hint" hidden>Enable two-factor authentication above before claiming a role.</p>
           <div id="account-admin-claim-error" class="account-error" role="alert" hidden></div>
           <div id="account-admin-claim-success" class="account-hint" hidden></div>
@@ -660,7 +665,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260904-6" type="module"></script>
+  <script src="/static/account.js?v=20260904-7" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

@@ -2433,11 +2433,17 @@ const ADMIN_ROLE_LABELS = { admin: 'admin', operator: 'operator' };
 function renderAdminSection(account) {
   const hasRoleEl = document.getElementById('account-admin-has-role');
   const claimEl = document.getElementById('account-admin-claim');
+  const claimHintEl = document.getElementById('account-admin-claim-hint');
+  const claimAdminHintEl = document.getElementById('account-admin-claim-admin-hint');
   const needsTotpEl = document.getElementById('account-admin-claim-needs-totp');
   const hasRoleNeedsTotpEl = document.getElementById('account-admin-has-role-needs-totp');
   const panelLinkEl = document.getElementById('account-admin-panel-link');
   hasRoleEl.hidden = true;
   claimEl.hidden = true;
+  claimHintEl.hidden = true;
+  claimAdminHintEl.hidden = true;
+
+  const totpOn = !!(account.totp && account.totp.enabled);
 
   if (account.role) {
     hasRoleEl.hidden = false;
@@ -2451,20 +2457,34 @@ function renderAdminSection(account) {
     // enrolled an authenticator). Tell them that up front rather than
     // showing a link into a panel that will just refuse every request
     // with a 403.
-    const totpOn = !!(account.totp && account.totp.enabled);
     hasRoleNeedsTotpEl.hidden = totpOn;
     panelLinkEl.hidden = !totpOn;
-    return;
+
+    if (account.role !== 'admin') {
+      // operator: there is nothing above it to claim, so the claim
+      // form -- and its token field -- stays hidden entirely.
+      return;
+    }
+
+    // admin: app/admin_api.py's POST /api/admin/roles/claim
+    // deliberately lets an account that already holds admin claim
+    // operator the same way any other account does (see that route's
+    // docstring). Fall through to also show the claim form below, worded
+    // for elevation rather than a first claim.
+    claimAdminHintEl.hidden = false;
+  } else {
+    // No role yet -- the claim form, worded for a first claim.
+    claimHintEl.hidden = false;
   }
 
-  // No role yet -- the claim form. Shown to every account (there is
-  // nothing to gate it on: the claim form is how a role is REACHED),
-  // but the submit button stays disabled without active two-factor --
-  // app/admin_api.py's POST /api/admin/roles/claim refuses the claim
-  // server-side either way, this is just not making someone type a
-  // token only to learn that after the fact.
+  // Shown whenever an elevation path is actually open (no role yet, or
+  // admin reaching for operator) -- there is nothing else to gate it on:
+  // the claim form is how a role is REACHED or RAISED. The submit button
+  // stays disabled without active two-factor -- app/admin_api.py's POST
+  // /api/admin/roles/claim refuses the claim server-side either way,
+  // this is just not making someone type a token only to learn that
+  // after the fact.
   claimEl.hidden = false;
-  const totpOn = !!(account.totp && account.totp.enabled);
   needsTotpEl.hidden = totpOn;
   document.getElementById('account-admin-claim-submit').disabled = !totpOn;
 }
