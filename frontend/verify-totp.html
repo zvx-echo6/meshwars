@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0C0B0A" />
+  <!-- Applied before any stylesheet paints -- see frontend/link.html's
+       identical inline script for the full reasoning (theme-toggle.js
+       owns everything after load; this only avoids a flash of the
+       wrong theme on first paint). -->
+  <script>
+    try { if (localStorage.getItem('mwTheme') === 'neon') {
+      document.documentElement.setAttribute('data-theme', 'neon');
+    } } catch (e) {}
+  </script>
+  <title>MeshWars — Two-Factor Sign-In</title>
+  <!-- Reached only by redirect: from POST /auth/password/start's own
+       "totp_required" result (frontend/signin-email.js) or from GET
+       /auth/email/callback when the outcome would otherwise log
+       someone in directly (app/oauth_api.py's
+       _respond_to_callback_outcome(), enforce_totp=True -- see
+       app/totp_api.py's own module docstring). Never a destination
+       anyone links to or is meant to land on directly, same "small
+       standalone screen" shape as frontend/link.html. -->
+  <meta name="robots" content="noindex">
+  <!-- Licensed under the GNU Affero General Public License v3 -- see
+       /LICENSE. Every indexed page declares this in its JSON-LD
+       "license" field; this page has no JSON-LD (see above), so it's
+       stated here instead. -->
+
+  <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/assets/favicon/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="/static/assets/favicon/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/assets/favicon/android-chrome-192x192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/assets/favicon/apple-touch-icon.png">
+  <link rel="manifest" href="/static/assets/site.webmanifest">
+
+  <!-- Cache-busting: bump v= on EVERY /static CSS/JS reference on this
+       page whenever any of those files change -- see frontend/link.html's
+       identical comment. -->
+  <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
+  <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
+  <link rel="stylesheet" href="/static/link.css?v=20260903-2" />
+  <link rel="stylesheet" href="/static/totp.css?v=20260903-1" />
+</head>
+<body>
+
+  <nav class="mw-nav">
+    <a href="/" class="mw-nav-brand"><span class="mw-nav-crest" role="img" aria-label="MeshWars crest"></span>MeshWars</a>
+    <div class="mw-nav-links">
+      <a href="/">Map</a>
+      <a href="/results">Results</a>
+      <a href="/rules">Rules</a>
+      <a href="/docs">Docs</a>
+      <a href="/about">About</a>
+      <a href="/join">Join</a>
+      <a href="/account" id="mw-nav-account">Account</a>
+      <button type="button" id="mw-theme-btn" class="mw-theme-btn" aria-pressed="false" title="Switch to the neon theme" aria-label="Switch to the neon theme">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm0 1.5v9.8a4.9 4.9 0 0 1 0-9.8z"/></svg>
+      </button>
+      <a href="https://github.com/zvx-echo6/meshwars" class="mw-nav-github" target="_blank" rel="noopener noreferrer" aria-label="MeshWars on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 0c-4.42 0-8 3.58-8 8a8.013 8.013 0 0 0 5.47 7.59c.4.08.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main class="link-wrap">
+
+    <section class="link-panel">
+
+      <!-- Filled in by verify-totp.js's loadChallenge(), which reads
+           GET /auth/totp/challenge -- that route reads the
+           mw_totp_challenge HttpOnly cookie server-side; this page's
+           own script never sees the raw token itself, same reasoning
+           frontend/link.js's own module docstring gives for the
+           pending-identity cookie. -->
+      <div id="totp-loading" class="link-hint">Loading...</div>
+
+      <div id="totp-content" hidden>
+        <div class="link-title">Two-factor authentication</div>
+        <p class="link-hint">Enter the 6-digit code from your authenticator app to finish signing in.</p>
+
+        <form id="totp-code-form" novalidate>
+          <label>
+            <span class="link-hint totp-field-label">Authentication code</span>
+            <input type="text" id="f-totp-code" class="totp-code-input" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" maxlength="6" required autofocus />
+          </label>
+          <div id="totp-code-error" class="link-error" role="alert" hidden></div>
+          <button type="submit" id="totp-code-submit-btn" class="totp-primary-btn">Verify</button>
+        </form>
+
+        <button type="button" id="totp-show-recovery-btn" class="totp-switch-btn">Use a recovery code instead</button>
+
+        <form id="totp-recovery-form" novalidate hidden>
+          <label>
+            <span class="link-hint totp-field-label">Recovery code</span>
+            <input type="text" id="f-totp-recovery-code" class="totp-recovery-input" autocomplete="off" required />
+          </label>
+          <div id="totp-recovery-error" class="link-error" role="alert" hidden></div>
+          <button type="submit" id="totp-recovery-submit-btn" class="totp-primary-btn">Verify recovery code</button>
+        </form>
+
+        <button type="button" id="totp-show-code-btn" class="totp-switch-btn" hidden>Use your authenticator app instead</button>
+      </div>
+
+      <div id="totp-expired" class="link-hint" hidden>
+        This sign-in attempt has expired or was already used. <a href="/join">Go back and sign in again.</a>
+      </div>
+
+    </section>
+
+  </main>
+
+  <script src="/static/verify-totp.js?v=20260903-1" type="module"></script>
+  <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
+  <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+/* MeshWars: styles shared by the two places TOTP two-factor
+   authentication shows up in the UI -- the /verify-totp sign-in
+   step (frontend/verify-totp.html/js) and the account page's own
+   Security > "Two-factor authentication" panel
+   (frontend/account.html/js). Loaded alongside theme.css (and, on
+   /verify-totp, landing.css + link.css, whose .link-wrap/.link-panel/
+   .link-title/.link-hint/.link-error classes that page reuses
+   directly -- see verify-totp.html's own <link> list) -- this file
+   only carries what neither of those already provides: the 6-digit
+   code input, the QR/secret enrollment block, and the recovery-code
+   list. */
+
+/* The 6-digit code input -- large, centered, widely spaced digits so
+   a person can see at a glance whether what they typed matches what
+   their authenticator app is showing, the same visual treatment a
+   phone's own OTP-entry field usually gets. inputmode="numeric" (set
+   in markup, not here) brings up a numeric keypad on mobile without
+   forcing type="number" (which would show spinner arrows and let a
+   leading zero get silently dropped). */
+.totp-code-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 1.5rem;
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.35em;
+  text-align: center;
+  padding: 12px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--mw-line-strong, var(--mw-line));
+  background: var(--mw-raised);
+  color: var(--mw-text-1);
+}
+.totp-code-input:focus {
+  outline: none;
+  border-color: var(--mw-accent);
+}
+
+/* A recovery code is 10 characters, not 6 digits -- its own input
+   stays left-aligned, monospace, and un-spaced, closer to how a
+   person actually reads one back off a saved list than the 6-digit
+   input's deliberately spread-out digits. */
+.totp-recovery-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 1.125rem;
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 10px;
+  border-radius: 4px;
+  border: 1px solid var(--mw-line-strong, var(--mw-line));
+  background: var(--mw-raised);
+  color: var(--mw-text-1);
+}
+.totp-recovery-input:focus {
+  outline: none;
+  border-color: var(--mw-accent);
+}
+
+/* Plain-looking "switch mode" links (code <-> recovery code) -- text
+   buttons, not the page's own primary action button. */
+.totp-switch-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-top: 10px;
+  font-size: 0.75rem;
+  color: var(--mw-accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.totp-switch-btn:hover { opacity: 0.85; }
+
+/* ---- enrollment (account.html's Security panel) ----------------------- */
+
+/* The QR code segno renders (app/totp_api.py's _render_qr_svg()) is
+   inserted as a literal inline <svg> (innerHTML -- see
+   account.js's own comment on why that is safe HERE specifically:
+   the SVG comes from this app's own server response, not
+   user-supplied content). A QR code needs real light/dark contrast to
+   scan reliably (see that function's own docstring for why it is
+   rendered fully opaque, #000 on #fff) -- this wrapper gives it a
+   fixed white card so it stays scannable even when the surrounding
+   page is in the dark "neon" theme, with enough padding that a
+   phone's camera has margin around the code's own quiet zone.
+*/
+.totp-qr-wrap {
+  display: inline-block;
+  background: #ffffff;
+  padding: 12px;
+  border-radius: 6px;
+  line-height: 0;
+}
+.totp-qr-wrap svg {
+  display: block;
+  width: 176px;
+  height: 176px;
+}
+
+.totp-secret-text {
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  letter-spacing: 0.04em;
+  word-break: break-all;
+  background: var(--mw-raised);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: var(--mw-text-1);
+  user-select: all;
+}
+
+/* One recovery code per row -- shown exactly once (the activation
+   response), so this list is deliberately easy to select-all/copy or
+   screenshot: monospace, generously spaced, numbered so a person can
+   tell at a glance how many they have written down. */
+.totp-recovery-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--mw-raised);
+  border: 1px solid var(--mw-line);
+  border-radius: 4px;
+  columns: 2;
+  column-gap: 20px;
+  font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.875rem;
+  color: var(--mw-text-1);
+}
+.totp-recovery-list li {
+  padding: 3px 0;
+  letter-spacing: 0.03em;
+}
+
+.totp-recovery-remaining {
+  font-size: 0.75rem;
+  color: var(--mw-text-5);
+  margin: 6px 0 0;
+}
+
+/* The account-panel already has its own action-button styling
+   (buttons/inputs inherit the page's base look) -- this is only for
+   the destructive "Disable two-factor authentication" action, which
+   gets the same "confirm with a warning box" shape
+   account.css's own .account-warning-box already establishes for
+   key rotation, reused verbatim rather than duplicated here. */
+.totp-status-line {
+  font-size: 0.8125rem;
+  color: var(--mw-text-1);
+  margin: 0 0 4px;
+}
+
+
+/* ---- /verify-totp page: form chrome (see totp-code-form/totp-recovery-form) */
+
+.totp-field-label {
+  margin: 0 0 6px;
+  display: block;
+}
+
+.totp-primary-btn {
+  margin-top: 12px;
+  width: 100%;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.totp-primary-btn:hover { background: var(--mw-line); }
+.totp-primary-btn:disabled { opacity: 0.5; cursor: default; }

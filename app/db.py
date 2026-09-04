@@ -1668,6 +1668,119 @@ CREATE TABLE IF NOT EXISTS account_contact_email_token (
     consumed_at  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_account_contact_email_token_account ON account_contact_email_token(account_id);
+
+-- TOTP two-factor authentication (app/totp.py, app/totp_api.py) -- one
+-- row per account that has ever started enrollment. account_id is the
+-- PRIMARY KEY, same "one row, keyed on the thing it belongs to" shape
+-- account_password above uses: at most one TOTP secret per account,
+-- ever (a fresh enrollment attempt overwrites a still-PENDING row --
+-- see activated_at below -- rather than accumulating a second one).
+--
+-- secret_encrypted is a cryptography.fernet.Fernet token (base64 TEXT)
+-- that decrypts to the raw 160-bit secret -- never the raw secret
+-- itself. Unlike account_password's hash or account_session's
+-- token_hash, this genuinely cannot be a one-way hash: verifying a
+-- submitted code requires recomputing HOTP from the ORIGINAL secret,
+-- not comparing to a digest of it. See app/totp.py's own "secret at
+-- rest" docstring section for the full reasoning on why this is
+-- encrypted with a key held in settings.account_totp_encryption_key
+-- (the ENVIRONMENT, never this database) rather than stored plain, and
+-- why enrollment refuses to even start when that key is unset.
+--
+-- activated_at is NULL from the moment enrollment begins (a secret was
+-- generated and the QR/text shown) until a person proves their
+-- authenticator app actually works by submitting one valid code
+-- (app/totp_api.py's POST /api/account/totp/activate) -- the row
+-- exists but does NOT yet guard sign-in while NULL: this app never
+-- lets an unproven secret become the thing standing between someone
+-- and their own account. A pending (activated_at IS NULL) row is
+-- silently replaced by the next enrollment attempt, not treated as a
+-- conflict -- see that route's own docstring.
+--
+-- last_used_step is this app's replay guard (app/totp.py's own
+-- "replayed codes" docstring section): the counter step (unix_time /
+-- 30) the most recently ACCEPTED code was valid at, updated on every
+-- successful verification anywhere a code is checked (activation,
+-- sign-in, disable) -- app/totp_api.py's verify_and_consume_totp_code()
+-- refuses to accept any candidate step at or before this value, which
+-- rejects an exact replay of the same code AND a stale code from an
+-- earlier step, while still accepting the normal forward march of time
+-- through the skew window. NULL until the first ever successful
+-- verification.
+CREATE TABLE IF NOT EXISTS account_totp (
+    account_id        INTEGER PRIMARY KEY,
+    secret_encrypted   TEXT NOT NULL,
+    created_at         INTEGER NOT NULL,
+    activated_at       INTEGER,
+    last_used_step     INTEGER
+);
+
+-- Ten (settings.account_totp_recovery_code_count) single-use recovery
+-- codes minted the moment account_totp.activated_at is first set
+-- (app/totp_api.py's POST /api/account/totp/activate) -- see that
+-- table's own comment for why account_totp cannot itself carry these
+-- (a fresh enrollment attempt replaces the SECRET row before it is
+-- proven, but recovery codes are only ever minted once activation
+-- actually succeeds, and a person may hold up to
+-- account_totp_recovery_code_count of them at once, not one).
+--
+-- code_hash is app/mc_ingest.py's hash_secret() (a bare SHA-256
+-- digest) -- the house convention for a random, server-generated,
+-- compared-not-brute-forced secret, the SAME reasoning
+-- account_session.token_hash/api_key.key_hash already follow and
+-- explicitly NOT app/password_login.py's scrypt (see that module's own
+-- docstring on exactly why a human-chosen password needs a slow,
+-- memory-hard hash and a 50-bit-entropy, machine-generated code does
+-- not: an offline attacker gains nothing from SHA-256 being fast here,
+-- because there is nothing short of the full keyspace worth searching).
+--
+-- used_at marks a code single-use (set the instant it is consumed,
+-- never deleted -- same "audit trail survives redemption" reasoning
+-- account_pending_identity's own comment gives for consumed_at) --
+-- app/totp_api.py's disable/re-enrollment paths DELETE every row for
+-- an account outright instead (turning TOTP off makes every one of
+-- them moot at once, so there is nothing worth keeping them around
+-- for).
+CREATE TABLE IF NOT EXISTS account_totp_recovery_code (
+    code_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id   INTEGER NOT NULL,
+    code_hash    TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    used_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_account_totp_recovery_code_account ON account_totp_recovery_code(account_id);
+
+-- The intermediate "credential verified, second factor not yet
+-- supplied" state app/totp_api.py's module docstring calls for --
+-- carries a single account_id from a successful password or
+-- magic-link sign-in (app/oauth_api.py's password_start()/
+-- email_callback()) across to POST /auth/totp/verify, which is the
+-- ONLY thing that may ever turn a row here into a real session. Same
+-- hashed-single-use-ticket shape as account_pending_identity/
+-- email_login_token/account_contact_email_token above (token_hash
+-- only -- the raw token exists only in the one HttpOnly cookie or
+-- JSON field handed to the caller that just proved a first factor;
+-- consumed_at makes redemption idempotently single-use; expires_at
+-- bounds how long an abandoned second-factor prompt stays live --
+-- settings.account_totp_challenge_lifetime_seconds, 5 minutes by
+-- default, deliberately shorter than every other ticket in this
+-- table's family since there is nothing to decide here, only to type
+-- in).
+--
+-- CRITICAL: a row here is NEVER, by itself, sufficient to authenticate
+-- as account_id -- it proves only that a FIRST factor already
+-- succeeded, which is exactly why this is its own table and never
+-- reuses account_session's own shape (see app/totp_api.py's module
+-- docstring for the full "why not just issue a session already" case
+-- this guards against: a session cookie IS a credential the instant it
+-- exists, and this must not be).
+CREATE TABLE IF NOT EXISTS account_totp_challenge (
+    token_hash   TEXT PRIMARY KEY,
+    account_id   INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    consumed_at  INTEGER
+);
 """
 
 

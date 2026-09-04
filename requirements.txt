@@ -26,3 +26,12 @@ paho-mqtt==2.1.0
 # app hand-rolls the handful of protobuf fields it actually needs (see
 # app/mqtt_subscriber.py) rather than take on that dependency.
 cryptography==49.0.0
+# TOTP two-factor authentication (app/totp.py, app/totp_api.py):
+# renders the otpauth:// enrollment URI as a scannable QR code. The
+# TOTP math itself (RFC 6238, HMAC-SHA1) is pure stdlib -- no
+# dependency needed for that -- but there is no QR encoder in the
+# stdlib. segno is pure Python with zero dependencies of its own and
+# emits SVG directly (see app/totp_api.py's _render_qr_svg()), so
+# nothing runs client-side and nothing is fetched from a CDN to show
+# the code -- the whole point, for a page rendering a shared secret.
+segno==1.6.6

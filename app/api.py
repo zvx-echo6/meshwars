@@ -62,6 +62,7 @@ from .node_ref import normalize_node_ref
 from .nodes_api import router as nodes_router
 from .notice_api import router as notice_router
 from .oauth_api import router as oauth_router
+from .totp_api import router as totp_router
 from .places_api import router as places_router
 from .public_api import router as public_router
 from .sessions import SessionPrincipal, optional_session, require_session
@@ -1018,6 +1019,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(join_router)
     app.include_router(account_router)
     app.include_router(oauth_router)
+    app.include_router(totp_router)
     app.include_router(admin_router)
     app.include_router(admin_ops_router)
     app.include_router(nodes_router)
@@ -1101,6 +1103,18 @@ def mount(app: FastAPI) -> None:
         @app.get("/account/verify-email", response_class=HTMLResponse, include_in_schema=False)
         async def verify_email_page(request: Request):
             return _templated_html_page(request, frontend_dir / "verify-email.html", "verify-email page not bundled")
+
+        # Where a real browser lands to type in a second factor after a
+        # password or magic-link sign-in verifies on an account that
+        # has TOTP active (app/oauth_api.py's password_start()/
+        # email_callback(), which set the mw_totp_challenge cookie --
+        # see app/totp_api.py's own module docstring for the full
+        # mechanism). Not in the nav, and reached no other way -- same
+        # "small standalone screen, only ever arrived at by redirect"
+        # shape as /link and /account/verify-email just above.
+        @app.get("/verify-totp", response_class=HTMLResponse, include_in_schema=False)
+        async def verify_totp_page(request: Request):
+            return _templated_html_page(request, frontend_dir / "verify-totp.html", "verify-totp page not bundled")
 
         @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
         async def about_page(request: Request):

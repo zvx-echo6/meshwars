@@ -24,8 +24,9 @@ full shape.
 
 GET /auth/{provider}/callback is where a real browser lands straight off
 a provider's own consent screen -- by default it now RESPONDS WITH A
-REDIRECT (to /account, /link, or /join with an error, depending on the
-outcome -- see oauth_callback's own docstring for the full mapping),
+REDIRECT (to /account on success, or /link for a pending identity, or
+back to /account with an `auth_error` code on failure -- see
+oauth_callback's own docstring for the full mapping),
 because a person completing a sign-in has nowhere to go if the response
 is a bare JSON body. The original JSON-bodied response this route
 always returned is still available, at `?format=json` -- see
@@ -153,6 +154,21 @@ from .sessions import (
     set_session_cookie,
     verify_session,
 )
+# TOTP two-factor authentication (app/totp_api.py's own module
+# docstring has the full design) -- imported here, one-directional,
+# so that a successful password/magic-link sign-in can hand off to a
+# second-factor challenge instead of issuing a session outright. Only
+# password_start() and email_callback() (via _respond_to_callback_
+# outcome's enforce_totp parameter) ever call into these -- see this
+# module's own "password sign-in" and "email sign-in" section
+# comments, and app/totp_api.py's own docstring, for exactly why
+# oauth_callback() (the OAuth-provider callback) never does.
+from .totp_api import (
+    TOTP_VERIFY_PAGE_PATH,
+    _set_totp_challenge_cookie,
+    issue_totp_challenge,
+    totp_active_for_account,
+)
 
 log = logging.getLogger("oauth_api")
 
@@ -177,7 +193,6 @@ _PENDING_COOKIE_NAME = "mw_pending_token"
 # the way oauth_public_base_url is.
 _ACCOUNT_PAGE_PATH = "/account"
 _LINK_PAGE_PATH = "/link"
-_JOIN_PAGE_PATH = "/join"
 # Landing page for GET /auth/contact-email/verify below -- a small,
 # standalone confirmation screen (frontend/verify-email.html), same
 # reasoning as _LINK_PAGE_PATH: the mailed link needs no session to
@@ -516,7 +531,7 @@ def resolve_oauth_callback(
 @router.get("/auth/providers")
 async def list_providers() -> JSONResponse:
     """Which providers are actually reachable right now -- the frontend
-    (frontend/join.js's sign-in section, frontend/link.js) calls this
+    (frontend/account.js's sign-in section, frontend/link.js) calls this
     instead of hardcoding a provider list, so an unconfigured provider
     (no client id/secret, or no oauth_public_base_url -- see
     provider_enabled() in app/oauth.py) is never rendered as a dead
@@ -532,7 +547,7 @@ async def list_providers() -> JSONResponse:
     app/email_login.py's own module docstring for why), so it can't fall
     out of the comprehension above the way a future OAuth provider
     would; this is the one place that has to know about it explicitly.
-    frontend/join.js's setupSignIn() and frontend/link.js's loadPending()
+    frontend/account.js's renderSignedOut() and frontend/link.js's loadPending()
     both special-case the name "email" in this list to render a form
     (address + submit) instead of the plain `/auth/{name}/start` link
     every OTHER entry here gets -- there is no GET .../start redirect
@@ -679,8 +694,8 @@ async def email_callback(request: Request) -> Response:
 
     Response shape matches oauth_callback exactly -- login/linked/
     auto_linked go to /account with a session cookie, pending goes to
-    /link with the pending cookie, any failure goes back to /join with
-    a short auth_error code -- because both routes share
+    /link with the pending cookie, any failure goes back to /account
+    with a short auth_error code -- because both routes share
     _respond_to_callback_outcome (login/pending/error) and
     _callback_error_response (error only) rather than each building
     these responses by hand. The ?format=json escape hatch
@@ -739,7 +754,14 @@ async def email_callback(request: Request) -> Response:
             now=now,
         )
 
-    return await _respond_to_callback_outcome(request, outcome=outcome, identity=identity, now=now)
+    # enforce_totp=True: this is one of the two LOCAL doors TOTP
+    # guards (the other is POST /auth/password/start below) -- see
+    # app/totp_api.py's own module docstring for exactly why magic-link
+    # email is guarded and every OAuth provider (oauth_callback below,
+    # which never passes this) is not.
+    return await _respond_to_callback_outcome(
+        request, outcome=outcome, identity=identity, now=now, enforce_totp=True
+    )
 
 
 # ---- password sign-in (the fifth door) -----------------------------------
@@ -863,7 +885,12 @@ async def password_start(request: Request) -> JSONResponse:
     "never create, never link, never run the pending-identity decision
     tree" contract. On success, issues a session exactly like every
     other door (create_session + set_session_cookie), the same as
-    oauth_callback/email_callback's "login" case.
+    oauth_callback/email_callback's "login" case -- UNLESS the account
+    has TOTP active, in which case this hands off to a second-factor
+    challenge instead (app/totp_api.py's own module docstring has the
+    full design; see this route's own body for exactly where that
+    branch happens, right before the session would otherwise be
+    created).
     """
     ip = get_client_ip(request)
     if _password_start_ip_limiter.limited(
@@ -944,6 +971,25 @@ async def password_start(request: Request) -> JSONResponse:
         write_conn.execute(
             "UPDATE account SET last_login_at = ? WHERE account_id = ?", (now, account_id)
         )
+
+    # This is one of the two LOCAL doors TOTP guards (the other is GET
+    # /auth/email/callback, via _respond_to_callback_outcome's
+    # enforce_totp=True) -- see app/totp_api.py's own module docstring
+    # for exactly why. A password sign-in that verifies on an account
+    # with TOTP active does NOT get a session here: it hands off to a
+    # second-factor challenge instead, the exact same shape
+    # _respond_to_callback_outcome uses for its own totp_required
+    # branch (this route is JSON-only and never redirects, so there is
+    # no browser-vs-?format=json split to make here -- one response
+    # shape, always).
+    if await totp_active_for_account(account_id):
+        raw_challenge_token, expires_at = await issue_totp_challenge(account_id)
+        resp = JSONResponse(
+            {"result": "totp_required", "challenge_token": raw_challenge_token, "expires_at": expires_at},
+            status_code=200,
+        )
+        _set_totp_challenge_cookie(resp, raw_token=raw_challenge_token, expires_at=expires_at, now=now)
+        return resp
 
     raw_session_token = await create_session(
         account_id, device_label=device_label_from_user_agent(request.headers.get("user-agent"))
@@ -1095,7 +1141,14 @@ def _callback_error_response(
     (before this change it never sent them anywhere -- a raw JSON error
     body is fine for a test's assertion, not for a person who just
     clicked "Sign in with GitHub"), with a short, non-sensitive `auth_error`
-    code in the query string frontend/join.js reads to show a message.
+    code in the query string that page reads to show a message. Lands
+    on /account, not /join: /join no longer carries a sign-in panel at
+    all (see frontend/join.js's own module docstring for why -- joining
+    and signing in are no longer offered from the same page), so
+    /account -- the one page every sign-in method (provider button,
+    magic link, password) already lands a SUCCESSFUL attempt on -- is
+    also where a FAILED one belongs; landing an error on a page with
+    nothing to show it would be a dead end.
     That code is deliberately an enum-like word (see the call sites
     below), never the raw exception text or provider response -- a
     query string lands in browser history and any access log that
@@ -1107,13 +1160,13 @@ def _callback_error_response(
     if _wants_json(request):
         resp = JSONResponse({"error": message}, status_code=status_code)
     else:
-        resp = RedirectResponse(f"{_JOIN_PAGE_PATH}?auth_error={redirect_code}", status_code=302)
+        resp = RedirectResponse(f"{_ACCOUNT_PAGE_PATH}?auth_error={redirect_code}", status_code=302)
     _clear_flow_cookies(resp)
     return resp
 
 
 async def _respond_to_callback_outcome(
-    request: Request, *, outcome: dict, identity: ProviderIdentity, now: int
+    request: Request, *, outcome: dict, identity: ProviderIdentity, now: int, enforce_totp: bool = False
 ) -> Response:
     """Turns resolve_oauth_callback()'s outcome dict into the actual
     response -- factored out of oauth_callback below (which it still
@@ -1131,6 +1184,22 @@ async def _respond_to_callback_outcome(
     after calling this, via _clear_flow_cookies; the email callback has
     no flow cookie of its own to clear at all, since it never sets one
     (see GET /auth/email/callback's own docstring).
+
+    `enforce_totp` is the ONLY thing that differs between the two
+    callers: email_callback() below passes True, oauth_callback() never
+    passes it at all (leaving the default, False) -- see
+    app/totp_api.py's own module docstring for exactly why OAuth
+    sign-in is never gated by this app's own TOTP. When True and the
+    outcome would otherwise issue a session ("login" or "auto_linked"
+    -- see that branch's own comment below for why "linked" never
+    applies here either way), and the resolved account has TOTP
+    active, this hands off to a second-factor challenge instead of a
+    session: app/totp_api.py's issue_totp_challenge() mints the ticket,
+    and the caller gets either a redirect to TOTP_VERIFY_PAGE_PATH (a
+    real browser) or a `{"result": "totp_required"}` JSON body
+    (?format=json) -- no account_id, no email, nothing about the
+    account leaks into this response; the challenge cookie/token is
+    the only thing a caller needs to finish signing in.
     """
     want_json = _wants_json(request)
 
@@ -1155,8 +1224,23 @@ async def _respond_to_callback_outcome(
     # already had a valid session (current_account_id came straight from
     # it), so reissuing one here would be pointless at best and would
     # invite a subtle bug at worst (a stale reference to the OLD token
-    # somewhere still expecting it to work).
+    # somewhere still expecting it to work). "linked" is also, for the
+    # exact same reason, never a candidate for the TOTP gate below: it
+    # never touches account_session at all, so there is no session
+    # here to withhold in the first place.
     account_id = outcome["account_id"]
+
+    if enforce_totp and outcome["case"] in ("login", "auto_linked") and await totp_active_for_account(account_id):
+        raw_challenge_token, expires_at = await issue_totp_challenge(account_id)
+        if want_json:
+            return JSONResponse(
+                {"result": "totp_required", "challenge_token": raw_challenge_token, "expires_at": expires_at},
+                status_code=200,
+            )
+        resp = RedirectResponse(TOTP_VERIFY_PAGE_PATH, status_code=302)
+        _set_totp_challenge_cookie(resp, raw_token=raw_challenge_token, expires_at=expires_at, now=now)
+        return resp
+
     if want_json:
         resp = JSONResponse({"result": outcome["case"], "account_id": account_id}, status_code=200)
     else:
@@ -1195,8 +1279,8 @@ async def oauth_callback(provider: str, request: Request) -> Response:
         use" for an identity this app has never seen before.
       - any failure (provider declined, state/PKCE mismatch, provider
         HTTP error) -> _callback_error_response above sends the browser
-        back to /join with a short `auth_error` code it can display next
-        to the sign-in button, rather than a bare JSON error body.
+        back to /account with a short `auth_error` code it can display
+        next to the sign-in button, rather than a bare JSON error body.
 
     The original JSON-bodied response (tested exhaustively in
     tests/test_oauth_api.py, which drives this route directly rather

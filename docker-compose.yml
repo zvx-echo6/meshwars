@@ -84,6 +84,14 @@ services:
       SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
       SMTP_FROM_ADDRESS: "${SMTP_FROM_ADDRESS:-admin@meshwars.com}"
       SMTP_TLS_MODE: "${SMTP_TLS_MODE:-starttls}"
+      # TOTP two-factor (app/totp.py): the Fernet key the shared secret is
+      # encrypted with at rest. It lives in the environment, never in the
+      # database, so a stolen database file alone yields no working second
+      # factors. Empty means TOTP enrollment refuses outright rather than
+      # ever storing a secret in the clear -- app/totp_api.py fails closed.
+      # Generate with:
+      #   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      ACCOUNT_TOTP_ENCRYPTION_KEY: "${ACCOUNT_TOTP_ENCRYPTION_KEY:-}"
       # FreqMapper (app/freqmapper_ingest.py): alternative Meshtastic
       # paint source to meshview's own position-packet feed above. See
       # MT_PAINT_SOURCE below for which one actually paints the board.

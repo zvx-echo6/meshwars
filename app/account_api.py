@@ -96,6 +96,7 @@ from .email_login import (
     send_magic_link_email,
 )
 from .oauth import PROVIDER_LABELS
+from .totp import totp_encryption_available
 # Reaching into app/checkin.py's underscore-prefixed helpers here is
 # deliberate, not a style slip: the four read-only routes at the bottom
 # of this module (stats/honors/checkins/checkin-health) exist
@@ -335,6 +336,42 @@ def _contact_email_out(conn, account_id: int) -> dict | None:
     }
 
 
+def _totp_out(conn, account_id: int) -> dict:
+    """TOTP status for GET /api/account's Security panel -- same
+    read-helper shape as _contact_email_out() just above. `enabled`
+    only ever reflects an ACTIVATED secret (account_totp.activated_at
+    IS NOT NULL -- see that column's own comment in app/db.py for why
+    a still-pending, unproven enrollment must never read as enabled).
+    `available` is app/totp.py's totp_encryption_available() -- whether
+    settings.account_totp_encryption_key is even configured, so the
+    frontend can explain an unavailable "Enable two-factor
+    authentication" control instead of offering one that would 404 the
+    moment it's used (see app/totp_api.py's POST
+    /api/account/totp/enroll for that same check on the write side).
+    recovery_codes_remaining is only meaningful (non-None) while
+    enabled -- an account that has never enrolled, or that disabled
+    TOTP (which deletes every recovery-code row -- see that table's
+    own comment in app/db.py), has none to count.
+    """
+    row = conn.execute(
+        "SELECT activated_at FROM account_totp WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    enabled = row is not None and row["activated_at"] is not None
+    recovery_codes_remaining = None
+    if enabled:
+        count_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM account_totp_recovery_code"
+            " WHERE account_id = ? AND used_at IS NULL",
+            (account_id,),
+        ).fetchone()
+        recovery_codes_remaining = count_row["n"] if count_row else 0
+    return {
+        "enabled": enabled,
+        "available": totp_encryption_available(),
+        "recovery_codes_remaining": recovery_codes_remaining,
+    }
+
+
 def _player_out(conn, player_id: int) -> dict | None:
     row = conn.execute(
         "SELECT player_id, display_name, team FROM player WHERE player_id = ?",
@@ -404,6 +441,7 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
         has_password = _has_password(conn, session.account_id)
         contact_email = _contact_email_out(conn, session.account_id)
         owes_password = _owes_password(conn, session.account_id)
+        totp = _totp_out(conn, session.account_id)
     finally:
         conn.close()
 
@@ -416,6 +454,7 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
             "has_password": has_password,
             "contact_email": contact_email,
             "owes_password": owes_password,
+            "totp": totp,
         },
         status_code=200,
     )

@@ -856,6 +856,90 @@ class Settings(BaseSettings):
     account_contact_email_rate_limit_attempts: int = 3
     account_contact_email_rate_limit_window_seconds: int = 600
 
+    # ---- TOTP two-factor authentication (app/totp.py, app/totp_api.py) ----
+    # An OPTIONAL second factor layered on top of the two LOCAL sign-in
+    # doors above (password, magic-link email) -- see app/totp_api.py's
+    # module docstring for exactly which doors this guards and why the
+    # three OAuth providers (GitHub/Google/Discord) are deliberately
+    # NOT guarded (each already enforces whatever second factor its own
+    # user configured with it).
+    #
+    # The symmetric key (cryptography.fernet.Fernet, urlsafe-base64,
+    # 32 raw bytes) that encrypts a TOTP secret at rest
+    # (app/totp.py's encrypt_secret/decrypt_secret) -- held in the
+    # ENVIRONMENT, never the database, so a stolen database file alone
+    # yields no working second factors (see app/totp.py's own "secret
+    # at rest" docstring section for the full reasoning). This is the
+    # one setting in this file where "empty means off" is not quite
+    # right: every other optional feature here just does nothing when
+    # unconfigured, but this one FAILS CLOSED -- app/totp.py's
+    # totp_encryption_available() returns False when this is unset (or
+    # not a valid Fernet key), and app/totp_api.py's enrollment route
+    # refuses to start enrollment at all rather than ever risk storing
+    # an unencrypted secret. Generate one with:
+    #   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    account_totp_encryption_key: str = ""
+
+    # otpauth:// issuer name (app/totp.py's provisioning_uri()) -- shown
+    # by every authenticator app next to the account label, so a person
+    # enrolling several MeshWars-adjacent tools in one app can still
+    # tell this entry apart. A plain constant, not deployment-configurable:
+    # unlike oauth_public_base_url (a real, deployment-specific address),
+    # this is just a display string, and every deployment of this
+    # codebase is still "MeshWars."
+    account_totp_issuer: str = "MeshWars"
+
+    # How long the intermediate "credential verified, second factor not
+    # yet supplied" state (app/db.py's account_totp_challenge -- the
+    # short-lived, single-use ticket a successful password or
+    # magic-link sign-in hands off to POST /auth/totp/verify, following
+    # the exact same hashed-single-use-ticket shape as
+    # account_pending_identity/email_login_token) stays redeemable.
+    # Short on purpose: this is never meant to survive more than the
+    # few seconds it takes to switch to an authenticator app and read a
+    # code off it, and -- unlike a pending OAuth identity someone might
+    # want to think over -- there is nothing to decide here, only to
+    # type in.
+    account_totp_challenge_lifetime_seconds: int = 300  # 5 minutes
+
+    # How many recovery codes app/totp_api.py's activation route mints,
+    # shown to the account holder exactly once. 10 is the number every
+    # mainstream 2FA implementation (GitHub, Google, ...) converges on
+    # -- enough to cover realistic loss-of-device scenarios (a phone
+    # replaced every year or two, an app reinstalled after a factory
+    # reset) across a game's typical lifetime, without generating (and
+    # asking a person to safely store) an excessive list.
+    account_totp_recovery_code_count: int = 10
+
+    # Rate limits on POST /api/account/totp/activate (proving
+    # enrollment) and DELETE /api/account/totp (disabling) -- both take
+    # an attacker-guessable 6-digit code from an ALREADY-authenticated
+    # session, so these are account-keyed (like
+    # account_contact_email_rate_limit_* above), not address-keyed:
+    # there is no anonymous-caller enumeration risk here, only "how many
+    # guesses can one hijacked/logged-in session throw before a code it
+    # doesn't actually know verifies."
+    account_totp_activate_rate_limit_attempts: int = 10
+    account_totp_activate_rate_limit_window_seconds: int = 300
+    account_totp_disable_rate_limit_attempts: int = 10
+    account_totp_disable_rate_limit_window_seconds: int = 300
+
+    # Rate limits on POST /auth/totp/verify -- the actual sign-in second
+    # factor, reached with NO session at all (only the short-lived
+    # challenge cookie/token above), which makes this the single
+    # highest-value guessing target this feature adds: a 6-digit code
+    # is only 1,000,000 possibilities, and the skew window
+    # (app/totp.py's DEFAULT_SKEW_STEPS) accepts three of them at once.
+    # Two independent budgets, the same "per IP, per the specific thing
+    # being attacked" shape POST /auth/password/start already uses (per
+    # source IP, and per the challenge being guessed against, rather
+    # than per email address -- there is no email here, only a
+    # challenge ticket).
+    account_totp_verify_ip_rate_limit_attempts: int = 10
+    account_totp_verify_ip_rate_limit_window_seconds: int = 300
+    account_totp_verify_challenge_rate_limit_attempts: int = 8
+    account_totp_verify_challenge_rate_limit_window_seconds: int = 300
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
