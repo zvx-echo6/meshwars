@@ -656,14 +656,155 @@ function accountConfirmPhrase(a) {
   return a.player ? a.player.display_name : ('DELETE ACCOUNT ' + a.account_id);
 }
 
+function recoveryConfirmPhrase(a, actionPhrase) {
+  // Same purpose accountConfirmPhrase() above serves for delete,
+  // generalized to whichever recovery action is asking -- mirrors
+  // app/admin_api.py's own _admin_account_recovery_confirm() exactly.
+  // Each recovery action gets its OWN phrase (not delete's fixed
+  // "DELETE ACCOUNT") so an orphan-account confirmation never reads
+  // like the wrong action.
+  return a.player ? a.player.display_name : (actionPhrase + ' ' + a.account_id);
+}
+
+// The three recovery actions below all share one rule: an operator can
+// only take a credential AWAY, never hand back a working one. There is
+// no "set a password for this account" action anywhere on this page,
+// and never will be -- see app/admin_api.py's own "account recovery:
+// clear a credential, never set one" section comment for the full
+// reasoning. Clearing restores the account to whoever can still prove
+// they hold ITS OTHER credentials; it never lets the operator sign in
+// as them.
+function appendAccountRecoveryActions(row, a) {
+  if (a.totp_active) {
+    row.appendChild(btn('Disable two-factor', 'adm-btn-danger', async (b) => {
+      const who = a.player ? a.player.display_name : ('account ' + a.account_id);
+      const expected = recoveryConfirmPhrase(a, 'DISABLE TWO-FACTOR');
+      const typed = window.prompt(
+        'This turns off two-factor authentication on ' + who + "'s account and clears " +
+        'every recovery code — the fix for a lost phone with no recovery codes left. ' +
+        who + ' will be able to sign back in with just their other credentials, with no ' +
+        'second factor until they set one up again.\n\n' +
+        'Type ' + expected + ' to confirm.'
+      );
+      if (!typed) return;
+      b.disabled = true;
+      try {
+        await post('/api/admin/account/disable-totp', { account_id: a.account_id, display_name: typed });
+        setStatus('Disabled two-factor authentication on account ' + a.account_id, false);
+        await refreshAll();
+      } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+    }));
+  }
+
+  // Offered only when a door would REMAIN. The server refuses a clear or a
+  // removal that would leave an account with none -- this surface can only
+  // ever clear a credential, never set one, so stripping the last door
+  // produces an account nobody can reach and nobody can hand back. Deciding
+  // that here as well, from identity_providers + has_password, is what stops
+  // the row offering a button that is guaranteed to fail: applicability is
+  // "would this help", not merely "does this credential exist".
+  const doorCount = (a.identity_providers || []).length + (a.has_password ? 1 : 0);
+
+  if (a.has_password && doorCount > 1) {
+    row.appendChild(btn('Clear password', 'adm-btn-danger', async (b) => {
+      const who = a.player ? a.player.display_name : ('account ' + a.account_id);
+      const expected = recoveryConfirmPhrase(a, 'CLEAR PASSWORD');
+      const typed = window.prompt(
+        'This removes the password on ' + who + "'s account — nothing is set in its " +
+        'place. ' + who + ' can only get back in through another sign-in method they ' +
+        'still hold, and can set a fresh password once they do.\n\n' +
+        'Type ' + expected + ' to confirm.'
+      );
+      if (!typed) return;
+      b.disabled = true;
+      try {
+        await post('/api/admin/account/password/clear', { account_id: a.account_id, display_name: typed });
+        setStatus('Cleared the password on account ' + a.account_id, false);
+        await refreshAll();
+      } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+    }));
+  }
+
+  (doorCount > 1 ? (a.identity_providers || []) : []).forEach((provider) => {
+    row.appendChild(btn('Remove ' + provider, 'adm-btn-danger', async (b) => {
+      const who = a.player ? a.player.display_name : ('account ' + a.account_id);
+      const expected = recoveryConfirmPhrase(a, 'REMOVE SIGN-IN');
+      const typed = window.prompt(
+        'This disconnects ' + provider + ' from ' + who + "'s account — for a provider " +
+        'they have lost access to, or one linked in error. Only offered when another ' +
+        'way to sign in would remain.\n\n' +
+        'Type ' + expected + ' to confirm.'
+      );
+      if (!typed) return;
+      b.disabled = true;
+      try {
+        await post('/api/admin/account/identity/remove',
+          { account_id: a.account_id, provider: provider, display_name: typed });
+        setStatus('Removed ' + provider + ' from account ' + a.account_id, false);
+        await refreshAll();
+      } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+    }));
+  });
+}
+
+// Grant and revoke, folded in from the old standalone Roles section --
+// every role holder is an account, so Roles was always a strict subset
+// of this list; there was never a reason for a role change to live
+// anywhere other than the account it changes. Operator-only in both
+// directions: POST /api/admin/roles/grant and .../revoke both guard
+// with _role_guard(need="operator") server-side, and this function
+// only ever runs when myRole === 'operator' -- an admin's own session
+// would just 401 on either route, so an admin never even sees a
+// control that would fail.
+function appendAccountRoleActions(row, a) {
+  if (myRole !== 'operator') return;
+  const who = a.player ? a.player.display_name : ('account ' + a.account_id);
+
+  if (!a.role) {
+    row.appendChild(btn('Grant admin', 'adm-btn', async (b) => {
+      b.disabled = true;
+      try {
+        await post('/api/admin/roles/grant', { account_id: a.account_id });
+        setStatus('Granted admin to ' + who, false);
+        await refreshAll();
+      } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+    }));
+    return;
+  }
+
+  // Revoke only, never Grant, on a row that already holds a role --
+  // POST /api/admin/roles/grant refuses (409) onto an account already
+  // holding operator, because granting 'admin' onto it would silently
+  // demote them, and granting onto an existing admin is a no-op this
+  // row has no need to offer. Revoke has no such restriction in either
+  // direction (see that route's own docstring).
+  row.appendChild(btn('Revoke', 'adm-btn-danger', async (b) => {
+    // A plain confirm, not the typed confirmation the recovery actions
+    // below use -- revoke only strips an elevated role, leaving the
+    // account, its data, and its ordinary sign-in untouched (unlike
+    // those actions, which can leave someone with no way in at all, or
+    // delete, which tombstones a player). The old Roles section used
+    // the same plain confirm for the same reason.
+    if (!window.confirm('Revoke the ' + a.role + ' role from ' + who + '?')) return;
+    b.disabled = true;
+    try {
+      await post('/api/admin/roles/revoke', { account_id: a.account_id });
+      setStatus('Revoked ' + a.role + ' from ' + who, false);
+      await refreshAll();
+    } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+  }));
+}
+
 function renderAccounts() {
   const host = document.getElementById('accounts');
   const q = (document.getElementById('account-search').value || '').trim().toLowerCase();
   const orphansOnly = document.getElementById('account-orphans-only').checked;
+  const rolesOnly = document.getElementById('account-roles-only').checked;
   host.replaceChildren();
 
   const shown = allAccounts.filter((a) => {
     if (orphansOnly && a.player) return false;
+    if (rolesOnly && !a.role) return false;
     if (!q) return true;
     if (String(a.account_id).includes(q)) return true;
     return !!(a.player && a.player.display_name.toLowerCase().includes(q));
@@ -699,6 +840,8 @@ function renderAccounts() {
       text: a.sign_in_methods + (a.sign_in_methods === 1 ? ' sign-in method' : ' sign-in methods') +
         ' · created ' + fmtTs(a.created_at) + ' · last signed in ' + ago(a.last_login_at),
     }));
+    appendAccountRoleActions(row, a);
+    appendAccountRecoveryActions(row, a);
     row.appendChild(btn('Delete account', 'adm-btn-danger', async (b) => {
       const who = a.player ? a.player.display_name : ('account ' + a.account_id);
       const expected = accountConfirmPhrase(a);
@@ -1468,80 +1611,6 @@ async function createApiClient(b) {
   b.disabled = false;
 }
 
-// ---- roles --------------------------------------------------------------
-//
-// Operator-only, both server-side (POST /api/admin/roles/* require the
-// operator role -- app/admin_api.py's _role_guard(need="operator")) and
-// here: the nav item and section are only ever shown when myRole ===
-// 'operator' (see showApp() below), so an admin account never even sees
-// a control that would just 401. Grant only ever mints 'admin' -- there
-// is no role picker here, because becoming an operator has exactly one
-// door (the claim flow, on the account page, token + two-factor), never
-// a grant from this panel -- see POST /api/admin/roles/grant's own
-// docstring for why that is deliberate, not a missing feature.
-
-async function loadRoles() {
-  if (myRole !== 'operator') return;
-  const host = document.getElementById('roles-list');
-  host.replaceChildren();
-  try {
-    const d = await api('/api/admin/roles');
-    if (!d.roles.length) {
-      host.appendChild(el('p', { className: 'adm-hint', text: 'No accounts hold a role.' }));
-      return;
-    }
-    d.roles.forEach((r) => {
-      const row = el('div', { className: 'adm-row' });
-      const who = r.display_name || ('account ' + r.account_id + ' (no player yet)');
-      row.appendChild(el('span', { text: who }));
-      row.appendChild(el('span', { className: 'adm-mono', text: 'id ' + r.account_id }));
-      row.appendChild(el('span', {
-        className: 'adm-badge' + (r.role === 'operator' ? ' adm-badge-ok' : ''),
-        text: r.role,
-      }));
-      row.appendChild(btn('Revoke', 'adm-btn-danger', async (b) => {
-        if (!window.confirm('Revoke the ' + r.role + ' role from ' + who + '?')) return;
-        b.disabled = true;
-        try {
-          await post('/api/admin/roles/revoke', { account_id: r.account_id });
-          setStatus('Revoked ' + r.role + ' from ' + who, false);
-          await loadRoles();
-        } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
-      }));
-      host.appendChild(row);
-    });
-  } catch (e) {
-    host.appendChild(el('p', { className: 'adm-hint', text: 'Could not load: ' + e.message }));
-  }
-}
-
-async function grantAdmin(b) {
-  const input = document.getElementById('rl-display-name');
-  const out = document.getElementById('rl-grant-result');
-  out.replaceChildren();
-  const name = input.value.trim();
-  if (!name) { out.textContent = 'Enter a player name.'; return; }
-  b.disabled = true;
-  try {
-    // POST /api/admin/roles/grant uses 404 for two ordinary lookup
-    // misses -- "no such player by that name" / "that player has no
-    // linked account" (see that route's own docstring) -- not for
-    // session loss. The shared post()/api() above now tells those
-    // apart correctly (see api()'s own comment): this call only runs
-    // once the panel is already up, so a 404 here surfaces body.error
-    // through the catch below instead of blanking the panel.
-    const body = await post('/api/admin/roles/grant', { display_name: name });
-    out.textContent = body.changed
-      ? ('"' + name + '" now holds the admin role.')
-      : ('"' + name + '" already held the admin role.');
-    input.value = '';
-    await loadRoles();
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
-  }
-  b.disabled = false;
-}
-
 // ---- session and navigation -------------------------------------------
 //
 // There is no sign-in FORM on this page any more -- the account page's
@@ -1576,7 +1645,6 @@ async function refreshAll() {
   const loads = [
     loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
   ];
-  if (myRole === 'operator') loads.push(loadRoles());
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
   // Orphan count, not total account count -- see this badge's own
@@ -1598,7 +1666,6 @@ function showNoAccess(message) {
 async function showApp() {
   document.getElementById('login').hidden = true;
   document.getElementById('app').hidden = false;
-  document.getElementById('nav-roles-item').hidden = myRole !== 'operator';
   document.getElementById('topbar-role').textContent = myRole;
   const wanted = location.hash.slice(1);
   show(document.querySelector('.adm-section[data-section="' + wanted + '"]') ? wanted : 'overview');
@@ -1679,6 +1746,7 @@ document.querySelectorAll('.adm-nav-item').forEach((b) => {
 document.getElementById('player-search').addEventListener('input', renderPlayers);
 document.getElementById('account-search').addEventListener('input', renderAccounts);
 document.getElementById('account-orphans-only').addEventListener('change', renderAccounts);
+document.getElementById('account-roles-only').addEventListener('change', renderAccounts);
 document.getElementById('ci-award').addEventListener('click', function () { awardCheckin(this); });
 document.getElementById('nc-save').addEventListener('click', function () { saveConfig(this); });
 document.getElementById('pt-save').addEventListener('click', function () { savePaint(this); });
@@ -1702,6 +1770,5 @@ document.getElementById('nt-save').addEventListener('click', function () { saveN
 // first retyping title/body/version just to satisfy the required-field
 // check saveNotice() otherwise runs.
 document.getElementById('nt-clear').addEventListener('click', function () { saveNotice(this, false); });
-document.getElementById('rl-grant').addEventListener('click', function () { grantAdmin(this); });
 
 checkAccess();

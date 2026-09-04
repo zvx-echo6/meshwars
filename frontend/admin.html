@@ -74,11 +74,6 @@
         <button type="button" class="adm-nav-item" data-section="places">Places</button>
         <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
         <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
-        <!-- Hidden by default (admin.js's showApp()) -- only an
-             operator can grant/revoke admin, so only an operator ever
-             sees this at all; an admin account never even gets a
-             control that would just 401. -->
-        <button type="button" class="adm-nav-item" data-section="roles" id="nav-roles-item" hidden>Roles</button>
       </nav>
 
       <main class="adm-main">
@@ -100,10 +95,12 @@
 
         <section class="adm-section" data-section="accounts" hidden>
           <h2 class="adm-h2">Accounts <span class="adm-count" id="accounts-count"></span></h2>
-          <p class="adm-hint">Every account, not just the ones with a linked player. An account with no linked player is reached from here only &mdash; released by "Release account link" on a player above, or never claimed after signing in. Deleting an account removes it and its sign-in identities and sessions; if a player is linked, that player is tombstoned exactly the way "Delete player" leaves it.</p>
+          <p class="adm-hint">Every account, not just the ones with a linked player. An account with no linked player is reached from here only &mdash; released by "Release account link" on a player above, or never claimed after signing in. Deleting an account removes it and its sign-in identities and sessions; if a player is linked, that player is tombstoned exactly the way "Delete player" leaves it. Disable two-factor, clear password, and remove a sign-in method are recovery actions, not deletion &mdash; each only clears a credential so the account's holder can get back in through whatever they still have; none of them lets an operator sign in as the account, and each is offered only when the account actually has that credential to clear.</p>
+          <p class="adm-hint">An account's role, if any, shows as a badge on its row, with Grant admin or Revoke alongside it &mdash; operator-only, both here and on the server, so an admin's own session never even sees the controls. Granting always mints admin; becoming an operator has exactly one door, claimed on the account page with the admin token and an active two-factor code, never a grant from this panel.</p>
           <input type="text" id="account-search" class="adm-search" autocomplete="off"
                  placeholder="search by player name or account id" />
           <label class="adm-check-label"><input type="checkbox" id="account-orphans-only" class="adm-check" /> No linked player only</label>
+          <label class="adm-check-label"><input type="checkbox" id="account-roles-only" class="adm-check" /> Holds a role only</label>
           <div id="accounts"></div>
         </section>
 
@@ -339,22 +336,10 @@
           <div id="apikeys"></div>
         </section>
 
-        <section class="adm-section" data-section="roles" hidden>
-          <h2 class="adm-h2">Roles</h2>
-          <p class="adm-hint">Every account currently holding a role. Admins cannot grant, revoke, demote, or delete admin or operator &mdash; this whole section, and every route behind it, is reachable by an operator account only. Becoming an operator has exactly one door: claim it on the account page with the admin token and an active two-factor code. Granting from here only ever mints the admin role.</p>
-          <div id="roles-list"></div>
-          <h3 class="adm-h3">Grant admin</h3>
-          <div class="adm-form">
-            <input type="text" id="rl-display-name" maxlength="32" autocomplete="off" placeholder="player name" />
-            <button type="button" id="rl-grant" class="adm-btn">Grant admin</button>
-          </div>
-          <div id="rl-grant-result" class="adm-result"></div>
-        </section>
-
       </main>
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260905-5"></script>
+  <script src="/static/admin.js?v=20260905-7"></script>
 </body>
 </html>

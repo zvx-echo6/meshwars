@@ -85,6 +85,7 @@ from .account_api import (
     _ACCOUNT_SCOPED_TABLES,
     _PLAYER_SCOPED_TABLES,
     _door_counts,
+    _has_password,
     _tombstone_display_name,
 )
 from .auth import new_rate_limit_bucket
@@ -448,11 +449,36 @@ async def admin_accounts(request: Request):
         app/account_api.py's own _door_counts() -- the same helper GET
         /api/account's own Security panel already builds its
         per-identity "can this be removed" answer from, reused here
-        rather than a second count that could drift from it. Never
-        WHICH providers or WHAT email address -- a bare count is
-        enough for an operator to tell "this account still has ways to
-        sign in" from "this is a dead husk with nothing behind it",
-        without exposing anything about who it belongs to.
+        rather than a second count that could drift from it.
+      - identity_providers -- the PROVIDER NAMES themselves (e.g.
+        ["google", "email"]), not merely how many. Added alongside the
+        three account-recovery routes below (disable-totp,
+        password/clear, identity/remove): "remove a sign-in method"
+        has to offer a button per provider actually present, and a
+        bare count cannot drive that. This is still a narrower
+        exposure than it looks -- a provider NAME is which service was
+        used, not who the account belongs to (no subject id, no email
+        address, nothing that identifies the person) -- which is the
+        same line _mask_email() already draws for a full address
+        versus a masked one in GET /api/account's own view. What is
+        still deliberately never exposed HERE is the finer detail
+        those routes never surface either: subject, email, or which
+        specific row within a provider (unlink/remove has always acted
+        on an entire provider at once, never a single row -- see
+        DELETE /api/account/identity/{provider}'s own docstring).
+      - has_password -- whether POST /api/admin/account/password/clear
+        below has anything to act on; redundant with sign_in_methods
+        in spirit but that field cannot be decomposed back into "is
+        one of these doors a password" without exposing
+        identity_providers' own count too, so this is its own boolean
+        rather than asking the frontend to infer it.
+      - totp_active -- whether POST /api/admin/account/disable-totp
+        below has anything to act on (an account_totp row with
+        activated_at set -- a pending, never-proven enrollment does
+        not count, same "unproven secret guards nothing" rule
+        _role_guard() itself applies). Never the secret, never a
+        recovery-code count -- just the one bit the UI needs to decide
+        whether to show the button at all.
       - created_at / last_login_at (account's own columns) -- when it
         first appeared and when it was last actually used, so a
         long-dead orphan reads differently on sight from one created
@@ -475,6 +501,10 @@ async def admin_accounts(request: Request):
                 (a["account_id"],),
             ).fetchone()
             per_provider, has_password = _door_counts(conn, a["account_id"])
+            totp_active = conn.execute(
+                "SELECT 1 FROM account_totp WHERE account_id = ? AND activated_at IS NOT NULL",
+                (a["account_id"],),
+            ).fetchone() is not None
             out.append({
                 "account_id": a["account_id"],
                 "player": (
@@ -486,6 +516,9 @@ async def admin_accounts(request: Request):
                 ),
                 "role": a["role"],
                 "sign_in_methods": sum(per_provider.values()) + (1 if has_password else 0),
+                "identity_providers": sorted(per_provider.keys()),
+                "has_password": has_password,
+                "totp_active": totp_active,
                 "created_at": a["created_at"],
                 "last_login_at": a["last_login_at"],
             })
@@ -1724,6 +1757,486 @@ async def admin_account_delete(request: Request):
         "display_name": display_name,
         "counts": counts,
     }
+
+
+# ---- account recovery: clear a credential, never set one ----------------
+#
+# The gap this section closes: before these three routes, the ONLY thing
+# an operator could do for someone locked out of their own account was
+# delete it (POST /api/admin/account/delete above) and tell them to start
+# over. That is backwards -- deletion is for ending a person's presence
+# in the game, not for helping them back in. These three routes are the
+# actual recovery doors: disable-totp (lost phone, recovery codes gone --
+# the genuine, unrecoverable-any-other-way lockout, and the most
+# important of the three), password/clear (holder still has some OTHER
+# way in and wants a fresh password), and identity/remove (a provider the
+# holder has lost access to, or one linked in error).
+#
+# ---- the property that governs every route below: CLEAR, never SET -----
+#
+# An operator may only ever take a credential AWAY. Not one route here
+# accepts a password, a TOTP secret, a recovery code, or any other
+# credential VALUE in its request body -- each one only ever names WHICH
+# credential to remove (an account_id, and for identity/remove, a
+# provider string). This is not an incidental implementation detail, it
+# is the entire security model of operator-assisted recovery:
+#
+#   An operator who could SET a password could sign in as the account
+#   holder, silently, at any time, forever -- the exact shared-secret
+#   failure mode this whole role/audit-log pass (see this module's own
+#   docstring) replaced. An operator who can only CLEAR one hands the
+#   door back to whoever can next prove they hold the account's OTHER
+#   surviving credentials (see _role_guard() itself, and every existing
+#   self-service route in app/account_api.py and app/totp_api.py) --
+#   they restore access without ever being able to grant themselves
+#   access. The same asymmetry a locksmith who can cut you a NEW key
+#   would be a very different, much more dangerous kind of trusted party
+#   than one who can only drill out a jammed lock and hand it back empty.
+#
+# If a future route here ever needs to accept `new_password`,
+# `totp_secret`, or anything shaped like a credential value: stop. That
+# is the fence this section exists to keep intact, not a gap to fill in.
+#
+# ---- the role guard matters MORE here than on delete --------------------
+#
+# Every route below carries the identical "an admin cannot act on an
+# account holding a role" guard POST /api/admin/player/delete and POST
+# /api/admin/account/delete already enforce (see player/delete's own
+# docstring, "an admin cannot use this route to reach a role-holder", for
+# the full reasoning -- reused verbatim here). It matters MORE on these
+# three than on delete: an admin who could disable an operator's
+# two-factor authentication would not need to delete anything to
+# escalate -- they would just have turned the operator's account into a
+# single-factor one, then gone back through whatever door survives
+# (a password, a recovery email) to sign in AS them, with every
+# operator-only power that account holds. Clearing a credential is a
+# strictly smaller act than deleting an account, but "smaller" is not
+# "safer" when the credential being cleared is someone else's second
+# factor -- so this guard is not weakened or skipped for any of the
+# three, even though none of them destroys anything the way delete does.
+#
+# ---- typed confirmation, on all three ------------------------------------
+#
+# Same shape POST /api/admin/account/delete already uses (see that
+# route's own docstring and _admin_account_no_player_confirm() above):
+# the target's linked player's CURRENT display_name when one exists, or
+# an account_id-bound phrase (_admin_account_recovery_confirm() below)
+# when the account is orphaned. All three warrant it, not just some:
+# every one of them acts on someone ELSE's account from a list that can
+# show many rows side by side (GET /api/admin/accounts), same shape that
+# makes account/delete's own confirmation necessary, and every one of
+# them takes something away that the account holder cannot simply put
+# back themselves (a cleared password cannot be un-cleared back to what
+# it was, a disabled second factor is not still there to re-check, a
+# removed identity is not still linked) -- the same "stale or mistyped
+# target must not be able to do this to the wrong person" reasoning
+# node/remove, reissue, unlink-account, player/delete, and account/delete
+# already apply to every route in this file that acts on someone else's
+# behalf. The one thing NOT required is proof of the CALLER's own
+# credentials the way DELETE /api/account or POST /api/account/totp
+# re-authenticate the person acting on their OWN account -- see
+# player/delete's own docstring for why: _role_guard() on the operator's
+# account already covers "is this really the operator", and there is no
+# equivalent credential of the TARGET's an operator acting on someone
+# else's account has any reason to hold.
+
+
+def _admin_account_recovery_confirm(account_id: int, action_phrase: str) -> str:
+    """The orphan-account confirmation phrase for one of the three
+    recovery routes below -- the same purpose
+    _admin_account_no_player_confirm() (above, for account/delete)
+    serves, generalized to a caller-supplied action phrase instead of
+    always saying "DELETE". Not a rename of that function nor a shared
+    helper with it: account/delete's own phrase is deliberately frozen
+    (changing it would break any operator tooling or muscle memory
+    already built around "DELETE ACCOUNT <id>"), and each of these three
+    routes needs its OWN verb so an operator confirming "disable
+    two-factor" is never looking at text that reads like a password
+    clear or a delete. See that function's own docstring for why the
+    account_id is folded into the phrase at all: a fixed literal would
+    let a phrase copied for one orphan row get pasted onto another
+    without the text itself ever forcing a look at which row is being
+    confirmed.
+    """
+    return f"{action_phrase} {account_id}"
+
+
+def _resolve_recovery_target(
+    conn, *, account_id: object, confirm: object, caller_role: str,
+    action_phrase: str, guard_verb: str,
+) -> tuple[int | None, str | None, JSONResponse | None]:
+    """Shared target-resolution for all three recovery routes below:
+    validates `account_id`/`confirm` shape, loads the target account,
+    checks the typed-confirmation guard (display_name when a player is
+    linked, `_admin_account_recovery_confirm()` when the account is
+    orphaned), and enforces the same "an admin cannot reach a
+    role-holder" boundary POST /api/admin/player/delete and POST
+    /api/admin/account/delete already carry (see this section's own
+    comment above, "the role guard matters MORE here than on delete").
+
+    Pulled out once here rather than copied three times: all three
+    routes below share this exact sequence of checks before they ever
+    reach their own action-specific logic (does TOTP exist to disable,
+    does a password exist to clear, is this provider linked to
+    remove) -- three copies of the same four checks would be three
+    places for the role-guard wording or the confirmation logic to
+    drift out of sync with each other, which is exactly the risk this
+    module's docstring already warns against for a role check this
+    security-sensitive.
+
+    Returns (account_id, target_role, None) on success -- target_role
+    is `account.role` for the resolved account, handed back so a
+    caller that wants to log or reason about it does not read the row
+    a second time. Returns (None, None, JSONResponse(...)) on any
+    failure, the response to hand back as-is.
+
+    `action_phrase` (e.g. "DISABLE TWO-FACTOR") is passed straight
+    through to `_admin_account_recovery_confirm()` for the orphan
+    confirmation text. `guard_verb` is a separate, already-grammatical
+    verb phrase for the role-guard 409's own message (e.g. "disable
+    two-factor authentication on", "clear the password on", "remove a
+    sign-in method from") -- kept apart from `action_phrase` rather
+    than deriving one from the other, because a shouted confirmation
+    literal ("CLEAR PASSWORD") and a sentence fragment that has to read
+    correctly inside "an admin cannot ___ an account that holds a
+    role" are two different pieces of text with two different jobs;
+    mechanically lowercasing the former for the latter produced
+    grammatically broken messages for two of the three routes below
+    (missing "the"/"a" and the trailing preposition) before this
+    parameter was split out.
+    """
+    if not isinstance(account_id, int) or isinstance(account_id, bool):
+        return None, None, JSONResponse({"error": "account_id is required"}, status_code=400)
+    if not isinstance(confirm, str) or not confirm:
+        return None, None, JSONResponse({"error": "display_name is required"}, status_code=400)
+
+    account_row = conn.execute(
+        "SELECT role FROM account WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    if account_row is None:
+        return None, None, JSONResponse({"error": "account not found"}, status_code=404)
+
+    player_row = conn.execute(
+        "SELECT display_name FROM player WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    if player_row is not None:
+        if confirm != player_row["display_name"]:
+            return None, None, JSONResponse(
+                {"error": "display name does not match"}, status_code=409
+            )
+    else:
+        expected = _admin_account_recovery_confirm(account_id, action_phrase)
+        if confirm != expected:
+            return None, None, JSONResponse(
+                {
+                    "error": f'type "{expected}" in display_name to confirm — '
+                    "this account has no linked player to name"
+                },
+                status_code=409,
+            )
+
+    # See this section's own "the role guard matters MORE here than on
+    # delete" comment, and POST /api/admin/player/delete's "an admin
+    # cannot use this route to reach a role-holder" docstring for the
+    # full reasoning -- identical rule, worded for whichever recovery
+    # action is calling in.
+    if caller_role == "admin" and account_row["role"] is not None:
+        return None, None, JSONResponse(
+            {
+                "error": f"that account holds the {account_row['role']} role — "
+                f"an admin cannot {guard_verb} an account that holds a role; "
+                "an operator can still do this"
+            },
+            status_code=409,
+        )
+
+    return account_id, account_row["role"], None
+
+
+@router.post("/api/admin/account/disable-totp")
+async def admin_account_disable_totp(request: Request):
+    """Turn off two-factor authentication on someone ELSE's account --
+    the recovery door for the genuine lockout case (lost phone,
+    recovery codes gone, nothing else gets back in) and the most
+    important of the three routes in this section: see this section's
+    own module-level comment above for why deletion was never the
+    right answer to this, and for the clear-never-set property this
+    route (like the other two) is built around.
+
+    Reuses app/totp_api.py's own DELETE /api/account/totp deletion
+    logic -- both account_totp and every account_totp_recovery_code
+    row for the account are removed outright, same as that route (see
+    its own docstring for why: turning TOTP off makes the secret and
+    every remaining recovery code moot at once, nothing is worth
+    keeping). Duplicated here rather than imported: that route's
+    deletion logic is inline in an HTTP handler, not a standalone
+    function, so there is nothing to import -- the same "duplicated
+    rather than imported" reasoning this file already gives for
+    _validate_team, _VALID_PROTOCOLS, and _player_radios above.
+
+    Deliberately does NOT require the target's current TOTP code or a
+    recovery code the way DELETE /api/account/totp requires from the
+    account holder themselves -- requiring either would defeat the
+    entire point of this route: an account holder who could still
+    produce a live code or an unused recovery code would not need an
+    operator's help, they would just call that route themselves. The
+    _role_guard() check on the OPERATOR's own account (real,
+    TOTP-active, role-holding) plus the typed confirmation below are
+    what stand in place of that proof here -- the same substitution
+    every other operator-acting-on-someone-else's-behalf route in this
+    file already makes (see POST /api/admin/player/delete's own
+    docstring on why re-authenticating the CALLER is what covers this,
+    not a credential of the TARGET's).
+
+    ---- last-door: does not apply -------------------------------------
+
+    TOTP is a GATE in front of an account's doors (see
+    app/totp_api.py's own module docstring, "which doors this
+    guards"), not a door itself -- an account cannot be signed into
+    with a TOTP code alone, only a password or magic-link sign-in that
+    TOTP then challenges. Disabling it never reduces how many doors an
+    account has; it only removes a lock sitting in front of whichever
+    doors already exist. There is nothing here for a last-door
+    refusal to protect against, unlike the two routes below.
+    """
+    guard = await _role_guard(request, return_role=True)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session, caller_role = guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    raw_account_id = body.get("account_id") if isinstance(body, dict) else None
+    confirm = body.get("display_name") if isinstance(body, dict) else None
+
+    now = int(time.time())
+    async with WriteSession() as conn:
+        account_id, _target_role, err = _resolve_recovery_target(
+            conn, account_id=raw_account_id, confirm=confirm, caller_role=caller_role,
+            action_phrase="DISABLE TWO-FACTOR",
+            guard_verb="disable two-factor authentication on",
+        )
+        if err is not None:
+            return err
+
+        totp_row = conn.execute(
+            "SELECT 1 FROM account_totp WHERE account_id = ? AND activated_at IS NOT NULL",
+            (account_id,),
+        ).fetchone()
+        if totp_row is None:
+            return JSONResponse(
+                {"error": "two-factor authentication is not enabled on this account"},
+                status_code=404,
+            )
+
+        recovery_codes_cleared = conn.execute(
+            "DELETE FROM account_totp_recovery_code WHERE account_id = ?", (account_id,)
+        ).rowcount
+        conn.execute("DELETE FROM account_totp WHERE account_id = ?", (account_id,))
+        conn.execute(
+            "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+            "VALUES (?, 'totp_disabled', 'operator recovery', 'operator', ?)",
+            (account_id, now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="account_disable_totp",
+            detail=f"account_id={account_id} recovery_codes_cleared={recovery_codes_cleared}",
+            now=now,
+        )
+
+    log.info(
+        "admin: disabled two-factor authentication on account %d (%d recovery code(s) cleared)",
+        account_id, recovery_codes_cleared,
+    )
+    return {"ok": True, "account_id": account_id, "recovery_codes_cleared": recovery_codes_cleared}
+
+
+@router.post("/api/admin/account/password/clear")
+async def admin_account_clear_password(request: Request):
+    """Remove the password on someone ELSE's account -- so the holder
+    can set a fresh one themselves the next time they sign in through
+    some OTHER door (see this section's own module-level comment).
+    This does not, by itself, sign anyone in: it only clears
+    account_password, the exact same row DELETE /api/account/password
+    removes for the caller's own account (see that route's own
+    docstring). Once cleared, POST /api/account/password's own "set
+    the FIRST password" branch applies the next time the account holder
+    is signed in (through whichever door still works) and visits their
+    account page -- no current_password is asked for, because there is
+    none any more.
+
+    ---- last-door: KEPT, same guard DELETE /api/account/password uses -
+
+    _door_counts() decides this the identical way that route already
+    does: refuse if removing the password would leave the account with
+    zero doors. This is NOT a case for inverting the self-service
+    guard the way the prompt asks each route to consider on its own
+    merits -- clearing a password does not, by itself, hand the
+    account holder anything to sign in WITH; the whole recovery
+    depends on some OTHER door already working, which is exactly what
+    this guard is checking for. An account whose ONLY door is its
+    password cannot be helped by this route at all: clearing that
+    password would not restore access (nothing here can ever SET a new
+    one -- see this section's own "clear, never set" comment), it
+    would only trade "locked out, but the row still exists" for
+    "permanently unreachable by anyone, including a future operator,
+    since nothing in this recovery surface can ever add a door back."
+    That is worse than doing nothing, so it stays refused -- the
+    self-service guard's protection and this route's own reasoning for
+    keeping it happen to reach the same number, but for different
+    reasons: self-service refuses to protect the CALLER from locking
+    themselves out by mistake; this route refuses because there is
+    nothing on the other side of the door being closed for the
+    operator to hand back.
+    """
+    guard = await _role_guard(request, return_role=True)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session, caller_role = guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    raw_account_id = body.get("account_id") if isinstance(body, dict) else None
+    confirm = body.get("display_name") if isinstance(body, dict) else None
+
+    now = int(time.time())
+    async with WriteSession() as conn:
+        account_id, _target_role, err = _resolve_recovery_target(
+            conn, account_id=raw_account_id, confirm=confirm, caller_role=caller_role,
+            action_phrase="CLEAR PASSWORD",
+            guard_verb="clear the password on",
+        )
+        if err is not None:
+            return err
+
+        if not _has_password(conn, account_id):
+            return JSONResponse({"error": "no password is set on this account"}, status_code=404)
+
+        per_provider, _ = _door_counts(conn, account_id)
+        remaining = sum(per_provider.values())  # the password itself is the door being removed
+        if remaining < 1:
+            return JSONResponse(
+                {
+                    "error": "clearing this password would leave the account with no way "
+                    "to sign in, and nothing here can set a new one — see this "
+                    "surface's own clear-never-set rule"
+                },
+                status_code=409,
+            )
+
+        conn.execute("DELETE FROM account_password WHERE account_id = ?", (account_id,))
+        conn.execute(
+            "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+            "VALUES (?, 'password_removed', 'operator recovery', 'operator', ?)",
+            (account_id, now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="account_clear_password",
+            detail=f"account_id={account_id} remaining_doors={remaining}", now=now,
+        )
+
+    log.info("admin: cleared password on account %d (%d door(s) remain)", account_id, remaining)
+    return {"ok": True, "account_id": account_id, "remaining_doors": remaining}
+
+
+@router.post("/api/admin/account/identity/remove")
+async def admin_account_remove_identity(request: Request):
+    """Disconnect one sign-in provider from someone ELSE's account --
+    for a provider the holder has lost access to (an old Google account
+    that no longer exists), or one linked in error (a misclick, a
+    shared device signed into the wrong account). Reuses the exact
+    removal DELETE /api/account/identity/{provider} performs for the
+    caller's own account (see that route's own docstring): every
+    account_identity row for (account_id, provider) at once, never a
+    single (provider, subject) row -- "disconnect google" is the only
+    granularity this data model supports, same reasoning there.
+
+    `provider` is read from the request body (not a path parameter,
+    unlike the self-service route) -- every other target-identifying
+    field in this file's admin routes lives in the JSON body, not the
+    URL, and this route follows that rather than being the one
+    exception.
+
+    ---- last-door: KEPT, same guard DELETE /api/account/identity uses -
+
+    Same reasoning as POST /api/admin/account/password/clear just
+    above, applied to an identity instead of a password: an identity
+    IS a door (unlike TOTP), so removing the account's LAST one would
+    leave it with zero ways to ever sign in again, and nothing in this
+    recovery surface can add a replacement door -- only clear existing
+    ones. Refusing that is not the self-service guard copied out of
+    caution, it is the only choice that leaves the account recoverable
+    by a LATER action (linking a fresh provider once signed in through
+    whatever door remains) instead of permanently orphaning it.
+    """
+    guard = await _role_guard(request, return_role=True)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session, caller_role = guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    raw_account_id = body.get("account_id") if isinstance(body, dict) else None
+    confirm = body.get("display_name") if isinstance(body, dict) else None
+    provider = body.get("provider") if isinstance(body, dict) else None
+    if not isinstance(provider, str) or not provider:
+        return JSONResponse({"error": "provider is required"}, status_code=400)
+
+    now = int(time.time())
+    async with WriteSession() as conn:
+        account_id, _target_role, err = _resolve_recovery_target(
+            conn, account_id=raw_account_id, confirm=confirm, caller_role=caller_role,
+            action_phrase="REMOVE SIGN-IN",
+            guard_verb="remove a sign-in method from",
+        )
+        if err is not None:
+            return err
+
+        per_provider, has_password = _door_counts(conn, account_id)
+        removing = per_provider.get(provider, 0)
+        if removing == 0:
+            return JSONResponse(
+                {"error": "that provider is not linked to this account"}, status_code=404
+            )
+
+        total_doors = sum(per_provider.values()) + (1 if has_password else 0)
+        remaining = total_doors - removing
+        if remaining < 1:
+            return JSONResponse(
+                {
+                    "error": "removing this would leave the account with no way to sign "
+                    "in, and nothing here can add a replacement — see this surface's "
+                    "own clear-never-set rule"
+                },
+                status_code=409,
+            )
+
+        conn.execute(
+            "DELETE FROM account_identity WHERE account_id = ? AND provider = ?",
+            (account_id, provider),
+        )
+        conn.execute(
+            "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+            "VALUES (?, 'identity_unlinked', ?, 'operator', ?)",
+            (account_id, f"provider={provider}", now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="account_remove_identity",
+            detail=f"account_id={account_id} provider={provider} remaining_doors={remaining}",
+            now=now,
+        )
+
+    log.info(
+        "admin: removed %s identity from account %d (%d door(s) remain)",
+        provider, account_id, remaining,
+    )
+    return {"ok": True, "account_id": account_id, "provider": provider, "remaining_doors": remaining}
 
 
 # ---- public API clients ------------------------------------------------
