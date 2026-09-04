@@ -1333,17 +1333,19 @@ async function loadRoles() {
     }
     d.roles.forEach((r) => {
       const row = el('div', { className: 'adm-row' });
-      row.appendChild(el('span', { className: 'adm-mono', text: 'account ' + r.account_id }));
+      const who = r.display_name || ('account ' + r.account_id + ' (no player yet)');
+      row.appendChild(el('span', { text: who }));
+      row.appendChild(el('span', { className: 'adm-mono', text: 'id ' + r.account_id }));
       row.appendChild(el('span', {
         className: 'adm-badge' + (r.role === 'operator' ? ' adm-badge-ok' : ''),
         text: r.role,
       }));
       row.appendChild(btn('Revoke', 'adm-btn-danger', async (b) => {
-        if (!window.confirm('Revoke the ' + r.role + ' role from account ' + r.account_id + '?')) return;
+        if (!window.confirm('Revoke the ' + r.role + ' role from ' + who + '?')) return;
         b.disabled = true;
         try {
           await post('/api/admin/roles/revoke', { account_id: r.account_id });
-          setStatus('Revoked ' + r.role + ' from account ' + r.account_id, false);
+          setStatus('Revoked ' + r.role + ' from ' + who, false);
           await loadRoles();
         } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
       }));

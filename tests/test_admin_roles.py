@@ -431,6 +431,49 @@ def test_operator_can_list_roles(client, db_path):
     assert ids == {operator_id: "operator", admin_id: "admin"}
 
 
+def _link_player(db_path: str, account_id: int, display_name: str) -> None:
+    """Insert a player row and link it to account_id via the same
+    player.account_id column /api/admin/roles now LEFT JOINs on (see
+    that column's UNIQUE index, idx_player_account, in app/db.py's
+    MIGRATIONS).
+    """
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player(display_name, team, created_at, account_id) "
+        "VALUES (?, 'RED', ?, ?)",
+        (display_name, NOW, account_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_list_roles_includes_display_name_for_a_linked_player(client, db_path):
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    _link_player(db_path, operator_id, "Malice")
+    _login_as(client, operator_id)
+
+    resp = client.get("/api/admin/roles")
+
+    assert resp.status_code == 200
+    rows = {r["account_id"]: r["display_name"] for r in resp.json()["roles"]}
+    assert rows == {operator_id: "Malice"}
+
+
+def test_list_roles_still_includes_a_role_holder_with_no_linked_player(client, db_path):
+    # The LEFT JOIN must not drop an account holding a role just
+    # because it has no player row -- that account still needs to show
+    # up here so its role can be seen and revoked.
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
+    admin_id = _make_account(db_path, role="admin")  # deliberately unlinked
+    _login_as(client, operator_id)
+
+    resp = client.get("/api/admin/roles")
+
+    assert resp.status_code == 200
+    rows = {r["account_id"]: r["display_name"] for r in resp.json()["roles"]}
+    assert rows == {operator_id: None, admin_id: None}
+
+
 def test_grant_refuses_to_silently_demote_an_operator(client, db_path):
     operator_id = _make_account(db_path, role="operator", totp_active=True)
     other_operator_id = _make_account(db_path, role="operator")

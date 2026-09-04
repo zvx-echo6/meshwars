@@ -1608,6 +1608,14 @@ async def admin_roles_list(request: Request) -> JSONResponse:
     module's own docstring for why admin can never reach this (or
     either of the two mutating roles routes below), regardless of what
     else it can do.
+
+    LEFT JOINs to `player` (on player.account_id = account.account_id,
+    which app/db.py keeps UNIQUE -- at most one player per account) to
+    include the holder's display_name for the UI. Must stay a LEFT
+    JOIN, never an inner join: an account can hold a role with no
+    player linked at all, and this route is the only place a role can
+    be revoked, so an inner join would silently drop that account from
+    the list -- a role with no way to see or revoke it.
     """
     guard = await _role_guard(request, need="operator")
     if isinstance(guard, JSONResponse):
@@ -1616,12 +1624,23 @@ async def admin_roles_list(request: Request) -> JSONResponse:
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT account_id, role FROM account WHERE role IS NOT NULL ORDER BY account_id"
+            "SELECT account.account_id, account.role, player.display_name "
+            "FROM account LEFT JOIN player ON player.account_id = account.account_id "
+            "WHERE account.role IS NOT NULL ORDER BY account.account_id"
         ).fetchall()
     finally:
         conn.close()
     return JSONResponse(
-        {"roles": [{"account_id": r["account_id"], "role": r["role"]} for r in rows]},
+        {
+            "roles": [
+                {
+                    "account_id": r["account_id"],
+                    "role": r["role"],
+                    "display_name": r["display_name"],
+                }
+                for r in rows
+            ]
+        },
         status_code=200,
     )
 
