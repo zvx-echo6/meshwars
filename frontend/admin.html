@@ -10,25 +10,27 @@
   <meta name="robots" content="noindex, nofollow" />
   <link rel="icon" href="/static/assets/favicon/favicon.ico" sizes="any">
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260902-3" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260904-1" />
 </head>
 <body>
 
-  <!-- Sign in. A view of its own rather than a field wedged above the
-       panels: until the token is accepted there is nothing to show, and
-       a page full of empty sections behind a text box does not tell
-       anyone that. -->
+  <!-- Not signed in, or signed in but no role. A view of its own rather
+       than a field wedged above the panels: until GET /api/account says
+       this session holds a role there is nothing to show, and a page
+       full of empty sections behind a message does not tell anyone
+       that. There is no token box here any more -- see admin.js's
+       checkAccess()/frontend/admin.js's own docstring: the admin token
+       is claim-only now (app/admin_api.py), and the door into this
+       panel is the same session cookie the account page already set. -->
   <div id="login" class="adm-login">
-    <form class="adm-login-card" id="login-form">
+    <div class="adm-login-card">
       <div class="adm-login-crest" role="img" aria-label="MeshWars crest"></div>
       <h1 class="adm-login-title">MeshWars Admin</h1>
-      <p class="adm-login-sub">Operator access</p>
-      <label class="adm-login-label" for="token-input">Admin token</label>
-      <input type="password" id="token-input" autocomplete="off" autofocus />
-      <button type="submit" id="login-btn" class="adm-btn adm-btn-wide">Sign in</button>
+      <p class="adm-login-sub">Admin / operator access</p>
       <p class="adm-login-err" id="login-err"></p>
-      <p class="adm-login-note">Held in this page for this session only &mdash; never stored, never sent anywhere but here.</p>
-    </form>
+      <a href="/account" class="adm-btn adm-btn-wide">Go to your account</a>
+      <p class="adm-login-note">Sign in, or claim a role, from the account page &mdash; this page never asks for a token.</p>
+    </div>
   </div>
 
   <!-- The panel proper. Hidden until sign in succeeds. -->
@@ -37,6 +39,7 @@
     <header class="adm-topbar">
       <span class="adm-topbar-crest" role="img" aria-label="MeshWars crest"></span>
       <span class="adm-topbar-title">MeshWars Admin</span>
+      <span class="adm-badge" id="topbar-role"></span>
       <span class="adm-topbar-status" id="status"></span>
       <button type="button" id="refresh-btn" class="adm-btn adm-btn-quiet">Refresh</button>
       <button type="button" id="signout-btn" class="adm-btn adm-btn-quiet">Sign out</button>
@@ -58,6 +61,11 @@
         <button type="button" class="adm-nav-item" data-section="places">Places</button>
         <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
         <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
+        <!-- Hidden by default (admin.js's showApp()) -- only an
+             operator can grant/revoke admin, so only an operator ever
+             sees this at all; an admin account never even gets a
+             control that would just 401. -->
+        <button type="button" class="adm-nav-item" data-section="roles" id="nav-roles-item" hidden>Roles</button>
       </nav>
 
       <main class="adm-main">
@@ -308,10 +316,22 @@
           <div id="apikeys"></div>
         </section>
 
+        <section class="adm-section" data-section="roles" hidden>
+          <h2 class="adm-h2">Roles</h2>
+          <p class="adm-hint">Every account currently holding a role. Admins cannot grant, revoke, demote, or delete admin or operator &mdash; this whole section, and every route behind it, is reachable by an operator account only. Becoming an operator has exactly one door: claim it on the account page with the admin token and an active two-factor code. Granting from here only ever mints the admin role.</p>
+          <div id="roles-list"></div>
+          <h3 class="adm-h3">Grant admin</h3>
+          <div class="adm-form">
+            <input type="number" id="rl-account-id" min="1" step="1" autocomplete="off" placeholder="account id" />
+            <button type="button" id="rl-grant" class="adm-btn">Grant admin</button>
+          </div>
+          <div id="rl-grant-result" class="adm-result"></div>
+        </section>
+
       </main>
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260903-1"></script>
+  <script src="/static/admin.js?v=20260904-1"></script>
 </body>
 </html>

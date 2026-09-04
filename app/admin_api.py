@@ -1,18 +1,66 @@
-"""FastAPI router for the minimal admin door: revoke keys, disable
-players.
+"""FastAPI router for the admin door: revoke keys, disable players, run
+the roles layer everything else here now depends on.
 
-There is no other authentication anywhere in this application -- this
-module and its token are the whole of it, so every route here is
-deliberately small and disabled outright unless `settings.admin_token`
-is configured (empty means off, never open, same reasoning as
-`join_invite_code` in app/join_api.py).
+---- roles, not a shared secret (privacy-hardening pass) ------------------
 
-`GET /admin` serves the page shell itself unauthenticated (beyond the
-enabled/disabled check) -- it is just a login box with no player data
-in it, the same way any other login page needs to be reachable before
-you're logged in. Every route that actually reads or changes data
-(`/api/admin/*`) requires the token in the `X-Admin-Token` header,
-compared with `secrets.compare_digest` so a wrong guess can't be timed.
+Every admin/operator action used to be authenticated by one shared
+secret -- an `X-Admin-Token` header, compared with
+`secrets.compare_digest` against `settings.admin_token`. That made every
+action anonymous: the database could say a key was revoked, never WHO
+revoked it. This module now uses three tiers, held on the ACCOUNT (never
+on a player, never on an API key -- `account.role`, see that column's
+own MIGRATIONS comment in app/db.py):
+
+  - operator: everything an admin can do, plus granting and revoking
+    the admin role (POST/DELETE-shaped below as
+    /api/admin/roles/grant and /api/admin/roles/revoke).
+  - admin: every route in this file and app/admin_ops.py below the
+    roles section itself. Admins cannot admin admins -- an admin
+    account can never grant, revoke, or otherwise act on ANY account's
+    role, including its own, full stop. That boundary is enforced by
+    /api/admin/roles/* requiring the OPERATOR rank specifically (see
+    _role_guard's `need` parameter) -- there is no route an admin can
+    reach that touches account.role at all, so there is nothing to
+    turn around.
+  - player: no admin surface. Everything in this module and
+    app/admin_ops.py 404s or 401s the same as an anonymous caller.
+
+_role_guard() (below) is what every route in both files now opens
+with, in place of the old _api_guard() token check -- see its own
+docstring for the 404-vs-401 contract, which is unchanged from before:
+404 when the admin surface does not exist on this deployment at all,
+401 when it exists but this caller cannot use it.
+
+`settings.admin_token` still exists, but its ONLY remaining power is
+POST /api/admin/roles/claim: a signed-in account with active two-factor
+authentication submits the token and, on a match, gains the operator
+role. See that route's own docstring for the full reasoning (why this
+is a real login-shaped event rather than a bypass, why TOTP is
+required, why several accounts may claim with the same token, and how
+this avoids ever locking every operator out). If the header still
+authenticated ordinary requests, none of the above would matter --
+anyone holding the token would bypass accounts, roles, and the audit
+log entirely, which is exactly the bypass this whole pass exists to
+close. There is no other route anywhere that reads
+`request.headers.get("X-Admin-Token")` or its equivalent; grep for it
+if you are ever unsure.
+
+Every mutating route in this file and app/admin_ops.py calls
+_log_admin_action() (below) right alongside its own write -- see
+admin_action_log's own comment in app/db.py for the audit shape this
+implements and why it is a new table rather than a repurposed
+account_link_event.
+
+`GET /admin` serves the page shell itself with only the same
+enabled/disabled check every other route here uses (see
+_admin_surface_enabled()) -- it is just a shell with no player data in
+it, the same way any other app page needs to be reachable before the
+browser's own JS has decided whether the signed-in account can see
+anything inside it. The panel's own entry point lives on the account
+page now (a button, shown only to a role-holding account -- see
+frontend/account.js) rather than a token box on this page; the page
+itself is unauthenticated the same "reachable, but nothing behind it
+without a role" way a login page always is.
 """
 from __future__ import annotations
 
@@ -24,16 +72,17 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from .auth import new_rate_limit_bucket
+from .client_ip import get_client_ip
 from .config import settings
 from .db import WriteSession, connect
 from .mc_ingest import hash_secret
 from .node_ref import normalize_node_ref, normalize_public_key
+from .sessions import SessionPrincipal, optional_session
 
 log = logging.getLogger("admin_api")
 
 router = APIRouter()
-
-_TOKEN_HEADER = "X-Admin-Token"
 
 # A key-hash prefix shorter than this is too likely to match more than
 # one key by chance once there are enough players -- refuse it outright
@@ -60,18 +109,120 @@ def _validate_team(raw: object) -> tuple[str | None, str | None]:
     return team, None
 
 
-def _api_guard(request: Request) -> JSONResponse | None:
-    """Returns a response to short-circuit an /api/admin/* route with,
-    or None to let the route continue. 404 when the admin door is off
-    entirely (indistinguishable from the route not existing); 401 when
-    it's on but the caller's token is missing or wrong.
+
+# Rank order for the two roles that can hold anything -- higher can do
+# everything lower can, per the module docstring's "operator >
+# admin > player" line. Deliberately does not include "player" at all:
+# a NULL role is refused outright before this table is ever consulted
+# (see _role_guard below), never looked up in it and found absent.
+_ROLE_RANK = {"admin": 1, "operator": 2}
+
+
+def _admin_surface_enabled(conn) -> bool:
+    """Whether the admin/operator surface exists AT ALL on this
+    deployment -- the same "empty means off, never open" contract
+    settings.admin_token's own comment has always described, now
+    extended to also stay open once an operator has actually claimed
+    the role.
+
+    True when EITHER settings.admin_token is set (so POST
+    /api/admin/roles/claim itself is reachable -- see that route's own
+    docstring for why it cannot require an existing role) OR at least
+    one account already holds a role. This is the ordering that avoids
+    ever locking every operator out: a fresh deployment with the token
+    unset and nobody holding a role has genuinely nothing here to
+    reach, and 404s exactly like before this pass. Setting the token
+    turns claiming on. Once the first operator claims, the surface
+    keeps working even if the token is later cleared -- a reasonable
+    thing to do once bootstrap is done and minting a brand-new operator
+    isn't needed for a while -- because an operator already exists to
+    keep using it. The one thing that can never happen is the token
+    being unset AND nobody holding a role AND the surface still being
+    reachable: there would be no way back in at all.
     """
-    if not settings.admin_token:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    supplied = request.headers.get(_TOKEN_HEADER, "")
-    if not supplied or not secrets.compare_digest(supplied, settings.admin_token):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return None
+    if settings.admin_token:
+        return True
+    return conn.execute(
+        "SELECT 1 FROM account WHERE role IS NOT NULL LIMIT 1"
+    ).fetchone() is not None
+
+
+async def _role_guard(request: Request, *, need: str = "admin") -> SessionPrincipal | JSONResponse:
+    """Replaces the old shared-secret _api_guard() for every route in
+    this file and app/admin_ops.py except POST /api/admin/roles/claim
+    itself (which cannot require a role -- see its own docstring).
+    Returns the caller's SessionPrincipal on success, so a mutating
+    route can pass session.account_id straight into
+    _log_admin_action(); returns a JSONResponse to hand back as-is on
+    any failure. Callers use the same shape the old guard already
+    established:
+
+        guard = await _role_guard(request)
+        if isinstance(guard, JSONResponse):
+            return guard
+        session = guard
+
+    404 when _admin_surface_enabled() says the surface does not exist
+    on this deployment at all -- indistinguishable from the route not
+    existing, same contract the old token guard already used. 401 for
+    every other failure (no session cookie, an expired/revoked one, a
+    real account with no role, or a role that outranks-fails `need`) --
+    deliberately the SAME status and body for all of those, never a
+    403 or a distinct message for "you have a role but not enough of
+    one": telling a caller which part was wrong (missing session vs.
+    insufficient role) would hand an attacker free information about
+    which accounts exist and what they hold, the same "don't reveal
+    which part failed" reasoning app/sessions.py's require_session()
+    and app/auth.py's require_api_key_principal() already apply to
+    their own failure modes.
+
+    `need` is "admin" (the default -- every route below the roles
+    section itself) or "operator" (the three roles routes: grant,
+    revoke, and the roster listing). optional_session(), not
+    require_session(): this function must never RAISE on a bad
+    session, it has its own 404-vs-401 decision to make first (whether
+    the surface exists at all), which a raised HTTPException would
+    short-circuit past.
+    """
+    conn = connect()
+    try:
+        if not _admin_surface_enabled(conn):
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        session = await optional_session(request)
+        if session is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+        row = conn.execute(
+            "SELECT role FROM account WHERE account_id = ?", (session.account_id,)
+        ).fetchone()
+        role = row["role"] if row is not None else None
+        if role is None or _ROLE_RANK.get(role, 0) < _ROLE_RANK[need]:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return session
+    finally:
+        conn.close()
+
+
+def _log_admin_action(
+    conn, *, actor_account_id: int, action: str, detail: str | None = None, now: int | None = None
+) -> None:
+    """Writes one admin_action_log row -- see that table's own comment
+    in app/db.py for the full shape and why it exists. Called at the
+    end of every mutating route in this file and app/admin_ops.py,
+    using the SAME conn/transaction the route's own write already has
+    open, so the audit row commits or rolls back atomically with the
+    action it describes -- never a separate best-effort write after
+    the fact that could succeed or fail independently of what it is
+    supposed to be recording.
+    """
+    if now is None:
+        now = int(time.time())
+    conn.execute(
+        "INSERT INTO admin_action_log(actor_account_id, action, detail, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (actor_account_id, action, detail, now),
+    )
 
 
 # ---- page ---------------------------------------------------------------
@@ -79,7 +230,12 @@ def _api_guard(request: Request) -> JSONResponse | None:
 
 @router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 async def admin_page() -> HTMLResponse:
-    if not settings.admin_token:
+    conn = connect()
+    try:
+        enabled = _admin_surface_enabled(conn)
+    finally:
+        conn.close()
+    if not enabled:
         return HTMLResponse("<h1>meshwars</h1><p>not found</p>", status_code=404)
     path = Path(__file__).resolve().parent.parent / "frontend" / "admin.html"
     if not path.exists():
@@ -92,9 +248,10 @@ async def admin_page() -> HTMLResponse:
 
 @router.get("/api/admin/players")
 async def admin_players(request: Request):
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     conn = connect()
     try:
@@ -153,9 +310,10 @@ async def admin_players(request: Request):
 
 @router.post("/api/admin/revoke")
 async def admin_revoke(request: Request):
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -194,6 +352,11 @@ async def admin_revoke(request: Request):
         # record of every key a player has ever held survives.
         conn.execute(
             "UPDATE api_key SET revoked_at = ? WHERE key_hash = ?", (now, match["key_hash"])
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="revoke_key",
+            detail=f"key_hash_prefix={match['key_hash'][:8]} player_id={match['player_id']}",
+            now=now,
         )
         conn.execute("COMMIT")
     except Exception:
@@ -277,21 +440,22 @@ async def admin_node_add(request: Request):
     registered" without touching keys or asking the player for
     anything. This does exactly what the player-facing POST /api/nodes
     does (app/nodes_api.py's add_node()) -- same normalize_node_ref(),
-    same check-then-act conflict check -- just authenticated by the
-    admin token instead of a player's key.
+    same check-then-act conflict check -- just authenticated by an
+    admin/operator role instead of a player's key.
 
     NOT destructive, unlike remove right below: it only ever creates a
     binding nobody held before, or confirms one this same player
     already has. A wrong player_id here binds a real radio to the
     wrong (but real) player -- visible immediately in the admin list
     and reversible with the remove route below -- it never takes
-    anything away from anyone. So this route gets only _api_guard(),
+    anything away from anyone. So this route gets only _role_guard(),
     not the player_id + display_name confirmation guard remove/delete/
     reissue require.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -366,6 +530,10 @@ async def admin_node_add(request: Request):
             "VALUES (?, ?, ?, ?, ?)",
             (protocol, node_ref, player_id, now, public_key),
         )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="node_add",
+            detail=f"player_id={player_id} {protocol}:{node_ref}", now=now,
+        )
         conn.execute("COMMIT")
         radios = _player_radios(conn, player_id)
     except Exception:
@@ -394,9 +562,10 @@ async def admin_node_remove(request: Request):
     for the same reason: a stale or mistyped player_id here would take
     a radio away from someone who never asked for that.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -451,6 +620,10 @@ async def admin_node_remove(request: Request):
             (protocol, node_ref, player_id),
         )
         removed = cur.rowcount > 0
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="node_remove",
+            detail=f"player_id={player_id} ({display_name}) {protocol}:{node_ref} removed={removed}",
+        )
         conn.execute("COMMIT")
         radios = _player_radios(conn, player_id)
     except Exception:
@@ -469,9 +642,10 @@ async def admin_node_remove(request: Request):
 
 
 async def _set_player_disabled(request: Request, disable: bool):
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -493,6 +667,11 @@ async def _set_player_disabled(request: Request, disable: bool):
             return JSONResponse({"error": "player not found"}, status_code=404)
         conn.execute(
             "UPDATE player SET disabled_at = ? WHERE player_id = ?", (now, player_id)
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id,
+            action="player_disable" if disable else "player_enable",
+            detail=f"player_id={player_id}",
         )
         conn.execute("COMMIT")
     except Exception:
@@ -538,9 +717,10 @@ async def admin_player_delete(request: Request):
     runs in one transaction so a failure partway through cannot leave a
     partial delete behind.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -631,6 +811,11 @@ async def admin_player_delete(request: Request):
         c = conn.execute("DELETE FROM player WHERE player_id = ?", (player_id,))
         counts["player"] = c.rowcount
 
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="player_delete",
+            detail=f"player_id={player_id} ({display_name})",
+        )
+
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -681,9 +866,10 @@ async def admin_player_issue_key(request: Request):
     same light guard disable/enable use (player_id only), not the
     heavier one delete/reissue need.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -708,6 +894,14 @@ async def admin_player_issue_key(request: Request):
         conn.execute(
             "INSERT INTO api_key(key_hash, player_id, issued_at) VALUES (?, ?, ?)",
             (hash_secret(raw_key), player_id, now),
+        )
+        # Never the raw key itself, same reasoning the response body's
+        # own "key" field is a one-time-only value never persisted --
+        # the audit row only needs to say an extra key was minted and
+        # for whom, not what it is.
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="issue_key",
+            detail=f"player_id={player_id}", now=now,
         )
         conn.execute("COMMIT")
         display_name = row["display_name"]
@@ -764,9 +958,10 @@ async def admin_player_reissue(request: Request):
     same protection against a stale/mistyped player_id doing this to
     the wrong person.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -812,6 +1007,11 @@ async def admin_player_reissue(request: Request):
             (hash_secret(raw_key), player_id, now),
         )
 
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="reissue_key",
+            detail=f"player_id={player_id} ({display_name}) revoked={revoked_count}", now=now,
+        )
+
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -846,7 +1046,13 @@ async def admin_player_reissue(request: Request):
 
 @router.post("/api/admin/player/unlink-account")
 async def admin_player_unlink_account(request: Request):
-    """Release a player's account link, operator-only.
+    """Release a player's account link -- an ordinary admin action
+    (any account holding the admin role or above), same as every other
+    route in this file; "operator" below refers only to
+    account_link_event.actor's fixed 'user'|'operator' vocabulary
+    (see that column's own comment in app/db.py), not this app's
+    admin/operator role names, which predate that column by a long
+    way.
 
     This is the ONLY place in the whole application that can clear
     player.account_id -- see app/account_api.py's link_key() for how it
@@ -884,9 +1090,10 @@ async def admin_player_unlink_account(request: Request):
     every operator-initiated write in this app, not the player-facing
     'user' link_key() itself writes.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -938,6 +1145,10 @@ async def admin_player_unlink_account(request: Request):
             "VALUES (?, 'player_unlinked', ?, 'operator', ?)",
             (account_id, f"player_id={player_id}", now),
         )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="unlink_account",
+            detail=f"player_id={player_id} ({display_name}) account_id={account_id}", now=now,
+        )
 
     log.info(
         "admin: released player %d (%s) from account %d",
@@ -968,9 +1179,10 @@ async def admin_api_clients(request: Request):
     characters of the hash are shown -- enough to tell two rows apart
     and to name one in a revoke, and useless to anyone who sees the
     screen."""
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     conn = connect()
     try:
@@ -1008,9 +1220,10 @@ async def admin_api_client_create(request: Request):
     "freq51 discord bot" rather than a twelve-character prefix nobody
     can place. It is required for that reason.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -1031,6 +1244,10 @@ async def admin_api_client_create(request: Request):
             "INSERT INTO api_client(key_hash, label, created_at) VALUES (?, ?, ?)",
             (hash_secret(raw), label, now),
         )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="api_client_create",
+            detail=f"label={label!r}", now=now,
+        )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -1049,9 +1266,10 @@ async def admin_api_client_revoke(request: Request):
     key that vanishes leaves an operator unable to answer "what was
     that and did I already deal with it".
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -1068,6 +1286,11 @@ async def admin_api_client_revoke(request: Request):
         cur = conn.execute(
             "UPDATE api_client SET revoked_at = ? "
             " WHERE key_hash LIKE ? AND revoked_at IS NULL", (now, prefix + "%"))
+        if cur.rowcount:
+            _log_admin_action(
+                conn, actor_account_id=session.account_id, action="api_client_revoke",
+                detail=f"key_hash_prefix={prefix} revoked={cur.rowcount}", now=now,
+            )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -1096,9 +1319,10 @@ async def admin_set_team(request: Request):
     the typed-name confirmation the destructive routes below require --
     a team change is fully reversible by switching back.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     try:
         body = await request.json()
@@ -1144,6 +1368,10 @@ async def admin_set_team(request: Request):
             "VALUES (?, ?, ?, ?, 'operator')",
             (player_id, player["team"], team, now),
         )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="player_team_set",
+            detail=f"player_id={player_id} {player['team']}->{team}", now=now,
+        )
 
         conn.execute("COMMIT")
     except Exception:
@@ -1154,3 +1382,311 @@ async def admin_set_team(request: Request):
 
     log.info("admin: set player %d team to %s", player_id, team)
     return JSONResponse({"player_id": player_id, "team": team, "changed": True}, status_code=200)
+
+
+# ---- roles: claim / grant / revoke --------------------------------------
+#
+# The whole point of this pass. Everything above this line is an
+# ordinary admin action, reachable by admin or operator alike; every
+# route below touches account.role itself, and is either reachable by
+# no role at all (claim -- there is nothing to require a role of yet)
+# or by operator alone (grant/revoke/list -- see _role_guard's `need`
+# parameter, and this module's own docstring for why admin can never
+# reach these three no matter what).
+
+# Address-keyed rate limit on the token comparison below -- without one
+# this is a straightforward token-guessing oracle, the same reasoning
+# app/account_api.py's _link_key_addr_limiter gives its own endpoint.
+# Independent instance, per app/auth.py's own "every call site owns its
+# budget" convention -- this is the single highest-value guessing
+# target this feature adds (a correct guess grants OPERATOR, not merely
+# a player), so it does not share link-key's budget.
+_claim_operator_addr_limiter = new_rate_limit_bucket()
+
+
+@router.post("/api/admin/roles/claim")
+async def admin_roles_claim(request: Request) -> JSONResponse:
+    """Claim the operator role onto the CALLER's own signed-in account.
+
+    This is the only remaining job settings.admin_token has -- see this
+    module's own docstring for the full before/after. The shape
+    deliberately mirrors app/account_api.py's own POST
+    /api/account/link-key: a signed-in account submits a secret, it is
+    compared in constant time, and on success something is attached to
+    THAT account and nothing else -- never a target account_id supplied
+    in the body, the same reasoning link_key() never accepts a
+    player_id: the only account a caller can grant something onto here
+    is the one whose session cookie is on the request.
+
+    ---- why this solves bootstrap ------------------------------------
+
+    Before this route runs for the first time, no account holds any
+    role -- there is no "existing operator" to ask, the same chicken-
+    and-egg problem every shared-secret-to-roles migration has. This
+    route is deliberately the ONE place in the whole roles surface that
+    does not require an existing role (see _role_guard's own docstring
+    for why every other roles route does): the token itself is what
+    proves the caller is allowed to become the first operator. Once
+    that happens, _admin_surface_enabled() (see this module's own
+    docstring) keeps the rest of the surface reachable even if the
+    token is later cleared.
+
+    ---- why several accounts may claim with the same token -----------
+
+    Nothing here marks the token "used" after a first claim. Matt's own
+    call: a second account claiming with the same token is exactly how
+    a second operator gets added, and exactly how recovery works if
+    every existing operator becomes unreachable (a lost password with
+    no other door, a departed volunteer) -- sign into a fresh account,
+    claim with the token, you are an operator again. Every claim is its
+    own account_link_event + admin_action_log row (below), so "who
+    claimed, and when" stays fully auditable even though the token
+    itself is reusable.
+
+    ---- why TOTP is required -------------------------------------------
+
+    Matt's explicit call: the highest-privilege role in this
+    application must never sit on a single factor. A password or a
+    magic-link email is one secret; if that is ever phished, guessed,
+    or leaked, this route would otherwise hand the operator role to
+    whoever holds it, on top of the admin_token itself already being a
+    second secret an attacker would need -- belt AND suspenders, not
+    either alone. 403, not 401: the caller IS who their session says
+    they are (a real signed-in account, a real correct token) and
+    nothing here is asking them to authenticate again -- they are
+    simply not eligible to hold this role until they enroll TOTP first
+    (app/totp_api.py's POST /api/account/totp/enroll +
+    .../activate), which is a distinct condition from "unauthorized."
+
+    ---- upgrading an existing admin -----------------------------------
+
+    An account that already holds the admin role (granted by an
+    operator, see POST /api/admin/roles/grant) may claim operator the
+    same way any other account does -- this is a legitimate elevation
+    path (the token AND active TOTP are still both required), not a
+    backdoor: it is exactly as hard to reach as becoming the very first
+    operator was.
+    """
+    if not settings.admin_token:
+        # Same "empty means off, never open" contract every other route
+        # in this file uses -- checked BEFORE anything about the caller
+        # (their session, their TOTP status) is even looked at, so a
+        # deployment with claiming turned off reveals nothing about
+        # whether the caller is signed in at all.
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    session = await optional_session(request)
+    if session is None:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    ip = get_client_ip(request)
+    if _claim_operator_addr_limiter.limited(
+        ip,
+        limit=settings.admin_claim_operator_rate_limit_attempts,
+        window=settings.admin_claim_operator_rate_limit_window_seconds,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    supplied = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(supplied, str) or not supplied:
+        return JSONResponse({"error": "token is required"}, status_code=400)
+    if not secrets.compare_digest(supplied, settings.admin_token):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    now = int(time.time())
+    async with WriteSession() as conn:
+        totp_row = conn.execute(
+            "SELECT 1 FROM account_totp WHERE account_id = ? AND activated_at IS NOT NULL",
+            (session.account_id,),
+        ).fetchone()
+        if totp_row is None:
+            return JSONResponse(
+                {
+                    "error": "two-factor authentication must be enabled on this account "
+                    "before it can claim the operator role"
+                },
+                status_code=403,
+            )
+
+        previous_role = conn.execute(
+            "SELECT role FROM account WHERE account_id = ?", (session.account_id,)
+        ).fetchone()["role"]
+
+        conn.execute(
+            "UPDATE account SET role = 'operator' WHERE account_id = ?", (session.account_id,)
+        )
+        conn.execute(
+            "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+            "VALUES (?, 'operator_claimed', ?, 'user', ?)",
+            (session.account_id, f"previous_role={previous_role or 'none'}", now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="claim_operator",
+            detail=f"previous_role={previous_role or 'none'}", now=now,
+        )
+
+    log.info("admin: account %d claimed the operator role", session.account_id)
+    return JSONResponse({"account_id": session.account_id, "role": "operator"}, status_code=200)
+
+
+@router.get("/api/admin/roles")
+async def admin_roles_list(request: Request) -> JSONResponse:
+    """Every account currently holding a role, operator-only -- see this
+    module's own docstring for why admin can never reach this (or
+    either of the two mutating roles routes below), regardless of what
+    else it can do.
+    """
+    guard = await _role_guard(request, need="operator")
+    if isinstance(guard, JSONResponse):
+        return guard
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT account_id, role FROM account WHERE role IS NOT NULL ORDER BY account_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return JSONResponse(
+        {"roles": [{"account_id": r["account_id"], "role": r["role"]} for r in rows]},
+        status_code=200,
+    )
+
+
+@router.post("/api/admin/roles/grant")
+async def admin_roles_grant(request: Request) -> JSONResponse:
+    """Grant the admin role to another account. Operator-only -- see
+    this module's own docstring for the one-directional boundary this
+    enforces: an admin account can never reach this route at all (a
+    plain 401, indistinguishable from having no role), so there is no
+    path by which an admin can grant itself or anyone else anything.
+
+    Deliberately grants ONLY 'admin', never 'operator' -- the request
+    body has no `role` field to choose one, on purpose. Becoming an
+    operator has exactly one door (POST /api/admin/roles/claim, the
+    token + active TOTP), never a grant from another operator -- see
+    this module's own docstring for why that is the bootstrap/recovery
+    path this whole design leans on, and keeping it the ONLY path means
+    an operator can never mint a second operator by fiat, only by
+    handing out the token (a decision Matt makes deliberately each time,
+    not a button in this panel).
+
+    Refuses (409) an account that already holds the operator role --
+    granting 'admin' onto it would silently DEMOTE an operator to
+    admin, which is not what "grant" means and must never happen by
+    accident. Revoke it first (POST /api/admin/roles/revoke) if a
+    demotion is actually intended. Granting admin to an account that
+    is already admin is a no-op success (changed: false), the same
+    "a retried request should just succeed" reasoning
+    admin_set_team()'s own already-on-that-team case gives above.
+    """
+    guard = await _role_guard(request, need="operator")
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    target_account_id = body.get("account_id") if isinstance(body, dict) else None
+    if not isinstance(target_account_id, int) or isinstance(target_account_id, bool):
+        return JSONResponse({"error": "account_id is required"}, status_code=400)
+
+    now = int(time.time())
+    async with WriteSession() as conn:
+        row = conn.execute(
+            "SELECT role FROM account WHERE account_id = ?", (target_account_id,)
+        ).fetchone()
+        if row is None:
+            return JSONResponse({"error": "account not found"}, status_code=404)
+
+        if row["role"] == "operator":
+            return JSONResponse(
+                {"error": "that account already holds the operator role -- "
+                          "revoke it first if a demotion to admin is intended"},
+                status_code=409,
+            )
+
+        if row["role"] == "admin":
+            return JSONResponse(
+                {"account_id": target_account_id, "role": "admin", "changed": False},
+                status_code=200,
+            )
+
+        conn.execute(
+            "UPDATE account SET role = 'admin' WHERE account_id = ?", (target_account_id,)
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="role_granted",
+            detail=f"account_id={target_account_id} role=admin", now=now,
+        )
+
+    log.info(
+        "admin: account %d granted admin to account %d", session.account_id, target_account_id
+    )
+    return JSONResponse(
+        {"account_id": target_account_id, "role": "admin", "changed": True}, status_code=200
+    )
+
+
+@router.post("/api/admin/roles/revoke")
+async def admin_roles_revoke(request: Request) -> JSONResponse:
+    """Revoke whatever role an account currently holds -- admin OR
+    operator, either direction. Operator-only, same one-directional
+    boundary as grant above: an admin account cannot reach this route
+    at all, so it can never revoke another admin's role, an operator's
+    role, or its own.
+
+    Unlike grant, there is no "already holds a higher role" refusal
+    here to worry about -- revoke only ever REMOVES a role, it can
+    never accidentally promote anyone, so an operator revoking another
+    operator (including, if they choose, their own account) is allowed
+    outright. Recovery does not depend on preventing that: as long as
+    settings.admin_token is still configured, POST
+    /api/admin/roles/claim can always mint a fresh operator on any
+    signed-in, TOTP-enabled account.
+    """
+    guard = await _role_guard(request, need="operator")
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    target_account_id = body.get("account_id") if isinstance(body, dict) else None
+    if not isinstance(target_account_id, int) or isinstance(target_account_id, bool):
+        return JSONResponse({"error": "account_id is required"}, status_code=400)
+
+    now = int(time.time())
+    async with WriteSession() as conn:
+        row = conn.execute(
+            "SELECT role FROM account WHERE account_id = ?", (target_account_id,)
+        ).fetchone()
+        if row is None:
+            return JSONResponse({"error": "account not found"}, status_code=404)
+        if row["role"] is None:
+            return JSONResponse({"error": "that account holds no role"}, status_code=409)
+
+        previous_role = row["role"]
+        conn.execute(
+            "UPDATE account SET role = NULL WHERE account_id = ?", (target_account_id,)
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="role_revoked",
+            detail=f"account_id={target_account_id} role={previous_role}", now=now,
+        )
+
+    log.info(
+        "admin: account %d revoked %s from account %d",
+        session.account_id, previous_role, target_account_id,
+    )
+    return JSONResponse(
+        {"account_id": target_account_id, "role": None, "revoked": True}, status_code=200
+    )

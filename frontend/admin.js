@@ -1,11 +1,18 @@
 'use strict';
 // =====================================================================
-// The operator panel. Split out of admin.html along with admin.css.
+// The operator/admin panel. Split out of admin.html along with
+// admin.css.
 //
-// The admin token lives in one variable for one page load. Never
-// localStorage, never sessionStorage, never a cookie, never logged --
-// this token can delete every player, and a browser that remembers it
-// is a browser that hands it to whoever opens the laptop next.
+// Session-authenticated, not a token typed into this page -- every
+// /api/admin/* call below rides the same mw_session cookie the rest of
+// the site already uses (app/sessions.py), sent automatically by the
+// browser on every same-origin fetch(), so there is nothing here to
+// hold in a variable or protect from a shared laptop the way the old
+// admin-token box had to. Whether this account can see anything at all
+// is decided server-side, on every single request, by app/admin_api.py's
+// _role_guard() -- this file's own gating (checkAccess() below) is a
+// UX nicety (don't show empty panels to someone who will just get 401s),
+// never the actual security boundary.
 //
 // Everything below is plain DOM. No templating and no innerHTML with
 // data in it: player names and labels are operator-supplied and
@@ -13,7 +20,7 @@
 // into running anything.
 // =====================================================================
 
-let adminToken = '';
+let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/account
 let allPlayers = [];
 let expanded = new Set();   // player ids left open across a refresh
 
@@ -74,12 +81,24 @@ function setStatus(msg, bad) {
 }
 
 async function api(path, options) {
-  const opts = options || {};
-  const headers = Object.assign({}, opts.headers || {}, { 'X-Admin-Token': adminToken });
-  const resp = await fetch(path, Object.assign({}, opts, { headers: headers }));
+  // No X-Admin-Token header anymore -- that door is retired (see
+  // app/admin_api.py's own module docstring). The session cookie rides
+  // along automatically on every same-origin fetch(); nothing here has
+  // to attach it.
+  const resp = await fetch(path, options || {});
   let body = null;
   try { body = await resp.json(); } catch (e) { /* no body */ }
-  if (!resp.ok) throw new Error((body && body.error) || ('HTTP ' + resp.status));
+  if (!resp.ok) {
+    if (resp.status === 401 || resp.status === 404) {
+      // The session expired, was revoked, or this account's role was
+      // pulled out from under it mid-visit (an operator can revoke
+      // their own role, or another operator's) -- reload straight into
+      // the access screen rather than leaving stale panels on screen
+      // that will now 401 on every action.
+      showNoAccess();
+    }
+    throw new Error((body && body.error) || ('HTTP ' + resp.status));
+  }
   return body;
 }
 
@@ -1282,11 +1301,79 @@ async function createApiClient(b) {
   b.disabled = false;
 }
 
+// ---- roles --------------------------------------------------------------
+//
+// Operator-only, both server-side (POST /api/admin/roles/* require the
+// operator role -- app/admin_api.py's _role_guard(need="operator")) and
+// here: the nav item and section are only ever shown when myRole ===
+// 'operator' (see showApp() below), so an admin account never even sees
+// a control that would just 401. Grant only ever mints 'admin' -- there
+// is no role picker here, because becoming an operator has exactly one
+// door (the claim flow, on the account page, token + two-factor), never
+// a grant from this panel -- see POST /api/admin/roles/grant's own
+// docstring for why that is deliberate, not a missing feature.
+
+async function loadRoles() {
+  if (myRole !== 'operator') return;
+  const host = document.getElementById('roles-list');
+  host.replaceChildren();
+  try {
+    const d = await api('/api/admin/roles');
+    if (!d.roles.length) {
+      host.appendChild(el('p', { className: 'adm-hint', text: 'No accounts hold a role.' }));
+      return;
+    }
+    d.roles.forEach((r) => {
+      const row = el('div', { className: 'adm-row' });
+      row.appendChild(el('span', { className: 'adm-mono', text: 'account ' + r.account_id }));
+      row.appendChild(el('span', {
+        className: 'adm-badge' + (r.role === 'operator' ? ' adm-badge-ok' : ''),
+        text: r.role,
+      }));
+      row.appendChild(btn('Revoke', 'adm-btn-danger', async (b) => {
+        if (!window.confirm('Revoke the ' + r.role + ' role from account ' + r.account_id + '?')) return;
+        b.disabled = true;
+        try {
+          await post('/api/admin/roles/revoke', { account_id: r.account_id });
+          setStatus('Revoked ' + r.role + ' from account ' + r.account_id, false);
+          await loadRoles();
+        } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+      }));
+      host.appendChild(row);
+    });
+  } catch (e) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'Could not load: ' + e.message }));
+  }
+}
+
+async function grantAdmin(b) {
+  const input = document.getElementById('rl-account-id');
+  const out = document.getElementById('rl-grant-result');
+  out.replaceChildren();
+  const accountId = parseInt(input.value, 10);
+  if (!accountId || accountId < 1) { out.textContent = 'Enter a valid account id.'; return; }
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/roles/grant', { account_id: accountId });
+    out.textContent = r.changed
+      ? ('Account ' + accountId + ' now holds the admin role.')
+      : ('Account ' + accountId + ' already held the admin role.');
+    input.value = '';
+    await loadRoles();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 // ---- session and navigation -------------------------------------------
 //
-// Signing in is a real step, not a text box above the content: the token
-// is checked against the server before anything is shown, so a wrong one
-// says so here instead of leaving six panels silently empty.
+// There is no sign-in FORM on this page any more -- the account page's
+// own session cookie is what authenticates every /api/admin/* call
+// (see api() above and app/admin_api.py's _role_guard()). checkAccess()
+// below just asks GET /api/account whether the signed-in session (if
+// any) holds a role, and shows either the panel or a plain "go sign in"
+// message -- a UX convenience, never the actual security boundary.
 
 function show(sectionName) {
   document.querySelectorAll('.adm-section').forEach((s) => {
@@ -1310,57 +1397,66 @@ function badge(id, value, bad) {
 }
 
 async function refreshAll() {
-  await Promise.all([
+  const loads = [
     loadPlayers(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
-  ]);
+  ];
+  if (myRole === 'operator') loads.push(loadRoles());
+  await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
 }
 
-async function signIn(e) {
-  if (e) e.preventDefault();
-  const input = document.getElementById('token-input');
-  const err = document.getElementById('login-err');
-  const btnEl = document.getElementById('login-btn');
-  err.textContent = '';
-  if (!input.value) { err.textContent = 'Enter the admin token.'; return; }
+function showNoAccess(message) {
+  myRole = null;
+  document.getElementById('app').hidden = true;
+  document.getElementById('login').hidden = false;
+  document.getElementById('login-err').textContent = message || '';
+}
 
-  adminToken = input.value;
-  btnEl.disabled = true;
-  btnEl.textContent = 'Checking...';
-  try {
-    // Any authenticated route would do; players is the cheapest that
-    // proves the token rather than merely proving the server is up.
-    await api('/api/admin/players');
-  } catch (ex) {
-    adminToken = '';
-    err.textContent = ex.message === 'unauthorized'
-      ? 'That token was not accepted.'
-      : ('Could not sign in: ' + ex.message);
-    btnEl.disabled = false;
-    btnEl.textContent = 'Sign in';
-    return;
-  }
-  input.value = '';
-  btnEl.disabled = false;
-  btnEl.textContent = 'Sign in';
-
+async function showApp() {
   document.getElementById('login').hidden = true;
   document.getElementById('app').hidden = false;
+  document.getElementById('nav-roles-item').hidden = myRole !== 'operator';
+  document.getElementById('topbar-role').textContent = myRole;
   const wanted = location.hash.slice(1);
   show(document.querySelector('.adm-section[data-section="' + wanted + '"]') ? wanted : 'overview');
   await refreshAll();
 }
 
-function signOut() {
-  adminToken = '';
-  allPlayers = [];
-  expanded.clear();
-  document.getElementById('app').hidden = true;
-  document.getElementById('login').hidden = false;
-  document.getElementById('token-input').focus();
+// Asks whether the CURRENT session (if any) can use this panel at all --
+// GET /api/account is the same session-shaped read the account page
+// itself uses, never the admin token. A missing/expired session, or a
+// real signed-in account that simply holds no role, both land on the
+// same "go sign in" message: telling the two apart would only help
+// someone probing for which accounts exist, the same reasoning
+// app/admin_api.py's _role_guard() gives its own 401 for both cases.
+async function checkAccess() {
+  let res;
+  try {
+    res = await fetch('/api/account');
+  } catch (e) {
+    showNoAccess('Could not reach the server. Check your connection and try again.');
+    return;
+  }
+  if (!res.ok) {
+    showNoAccess('Sign in on the account page, then come back here.');
+    return;
+  }
+  const data = await res.json();
+  if (data.role !== 'admin' && data.role !== 'operator') {
+    showNoAccess('This account does not hold the admin or operator role.');
+    return;
+  }
+  myRole = data.role;
+  await showApp();
 }
 
-document.getElementById('login-form').addEventListener('submit', signIn);
+async function signOut() {
+  try {
+    await fetch('/api/account/logout', { method: 'POST' });
+  } catch (e) { /* falling through to the redirect either way */ }
+  location.href = '/account';
+}
+
 document.getElementById('signout-btn').addEventListener('click', signOut);
 document.getElementById('refresh-btn').addEventListener('click', function () {
   setStatus('Refreshing...', false);
@@ -1393,3 +1489,6 @@ document.getElementById('nt-save').addEventListener('click', function () { saveN
 // first retyping title/body/version just to satisfy the required-field
 // check saveNotice() otherwise runs.
 document.getElementById('nt-clear').addEventListener('click', function () { saveNotice(this, false); });
+document.getElementById('rl-grant').addEventListener('click', function () { grantAdmin(this); });
+
+checkAccess();

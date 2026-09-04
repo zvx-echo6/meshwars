@@ -38,7 +38,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from . import mc_api, results
-from .admin_api import _api_guard
+from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
     checkin_streak, load_checkin_config, streak_points, MC_PROTOCOL as CHK_MC,
     KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_PROTOCOL,
@@ -306,9 +306,10 @@ def _poller_health(request: Request) -> dict:
 @router.get("/api/admin/overview")
 async def admin_overview(request: Request):
     """What is wrong right now, plus the health figures behind it."""
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     poller = getattr(request.app.state, "checkin_poller", None)
     directory = poller.directory_snapshot() if poller else []
@@ -350,9 +351,10 @@ async def admin_places_preview(request: Request, week_start: str | None = None):
     uses), so an operator does not have to already know which Wednesday
     a given day belongs to. Omitted, it previews the current week.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     if week_start:
         try:
@@ -413,9 +415,10 @@ async def admin_player_diagnostics(request: Request, player_id: int):
     This is /api/mc/status's data without needing that player's key --
     the whole reason this module exists.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     conn = connect()
     try:
@@ -442,9 +445,10 @@ async def admin_season_extend(request: Request):
     Shortening one past `now` will end it on the next poll and crown a
     winner, so this refuses to set an end date in the past.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -464,6 +468,11 @@ async def admin_season_extend(request: Request):
         cur = conn.execute(
             "UPDATE mc_season SET ends_at = ? WHERE id = ? AND status = 'active'",
             (ends_at, season_id))
+        if cur.rowcount:
+            _log_admin_action(
+                conn, actor_account_id=session.account_id, action="season_extend",
+                detail=f"season_id={season_id} ends_at={ends_at}",
+            )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -485,9 +494,10 @@ async def admin_checkin_award(request: Request):
     Use it when the feed dropped somebody, not to hand out points: the
     monthly honors read these rows and cannot tell the difference.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -514,6 +524,12 @@ async def admin_checkin_award(request: Request):
             "(season_id, player_id, net_date, points, protocol, message_id, awarded_at, streak) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (season["id"], player_id, net_date, points, protocol, "admin", now, streak))
+        if cur.rowcount:
+            _log_admin_action(
+                conn, actor_account_id=session.account_id, action="checkin_award",
+                detail=f"player_id={player_id} protocol={protocol} net_date={net_date} points={points}",
+                now=now,
+            )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -773,9 +789,10 @@ async def admin_checkin_nets(request: Request):
     empty list, same shape either way so the frontend never has to
     branch on the key being absent.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     conn = connect()
     try:
         nets = [dict(r) for r in conn.execute(
@@ -807,9 +824,10 @@ async def admin_checkin_net_create(request: Request):
     table's own comment for the corescope/beacon/meshview asymmetry
     this deliberately preserves rather than unifies.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -832,6 +850,10 @@ async def admin_checkin_net_create(request: Request):
             {**fields, "created_at": now},
         )
         net_id = cur.lastrowid
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="checkin_net_create",
+            detail=f"net_id={net_id} label={fields['label']!r} kind={fields['kind']}", now=now,
+        )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -850,9 +872,10 @@ async def admin_checkin_net_update(request: Request):
     CheckinPoller's to write, on its own next cycle against whatever
     this update just changed).
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -891,6 +914,11 @@ async def admin_checkin_net_update(request: Request):
             " WHERE id=:id",
             {**fields, "id": net_id},
         )
+        if cur.rowcount:
+            _log_admin_action(
+                conn, actor_account_id=session.account_id, action="checkin_net_update",
+                detail=f"net_id={net_id} label={fields['label']!r} kind={fields['kind']}",
+            )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -913,9 +941,10 @@ async def admin_checkin_net_delete(request: Request):
     (season, player, net_date, protocol), not on which net row produced
     them, so removing a net can never touch anyone's earned history.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -938,6 +967,10 @@ async def admin_checkin_net_delete(request: Request):
             conn.execute("ROLLBACK")
             return JSONResponse({"error": "label does not match"}, status_code=409)
         conn.execute("DELETE FROM checkin_net WHERE id = ?", (net_id,))
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="checkin_net_delete",
+            detail=f"net_id={net_id} label={label!r}",
+        )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -953,9 +986,10 @@ async def admin_checkin_config_update(request: Request):
     app/checkin.py's poller reads this table fresh every cycle, never
     settings.py, by design (see load_checkin_config).
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -1008,6 +1042,10 @@ async def admin_checkin_config_update(request: Request):
             (int(enabled), points, streak_bonus, streak_bonus_max, poll_interval_seconds,
              directory_limit, directory_refresh_seconds, now),
         )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="checkin_config_update",
+            detail=f"enabled={enabled} points={points}", now=now,
+        )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -1057,9 +1095,10 @@ async def admin_checkin_channels(request: Request):
     must fail fast with a clean JSON error rather than hang the request
     or bubble up a 500.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     kind = (request.query_params.get("kind") or "").strip()
     if kind not in _NET_KINDS:
@@ -1165,9 +1204,10 @@ async def admin_paint(request: Request):
     deployment has ever recorded (app/db.py's freqmapper_verification),
     the plainest "is anything actually arriving" number available.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     conn = connect()
     try:
         cfg = load_freqmapper_config(conn)
@@ -1197,9 +1237,10 @@ async def admin_paint_update(request: Request):
     this route itself has no way to tell an intentional switch from a
     typo, so it enforces only shape, not intent.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -1299,6 +1340,10 @@ async def admin_paint_update(request: Request):
             (mt_paint_source, int(enabled), base_url, api_key, poll_interval_seconds,
              page_limit, points_per_event, unique_painter_bonus, paint_from, now),
         )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="paint_update",
+            detail=f"mt_paint_source={mt_paint_source} enabled={enabled}", now=now,
+        )
         conn.execute("COMMIT")
         cfg = load_freqmapper_config(conn)
     finally:
@@ -1328,13 +1373,17 @@ async def admin_paint_clear_cursor(request: Request):
     there, so an already-seen event coming back around after a clear is
     a no-op, not a replay or a double-score.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM cursor WHERE k = ?", (FREQMAPPER_CURSOR_KEY,))
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="paint_clear_cursor",
+        )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -1350,9 +1399,10 @@ async def admin_notice(request: Request):
     a DB that has never had one saved gets all-empty/inactive defaults
     rather than a 404, so the form just opens blank.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
 
     conn = connect()
     try:
@@ -1393,9 +1443,10 @@ async def admin_notice_save(request: Request):
     resends whatever is already saved with active flipped off, so
     retiring a notice never requires retyping it.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -1431,6 +1482,10 @@ async def admin_notice_save(request: Request):
             "  updated_at = excluded.updated_at",
             (version_key, title, notice_body, int(active), now),
         )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="notice_save",
+            detail=f"version_key={version_key!r} active={active}", now=now,
+        )
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -1457,9 +1512,10 @@ async def admin_month_freeze(request: Request):
     Refuses the month in progress. A result that can still change is not
     a result.
     """
-    guard = _api_guard(request)
-    if guard is not None:
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
         return guard
+    session = guard
     try:
         body = await request.json()
     except Exception:
@@ -1477,6 +1533,10 @@ async def admin_month_freeze(request: Request):
     try:
         conn.execute("BEGIN IMMEDIATE")
         results.freeze_month(conn, protocol, month, now)
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="month_freeze",
+            detail=f"month={month} protocol={protocol}", now=now,
+        )
         conn.execute("COMMIT")
     finally:
         conn.close()

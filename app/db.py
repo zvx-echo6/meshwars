@@ -1522,6 +1522,47 @@ CREATE TABLE IF NOT EXISTS account_link_event (
 );
 CREATE INDEX IF NOT EXISTS idx_account_link_event_account ON account_link_event(account_id, created_at);
 
+-- Audit trail for the role-gated admin/operator surface
+-- (app/admin_api.py, app/admin_ops.py) -- who did WHAT, to WHAT, when.
+-- Added alongside account.role (see that column's own MIGRATIONS
+-- comment below) replacing the old shared X-Admin-Token door: every
+-- action through that door was anonymous by construction (a header
+-- either matched the one configured secret or it didn't -- there was no
+-- "which admin" to record), so moving to per-account roles is worthless
+-- on its own unless the actions themselves start carrying an identity
+-- too. Every mutating route under both admin routers writes exactly one
+-- row here (app/admin_api.py's _log_admin_action()) right alongside its
+-- own write, on success.
+--
+-- Same append-only, never-updated-or-deleted shape player_team_change
+-- and account_link_event above already establish for this codebase's
+-- other audit trails -- read either of those tables' own comments
+-- first, this one only differs in whose id it carries:
+-- actor_account_id is the SIGNED-IN account that performed the action,
+-- resolved from the session by _role_guard() and never from anything a
+-- request body supplies, where account_link_event's own `actor` column
+-- is just the fixed string 'operator' with no way to say which one.
+--
+-- `action` names the operation ('player_delete', 'revoke_key',
+-- 'role_granted', 'role_revoked', 'operator_claimed', ...) -- see each
+-- route's own call to _log_admin_action() for the exact vocabulary in
+-- use; nothing enumerates or constrains the value at the database
+-- level, the same "free text, not a fixed set" latitude checkin_net's
+-- `kind` column was given before it hardened into _NET_KINDS. `detail`
+-- is free text too, same "not a foreign key, built by whichever code
+-- path writes the row" reasoning account_link_event's own detail column
+-- gives -- nothing downstream ever parses it back out, it exists so a
+-- person reading this table can tell what happened without cross-
+-- referencing five other tables by hand.
+CREATE TABLE IF NOT EXISTS admin_action_log (
+    log_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_account_id  INTEGER NOT NULL,
+    action            TEXT NOT NULL,
+    detail            TEXT,
+    created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_action_log_actor ON admin_action_log(actor_account_id, created_at);
+
 -- OAuth provider sign-in (app/oauth.py, app/oauth_api.py): a brand-new
 -- provider identity that does not yet belong to any account, waiting
 -- for a person to choose what happens to it. This is case 4 of
@@ -2119,9 +2160,45 @@ MIGRATIONS = [
     # app/account_api.py's POST /api/account/contact-email; unverified
     # (contact_email_verified_at NULL) the moment it is set, verified
     # only once GET /auth/contact-email/verify redeems a token mailed
-    # to it.
+    # to it -- OR, since POST /api/account/contact-email/use-identity
+    # (app/account_api.py), verified immediately when the address was
+    # copied server-side from the account's own already-provider-
+    # verified account_identity row instead of typed by hand; see that
+    # route's own docstring for why skipping the mailed round-trip is
+    # correct in that one case and nowhere else.
     "ALTER TABLE account ADD COLUMN contact_email TEXT",
     "ALTER TABLE account ADD COLUMN contact_email_verified_at INTEGER",
+    # The role-gated admin/operator surface (app/admin_api.py's
+    # _role_guard) needs somewhere to persist "this account is an
+    # operator/admin" that survives a restart -- `account`, like
+    # player.account_id and account.contact_email above, is a
+    # pre-existing table with rows already in it on every real
+    # deployment, so this is an ALTER, not part of the original CREATE
+    # TABLE. NULL (no role) for every row until POST
+    # /api/admin/roles/claim grants the first operator, or an operator
+    # grants admin to someone else through POST /api/admin/roles/grant --
+    # correct for 100% of existing rows, since no account could have
+    # held a role before this column existed. Deliberately just a plain
+    # TEXT column ('admin' | 'operator' | NULL), not a separate
+    # account_role join table: one account holds AT MOST one role at a
+    # time in this design (see app/admin_api.py's own module docstring
+    # for the two-tier model), so there is nothing a join table would
+    # let this represent that a single nullable column cannot.
+    "ALTER TABLE account ADD COLUMN role TEXT",
+    # A partial index -- only the non-NULL rows, which on any real
+    # deployment is a small handful of operators/admins out of every
+    # account that has ever signed in -- for the two queries that scan
+    # role by VALUE rather than by account_id (already covered for free
+    # by account's own PRIMARY KEY): _admin_surface_enabled()'s "does
+    # any account hold a role at all" check, and GET /api/admin/roles'
+    # roster listing. Created down here, after the ALTER immediately
+    # above guarantees the column exists, for the same reason
+    # idx_player_account is created after player.account_id's own ALTER
+    # rather than inside SCHEMA's CREATE TABLE block (see that index's
+    # own comment): on a database that already ran SCHEMA before this
+    # ALTER added the column, an index referencing `role` inside SCHEMA
+    # itself would fail startup with "no such column: role".
+    "CREATE INDEX IF NOT EXISTS idx_account_role ON account(role) WHERE role IS NOT NULL",
     # `sample` removed entirely -- see the comment left in its place in
     # SCHEMA above (right before node_seen) for the full privacy
     # reasoning. Unlike checkin_player_name's own DROP TABLE further up

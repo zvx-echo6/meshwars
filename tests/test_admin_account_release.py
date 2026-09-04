@@ -1,10 +1,19 @@
 """Tests for POST /api/admin/player/unlink-account (app/admin_api.py).
 
-This is the operator-only door that clears player.account_id -- the
-only place in the whole app that can, since app/account_api.py's
+This is the admin/operator-only door that clears player.account_id --
+the only place in the whole app that can, since app/account_api.py's
 link_key() (POST /api/account/link-key) can only ever SET it, never
 clear it, by design. See app/admin_api.py's own docstring on the new
 route for the full reasoning.
+
+Auth model (privacy-hardening pass): every /api/admin/* route,
+including this one, now requires a signed-in account holding a role
+(account.role -- 'admin' or 'operator') resolved from the session
+cookie by app/admin_api.py's _role_guard(), never the retired
+X-Admin-Token header. This file exercises that guard directly (401 with
+no session, 401 with a session that holds no role, 404 when the whole
+admin surface does not exist on this deployment) alongside the route's
+own behavior, which is otherwise unchanged from before this pass.
 
 Same "FastAPI-around-one-router" TestClient shape tests/test_account_api.py
 uses, with a real file-backed sqlite database (app/admin_api.py's routes
@@ -20,6 +29,7 @@ can also prove the two things the task explicitly called out:
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 
@@ -35,7 +45,6 @@ from app.db import MIGRATIONS, SCHEMA
 from app.mc_ingest import AuthResult
 from app.sessions import SESSION_COOKIE_NAME, create_session
 
-ADMIN_TOKEN = "test-admin-token"
 GOOD_KEY = "good-key"
 KEY_PLAYER_ID = 77  # the player FakeIngestor resolves GOOD_KEY to
 
@@ -80,19 +89,6 @@ def db_path(tmp_path, monkeypatch):
     return path
 
 
-@pytest.fixture(autouse=True)
-def _admin_token(monkeypatch):
-    """Every route under test lives behind _api_guard, which 404s
-    outright unless settings.admin_token is configured -- see
-    app/admin_api.py's own module docstring. Set once here so every
-    test in this file gets a working door by default; the two guard
-    tests below override it back to '' to exercise the disabled case.
-    """
-    import app.admin_api as admin_api_module
-
-    monkeypatch.setattr(admin_api_module.settings, "admin_token", ADMIN_TOKEN)
-
-
 @pytest.fixture
 def client(db_path):
     app = FastAPI()
@@ -104,16 +100,28 @@ def client(db_path):
 
 
 def _run(coro):
-    import asyncio
     return asyncio.run(coro)
 
 
-def _make_account(path: str) -> int:
+def _make_account(path: str, *, role: str | None = None) -> int:
     conn = sqlite3.connect(path)
-    cur = conn.execute("INSERT INTO account(created_at) VALUES (?)", (int(time.time()),))
+    cur = conn.execute(
+        "INSERT INTO account(created_at, role) VALUES (?, ?)", (int(time.time()), role)
+    )
     conn.commit()
     account_id = cur.lastrowid
     conn.close()
+    return account_id
+
+
+def _login_as(client, db_path, *, role: str) -> int:
+    """Creates a fresh account holding `role`, signs the TestClient's
+    cookie jar into it, and returns the account_id -- the session-based
+    replacement for the old `_headers()` helper's X-Admin-Token header.
+    """
+    account_id = _make_account(db_path, role=role)
+    raw_token = _run(create_session(account_id, device_label=None))
+    client.cookies.set(SESSION_COOKIE_NAME, raw_token)
     return account_id
 
 
@@ -159,21 +167,18 @@ def _add_api_key(path: str, player_id: int, key_hash="deadbeefcafef00d") -> None
     conn.close()
 
 
-def _headers():
-    return {"X-Admin-Token": ADMIN_TOKEN}
-
-
-# ---- release clears the link and writes the audit event -----------------
+# ---- release clears the link, writes the audit event, and the actor's
+#      account_id lands in admin_action_log -----------------------------
 
 
 def test_release_clears_account_id_and_writes_operator_event(client, db_path):
+    actor_id = _login_as(client, db_path, role="admin")
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id, display_name="Malice")
 
     resp = client.post(
         "/api/admin/player/unlink-account",
         json={"player_id": player_id, "display_name": "Malice"},
-        headers=_headers(),
     )
 
     assert resp.status_code == 200
@@ -193,20 +198,29 @@ def test_release_clears_account_id_and_writes_operator_event(client, db_path):
         "SELECT kind, actor, detail FROM account_link_event WHERE account_id = ?",
         (account_id,),
     ).fetchone()
+    # The whole point of the roles pass: this action is no longer
+    # anonymous -- admin_action_log names the SIGNED-IN account that
+    # performed it (see app/db.py's own comment on that table).
+    log_row = conn.execute(
+        "SELECT actor_account_id, action, detail FROM admin_action_log"
+    ).fetchone()
     conn.close()
 
     assert row[0] is None
     assert event == ("player_unlinked", "operator", f"player_id={player_id}")
+    assert log_row[0] == actor_id
+    assert log_row[1] == "unlink_account"
+    assert str(player_id) in log_row[2]
 
 
 def test_release_display_name_mismatch_is_409_and_does_not_unlink(client, db_path):
+    _login_as(client, db_path, role="admin")
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id, display_name="Malice")
 
     resp = client.post(
         "/api/admin/player/unlink-account",
         json={"player_id": player_id, "display_name": "Wrong Name"},
-        headers=_headers(),
     )
 
     assert resp.status_code == 409
@@ -222,12 +236,12 @@ def test_release_display_name_mismatch_is_409_and_does_not_unlink(client, db_pat
 
 
 def test_release_not_linked_returns_clear_error_and_writes_no_event(client, db_path):
+    _login_as(client, db_path, role="admin")
     player_id = _make_player(db_path, account_id=None, display_name="Loner")
 
     resp = client.post(
         "/api/admin/player/unlink-account",
         json={"player_id": player_id, "display_name": "Loner"},
-        headers=_headers(),
     )
 
     assert resp.status_code == 409
@@ -243,27 +257,33 @@ def test_release_not_linked_returns_clear_error_and_writes_no_event(client, db_p
 
 
 def test_release_nonexistent_player_is_404(client, db_path):
+    _login_as(client, db_path, role="admin")
+
     resp = client.post(
         "/api/admin/player/unlink-account",
         json={"player_id": 999999, "display_name": "Nobody"},
-        headers=_headers(),
     )
 
     assert resp.status_code == 404
     assert resp.json() == {"error": "player not found"}
 
 
-# ---- guard: unreachable without admin auth -------------------------------
+# ---- guard: unreachable without a session holding a role -----------------
 
 
-def test_release_requires_admin_token(client, db_path):
+def test_release_requires_a_signed_in_session(client, db_path):
+    # An account exists holding a role (so the admin surface itself is
+    # enabled -- see _admin_surface_enabled()), but THIS request carries
+    # no session cookie at all.
+    _make_account(db_path, role="admin")
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id, display_name="Malice")
 
     resp = client.post(
         "/api/admin/player/unlink-account",
         json={"player_id": player_id, "display_name": "Malice"},
-        # no X-Admin-Token header at all
+        # no cookie, no X-Admin-Token header -- neither authenticates
+        # this route any more.
     )
 
     assert resp.status_code == 401
@@ -277,17 +297,65 @@ def test_release_requires_admin_token(client, db_path):
     assert row[0] == account_id  # untouched
 
 
-def test_release_404s_when_admin_door_is_closed(client, db_path, monkeypatch):
-    import app.admin_api as admin_api_module
-
-    monkeypatch.setattr(admin_api_module.settings, "admin_token", "")
+def test_release_refused_for_a_signed_in_account_with_no_role(client, db_path):
+    # A real, valid session -- just for an account that holds no role.
+    # This is the guard's OTHER 401 case, and it must read identically
+    # to "no session at all" (see _role_guard's own docstring on why).
+    _make_account(db_path, role="admin")  # keeps the surface enabled
+    _login_as(client, db_path, role=None)
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id, display_name="Malice")
 
     resp = client.post(
         "/api/admin/player/unlink-account",
         json={"player_id": player_id, "display_name": "Malice"},
-        headers=_headers(),
+    )
+
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+
+
+def test_the_retired_header_no_longer_authenticates_anything(client, db_path, monkeypatch):
+    """The bypass this whole pass exists to close: holding the old
+    admin_token is no longer enough on its own. Even WITH the header
+    set to a real configured token, a request carrying no session (or a
+    session with no role) still gets refused.
+    """
+    import app.admin_api as admin_api_module
+
+    monkeypatch.setattr(admin_api_module.settings, "admin_token", "still-configured-for-claiming")
+    account_id = _make_account(db_path)
+    player_id = _make_player(db_path, account_id=account_id, display_name="Malice")
+
+    resp = client.post(
+        "/api/admin/player/unlink-account",
+        json={"player_id": player_id, "display_name": "Malice"},
+        headers={"X-Admin-Token": "still-configured-for-claiming"},
+    )
+
+    # 401, not 200 -- the header is compared nowhere in this route any
+    # more (see app/admin_api.py's _role_guard()).
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT account_id FROM player WHERE player_id = ?", (player_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == account_id  # untouched
+
+
+def test_release_404s_when_the_admin_surface_does_not_exist_at_all(client, db_path):
+    # Neither settings.admin_token nor any account holding a role --
+    # the one state in which the whole admin surface must be
+    # indistinguishable from not existing (_admin_surface_enabled()).
+    account_id = _make_account(db_path)
+    player_id = _make_player(db_path, account_id=account_id, display_name="Malice")
+
+    resp = client.post(
+        "/api/admin/player/unlink-account",
+        json={"player_id": player_id, "display_name": "Malice"},
     )
 
     assert resp.status_code == 404
@@ -298,6 +366,7 @@ def test_release_404s_when_admin_door_is_closed(client, db_path, monkeypatch):
 
 
 def test_after_release_link_key_succeeds_for_a_fresh_account(client, db_path):
+    _login_as(client, db_path, role="admin")
     stuck_account_id = _make_account(db_path)
     _make_player(
         db_path, player_id=KEY_PLAYER_ID, account_id=stuck_account_id,
@@ -305,21 +374,23 @@ def test_after_release_link_key_succeeds_for_a_fresh_account(client, db_path):
     )
 
     # Before release, the 409 link_key() itself is documented to raise
-    # for a player already owned by a different account.
+    # for a player already owned by a different account. Uses a
+    # SEPARATE TestClient (its own cookie jar) so the admin session set
+    # by _login_as() above isn't the one attempting to link-key.
     fresh_account_id = _make_account(db_path)
+    player_client = TestClient(client.app)
     raw_token = _run(create_session(fresh_account_id, device_label=None))
-    client.cookies.set(SESSION_COOKIE_NAME, raw_token)
-    blocked = client.post("/api/account/link-key", json={"api_key": GOOD_KEY})
+    player_client.cookies.set(SESSION_COOKIE_NAME, raw_token)
+    blocked = player_client.post("/api/account/link-key", json={"api_key": GOOD_KEY})
     assert blocked.status_code == 409
 
     release = client.post(
         "/api/admin/player/unlink-account",
         json={"player_id": KEY_PLAYER_ID, "display_name": "KeyHolder"},
-        headers=_headers(),
     )
     assert release.status_code == 200
 
-    resp = client.post("/api/account/link-key", json={"api_key": GOOD_KEY})
+    resp = player_client.post("/api/account/link-key", json={"api_key": GOOD_KEY})
 
     assert resp.status_code == 200
     assert resp.json()["player"] == {
@@ -340,6 +411,7 @@ def test_after_release_link_key_succeeds_for_a_fresh_account(client, db_path):
 
 
 def test_release_keeps_player_node_rows_and_api_keys(client, db_path):
+    _login_as(client, db_path, role="admin")
     account_id = _make_account(db_path)
     player_id = _make_player(db_path, account_id=account_id, display_name="Malice")
     _add_node(db_path, player_id, protocol="mc", node_ref="a1b2c3d4")
@@ -348,7 +420,6 @@ def test_release_keeps_player_node_rows_and_api_keys(client, db_path):
     resp = client.post(
         "/api/admin/player/unlink-account",
         json={"player_id": player_id, "display_name": "Malice"},
-        headers=_headers(),
     )
     assert resp.status_code == 200
 
@@ -371,7 +442,7 @@ def test_release_keeps_player_node_rows_and_api_keys(client, db_path):
 def test_delete_account_link_does_not_exist(client, db_path):
     """A previous attempt added a player-facing DELETE /api/account/link
     -- session-authenticated self-service unlink. That was rejected and
-    reverted: the model is release-by-operator-only (see
+    reverted: the model is release-by-admin/operator-only (see
     app/admin_api.py's admin_player_unlink_account() docstring). This
     pins the route's absence down so a reintroduction fails a test
     immediately rather than shipping unnoticed.

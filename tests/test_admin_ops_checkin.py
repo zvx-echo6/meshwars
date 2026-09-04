@@ -25,17 +25,31 @@ doesn't need a real HTTP round trip, plus the "FastAPI-around-one-
 router" TestClient shape tests/test_account_api.py uses for the one
 test here that does (proving the route is truly gone, which only a
 real route lookup can show).
+
+The one HTTP test in this file (test_admin_checkin_binding_route_is_gone)
+predates the privacy-hardening pass's move off the shared X-Admin-Token
+header onto session+role auth (app/admin_api.py's _role_guard()) -- it
+now signs a real admin-role session in rather than sending that retired
+header, for the same reason the original test avoided a bare guard-off
+404: this must prove the ROUTE is missing, not merely that some guard
+rejected the request.
 """
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 import time
 
+import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import app.admin_ops as admin_ops_module
+import app.db as db
 from app.admin_ops import _attention, router as admin_router
 from app.auth import http_exception_as_error_body
+from app.db import MIGRATIONS, SCHEMA
+from app.sessions import SESSION_COOKIE_NAME, create_session
 
 NOW = int(time.time())
 
@@ -51,39 +65,56 @@ def _make_player(conn, display_name="Test Player", team="RED"):
 # ---- POST /api/admin/checkin/binding is gone -----------------------------
 
 
-def test_admin_checkin_binding_route_is_gone(monkeypatch):
-    # admin_token has to be set (and supplied) for this to prove the
-    # ROUTE is missing rather than just re-demonstrating _api_guard's
-    # own "admin door is off" 404 -- with a valid token, FastAPI would
-    # reach a real handler if one were still registered here.
-    monkeypatch.setattr(admin_ops_module.settings, "admin_token", "test-token")
+def test_admin_checkin_binding_route_is_gone(tmp_path, monkeypatch):
+    # A real, valid admin session -- signed in and holding the admin
+    # role -- proves the ROUTE is missing rather than just
+    # re-demonstrating _role_guard's own "no role" 401: with valid
+    # credentials, FastAPI would reach a real handler if one were still
+    # registered here.
+    db_path = str(tmp_path / "game.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA)
+    for stmt in MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                continue
+            raise
+    cur = conn.execute("INSERT INTO account(created_at, role) VALUES (?, 'admin')", (NOW,))
+    account_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(db.settings, "db_path", db_path)
 
     app = FastAPI()
     app.include_router(admin_router)
     app.add_exception_handler(HTTPException, http_exception_as_error_body)
     client = TestClient(app)
+    raw_token = asyncio.run(create_session(account_id, device_label=None))
+    client.cookies.set(SESSION_COOKIE_NAME, raw_token)
 
     resp = client.post(
         "/api/admin/checkin/binding",
         json={"player_id": 1, "sender_name": "somebody"},
-        headers={"X-Admin-Token": "test-token"},
     )
     # A plain starlette "no route matched" 404, not admin_ops's own
-    # JSONResponse({"error": "not found"}) shape that _api_guard
-    # produces when the admin door itself is disabled -- so this fails
-    # loudly if the route is ever reintroduced without a matching test
-    # update, and doesn't just coincidentally pass because the token
+    # JSONResponse({"error": "not found"}) shape that _role_guard
+    # produces when the admin surface itself is disabled -- so this
+    # fails loudly if the route is ever reintroduced without a matching
+    # test update, and doesn't just coincidentally pass because the
     # guard rejected it instead.
     assert resp.status_code == 404
     assert resp.json() != {"error": "not found"}
 
 
-def test_admin_checkin_binding_route_is_gone_even_with_no_admin_token():
+def test_admin_checkin_binding_route_is_gone_even_with_no_admin_configured():
     # Sanity check on the other guard path: with no admin_token
-    # configured at all (this repo's default -- see app/config.py),
-    # every /api/admin/* route already 404s via _api_guard itself. The
+    # configured and no account holding a role (this repo's fresh-
+    # install default -- see app/config.py), every /api/admin/* route
+    # already 404s via _role_guard/_admin_surface_enabled itself. The
     # route being gone doesn't change that, but this pins down that the
-    # ordinary "admin door off" case still behaves as documented.
+    # ordinary "admin surface off" case still behaves as documented.
     app = FastAPI()
     app.include_router(admin_router)
     app.add_exception_handler(HTTPException, http_exception_as_error_body)
