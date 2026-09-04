@@ -96,6 +96,14 @@ async function api(path, options) {
       // the access screen rather than leaving stale panels on screen
       // that will now 401 on every action.
       showNoAccess();
+    } else if (resp.status === 403) {
+      // Same idea, for the one guard failure that carries its own
+      // message: TOTP was disabled mid-visit (app/admin_api.py's
+      // _role_guard() requires it be active on every call, not just at
+      // sign-in). body.error here is _role_guard's own explanation,
+      // not a generic one -- surface it rather than the fallback
+      // "HTTP 403" this would otherwise throw as.
+      showNoAccess((body && body.error) || 'Two-factor authentication is required to use this panel.');
     }
     throw new Error((body && body.error) || ('HTTP ' + resp.status));
   }
@@ -1429,6 +1437,18 @@ async function showApp() {
 // same "go sign in" message: telling the two apart would only help
 // someone probing for which accounts exist, the same reasoning
 // app/admin_api.py's _role_guard() gives its own 401 for both cases.
+//
+// The one case that DOES get its own message: a role held, but no
+// active two-factor authentication. _role_guard() now requires TOTP to
+// USE admin/operator, not just to hold it (see that function's own
+// docstring for the full reasoning on why this is enforced at every
+// route below, and why the account-side 403 it returns is safe to
+// surface here too) -- every /api/admin/* call this page makes from
+// here on would otherwise 403 one at a time with no explanation, which
+// reads as "this panel is broken" rather than "turn on two-factor".
+// GET /api/account already carries `totp.enabled` (the same field the
+// account page's own TOTP panel reads), so this is known before a
+// single admin route is ever called.
 async function checkAccess() {
   let res;
   try {
@@ -1444,6 +1464,10 @@ async function checkAccess() {
   const data = await res.json();
   if (data.role !== 'admin' && data.role !== 'operator') {
     showNoAccess('This account does not hold the admin or operator role.');
+    return;
+  }
+  if (!data.totp || !data.totp.enabled) {
+    showNoAccess('This account holds a role, but needs two-factor authentication enabled before it can be used here. Enable it on the account page.');
     return;
   }
   myRole = data.role;

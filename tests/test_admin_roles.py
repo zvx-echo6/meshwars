@@ -24,16 +24,19 @@ import sqlite3
 import time
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import app.db as db
+import app.totp_api as totp_api_module
 from app.account_api import router as account_router
 from app.admin_api import router as admin_router
 from app.admin_ops import router as admin_ops_router
 from app.auth import http_exception_as_error_body
 from app.db import MIGRATIONS, SCHEMA
 from app.sessions import SESSION_COOKIE_NAME, create_session
+from app.totp_api import router as totp_router
 
 NOW = int(time.time())
 
@@ -367,7 +370,16 @@ def test_admin_cannot_delete_an_operator_player_via_role_routes(client, db_path)
 
 
 def test_operator_can_grant_admin_and_it_is_audited(client, db_path):
-    operator_id = _make_account(db_path, role="operator")
+    # totp_active=True on every operator/admin account below that is
+    # actually EXPECTED to reach a route's own logic (as opposed to
+    # being turned away by _role_guard's rank check before TOTP is ever
+    # consulted) -- _role_guard() now also requires active TOTP to USE
+    # a role, not merely to hold one (see that function's own docstring
+    # for the new use-time requirement). These tests are exercising
+    # rank/ownership logic, not TOTP, so the fixture accounts are given
+    # TOTP up front rather than incidentally re-testing the new gate
+    # here too.
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     target_id = _make_account(db_path)
     _login_as(client, operator_id)
 
@@ -382,7 +394,7 @@ def test_operator_can_grant_admin_and_it_is_audited(client, db_path):
 
 
 def test_operator_can_revoke_an_admin(client, db_path):
-    operator_id = _make_account(db_path, role="operator")
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     admin_id = _make_account(db_path, role="admin")
     _login_as(client, operator_id)
 
@@ -397,7 +409,7 @@ def test_operator_can_revoke_an_admin(client, db_path):
 
 
 def test_operator_can_revoke_another_operator(client, db_path):
-    operator_id = _make_account(db_path, role="operator")
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     other_operator_id = _make_account(db_path, role="operator")
     _login_as(client, operator_id)
 
@@ -408,7 +420,7 @@ def test_operator_can_revoke_another_operator(client, db_path):
 
 
 def test_operator_can_list_roles(client, db_path):
-    operator_id = _make_account(db_path, role="operator")
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     admin_id = _make_account(db_path, role="admin")
     _login_as(client, operator_id)
 
@@ -420,7 +432,7 @@ def test_operator_can_list_roles(client, db_path):
 
 
 def test_grant_refuses_to_silently_demote_an_operator(client, db_path):
-    operator_id = _make_account(db_path, role="operator")
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     other_operator_id = _make_account(db_path, role="operator")
     _login_as(client, operator_id)
 
@@ -431,7 +443,7 @@ def test_grant_refuses_to_silently_demote_an_operator(client, db_path):
 
 
 def test_grant_is_a_no_op_for_an_account_already_admin(client, db_path):
-    operator_id = _make_account(db_path, role="operator")
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     already_admin_id = _make_account(db_path, role="admin")
     _login_as(client, operator_id)
 
@@ -442,7 +454,7 @@ def test_grant_is_a_no_op_for_an_account_already_admin(client, db_path):
 
 
 def test_revoke_404s_for_an_account_holding_no_role(client, db_path):
-    operator_id = _make_account(db_path, role="operator")
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     plain_id = _make_account(db_path)
     _login_as(client, operator_id)
 
@@ -453,12 +465,127 @@ def test_revoke_404s_for_an_account_holding_no_role(client, db_path):
 
 
 def test_grant_404s_for_a_nonexistent_account(client, db_path):
-    operator_id = _make_account(db_path, role="operator")
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     _login_as(client, operator_id)
 
     resp = client.post("/api/admin/roles/grant", json={"account_id": 999999})
 
     assert resp.status_code == 404
+
+
+# ===========================================================================
+# TOTP is required to USE a role, not merely to hold one -- see
+# _role_guard's own docstring on why the requirement lives at use-time
+# rather than grant-time, and why the refusal below is 403 (a distinct,
+# actionable shape) rather than folding into the generic 401 every
+# other failure in this guard uses.
+# ===========================================================================
+
+
+_TOTP_REQUIRED_BODY = {
+    "error": "two-factor authentication must be enabled on this account "
+    "to use the admin panel"
+}
+
+
+def test_admin_role_without_active_totp_is_refused(client, db_path):
+    admin_id = _make_account(db_path, role="admin", totp_active=False)
+    _login_as(client, admin_id)
+
+    resp = client.get("/api/admin/players")
+
+    assert resp.status_code == 403
+    assert resp.json() == _TOTP_REQUIRED_BODY
+
+
+def test_admin_role_with_active_totp_is_allowed(client, db_path):
+    admin_id = _make_account(db_path, role="admin", totp_active=True)
+    _login_as(client, admin_id)
+
+    resp = client.get("/api/admin/players")
+
+    assert resp.status_code == 200
+
+
+def test_operator_without_active_totp_is_refused_too(client, db_path):
+    # The requirement is not admin-specific -- it applies at the
+    # operator rank too, on both the ordinary need="admin" surface and
+    # the operator-only roles routes.
+    operator_id = _make_account(db_path, role="operator", totp_active=False)
+    _login_as(client, operator_id)
+
+    assert client.get("/api/admin/players").status_code == 403
+    assert client.get("/api/admin/roles").status_code == 403
+
+
+def test_pending_totp_enrollment_does_not_count_for_role_use(client, db_path):
+    # A row exists in account_totp but activated_at is still NULL --
+    # enrollment was started but never proven with a real code. Must be
+    # refused the same as no row at all -- mirrors POST
+    # /api/admin/roles/claim's own identical pending-row check (see
+    # test_claim_refuses_with_a_pending_unactivated_totp_enrollment
+    # above).
+    admin_id = _make_account(db_path, role="admin", totp_active=False)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO account_totp(account_id, secret_encrypted, created_at, activated_at) "
+        "VALUES (?, 'unused', ?, NULL)",
+        (admin_id, NOW),
+    )
+    conn.commit()
+    conn.close()
+    _login_as(client, admin_id)
+
+    resp = client.get("/api/admin/players")
+
+    assert resp.status_code == 403
+    assert resp.json() == _TOTP_REQUIRED_BODY
+
+
+def test_role_without_totp_can_still_reach_account_page_and_totp_enrollment(
+    client, db_path, monkeypatch
+):
+    """The deadlock guard: an account that holds a role but has not
+    enrolled TOTP yet must still be able to reach the ordinary account
+    page and the TOTP enrollment routes themselves -- otherwise it
+    would have no way to ever clear the refusal above. GET /api/account
+    (app/account_api.py) and POST /api/account/totp/enroll
+    (app/totp_api.py) both depend on require_session() only, never
+    _role_guard() -- true by construction (neither module imports the
+    other's guard), but proven here directly with a real request rather
+    than left as an inference from reading two files side by side.
+
+    Builds its OWN app/client (rather than reusing the `client` fixture
+    above) because this is the one test in this file that needs
+    app/totp_api.py's router mounted alongside the admin and account
+    routers.
+    """
+    monkeypatch.setattr(
+        totp_api_module.settings, "account_totp_encryption_key", Fernet.generate_key().decode()
+    )
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.include_router(account_router)
+    app.include_router(totp_router)
+    app.add_exception_handler(HTTPException, http_exception_as_error_body)
+    local_client = TestClient(app)
+
+    admin_id = _make_account(db_path, role="admin", totp_active=False)
+    raw_token = _run(create_session(admin_id, device_label=None))
+    local_client.cookies.set(SESSION_COOKIE_NAME, raw_token)
+
+    # Confirms there is something to escape from: the admin route
+    # itself is refused without active TOTP.
+    assert local_client.get("/api/admin/players").status_code == 403
+
+    account_resp = local_client.get("/api/account")
+    assert account_resp.status_code == 200
+    assert account_resp.json()["role"] == "admin"
+    assert account_resp.json()["totp"]["enabled"] is False
+
+    enroll_resp = local_client.post("/api/account/totp/enroll")
+    assert enroll_resp.status_code == 200
 
 
 # ===========================================================================
@@ -549,7 +676,7 @@ def test_get_account_role_reflects_operator_after_claim(client, db_path):
 def test_surface_stays_enabled_after_token_cleared_once_an_operator_exists(
     client, db_path, monkeypatch
 ):
-    operator_id = _make_account(db_path, role="operator")
+    operator_id = _make_account(db_path, role="operator", totp_active=True)
     _login_as(client, operator_id)
 
     import app.admin_api as admin_api_module

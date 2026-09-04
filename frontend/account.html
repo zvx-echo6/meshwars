@@ -583,6 +583,12 @@
         <!-- Already holds a role. -->
         <div id="account-admin-has-role" hidden>
           <p id="account-admin-role-line" class="account-hint"></p>
+          <!-- Holding a role is not enough to USE it -- app/admin_api.py's
+               _role_guard() also requires active two-factor authentication,
+               for admin and operator alike (see that function's own
+               docstring). Shown instead of the panel link so nobody clicks
+               through to a page that will just refuse them. -->
+          <p id="account-admin-has-role-needs-totp" class="account-hint" hidden>Enable two-factor authentication above before opening the admin panel — the admin and operator roles require it to be used, not just to be granted.</p>
           <a href="/admin" id="account-admin-panel-link" class="account-link-btn">Open the admin panel</a>
         </div>
 
@@ -658,7 +664,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260904-4" type="module"></script>
+  <script src="/static/account.js?v=20260904-5" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

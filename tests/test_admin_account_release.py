@@ -118,8 +118,27 @@ def _login_as(client, db_path, *, role: str) -> int:
     """Creates a fresh account holding `role`, signs the TestClient's
     cookie jar into it, and returns the account_id -- the session-based
     replacement for the old `_headers()` helper's X-Admin-Token header.
+
+    Also gives the account an ACTIVE account_totp row when it holds a
+    role: app/admin_api.py's _role_guard() now requires active
+    two-factor authentication to USE admin/operator, not merely to
+    hold the role (see that function's own docstring, and
+    tests/test_admin_roles.py for the tests that exercise that
+    requirement directly). This file is testing player-release
+    behavior, not TOTP, so the fixture account is given TOTP up front
+    rather than incidentally re-testing the new gate on every test
+    here too.
     """
     account_id = _make_account(db_path, role=role)
+    if role is not None:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO account_totp(account_id, secret_encrypted, created_at, activated_at) "
+            "VALUES (?, 'unused', ?, ?)",
+            (account_id, int(time.time()), int(time.time())),
+        )
+        conn.commit()
+        conn.close()
     raw_token = _run(create_session(account_id, device_label=None))
     client.cookies.set(SESSION_COOKIE_NAME, raw_token)
     return account_id

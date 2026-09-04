@@ -31,6 +31,15 @@ docstring for the 404-vs-401 contract, which is unchanged from before:
 404 when the admin surface does not exist on this deployment at all,
 401 when it exists but this caller cannot use it.
 
+Holding a role is not by itself enough to USE it: _role_guard() also
+requires active two-factor authentication on the caller's account, for
+admin and operator alike -- see its own docstring for the full
+reasoning and for why that one failure mode gets a 403 instead of
+folding into the generic 401. Granting a role (POST
+/api/admin/roles/grant) still never requires TOTP; the requirement is
+enforced at use, not at grant, so an operator can hand the role to
+someone before they have enrolled an authenticator.
+
 `settings.admin_token` still exists, but its ONLY remaining power is
 POST /api/admin/roles/claim: a signed-in account with active two-factor
 authentication submits the token and, on a match, gains the operator
@@ -165,16 +174,57 @@ async def _role_guard(request: Request, *, need: str = "admin") -> SessionPrinci
     404 when _admin_surface_enabled() says the surface does not exist
     on this deployment at all -- indistinguishable from the route not
     existing, same contract the old token guard already used. 401 for
-    every other failure (no session cookie, an expired/revoked one, a
-    real account with no role, or a role that outranks-fails `need`) --
-    deliberately the SAME status and body for all of those, never a
-    403 or a distinct message for "you have a role but not enough of
-    one": telling a caller which part was wrong (missing session vs.
+    every other failure that does NOT already prove the caller holds
+    `need` (no session cookie, an expired/revoked one, a real account
+    with no role, or a role that outranks-fails `need`) -- deliberately
+    the SAME status and body for all of those, never a 403 or a
+    distinct message for "you have a role but not enough of one":
+    telling a caller which part was wrong (missing session vs.
     insufficient role) would hand an attacker free information about
     which accounts exist and what they hold, the same "don't reveal
     which part failed" reasoning app/sessions.py's require_session()
     and app/auth.py's require_api_key_principal() already apply to
     their own failure modes.
+
+    ---- the one failure mode that DOES get its own shape: role held,
+    TOTP not active ----------------------------------------------------
+
+    Matt's call: an account granted admin (or operator) may hold that
+    role with only a password behind it -- POST /api/admin/roles/grant
+    never required TOTP to GRANT the role (an operator can hand it to
+    someone before they have set up an authenticator, and it starts
+    working the moment they do; refusing the grant would make the
+    operator wait on the grantee). But admin is reachable single-factor
+    that way, and it can delete players, reissue API keys, release
+    account links, and edit nets -- the weakest reachable path into the
+    whole admin surface if left alone. So the requirement moves from
+    "claim-time" (POST /api/admin/roles/claim, already TOTP-gated, see
+    that route's own docstring) to "use-time": EVERY route this guard
+    protects, for admin and operator alike.
+
+    This failure is answered with 403, not the generic 401 above, and
+    that is a deliberate departure from the "never reveal which part
+    failed" rule two paragraphs up -- not an oversight. The reasoning
+    that rule rests on is that an anonymous or wrong-role caller learns
+    nothing valuable from a generic 401 that they did not already
+    suspect. That reasoning does not apply here: this caller's session
+    already resolved to an account holding `need`, which is not
+    something the response reveals -- it is something the caller
+    already knows, because it is their own account. Handing them a
+    bare 401 here would not protect any secret; it would just look
+    like their access is broken, with no way to tell "your role was
+    pulled" from "your session died" from "you need to turn on
+    two-factor," and only the last of those has a fix the caller can
+    act on themselves. This mirrors POST /api/admin/roles/claim's own
+    403-not-401 choice (see that route's docstring) for the identical
+    reason: the caller IS who they say they are, they are just not
+    eligible to use this yet, which is a distinct condition from
+    "unauthorized."
+
+    A PENDING (enrolled but never activated -- account_totp.activated_at
+    IS NULL) row does not count, same as claim's own check: an unproven
+    secret must never become the thing standing between an account and
+    anything it can otherwise reach, including the admin surface.
 
     `need` is "admin" (the default -- every route below the roles
     section itself) or "operator" (the three roles routes: grant,
@@ -199,6 +249,25 @@ async def _role_guard(request: Request, *, need: str = "admin") -> SessionPrinci
         role = row["role"] if row is not None else None
         if role is None or _ROLE_RANK.get(role, 0) < _ROLE_RANK[need]:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+        totp_row = conn.execute(
+            "SELECT 1 FROM account_totp WHERE account_id = ? AND activated_at IS NOT NULL",
+            (session.account_id,),
+        ).fetchone()
+        if totp_row is None:
+            # See this function's own docstring for why this gets its
+            # own 403 shape rather than folding into the generic 401
+            # above -- the caller has already proven they hold `need`,
+            # so telling them what to do about it reveals nothing an
+            # attacker could not already see by holding the role
+            # themselves.
+            return JSONResponse(
+                {
+                    "error": "two-factor authentication must be enabled on this account "
+                    "to use the admin panel"
+                },
+                status_code=403,
+            )
         return session
     finally:
         conn.close()

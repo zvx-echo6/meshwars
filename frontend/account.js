@@ -2454,6 +2454,8 @@ function renderAdminSection(account) {
   const hasRoleEl = document.getElementById('account-admin-has-role');
   const claimEl = document.getElementById('account-admin-claim');
   const needsTotpEl = document.getElementById('account-admin-claim-needs-totp');
+  const hasRoleNeedsTotpEl = document.getElementById('account-admin-has-role-needs-totp');
+  const panelLinkEl = document.getElementById('account-admin-panel-link');
   hasRoleEl.hidden = true;
   claimEl.hidden = true;
 
@@ -2461,6 +2463,17 @@ function renderAdminSection(account) {
     hasRoleEl.hidden = false;
     document.getElementById('account-admin-role-line').textContent =
       'This account holds the ' + (ADMIN_ROLE_LABELS[account.role] || account.role) + ' role.';
+
+    // Holding a role is not enough to USE it -- app/admin_api.py's
+    // _role_guard() also requires active two-factor authentication on
+    // the account, for admin and operator alike (enforced at USE, not
+    // at grant -- an operator can hand out the role before someone has
+    // enrolled an authenticator). Tell them that up front rather than
+    // showing a link into a panel that will just refuse every request
+    // with a 403.
+    const totpOn = !!(account.totp && account.totp.enabled);
+    hasRoleNeedsTotpEl.hidden = totpOn;
+    panelLinkEl.hidden = !totpOn;
     return;
   }
 
