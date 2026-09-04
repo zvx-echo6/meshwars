@@ -43,8 +43,9 @@
        change. -->
   <link rel="stylesheet" href="/static/theme.css?v=20260827-1" />
   <link rel="stylesheet" href="/static/landing.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/signin.css?v=20260903-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260903-10" />
+  <link rel="stylesheet" href="/static/signin.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/account.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/totp.css?v=20260903-1" />
 </head>
 <body>
 
@@ -90,6 +91,14 @@
     <section id="account-signed-out" class="account-panel" hidden>
       <div class="account-title">Sign in</div>
       <p class="account-hint">Sign in to see your connected sign-in methods, your linked player, and your active sessions.</p>
+      <!-- A failed sign-in attempt (GET /auth/{provider}/callback or GET
+           /auth/email/callback) redirects back HERE now with a short
+           `auth_error` code -- see app/oauth_api.py's
+           _callback_error_response() docstring for why /account, not
+           /join (which no longer has anywhere to show it). Populated by
+           signin-email.js's shared showAuthErrorFromQuery(), called from
+           this page's own boot() below. -->
+      <div id="account-signin-error" class="account-error" role="alert" hidden></div>
       <div id="account-signin-providers" class="signin-providers"></div>
 
       <form id="account-signin-email-form" class="signin-email-form" novalidate hidden>
@@ -161,7 +170,66 @@
           <p id="account-player-team" class="account-player-line"></p>
         </div>
         <div id="account-player-unlinked" hidden>
-          <p class="account-hint">No player is connected to this account yet. If you've played before and have your API key, connect it here to claim your player. Registering for the first time? <a href="/join">Join MeshWars</a> instead.</p>
+          <p class="account-hint">No player is connected to this account yet.</p>
+
+          <!-- ===============================================================
+               JOIN. The whole "register for the first time" flow now lives
+               HERE, not on /join -- see account.js's own module docstring
+               for why: /join used to be where this happened, but that meant
+               an already-signed-in visitor landed on a page asking them to
+               sign in a SECOND time, above a form that still demanded an
+               invite code they had already cleared a stronger bar than.
+
+               No invite-code field here at all -- POST /api/join, called
+               with this page's own session cookie
+               (credentials: 'same-origin', the default for a same-origin
+               fetch), never asks a signed-in caller for one; the session
+               itself is what the server checks instead
+               (app/join_api.py's join(), Depends(optional_session)). See
+               that route's own docstring for the exact gate: an account
+               that already has a linked player is refused here (409) the
+               same way POST /api/account/link-key already refuses a
+               second one -- "Join" only ever applies once.
+
+               Only display name + team + protocol are collected -- no
+               radio picker, no MeshMapper walkthrough, both duplicated
+               nowhere here. Radios & troubleshooting below (revealed by
+               applyPlayerGate() the instant this succeeds) already has an
+               "Add radio" form built for exactly this -- see
+               #account-add-radio-form further down this page -- there is
+               no reason for a second, join-specific copy of it. -->
+          <div id="account-join-panel">
+            <p class="account-hint">Registering for the first time? Pick a display name and team, then press Join -- no invite code needed.</p>
+            <div id="account-join-error" class="account-error" role="alert" hidden></div>
+            <form id="account-join-form" class="account-connect-form" novalidate autocomplete="off">
+              <label class="account-field">
+                <span>Display name</span>
+                <input type="text" id="f-account-join-name" maxlength="32" autocomplete="off" required />
+              </label>
+              <div id="account-join-team-picker" class="account-team-picker"></div>
+              <label class="account-field account-field-compact">
+                <span>Radio type</span>
+                <select id="f-account-join-protocol">
+                  <option value="mc" selected>MeshCore</option>
+                  <option value="mt">Meshtastic</option>
+                </select>
+              </label>
+              <button type="submit" id="account-join-submit">Join</button>
+            </form>
+
+            <!-- Shown once POST /api/join above succeeds -- the key is
+                 shown exactly once, same one-time-shown rule
+                 frontend/join.js's own module docstring states for the
+                 identical key there, reusing this page's own
+                 buildCopyRow() rather than a second key-display widget. -->
+            <div id="account-join-result" hidden>
+              <p id="account-join-success" class="account-hint"></p>
+              <div id="account-join-key-slot"></div>
+              <p class="account-hint">Setting up MeshMapper or the Meshtastic app for the first time? The <a href="/docs">Docs page</a> walks through it.</p>
+            </div>
+          </div>
+
+          <p class="account-hint account-group-note">Already played before and have your API key? Connect it below to claim your existing player instead.</p>
           <div id="account-connect-error" class="account-error" role="alert" hidden></div>
           <form id="account-connect-form" class="account-connect-form" novalidate autocomplete="off">
             <label class="account-field">
@@ -381,6 +449,83 @@
         </form>
       </section>
 
+      <section id="account-totp-panel" class="account-panel">
+        <div class="account-title">Two-factor authentication</div>
+
+        <!-- Not offered at all -- settings.account_totp_encryption_key
+             is unset on this deployment (GET /api/account's
+             totp.available). See app/totp.py's own "secret at rest"
+             docstring for why this fails closed rather than ever
+             letting enrollment start with nowhere safe to put the
+             secret. -->
+        <p id="account-totp-unavailable" class="account-hint" hidden>Two-factor authentication is not configured on this deployment yet.</p>
+
+        <div id="account-totp-error" class="account-error" role="alert" hidden></div>
+        <div id="account-totp-success" class="account-hint" hidden></div>
+
+        <!-- Steady state: OFF. -->
+        <div id="account-totp-off" hidden>
+          <p class="account-hint">Add a second step to signing in with your password or a magic-link email — an authenticator app code, on top of what you already have. Optional; the two OAuth sign-in providers on this account (GitHub, Google, Discord) already have their own.</p>
+          <button type="button" id="account-totp-enable-btn">Enable two-factor authentication</button>
+        </div>
+
+        <!-- Enrollment: a secret was generated and is PENDING -- not
+             active until a code proves the authenticator app was set
+             up correctly (see app/totp_api.py's POST
+             /api/account/totp/enroll docstring). -->
+        <div id="account-totp-enroll" hidden>
+          <p class="account-hint">Scan this with your authenticator app (Google Authenticator, Authy, 1Password, ...), or enter the code below by hand.</p>
+          <div id="account-totp-qr" class="totp-qr-wrap"></div>
+          <p class="totp-secret-text" id="account-totp-secret-text"></p>
+          <form id="account-totp-activate-form" novalidate>
+            <label class="account-field">
+              <span>Enter the 6-digit code from your app to confirm it's working</span>
+              <input type="text" id="f-account-totp-activate-code" class="totp-code-input" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" maxlength="6" />
+            </label>
+            <div class="account-password-actions">
+              <button type="submit" id="account-totp-activate-submit">Confirm and activate</button>
+              <button type="button" id="account-totp-enroll-cancel-btn" class="account-link-btn">Cancel</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Just activated: the ten recovery codes, shown exactly
+             once (app/totp_api.py's POST /api/account/totp/activate
+             response body is the only place these plaintext codes
+             ever exist). -->
+        <div id="account-totp-recovery-reveal" hidden>
+          <div class="account-warning-box account-warning-box-strong">
+            <strong>Save these recovery codes now — this is the only time they're shown.</strong>
+            Each one signs you in once if you lose access to your authenticator app. Store them somewhere safe, separate from your password.
+          </div>
+          <ul id="account-totp-recovery-codes" class="totp-recovery-list"></ul>
+          <button type="button" id="account-totp-recovery-ack-btn">I've saved these codes</button>
+        </div>
+
+        <!-- Steady state: ON. -->
+        <div id="account-totp-on" hidden>
+          <p class="totp-status-line">Two-factor authentication is enabled.</p>
+          <p id="account-totp-recovery-remaining" class="totp-recovery-remaining"></p>
+          <button type="button" id="account-totp-disable-btn">Disable two-factor authentication</button>
+          <div id="account-totp-disable-confirm" class="account-rotate-key-confirm" hidden>
+            <div class="account-warning-box account-warning-box-strong">
+              <strong>Turning this off removes the second step from signing in.</strong>
+              Enter a current code from your authenticator app (or one of your remaining recovery codes) to confirm.
+            </div>
+            <form id="account-totp-disable-form" novalidate>
+              <label class="account-field">
+                <span>Code or recovery code</span>
+                <input type="text" id="f-account-totp-disable-code" autocomplete="off" />
+              </label>
+              <div class="account-confirm-actions">
+                <button type="submit" id="account-totp-disable-submit">Yes, disable it</button>
+                <button type="button" id="account-totp-disable-cancel-btn" class="account-link-btn">Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+
       <section class="account-panel">
         <div class="account-title">Contact email</div>
         <p class="account-hint">A recovery address MeshWars can reach you at — separate from any sign-in method, and never usable to sign in on its own.</p>
@@ -428,7 +573,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260903-11" type="module"></script>
+  <script src="/static/account.js?v=20260904-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

@@ -13,6 +13,25 @@
  * in place once /api/join succeeds -- nothing is hidden or navigated
  * away.
  *
+ * This is the ANONYMOUS entry point ONLY -- always was, is again. It
+ * used to also carry its own "Sign in" panel above this flow (a
+ * SEPARATE thing from registering: that panel made an ACCOUNT, this
+ * flow makes a PLAYER), which meant an already-signed-in visitor who
+ * followed a "join" link landed on a page asking them to sign in a
+ * second time, right above a form that still demanded an invite code
+ * they'd already cleared a stronger bar than. That panel, and its
+ * whole sign-in machinery (fetchProviders/renderProviderButtons/
+ * setupEmailSignInForm/setupPasswordSignInForm from
+ * frontend/signin-email.js, and this file's own setupSignIn()), moved
+ * to frontend/account.js instead: an authenticated account with no
+ * linked player now completes the ENTIRE join flow from /account --
+ * team, radio, key -- server-side gated on the session
+ * (app/join_api.py's join(), Depends(optional_session)), never asked
+ * for an invite code at all. The one line this page now offers someone
+ * who already has an account is a plain link to /account -- see the
+ * "Already have a MeshWars account?" teaser in join.html, right above
+ * #join-flow-panel below.
+ *
  * SECURITY: display names and every message the server returns are
  * untrusted. Every dynamic value rendered on this page is set via
  * textContent, an element's .value, or a CSS custom property with a
@@ -30,8 +49,6 @@
  * already exactly one place this key lives on the page, and it should
  * stay that way.
  */
-
-import { fetchProviders, renderProviderButtons, setupEmailSignInForm, setupPasswordSignInForm } from './signin-email.js?v=20260903-3';
 
 // Same roster/colors as frontend/mc.js -- duplicated rather than
 // imported, since this page must stay self-contained and load
@@ -1446,75 +1463,6 @@ function setupStatusKeyToggle() {
   });
 }
 
-// ---- Sign in with an account provider (GET /auth/providers) --------------
-//
-// A SEPARATE thing from the invite-code registration flow above it on
-// this page: that flow makes a PLAYER (app/join_api.py -- a radio, a
-// team, an API key); this makes an ACCOUNT (app/account_api.py,
-// app/oauth_api.py), the sign-in layer /account later lets someone
-// point at that player via the connect-by-key flow. See #signin-panel's
-// own comment in join.html for why the two are independent and can be
-// done in either order.
-//
-// The "fetch the provider list, render a button per entry, reveal the
-// email form" shape itself now lives in frontend/signin-email.js --
-// shared with frontend/link.js and frontend/account.js, see that
-// module's own header comment for why this one piece is not
-// duplicated per page the way TEAM_COLORS above is.
-//
-// GET /auth/providers only ever lists a provider that is actually
-// configured (app/oauth.py's provider_enabled()), so an unconfigured
-// one is never rendered as a button that would 404 the moment someone
-// clicked it -- and the whole panel starts `hidden` in join.html and
-// is only revealed once there is something worth showing (a real
-// provider, an auth_error to report, or password sign-in, which is
-// always worth showing -- see below).
-const AUTH_ERROR_MESSAGES = {
-  provider_declined: 'Sign-in was cancelled.',
-  invalid_session: 'That sign-in attempt expired or was already used. Try again.',
-  provider_error: 'The sign-in provider had a problem. Try again in a moment.',
-};
-
-async function setupSignIn() {
-  const panel = document.getElementById('signin-panel');
-  const wrap = document.getElementById('signin-providers');
-  const errEl = document.getElementById('signin-error');
-  const emailForm = document.getElementById('signin-email-form');
-  const magicLinkBtn = document.getElementById('signin-magic-link-btn');
-  if (!panel || !wrap) return;
-
-  // A failed sign-in attempt (GET /auth/{provider}/callback -- see
-  // app/oauth_api.py's oauth_callback()) redirects back here with a
-  // short, non-sensitive reason code in the query string, never the
-  // raw provider error -- see that route's own docstring for why.
-  const errorCode = new URLSearchParams(window.location.search).get('auth_error');
-  if (errorCode && errEl) {
-    errEl.textContent = AUTH_ERROR_MESSAGES[errorCode] || 'Sign-in failed. Try again.';
-    errEl.hidden = false;
-  }
-
-  const providers = await fetchProviders();
-
-  const hasEmail = providers.some((p) => p.name === 'email');
-  renderProviderButtons(providers.filter((p) => p.name !== 'email'), wrap);
-
-  // The email <form> now always has something to offer -- password
-  // sign-in (#signin-password-group), which is never gated by GET
-  // /auth/providers at all (see frontend/signin-email.js's own header
-  // comment) -- so unlike before, it is no longer hidden when magic-link
-  // email itself isn't configured. Only the magic-link button is gated
-  // on `hasEmail`, same as it always was.
-  if (emailForm) emailForm.hidden = false;
-  if (magicLinkBtn) magicLinkBtn.hidden = !hasEmail;
-
-  // Password sign-in (above) is unconditional, so this panel now always
-  // has something worth showing -- unlike the old
-  // `providers.length > 0 || errorCode` check this replaces, which
-  // could leave it hidden on a deployment with no OAuth provider and no
-  // SMTP configured.
-  panel.hidden = false;
-}
-
 function boot() {
   buildTeamPicker();
   mcPicker = createNodePicker('mc');
@@ -1530,22 +1478,9 @@ function boot() {
   setupProtocolToggle();
   applyMeshtasticAvailability();
   applyInviteCodeHint();
-  setupSignIn();
   setupStatusKeyToggle();
   setupEndpointCopy();
   document.getElementById('join-submit').addEventListener('click', handleJoinClick);
-  setupEmailSignInForm(document.getElementById('signin-email-form'), {
-    input: document.getElementById('f-signin-email'),
-    errorEl: document.getElementById('signin-email-error'),
-    sentEl: document.getElementById('signin-email-sent'),
-    submitBtn: document.getElementById('signin-magic-link-btn'),
-  });
-  setupPasswordSignInForm(document.getElementById('signin-email-form'), {
-    emailInput: document.getElementById('f-signin-email'),
-    passwordInput: document.getElementById('f-signin-password'),
-    errorEl: document.getElementById('signin-email-error'),
-    submitBtn: document.getElementById('signin-password-btn'),
-  });
   document.getElementById('status-form').addEventListener('submit', handleStatusSubmit);
   document.getElementById('add-radio-form').addEventListener('submit', handleAddRadioSubmit);
   document.getElementById('status-team-switch-btn').addEventListener('click', handleTeamSwitchBtnClick);

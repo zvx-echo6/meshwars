@@ -699,9 +699,14 @@ def test_callback_redirect_login_goes_to_account_with_session_cookie(db_path, mo
     assert "mw_session" in resp.cookies
 
 
-def test_callback_redirect_invalid_token_goes_to_join_with_auth_error(db_path, monkeypatch):
+def test_callback_redirect_invalid_token_goes_to_account_with_auth_error(db_path, monkeypatch):
+    # /account, not /join: /join no longer carries a sign-in panel to
+    # show this error against (see app/oauth_api.py's
+    # _callback_error_response docstring) -- /account is the one page
+    # every sign-in method already lands a successful attempt on, and
+    # now a failed one too.
     _enable_email(monkeypatch)
     client = _client()
     resp = client.get("/auth/email/callback", params={"token": "never-issued"}, follow_redirects=False)
     assert resp.status_code == 302
-    assert resp.headers["location"] == "/join?auth_error=invalid_session"
+    assert resp.headers["location"] == "/account?auth_error=invalid_session"

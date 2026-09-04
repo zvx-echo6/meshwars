@@ -51,8 +51,7 @@ body {
    around the flow rather than being fed to the fields themselves. */
 #join-flow-panel,
 #status-check-panel,
-#working-check-panel,
-#signin-panel {
+#working-check-panel {
   max-width: 560px;
   margin-left: auto;
   margin-right: auto;
@@ -76,48 +75,11 @@ body {
 }
 .join-check-teaser a:hover { text-decoration: underline; }
 
-/* The "check your email" status line under the magic-link button --
-   everything else this sign-in card needs now lives in
-   frontend/signin.css (shared with account.css/link.css, see that
-   file's own header), but this rule's colour differs on link.css
-   (a different --mw-text-* step), so it stays local rather than
-   forcing all three pages to the same shade. */
-.signin-email-sent {
-  font-size: 0.6875rem;
-  color: var(--mw-text-6);
-  margin: 8px 0 0;
-}
-
-/* ---- Password sign-in (POST /auth/password/start) ------------------------
-   A SECOND action on the same #signin-email-form as the magic-link
-   button above it, sharing that form's one email field -- see
-   join.html's own comment on #signin-password-group for why this isn't
-   a separate form. Its own border-top visually separates it from the
-   magic-link button/status text above, the same way .signin-email-form
-   is set off from .signin-providers in frontend/signin.css. Same shape
-   account.css defines for its own #account-signin-password-group --
-   link.css has no equivalent (link.html never offers password sign-in,
-   see link.js's own comment), so this isn't a three-way match like
-   frontend/signin.css's rules and stays local to the two pages that
-   need it. */
-.signin-password-group {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--mw-line);
-}
-.signin-password-group label {
-  display: block;
-  margin-bottom: 10px;
-  font-size: 0.75rem;
-  color: var(--mw-text-5);
-}
-.signin-password-group label > span {
-  display: block;
-  margin-bottom: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-size: 0.6875rem;
-}
+/* Sign-in (provider buttons, magic-link, password) no longer lives on
+   this page -- see frontend/join.js's own module docstring for why it
+   moved to frontend/account.js, which now owns the CSS for all of it
+   (account.css). This page kept only .join-panel-title below, still
+   used by #join-flow-panel/#status-check-panel/#working-check-panel. */
 
 .join-panel-title {
   font-weight: 700;

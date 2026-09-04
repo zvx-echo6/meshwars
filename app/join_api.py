@@ -1,20 +1,44 @@
 """FastAPI router for public player self-registration.
 
-`/api/join` and `/api/join/redeem` are the only unauthenticated,
-state-changing endpoints in this app -- reachable from the public
-internet, so this module is defensive about it:
+`/api/join` is reachable two ways now, both handled by the one route
+below:
+
+- Anonymous (no session cookie): the original public path, reachable
+  from the public internet, so this module stays defensive about it --
+  see the invite-code section further down.
+- Signed in (a valid `account_session` cookie -- app/sessions.py's
+  `optional_session`), for an account with no player linked yet. This
+  is what lets someone who has already authenticated finish joining
+  from /account without ever visiting /join a second time and being
+  asked to sign in again -- see join()'s own docstring for the exact
+  gate. The session is resolved via `optional_session`, never
+  `require_session`: this route has to keep working with NO session at
+  all (that's the whole public join flow), so a missing/expired/
+  revoked cookie must fall through to the anonymous path rather than
+  401ing.
+
+Defensive posture for the anonymous path:
 
 - Registration is entirely OFF unless `settings.join_invite_code` is
   configured. Empty means off, never open (see the check at the top of
-  `join()`).
+  `join()`) -- this switch is deployment-wide and still applies to a
+  signed-in caller too; it is "is joining open at all," not "do you
+  need a code."
 - The invite code is compared with `secrets.compare_digest`, and a wrong
   code still costs a small fixed delay, so the endpoint can't be used as
-  a fast oracle to brute-force the code.
+  a fast oracle to brute-force the code. A signed-in caller with no
+  linked player skips this comparison entirely (see step 2 below) --
+  they have already cleared a stronger bar than the code, so whatever
+  they send in `invite_code` (right, wrong, or omitted) is simply never
+  looked at.
 - A simple in-process rate limiter (`_attempts`, keyed on client IP)
   caps attempts per address; the tracking dict is bounded the same way
   `McIngestor._key_cache` is in app/mc_ingest.py -- sweep expired
   entries first, and only clear the whole structure if that alone
-  doesn't bring it back under the cap.
+  doesn't bring it back under the cap. Applied to both paths -- it is
+  an abuse guard on the endpoint itself, not specifically on invite-code
+  guessing, so a signed-in caller is rate-limited the same as anyone
+  else.
 
 `/api/join/redeem` exists now so a later mesh join command can turn a
 pre-issued token into a key without any change here. Nothing in this
@@ -37,6 +61,7 @@ from .db import connect
 from .mc_ingest import hash_secret
 from .node_ref import normalize_node_ref
 from .results import month_bounds, month_key
+from .sessions import SessionPrincipal, optional_session
 
 router = APIRouter()
 
@@ -147,9 +172,38 @@ def _registration_response(display_name: str, team: str, protocol: str | None, r
 # ---- routes -------------------------------------------------------------
 
 @router.post("/api/join")
-async def join(request: Request) -> JSONResponse:
+async def join(
+    request: Request, session: SessionPrincipal | None = Depends(optional_session)
+) -> JSONResponse:
+    """Register a new player -- anonymously with an invite code (the
+    original public flow), or, now, as the one-time completion of
+    joining for an already-signed-in account that has no player linked
+    yet (see this module's own docstring for why `optional_session`,
+    not `require_session`).
+
+    A session with a player ALREADY linked is refused up front (step 0
+    below) -- POST /api/account/link-key (app/account_api.py) is the
+    retrofit path for an account that wants to claim an existing key
+    instead, and "one account, one player" is the same invariant that
+    route already enforces via player.account_id's UNIQUE index; this
+    route would otherwise happily mint a SECOND, unlinked player for a
+    signed-in caller who already has one, which is never what "Join" on
+    /account means.
+    """
+    # 0. A session with a player already linked has nothing left to do
+    # here -- see this route's own docstring for why this is checked
+    # before anything else, including the invite-code gate below (an
+    # already-linked account is refused the same way regardless of
+    # whatever code, right or wrong, it happens to send).
+    if session is not None and session.player_id is not None:
+        return JSONResponse(
+            {"error": "this account already has a linked player"}, status_code=409
+        )
+
     # 1. Registration is disabled unless an invite code is configured.
-    # Empty must mean off, never open.
+    # Empty must mean off, never open -- this is a deployment-wide
+    # switch for whether joining is open AT ALL, so it applies to a
+    # signed-in caller too, not just the invite-code check below.
     if not settings.join_invite_code:
         return JSONResponse(
             {"error": "registration is currently closed"}, status_code=503
@@ -171,12 +225,23 @@ async def join(request: Request) -> JSONResponse:
     # 2. Invite code, constant-time compare, fixed delay on mismatch so
     # this can't be timed as a fast oracle. asyncio.sleep, not
     # time.sleep -- this must not block the event loop.
-    supplied_code = body.get("invite_code")
-    if not isinstance(supplied_code, str) or not secrets.compare_digest(
-        supplied_code, settings.join_invite_code
-    ):
-        await asyncio.sleep(_WRONG_CODE_DELAY_S)
-        return JSONResponse({"error": "invalid invite code"}, status_code=403)
+    #
+    # Skipped entirely for a signed-in caller (session is not None here
+    # -- step 0 above already refused the one case where they'd have a
+    # player to conflict with): an authenticated account has already
+    # cleared a stronger bar than the code, so whatever `invite_code`
+    # this request carries -- right, wrong, or omitted -- is never
+    # looked at. This is the server-side half of "no invite code
+    # required for user accounts": gated on the verified session
+    # `optional_session` resolved above, never on a client-supplied
+    # flag the request body could just as easily lie about.
+    if session is None:
+        supplied_code = body.get("invite_code")
+        if not isinstance(supplied_code, str) or not secrets.compare_digest(
+            supplied_code, settings.join_invite_code
+        ):
+            await asyncio.sleep(_WRONG_CODE_DELAY_S)
+            return JSONResponse({"error": "invalid invite code"}, status_code=403)
 
     # 3. Display name.
     display_name, err = _validate_display_name(body.get("display_name"))
@@ -240,6 +305,25 @@ async def join(request: Request) -> JSONResponse:
             conn.execute("ROLLBACK")
             return JSONResponse({"error": "that name is taken"}, status_code=409)
 
+        # Re-check "does this account already have a linked player"
+        # under the write lock BEGIN IMMEDIATE above just acquired --
+        # step 0's check ran before this transaction opened, so a
+        # second /api/join call on the same session racing in between
+        # could otherwise still slip a second player onto one account.
+        # Same conflict, same message, same reasoning as
+        # app/account_api.py's link_key() re-checking its own
+        # "already linked" condition inside its WriteSession.
+        if session is not None:
+            already = conn.execute(
+                "SELECT player_id FROM player WHERE account_id = ?",
+                (session.account_id,),
+            ).fetchone()
+            if already:
+                conn.execute("ROLLBACK")
+                return JSONResponse(
+                    {"error": "this account already has a linked player"}, status_code=409
+                )
+
         if node_ref is not None:
             bound = conn.execute(
                 "SELECT player_id FROM player_node WHERE protocol = 'mt' AND node_ref = ?",
@@ -270,6 +354,27 @@ async def join(request: Request) -> JSONResponse:
                 "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) "
                 "VALUES ('mt', ?, ?, ?)",
                 (node_ref, player_id, now),
+            )
+
+        # A session-based join links the new player to the calling
+        # account in the SAME transaction that created it -- so a
+        # signed-in caller who just joined never has to turn around and
+        # paste their own brand-new key into POST /api/account/link-key
+        # to claim what they just made. Same write, same event kind
+        # ('player_linked'), and the same reasoning app/account_api.py's
+        # link_key() already documents for its own UPDATE -- this is
+        # just that same link happening automatically, at creation time,
+        # for the one case (no prior player at all) link-key's own
+        # conflict check above already proved is clear.
+        if session is not None:
+            conn.execute(
+                "UPDATE player SET account_id = ? WHERE player_id = ?",
+                (session.account_id, player_id),
+            )
+            conn.execute(
+                "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+                "VALUES (?, 'player_linked', ?, 'user', ?)",
+                (session.account_id, f"player_id={player_id}", now),
             )
 
         conn.execute("COMMIT")

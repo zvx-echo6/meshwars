@@ -1,30 +1,35 @@
 /* =====================================================================
    frontend/signin.css -- the sign-in-card styling shared by every page
    that offers it: frontend/account.html (the signed-out /account page's
-   welcome panel), frontend/join.html (registration flow's own sign-in
-   panel), and frontend/link.html (the pending-identity screen's "sign
-   in with a method you already use" choice). Same three pages
-   frontend/signin-email.js already serves -- see that file's own header
-   comment for why this is one shared module rather than a copy per
-   page: there is only one correct way to render GET /auth/providers as
-   a row of sign-in buttons plus the "email" entry's address-and-submit
-   form, and nothing below is page-specific enough to justify drifting
-   three ways.
+   welcome panel, and now also the ONLY place an authenticated visitor
+   completes joining -- see account.js's own module docstring) and
+   frontend/link.html (the pending-identity screen's "sign in with a
+   method you already use" choice). frontend/join.html used to be a
+   third consumer (registration flow's own sign-in panel) -- it dropped
+   sign-in entirely (see frontend/join.js's own module docstring for
+   why: signing in and joining are no longer offered from the same
+   page, so join.html no longer loads this stylesheet at all). Same two
+   pages frontend/signin-email.js still serves -- see that file's own
+   header comment for why this is one shared module rather than a copy
+   per page: there is only one correct way to render GET /auth/providers
+   as a row of sign-in buttons plus the "email" entry's
+   address-and-submit form, and nothing below is page-specific enough to
+   justify drifting two ways.
 
    Loaded after theme.css, which is where the --mw-* custom properties
-   this file reads are defined (:root, all three pages load it), and
-   before each page's own stylesheet, so a page can still override a
-   rule here without !important -- see each page's own <link> order.
+   this file reads are defined (:root, both pages load it), and before
+   each page's own stylesheet, so a page can still override a rule here
+   without !important -- see each page's own <link> order.
 
    NOT everything the sign-in card touches lives here. Two rules stay
-   page-local instead of being forced into a false three-way match:
+   page-local instead of being forced into a false two-way match:
      - .signin-email-sent (the "check your email" status line) is a
-       different --mw-text-* shade on link.css than on
-       account.css/join.css -- each page still defines it.
+       different --mw-text-* shade on link.css than on account.css --
+       each page still defines it.
      - .signin-password-group (password sign-in) has no link.css
        equivalent at all -- link.html never offers password sign-in
-       (see frontend/link.js's own comment) -- so only account.css and
-       join.css still define it.
+       (see frontend/link.js's own comment) -- so only account.css
+       still defines it.
    ===================================================================== */
 
 /* ---- Sign in (GET /auth/providers) -- row of provider buttons ------------

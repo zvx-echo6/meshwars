@@ -3,9 +3,9 @@
  *
  * Talks to GET /api/account, GET /api/account/pending, POST
  * /api/account/pending/link, POST /api/account/link-key, POST
- * /api/account/logout[-all], GET /auth/providers, and the full set of
- * session-authenticated player/security surfaces this page grew into:
- * GET/POST/DELETE /api/nodes, POST /api/mc/status, GET
+ * /api/join, POST /api/account/logout[-all], GET /auth/providers, and
+ * the full set of session-authenticated player/security surfaces this
+ * page grew into: GET/POST/DELETE /api/nodes, POST /api/mc/status, GET
  * /api/account/checkin-health, POST /api/checkin/confirm/start, GET
  * /api/checkin/confirm/status, POST /api/checkin/confirm/accept,
  * DELETE /api/checkin/confirm, GET/POST /api/team, GET
@@ -29,20 +29,34 @@
  * join.html's key-pasting panel: a signed-in visitor never has to
  * paste their key on this page for anything.
  *
+ * This page is now ALSO where joining for the first time happens, for
+ * an account with no linked player -- see the Player panel's
+ * #account-join-panel (handleJoinSubmit() below) and
+ * app/join_api.py's join() docstring for the full picture. Sign-in
+ * used to live on frontend/join.js's own page instead, above the
+ * anonymous invite-code flow -- which meant an already-signed-in
+ * visitor who followed a "join" link landed on a page asking them to
+ * sign in a SECOND time, next to a form still demanding an invite code
+ * they'd already cleared a stronger bar than. join.html dropped that
+ * panel; this page's own signed-out state (renderSignedOut() below)
+ * already covered the identical sign-in UI, so nothing about signing
+ * in moved here that wasn't already here -- only joining did.
+ *
  * Every player-scoped section below (radios, troubleshooting,
  * check-in health, confirm-my-node, team, stats, check-in history,
  * honors) is gated on session.player_id existing at all -- see
  * applyPlayerGate(). An account with no linked player sees a plain
- * explanation and the connect-by-key form instead of any of those
- * sections erroring out.
+ * explanation, the Join flow, and the connect-by-key form instead of
+ * any of those sections erroring out.
  *
  * SECURITY: every dynamic value rendered here (provider labels, masked
  * emails, player name/team, session user-agent/ip, server error text,
  * diagnosis/explanation copy, confirm-my-node candidate names) is set
  * via textContent or an element's .value, never innerHTML -- same rule
  * frontend/join.js's own module docstring states for the same reason.
- * The API key entered in the connect-by-key form, and the freshly
- * rotated key rotate-key returns, are each handled the same way
+ * The API key entered in the connect-by-key form, the one POST
+ * /api/join's own session-based join returns, and the freshly rotated
+ * key rotate-key returns, are each handled the same way
  * frontend/join.js's own module docstring describes for the identical
  * key on the join page: sent/shown exactly once, never stored or
  * logged, and GET /api/account never returns a key at all.
@@ -53,8 +67,9 @@ import {
   renderProviderButtons,
   setupEmailSignInForm,
   setupPasswordSignInForm,
+  showAuthErrorFromQuery,
   PASSWORD_SIGNIN_AVAILABLE,
-} from './signin-email.js?v=20260903-3';
+} from './signin-email.js?v=20260904-1';
 
 // No local PROVIDER_LABELS map here -- app/oauth.py's PROVIDER_LABELS
 // is the single source of truth, and every API response this page
@@ -225,8 +240,7 @@ async function renderSignedOut() {
   // (#account-signin-email-form below), not a plain provider link --
   // see frontend/signin-email.js's own header comment for why (there
   // is no GET /auth/email/start redirect to point one at). Same
-  // component frontend/join.js's #signin-email-form and
-  // frontend/link.js's #link-email-form use.
+  // component frontend/link.js's #link-email-form uses.
   const hasEmail = providers.some((p) => p.name === 'email');
   const linkableProviders = providers.filter((p) => p.name !== 'email');
 
@@ -364,6 +378,151 @@ function renderPlayer(player) {
   } else {
     linkedEl.hidden = true;
     unlinkedEl.hidden = false;
+  }
+}
+
+// ---- Join (POST /api/join, session-authenticated) ------------------------
+//
+// The whole "register for the first time" flow, moved here from
+// frontend/join.js -- see this file's own module docstring for why.
+// Collects only display name + team + protocol: no invite-code field
+// (a signed-in caller is never asked for one -- see app/join_api.py's
+// join() docstring for the server-side gate this relies on, which is
+// what actually enforces it; this form simply never renders a field
+// for something the endpoint would ignore anyway), and no radio picker
+// either -- #account-add-radio-form just below (Radios &
+// troubleshooting, revealed the instant this succeeds by
+// applyPlayerGate()) already exists for adding a radio to a linked
+// player, so a second, join-specific copy of that picker would be the
+// exact kind of duplicated join logic this change was told not to
+// introduce.
+let selectedJoinTeam = null;
+
+// Same swatch markup/behavior as buildTeamSwitchPicker() further down
+// (account-team-switch's own picker), simplified: no "current team"
+// disabled state (there is no current team yet) and no confirmation
+// step (switching teams gives up held ground and is rate-limited;
+// picking a team to join for the first time is neither). Not factored
+// into one shared builder with buildTeamSwitchPicker() -- the two
+// diverge enough (disabled state, confirm step, target picker id) that
+// sharing one function would need as many branches as just having two
+// short ones.
+function buildJoinTeamPicker() {
+  const wrap = document.getElementById('account-join-team-picker');
+  if (!wrap) return;
+  wrap.replaceChildren();
+  selectedJoinTeam = null;
+  TEAM_ORDER.forEach((team) => {
+    const swatch = document.createElement('button');
+    swatch.type = 'button';
+    swatch.className = 'account-team-swatch';
+    swatch.style.setProperty('--swatch-color', TEAM_COLORS[team]);
+    swatch.textContent = team;
+    swatch.addEventListener('click', () => {
+      wrap.querySelectorAll('.account-team-swatch').forEach((b) => b.classList.remove('active'));
+      swatch.classList.add('active');
+      selectedJoinTeam = team;
+    });
+    wrap.appendChild(swatch);
+  });
+}
+
+function showJoinError(message) {
+  const el = document.getElementById('account-join-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearJoinError() {
+  const el = document.getElementById('account-join-error');
+  el.textContent = '';
+  el.hidden = true;
+}
+
+async function handleJoinSubmit(e) {
+  e.preventDefault();
+  clearJoinError();
+
+  const nameInput = document.getElementById('f-account-join-name');
+  const displayName = nameInput.value.trim();
+  if (!displayName) {
+    showJoinError('Enter a display name.');
+    return;
+  }
+  if (!selectedJoinTeam) {
+    showJoinError('Choose a team.');
+    return;
+  }
+  const protocol = document.getElementById('f-account-join-protocol').value;
+
+  const submitBtn = document.getElementById('account-join-submit');
+  submitBtn.disabled = true;
+  try {
+    // No invite_code in this body at all -- and no credentials option
+    // needed either, since a same-origin fetch already sends this
+    // page's own session cookie by default. That cookie is what
+    // app/join_api.py's join() actually checks (Depends(optional_session))
+    // to skip the invite-code requirement -- there is no client-side
+    // flag here that could be tampered with to fake that; the gate is
+    // entirely server-side.
+    const res = await fetch('/api/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: displayName, team: selectedJoinTeam, protocol }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      const message = (data && typeof data.error === 'string')
+        ? data.error
+        : `Join failed (status ${res.status}).`;
+      showJoinError(message);
+      submitBtn.disabled = false;
+      return;
+    }
+
+    // Success. Registration is one-time -- disable every control in
+    // this form rather than resetting it for a second submit, same
+    // reasoning frontend/join.js's own handleJoinClick() gives for
+    // leaving its own Join button disabled after success.
+    nameInput.disabled = true;
+    document.getElementById('f-account-join-protocol').disabled = true;
+    document.getElementById('account-join-team-picker')
+      .querySelectorAll('.account-team-swatch')
+      .forEach((b) => { b.disabled = true; });
+
+    document.getElementById('account-join-success').textContent =
+      `You're registered for team ${data.team}. Copy your API key below -- this is the only time it will ever be shown.`;
+    document.getElementById('account-join-key-slot').replaceChildren(buildCopyRow(data.key));
+    document.getElementById('account-join-result').hidden = false;
+
+    // Re-fetch the canonical player object rather than building one
+    // from /api/join's own response shape (display_name/team/protocol/
+    // key -- built for the anonymous flow's key-display step, not a
+    // player_id) -- same "re-fetch after a mutation" pattern
+    // loadAccount() already uses after maybeCompletePendingLink(). The
+    // new player is already linked to this account server-side, in
+    // the SAME transaction that created it (see join()'s own
+    // docstring) -- there is no separate link-key step to perform
+    // here the way an anonymous join needs a follow-up bindPickedMcNode()/
+    // bindPickedMtNode() call for a picked radio; there is no radio
+    // picked here at all (see this section's own header comment).
+    try {
+      const accRes = await fetch('/api/account');
+      if (accRes.ok) {
+        const accData = await accRes.json();
+        renderPlayer(accData.player);
+      }
+    } catch (err) {
+      // The success line above already told them it worked; a failed
+      // refresh here just means the Player panel's linked-state copy
+      // catches up on the next page load instead of immediately.
+    }
+    applyPlayerGate(true);
+    loadPlayerSections();
+  } catch (err) {
+    showJoinError('Could not reach the server. Check your connection and try again.');
+    submitBtn.disabled = false;
   }
 }
 
@@ -1894,6 +2053,213 @@ async function handlePasswordRemove() {
 }
 
 // ============================================================================
+// SECURITY: two-factor authentication (app/totp_api.py's enroll/
+// activate/disable routes)
+// ============================================================================
+
+function showTotpError(message) {
+  const el = document.getElementById('account-totp-error');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function showTotpSuccess(message) {
+  const el = document.getElementById('account-totp-success');
+  el.textContent = message;
+  el.hidden = false;
+}
+
+function clearTotpMessages() {
+  document.getElementById('account-totp-error').hidden = true;
+  document.getElementById('account-totp-success').hidden = true;
+}
+
+// Hides every one of this panel's mutually-exclusive sub-views before
+// showing exactly one -- same "one function decides the whole panel's
+// shape" discipline renderPasswordSection() already follows, so a
+// caller never has to remember which OTHER divs a given state leaves
+// behind.
+function _hideAllTotpViews() {
+  document.getElementById('account-totp-unavailable').hidden = true;
+  document.getElementById('account-totp-off').hidden = true;
+  document.getElementById('account-totp-enroll').hidden = true;
+  document.getElementById('account-totp-recovery-reveal').hidden = true;
+  document.getElementById('account-totp-on').hidden = true;
+}
+
+// Reflects GET /api/account's own `totp` field (app/account_api.py's
+// _totp_out()): {enabled, available, recovery_codes_remaining}.
+// Deliberately does NOT try to reconstruct an in-progress enrollment
+// across a page reload -- a still-PENDING secret (enroll called, code
+// never confirmed) has no representation in this response at all (see
+// that helper's own docstring: `enabled` only ever reflects an
+// ACTIVATED secret), so a reload mid-enrollment simply lands back on
+// the "off" view; clicking "Enable" again starts a fresh enrollment,
+// which server-side silently replaces whatever unproven secret was
+// already pending (POST /api/account/totp/enroll's own docstring) --
+// there is nothing lost that was ever actually usable.
+function renderTotpSection(account) {
+  const totp = account.totp || { enabled: false, available: false, recovery_codes_remaining: null };
+  _hideAllTotpViews();
+
+  if (!totp.available) {
+    document.getElementById('account-totp-unavailable').hidden = false;
+    return;
+  }
+
+  if (totp.enabled) {
+    document.getElementById('account-totp-on').hidden = false;
+    const remainingEl = document.getElementById('account-totp-recovery-remaining');
+    const n = totp.recovery_codes_remaining;
+    remainingEl.textContent = (typeof n === 'number')
+      ? `${n} recovery code${n === 1 ? '' : 's'} remaining.`
+      : '';
+    // Collapse any confirm form left open from a previous render.
+    document.getElementById('account-totp-disable-confirm').hidden = true;
+  } else {
+    document.getElementById('account-totp-off').hidden = false;
+  }
+}
+
+async function handleTotpEnableClick() {
+  clearTotpMessages();
+  const btn = document.getElementById('account-totp-enable-btn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/account/totp/enroll', { method: 'POST' });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showTotpError((data && data.error) || 'Something went wrong. Try again in a moment.');
+      return;
+    }
+
+    _hideAllTotpViews();
+    document.getElementById('account-totp-enroll').hidden = false;
+    // SECURITY: the QR markup here is app/totp_api.py's own
+    // _render_qr_svg() output -- a plain SVG this server rendered from
+    // the otpauth:// URI it just generated, never anything supplied by
+    // a browser or another user (unlike, say, a chat message or a
+    // profile field). innerHTML is the right tool for inserting a real
+    // <svg> element as markup (as opposed to text) -- the same
+    // reasoning frontend/signin-email.js's own PROVIDER_ICONS insertion
+    // already applies to its own trusted, this-app-authored SVG
+    // strings.
+    document.getElementById('account-totp-qr').innerHTML = data.qr_svg;
+    document.getElementById('account-totp-secret-text').textContent = data.secret;
+    document.getElementById('f-account-totp-activate-code').value = '';
+    document.getElementById('f-account-totp-activate-code').focus();
+  } catch (err) {
+    showTotpError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function handleTotpEnrollCancel() {
+  clearTotpMessages();
+  _hideAllTotpViews();
+  document.getElementById('account-totp-off').hidden = false;
+}
+
+async function handleTotpActivateSubmit(e) {
+  e.preventDefault();
+  clearTotpMessages();
+  const input = document.getElementById('f-account-totp-activate-code');
+  const code = (input.value || '').trim();
+  if (!/^[0-9]{6}$/.test(code)) {
+    showTotpError('Enter the 6-digit code from your authenticator app.');
+    return;
+  }
+
+  const submitBtn = document.getElementById('account-totp-activate-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/account/totp/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showTotpError((data && data.error) || 'That code was not accepted. Check it and try again.');
+      return;
+    }
+
+    _hideAllTotpViews();
+    document.getElementById('account-totp-recovery-reveal').hidden = false;
+    const list = document.getElementById('account-totp-recovery-codes');
+    list.replaceChildren();
+    (data.recovery_codes || []).forEach((code) => {
+      const li = document.createElement('li');
+      li.textContent = code;
+      list.appendChild(li);
+    });
+  } catch (err) {
+    showTotpError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+async function handleTotpRecoveryAck() {
+  showTotpSuccess('Two-factor authentication is enabled.');
+  await refreshAccountCore();
+}
+
+function handleTotpDisableClick() {
+  clearTotpMessages();
+  document.getElementById('account-totp-disable-confirm').hidden = false;
+  document.getElementById('f-account-totp-disable-code').value = '';
+  document.getElementById('f-account-totp-disable-code').focus();
+}
+
+function handleTotpDisableCancel() {
+  document.getElementById('account-totp-disable-confirm').hidden = true;
+}
+
+async function handleTotpDisableSubmit(e) {
+  e.preventDefault();
+  clearTotpMessages();
+  const input = document.getElementById('f-account-totp-disable-code');
+  const value = (input.value || '').trim();
+  if (!value) {
+    showTotpError('Enter a code or one of your recovery codes.');
+    return;
+  }
+  // A live TOTP code is always exactly 6 digits (app/totp.py's own
+  // _DIGITS); anything else is treated as a recovery code -- the same
+  // "shape tells you which one" split app/totp_api.py's DELETE
+  // /api/account/totp accepts either field for, just decided
+  // client-side here so this form only needs one input.
+  const body = /^[0-9]{6}$/.test(value) ? { code: value } : { recovery_code: value };
+
+  const submitBtn = document.getElementById('account-totp-disable-submit');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/api/account/totp', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (!res.ok) {
+      showTotpError((data && data.error) || 'That code was not accepted. Check it and try again.');
+      return;
+    }
+    document.getElementById('account-totp-disable-confirm').hidden = true;
+    showTotpSuccess('Two-factor authentication has been disabled.');
+    await refreshAccountCore();
+  } catch (err) {
+    showTotpError('Could not reach the server. Check your connection and try again.');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
+
+// ============================================================================
 // SECURITY: contact email (POST /api/account/contact-email)
 // ============================================================================
 
@@ -2080,6 +2446,7 @@ async function refreshAccountCore() {
     renderSessions(data.sessions);
     renderPasswordSection(data);
     renderOwesPasswordBanner(data);
+    renderTotpSection(data);
     renderContactEmail(data.contact_email);
   } catch (err) {
     // Leave whatever was already rendered in place.
@@ -2129,6 +2496,7 @@ async function loadAccount() {
   renderSessions(finalData.sessions);
   renderPasswordSection(finalData);
   renderOwesPasswordBanner(finalData);
+  renderTotpSection(finalData);
   renderContactEmail(finalData.contact_email);
 
   const hasPlayer = !!finalData.player;
@@ -2137,7 +2505,18 @@ async function loadAccount() {
 }
 
 function boot() {
+  // Runs unconditionally, before we even know whether GET /api/account
+  // will say signed-in or signed-out below (loadAccount(), at the
+  // bottom of this function) -- a plain query-string read has nothing
+  // to wait on, and #account-signin-error only becomes visible at all
+  // once #account-signed-out itself does, which is exactly the state a
+  // failed sign-in redirect always lands in. See signin-email.js's own
+  // showAuthErrorFromQuery() docstring for the message table.
+  showAuthErrorFromQuery(document.getElementById('account-signin-error'));
+
   document.getElementById('account-connect-form').addEventListener('submit', handleConnectSubmit);
+  buildJoinTeamPicker();
+  document.getElementById('account-join-form').addEventListener('submit', handleJoinSubmit);
   document.getElementById('account-logout-btn').addEventListener('click', handleLogout);
   document.getElementById('account-logout-all-btn').addEventListener('click', handleLogoutAll);
   setupEmailSignInForm(document.getElementById('account-signin-email-form'), {
@@ -2166,6 +2545,15 @@ function boot() {
 
   document.getElementById('account-password-form').addEventListener('submit', handlePasswordSubmit);
   document.getElementById('account-password-remove-btn').addEventListener('click', handlePasswordRemove);
+
+  document.getElementById('account-totp-enable-btn').addEventListener('click', handleTotpEnableClick);
+  document.getElementById('account-totp-enroll-cancel-btn').addEventListener('click', handleTotpEnrollCancel);
+  document.getElementById('account-totp-activate-form').addEventListener('submit', handleTotpActivateSubmit);
+  document.getElementById('account-totp-recovery-ack-btn').addEventListener('click', handleTotpRecoveryAck);
+  document.getElementById('account-totp-disable-btn').addEventListener('click', handleTotpDisableClick);
+  document.getElementById('account-totp-disable-cancel-btn').addEventListener('click', handleTotpDisableCancel);
+  document.getElementById('account-totp-disable-form').addEventListener('submit', handleTotpDisableSubmit);
+
   document.getElementById('account-contact-email-form').addEventListener('submit', handleContactEmailSubmit);
 
   document.getElementById('account-rotate-key-btn').addEventListener('click', handleRotateKeyBtnClick);

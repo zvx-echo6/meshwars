@@ -1,9 +1,15 @@
 // =====================================================================
 // frontend/signin-email.js -- the sign-in-with-a-provider component
-// shared by every page that offers it: frontend/join.js (registration
-// flow's own sign-in panel), frontend/link.js (the pending-identity
-// screen's "sign in with a method you already use" choice), and
-// frontend/account.js (the signed-out /account page's welcome panel).
+// shared by every page that offers it: frontend/account.js (the
+// signed-out /account page's welcome panel -- also, now, the ONLY
+// place sign-in is offered from the join side of the app; see that
+// file's own module docstring) and frontend/link.js (the
+// pending-identity screen's "sign in with a method you already use"
+// choice). frontend/join.js used to be a third consumer (registration
+// flow's own sign-in panel, above the anonymous invite-code flow) --
+// it dropped sign-in entirely once an authenticated visitor could join
+// straight from /account instead, so join.html no longer loads this
+// module at all (see frontend/join.js's own module docstring for why).
 //
 // One shared module, included alongside those pages' own scripts --
 // same exception to the "self-contained, no shared import" convention
@@ -12,13 +18,12 @@
 // sign-in buttons plus the "email" entry's address-and-submit form, and
 // unlike TEAM_COLORS (which IS duplicated per page script, on purpose,
 // so each page stays loadable on its own), this piece has nothing
-// page-specific in it to justify a third (now fourth) copy -- see
-// nav-auth.js's own header comment. Provider display labels are never
-// duplicated anywhere in the frontend either: app/oauth.py's
-// PROVIDER_LABELS is the single source of truth, and every API
-// response that names a provider (GET /auth/providers, GET
-// /api/account, GET /api/account/pending) already carries the label
-// alongside the raw name.
+// page-specific in it to justify a second copy -- see nav-auth.js's own
+// header comment. Provider display labels are never duplicated anywhere
+// in the frontend either: app/oauth.py's PROVIDER_LABELS is the single
+// source of truth, and every API response that names a provider (GET
+// /auth/providers, GET /api/account, GET /api/account/pending) already
+// carries the label alongside the raw name.
 //
 // "email" is never rendered as a plain provider link -- unlike every
 // OAuth provider, there is no GET /auth/email/start redirect to point
@@ -38,8 +43,8 @@
 // provider_enabled()-style gate for it in app/oauth.py and no SMTP
 // dependency the way magic-link email has, so PASSWORD_SIGNIN_AVAILABLE
 // below is a constant, not something derived from that endpoint. Only
-// join.js and account.js wire it in -- frontend/link.js's "already have
-// an account" panel deliberately does NOT, because POST
+// account.js wires it in -- frontend/link.js's "already have an
+// account" panel deliberately does NOT, because POST
 // /auth/password/start only ever authenticates an existing account and
 // never links a pending identity onto it (see that route's own
 // docstring), which is the entire reason that panel exists.
@@ -49,6 +54,37 @@
 // unlike every provider GET /auth/providers can list, is never
 // conditionally hidden.
 export const PASSWORD_SIGNIN_AVAILABLE = true;
+
+// A failed sign-in attempt (GET /auth/{provider}/callback or GET
+// /auth/email/callback -- see app/oauth_api.py's
+// _callback_error_response()) redirects the browser back to /account
+// with a short, non-sensitive reason code in the query string, never
+// the raw provider error -- see that function's own docstring for why.
+// Both callback routes land here now (previously /join, before it lost
+// its own sign-in panel -- see frontend/join.js's module docstring), so
+// this reads the query string once, in one place, instead of each
+// signed-out panel (account.js's renderSignedOut(), formerly join.js's
+// setupSignIn()) keeping its own copy of the same three-entry lookup
+// table to drift out of sync with app/oauth_api.py's actual codes.
+const AUTH_ERROR_MESSAGES = {
+  provider_declined: 'Sign-in was cancelled.',
+  invalid_session: 'That sign-in attempt expired or was already used. Try again.',
+  provider_error: 'The sign-in provider had a problem. Try again in a moment.',
+};
+
+// Reads `?auth_error=` off the current page's URL and, if present,
+// shows the matching message in `errEl` (a role="alert" element the
+// caller owns and has already put somewhere visible in its signed-out
+// panel). A no-op with no query param and with no `errEl` at all, so a
+// caller can always call this unconditionally in its boot path rather
+// than guarding on whether the element exists first.
+export function showAuthErrorFromQuery(errEl) {
+  if (!errEl) return;
+  const errorCode = new URLSearchParams(window.location.search).get('auth_error');
+  if (!errorCode) return;
+  errEl.textContent = AUTH_ERROR_MESSAGES[errorCode] || 'Sign-in failed. Try again.';
+  errEl.hidden = false;
+}
 
 // GET /auth/providers (app/oauth_api.py's list_providers()) -- only
 // ever lists a provider that is actually configured
@@ -324,7 +360,22 @@ export function setupPasswordSignInForm(form, els) {
         return;
       }
 
-      // Success: POST /auth/password/start already set the session
+      // Success is one of TWO shapes -- app/oauth_api.py's
+      // password_start() either issues a session outright ("login") or,
+      // when the account has TOTP two-factor active, hands off to a
+      // second-factor challenge instead ("totp_required" -- see that
+      // route's own docstring and app/totp_api.py's module docstring
+      // for the full mechanism). The challenge cookie is already set on
+      // THIS response either way this branches, so no token from the
+      // body is needed here -- only where to send the browser next.
+      let data = null;
+      try { data = await res.json(); } catch (err) { data = null; }
+      passwordInput.value = '';
+      if (data && data.result === 'totp_required') {
+        window.location.assign('/verify-totp');
+        return;
+      }
+      // "login": POST /auth/password/start already set the session
       // cookie on this response (create_session + set_session_cookie --
       // see that route's own docstring), exactly like oauth_callback and
       // email_callback do for their own "login" case. Those two land a
@@ -335,7 +386,6 @@ export function setupPasswordSignInForm(form, els) {
       // whether this form was reached from join.html, or was already on
       // /account itself (account.html), where it just re-loads the page
       // into its now-signed-in state.
-      passwordInput.value = '';
       window.location.assign('/account');
     } catch (err) {
       if (errorEl) {

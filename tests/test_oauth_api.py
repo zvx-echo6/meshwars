@@ -1117,7 +1117,13 @@ def test_callback_redirect_pending_goes_to_link_with_pending_cookie(db_path, mon
     assert row["subject"] == "999"
 
 
-def test_callback_redirect_error_goes_to_join_with_auth_error(db_path, monkeypatch):
+# All three of these land on /account, not /join: /join no longer
+# carries a sign-in panel to show `auth_error` against (see
+# app/oauth_api.py's _callback_error_response docstring) -- /account is
+# the one page every sign-in method already lands a successful attempt
+# on, and now a failed one too.
+
+def test_callback_redirect_error_goes_to_account_with_auth_error(db_path, monkeypatch):
     _enable_github(monkeypatch)
     client = _client()
     _start_and_get_state(client)
@@ -1126,10 +1132,10 @@ def test_callback_redirect_error_goes_to_join_with_auth_error(db_path, monkeypat
         "/auth/github/callback", params={"error": "access_denied"}, follow_redirects=False
     )
     assert resp.status_code == 302
-    assert resp.headers["location"] == "/join?auth_error=provider_declined"
+    assert resp.headers["location"] == "/account?auth_error=provider_declined"
 
 
-def test_callback_redirect_state_mismatch_goes_to_join_with_auth_error(db_path, monkeypatch):
+def test_callback_redirect_state_mismatch_goes_to_account_with_auth_error(db_path, monkeypatch):
     _enable_github(monkeypatch)
     client = _client()
     _start_and_get_state(client)
@@ -1140,10 +1146,10 @@ def test_callback_redirect_state_mismatch_goes_to_join_with_auth_error(db_path, 
         follow_redirects=False,
     )
     assert resp.status_code == 302
-    assert resp.headers["location"] == "/join?auth_error=invalid_session"
+    assert resp.headers["location"] == "/account?auth_error=invalid_session"
 
 
-def test_callback_redirect_provider_http_failure_goes_to_join_with_auth_error(db_path, monkeypatch):
+def test_callback_redirect_provider_http_failure_goes_to_account_with_auth_error(db_path, monkeypatch):
     _enable_github(monkeypatch)
     _patch_provider_http(monkeypatch, lambda r: httpx.Response(500))
     client = _client()
@@ -1153,7 +1159,7 @@ def test_callback_redirect_provider_http_failure_goes_to_join_with_auth_error(db
         "/auth/github/callback", params={"code": "the-code", "state": state}, follow_redirects=False
     )
     assert resp.status_code == 302
-    assert resp.headers["location"] == "/join?auth_error=provider_error"
+    assert resp.headers["location"] == "/account?auth_error=provider_error"
 
 
 # =========================================================================

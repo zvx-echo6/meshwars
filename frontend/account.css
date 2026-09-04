@@ -46,6 +46,18 @@
   margin-bottom: 8px;
 }
 
+/* The Player panel's "Join MeshWars" flow (#account-join-panel in
+   account.html, #account-player-unlinked) sits above the older
+   "connect an existing key" form as two distinct options, not one
+   continuous form -- this border is the only thing marking that seam;
+   everything else (spacing, field styling) already comes from the
+   shared rules below. */
+#account-join-panel {
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--mw-line);
+}
+
 .account-error {
   background: #2a1414;
   border: 1px solid #663333;
@@ -522,7 +534,12 @@
 }
 .account-field-compact { flex: 0 0 140px; }
 .account-field-grow { flex: 1; }
-.account-add-radio-form select {
+/* Shared with #account-join-form's own protocol select (the Player
+   panel's "Join MeshWars" flow, #account-player-unlinked in
+   account.html) -- same field, same styling need, no reason for a
+   second copy of this rule. */
+.account-add-radio-form select,
+#account-join-form select {
   width: 100%;
   background: var(--mw-page);
   color: var(--mw-text-1);
