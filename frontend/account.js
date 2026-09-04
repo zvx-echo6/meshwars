@@ -625,15 +625,100 @@ function finishWizard() {
   completeWizard();
 }
 
-// Closes the wizard: suppresses wizardPasswordActive (idempotent if it
-// was never set), puts #account-password-form back in its normal home
-// if the password step had it, and flips the Player panel over to its
-// ordinary "linked" summary -- the same renderPlayer() every other
-// caller on this page already uses.
+// Closes the wizard by closing #account-wizard-dialog -- everything
+// completing the wizard actually needs to do (suppressing
+// wizardPasswordActive, putting #account-password-form back in its
+// normal home, flipping the Player panel over to its "linked" summary)
+// now lives in handleWizardDialogClosed() below, wired to the dialog's
+// own native "close" event, so it runs identically whether the dialog
+// closed because the wizard finished or because the reader dismissed it
+// early (Escape, or the close button) -- see that function's own
+// comment.
 function completeWizard() {
-  wizardPasswordActive = false;
+  closeWizardDialog();
+}
+
+// ---- Wizard dialog (#account-wizard-dialog, native <dialog>) -------------
+//
+// showModal()/close() give this focus trapping, Escape handling, a
+// ::backdrop (styled in account.css) and background inerting for free --
+// nothing here hand-rolls any of that. wizardDialogOpener remembers
+// whichever element opened it (the boot-time auto-open passes null; the
+// "Set up your player" button passes itself), purely so
+// handleWizardDialogClosed() below has something to return focus to.
+let wizardDialogOpener = null;
+
+function openWizardDialog(opener) {
+  const dialog = document.getElementById('account-wizard-dialog');
+  if (!dialog || dialog.open) return;
+  wizardDialogOpener = opener || null;
+  dialog.showModal();
+  // Always starts back at the fork -- this can be a fresh open (the
+  // boot-time auto-open, or the route-back button after an earlier
+  // dismiss) as easily as a reopen mid-flow, and there's no signal
+  // worth keeping progress against either way. showWizardStep() also
+  // moves focus to the step's own heading, satisfying "move focus into
+  // the dialog when it opens" -- has to run AFTER showModal(), not
+  // before: an element inside a still-closed <dialog> isn't focusable.
+  showWizardStep('fork');
+  // A dialog opening while a password is independently owed (unrelated
+  // to this wizard -- see isWizardDialogOpen() above) needs the banner
+  // suppressed the instant it opens, not just on the next unrelated
+  // re-render.
   if (lastAccountData) renderOwesPasswordBanner(lastAccountData);
-  if (lastAccountData && lastAccountData.player) renderPlayer(lastAccountData.player);
+}
+
+function closeWizardDialog() {
+  const dialog = document.getElementById('account-wizard-dialog');
+  if (dialog && dialog.open) dialog.close();
+}
+
+function handleWizardOpenBtnClick(e) {
+  openWizardDialog(e.currentTarget);
+}
+
+function handleWizardDialogCloseBtnClick() {
+  closeWizardDialog();
+}
+
+// Fires on the dialog's own native "close" event -- covers every way it
+// can close: the explicit close button, Escape (the platform fires
+// "cancel" then "close"), and this file's own closeWizardDialog() once
+// the wizard actually finishes. One handler for all three so dismissing
+// early is never a second, worse-tested code path than finishing
+// normally.
+//
+// Unconditionally re-syncs from lastAccountData rather than trusting
+// which step was showing: a dismiss after Join/Connect succeeded but
+// before "Continue", or during the conditional password step, still
+// needs the Player panel and the owes-password banner to reflect
+// whatever the server actually holds by now -- exactly what
+// renderPlayer()/renderOwesPasswordBanner() already do everywhere else
+// on this page. If the dismiss landed mid password-step,
+// wizardPasswordActive is still true here; clearing it before calling
+// renderOwesPasswordBanner() is what lets the top banner (Security's
+// actual, ordinary job) take back over instead of staying suppressed --
+// see that function's own comment on why it's suppressed at all.
+function handleWizardDialogClosed() {
+  wizardPasswordActive = false;
+  if (lastAccountData) {
+    renderOwesPasswordBanner(lastAccountData);
+    renderPlayer(lastAccountData.player);
+  }
+  // Falls back to the route-back button itself when there was no real
+  // opener to return to -- the boot-time auto-open passes null (nothing
+  // was focused first; the browser's own default focus restoration has
+  // nowhere useful to send it), so without this a keyboard user who
+  // just hit Escape on the very first page load would land back on
+  // nothing at all. #account-wizard-open-btn is only ever on screen and
+  // focusable when there's still no player to link (a player now linked
+  // hides it along with the rest of #account-player-unlinked) --
+  // checked rather than assumed either way.
+  const opener = wizardDialogOpener || document.getElementById('account-wizard-open-btn');
+  wizardDialogOpener = null;
+  if (opener && document.body.contains(opener) && !opener.closest('[hidden]')) {
+    opener.focus();
+  }
 }
 
 // ---- Join (POST /api/join, session-authenticated) ------------------------
@@ -706,7 +791,7 @@ async function handleJoinSubmit(e) {
       .forEach((b) => { b.disabled = true; });
 
     document.getElementById('account-join-success').textContent =
-      `You're registered for team ${data.team}. Copy your API key below -- this is the only time it will ever be shown.`;
+      `You're registered for team ${data.team}. Copy your API key below — this is the only time it will ever be shown.`;
     document.getElementById('account-join-key-slot').replaceChildren(buildCopyRow(data.key));
     showWizardStep('done');
 
@@ -721,18 +806,23 @@ async function handleJoinSubmit(e) {
     // here the way an anonymous join needs a follow-up bindPickedMcNode()/
     // bindPickedMtNode() call for a picked radio; there is no radio
     // picked here at all (see this section's own header comment).
-    // Deliberately does NOT call renderPlayer() here -- that would flip
-    // #account-player-unlinked (and the "You're in" key reveal it still
-    // holds) out of view immediately, before anyone could read or copy
-    // the key. Only the linked-state copy is refreshed now; the
-    // visibility flip waits for completeWizard(), once the wizard is
-    // actually done (see finishWizard()'s own comment).
+    // renderPlayer() IS called here, and that is a change: it used to be
+    // deliberately skipped, because the "You're in" key reveal lived
+    // inside #account-player-unlinked and flipping that panel would have
+    // torn the one-time key off the screen before anyone could copy it.
+    // The key reveal now lives inside the wizard dialog, a sibling of
+    // that panel rather than a child, so the flip can no longer touch
+    // it. Skipping it is what left the page behind the dialog saying
+    // "No player is connected to this account yet." with a "Set up your
+    // player" button, underneath a dialog reading "You're in" -- two
+    // contradictory claims visible through the backdrop at once, and
+    // the wrong one waiting if the dialog were dismissed there.
     try {
       const accRes = await fetch('/api/account');
       if (accRes.ok) {
         const accData = await accRes.json();
         lastAccountData = accData;
-        updatePlayerLinkedCopy(accData.player);
+        renderPlayer(accData.player);
       }
     } catch (err) {
       // The success line above already told them it worked; a failed
@@ -1645,12 +1735,12 @@ function renderCheckinConfirmWaiting(data) {
 
     const instructions = document.createElement('p');
     instructions.className = 'account-hint';
-    instructions.textContent = 'Send that exact text as a message on your mesh now -- any channel, and it can be part of a longer sentence. We watch for it and show you which node it came from below.';
+    instructions.textContent = 'Send that exact text as a message on your mesh now — any channel, and it can be part of a longer sentence. We watch for it and show you which node it came from below.';
     result.appendChild(instructions);
   } else {
     const instructions = document.createElement('p');
     instructions.className = 'account-hint';
-    instructions.textContent = 'Trigger an advert on that radio now -- most MeshCore devices send one from a long-press of the side button, or a "Send Advert" / "Flood Advert" menu item.';
+    instructions.textContent = 'Trigger an advert on that radio now — most MeshCore devices send one from a long-press of the side button, or a "Send Advert" / "Flood Advert" menu item.';
     result.appendChild(instructions);
 
     if (data.baseline_count > 0) {
@@ -2405,6 +2495,26 @@ function renderPasswordSection(account) {
 // sit. Idempotent: calling this again with the account (and
 // wizardPasswordActive) in the same state just re-parents the node to
 // where it already is, which is harmless.
+//
+// Also suppressed for as long as #account-wizard-dialog is open on ANY
+// step, not just its own password step -- Matt's own complaint: this
+// banner asking for a password at the top of the page while the wizard
+// is mid fork/name/team/join competes with a flow that's already asking
+// for the reader's attention. Deliberately does NOT touch the form's
+// current location in that earlier-step case (isWizardDialogOpen() true,
+// wizardPasswordActive still false) -- the wizard isn't showing it yet
+// either, so it just stays wherever it already was; the wizard's own
+// password step reparents it itself the moment it actually needs it
+// (finishWizard() above). handleWizardDialogClosed() below re-calls this
+// once the dialog closes, so the banner (and the form, if it's owed)
+// resumes its normal top-of-page job the instant the wizard stops being
+// the thing on screen -- whether the dialog closed because the wizard
+// finished or because the reader dismissed it early.
+function isWizardDialogOpen() {
+  const dialog = document.getElementById('account-wizard-dialog');
+  return !!(dialog && dialog.open);
+}
+
 function renderOwesPasswordBanner(account) {
   const banner = document.getElementById('account-owes-password-banner');
   const slot = document.getElementById('account-owes-password-form-slot');
@@ -2415,6 +2525,11 @@ function renderOwesPasswordBanner(account) {
   if (wizardPasswordActive && account.owes_password) {
     banner.hidden = true;
     wizardSlot.appendChild(form);
+    return;
+  }
+
+  if (isWizardDialogOpen()) {
+    banner.hidden = true;
     return;
   }
 
@@ -3165,6 +3280,13 @@ async function loadAccount() {
   const hasPlayer = !!finalData.player;
   applyPlayerGate(hasPlayer);
   if (hasPlayer) loadPlayerSections();
+  // Opens the sign-up wizard automatically the instant this page learns
+  // there's no player to link -- the reader never has to find and click
+  // the route-back button (#account-wizard-open-btn) on a completely
+  // fresh account. Only fires here, once, at boot: nothing else on this
+  // page can turn a linked player back into an unlinked one, so there's
+  // no later point where this would need to fire again.
+  if (!hasPlayer) openWizardDialog(null);
 }
 
 function boot() {
@@ -3180,6 +3302,9 @@ function boot() {
   document.getElementById('account-connect-form').addEventListener('submit', handleConnectSubmit);
   buildJoinTeamPicker();
   document.getElementById('account-join-form').addEventListener('submit', handleJoinSubmit);
+  document.getElementById('account-wizard-open-btn').addEventListener('click', handleWizardOpenBtnClick);
+  document.getElementById('account-wizard-dialog-close-btn').addEventListener('click', handleWizardDialogCloseBtnClick);
+  document.getElementById('account-wizard-dialog').addEventListener('close', handleWizardDialogClosed);
   document.getElementById('account-wizard-fork-key-btn').addEventListener('click', handleWizardForkKey);
   document.getElementById('account-wizard-fork-new-btn').addEventListener('click', handleWizardForkNew);
   document.getElementById('account-wizard-key-back-btn').addEventListener('click', handleWizardKeyBack);

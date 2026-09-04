@@ -54,7 +54,7 @@
        page load. Do not remove this link without replacing both. -->
   <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
   <link rel="stylesheet" href="/static/signin.css?v=20260904-1" />
-  <link rel="stylesheet" href="/static/account.css?v=20260904-6" />
+  <link rel="stylesheet" href="/static/account.css?v=20260904-9" />
   <link rel="stylesheet" href="/static/totp.css?v=20260903-1" />
 </head>
 <body>
@@ -155,10 +155,16 @@
            #account-owes-password-form-slot while owed, and moves it back
            once it isn't -- so there is exactly one set-password
            implementation, exactly one submit handler
-           (account.js's handlePasswordSubmit), just two places it can
-           visually sit. Distinct styling from the ordinary Security
-           panels lives in account.css's .account-owes-password-banner
-           rule -- see that rule's own comment for why. -->
+           (account.js's handlePasswordSubmit), just three places it can
+           visually sit (the third being #account-wizard-dialog's own
+           password step, further down). This banner is also suppressed
+           for as long as that dialog is open on ANY step, not only its
+           own password step -- competing with the wizard for the
+           reader's attention was Matt's own complaint; see
+           renderOwesPasswordBanner()'s own comment in account.js for the
+           rest. Distinct styling from the ordinary Security panels lives
+           in account.css's .account-owes-password-banner rule -- see
+           that rule's own comment for why. -->
       <div id="account-owes-password-banner" class="account-owes-password-banner" hidden role="alert">
         <div class="account-owes-password-copy">
           <div class="account-owes-password-title">Set a password for this account</div>
@@ -210,6 +216,51 @@
           <p id="account-player-team" class="account-player-line"></p>
         </div>
         <div id="account-player-unlinked" hidden>
+          <!-- The wizard itself now lives in #account-wizard-dialog below,
+               a native <dialog> -- see that element's own comment for why.
+               This is just the route back in: shown any time this account
+               has no linked player and the dialog isn't open (a dialog
+               opened with showModal() makes everything outside it inert,
+               so this button never competes for a click while the dialog
+               is up). It's also what account.js's boot-time auto-open and
+               the dialog's own "close" handler hand focus back to. -->
+          <p class="account-hint">No player is connected to this account yet.</p>
+          <button type="button" id="account-wizard-open-btn" class="account-wizard-choice-btn">Set up your player</button>
+        </div>
+
+        <!-- ===================================================================
+             SIGN-UP WIZARD, as a native <dialog> (account.js's
+             openWizardDialog()/closeWizardDialog(), showModal()/close()).
+             Opens automatically the instant loadAccount() learns this
+             account has no linked player, and again any time the
+             "Set up your player" button above is clicked. showModal() gives
+             this focus trapping, Escape-to-dismiss, a ::backdrop (styled in
+             account.css) and background inerting for free -- none of that
+             is hand-rolled here.
+
+             Dismissible on purpose (Escape, or the close button just
+             below) -- Matt's own instruction was "don't trap someone in
+             it". That's exactly why the route-back button above exists:
+             losing progress here is recoverable, getting stuck would not
+             be. Dismissing mid-flow does NOT throw away a player that
+             already exists by that point (handleJoinSubmit()/
+             handleConnectSubmit() have already created/linked it
+             server-side) -- account.js's handleWizardDialogClosed() always
+             re-syncs the Player panel and the owes-password banner from
+             lastAccountData on close, so a dismiss after Join/Connect but
+             before "Continue", or during the conditional password step,
+             still leaves the page in the state the server is actually in.
+
+             The conditional password step (#account-wizard-step-password,
+             further down) is the SAME wizard div this dialog wraps whole
+             -- not a separate section that appears after the dialog closes
+             -- so it reads as part of one contained process, the other
+             half of Matt's complaint this whole element exists to fix. -->
+        <dialog id="account-wizard-dialog" class="account-wizard-dialog" aria-label="Set up your player">
+          <div class="account-wizard-dialog-header">
+            <button type="button" id="account-wizard-dialog-close-btn" class="account-wizard-dialog-close" aria-label="Close">&times;</button>
+          </div>
+
           <!-- Hidden once either wizard path succeeds (account.js's
                showWizardStep()) -- otherwise it sits directly above a
                screen that just said "You're registered for team RED" /
@@ -394,7 +445,7 @@
             </div>
 
           </div>
-        </div>
+        </dialog>
       </section>
 
       <!-- Shown only when no player is linked (account-player-unlinked
@@ -781,7 +832,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260904-10" type="module"></script>
+  <script src="/static/account.js?v=20260904-12" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>
