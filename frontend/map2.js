@@ -1704,8 +1704,13 @@ function placeToFeature(p) {
   };
 }
 
-async function fetchPlacesInViewport(bounds, zoom) {
-  const params = new URLSearchParams({
+// Builds the exact query MapLibre/loadPlacesViewport are about to ask
+// for -- used both as the fetch URL and (via .toString()) as the
+// duplicate-request guard's cache key below, so the two can never drift
+// apart the way two independently-written copies of this param list
+// eventually would.
+function placesViewportParams(bounds, zoom) {
+  return new URLSearchParams({
     north: bounds.getNorth(), south: bounds.getSouth(),
     west: bounds.getWest(), east: bounds.getEast(),
     // Server only computes/returns park_boundaries at all once zoom is
@@ -1718,13 +1723,23 @@ async function fetchPlacesInViewport(bounds, zoom) {
     // have to follow the board the map is showing.
     board: mode,
   });
+}
+
+async function fetchPlacesInViewport(params) {
   const res = await fetch(`/api/places?${params}`);
   if (!res.ok) throw new Error(`places fetch failed: ${res.status}`);
   return res.json();
 }
 
-async function fetchPlacesNear(lat, lon) {
-  const params = new URLSearchParams({ lat, lon, limit: 30 });
+// Same params-builder-shared-with-its-cache-key shape as
+// placesViewportParams above, for the same reason: one definition the
+// fetch URL and the duplicate-request guard's key both read, so they
+// cannot silently drift apart.
+function placesNearParams(lat, lon) {
+  return new URLSearchParams({ lat, lon, limit: 30 });
+}
+
+async function fetchPlacesNear(params) {
   const res = await fetch(`/api/places/near?${params}`);
   if (!res.ok) throw new Error(`places/near fetch failed: ${res.status}`);
   return res.json();
@@ -2442,10 +2457,66 @@ function buildParkLabelPoints(boundaryFeatures, places) {
   return { type: 'FeatureCollection', features };
 }
 
+// ---- duplicate-request guard (loadPlacesViewport / loadPlacesPanel) ---
+//
+// loadPlacesViewport and loadPlacesPanel each have multiple call sites
+// that can all fire for the *same* viewport within one page load:
+// setBoardMode's own refetch (needed because place colours are
+// board-scoped -- see its own comment on that), and the moveend
+// handler further down -- which fires even on a page load with no user
+// interaction at all, because the map's own initial fitBounds easing
+// counts as a move, and keeps firing forever afterwards as the user
+// pans. Measured on a single, untouched page load before this guard
+// existed: /api/places and /api/places/near each went out 3-4 times
+// with byte-identical query parameters, parsing the same ~267KB JSON
+// response repeatedly for nothing.
+//
+// This is a "did I just ask this exact question" guard, not a response
+// cache: for each endpoint it remembers only the query string of (a)
+// the fetch currently in flight and (b) the most recently *completed*
+// fetch, and a call is skipped when its query string matches either
+// one. Both checks are needed:
+//   - (a) alone misses a duplicate that arrives after the first
+//     request already resolved -- on a fast backend the moveend-
+//     triggered call can land well after the initial call finished, so
+//     there is nothing "in flight" left to collapse into.
+//   - (b) alone misses the common case here, where two or three calls
+//     fire within milliseconds of each other, before any response has
+//     come back to populate "most recently completed".
+// A failed fetch updates neither -- an error must not get remembered
+// as "done" and silently block the retry a subsequent identical call
+// represents.
+//
+// What this must NOT do: block a fetch whose parameters genuinely
+// differ. A pan or zoom to a different viewport always changes
+// north/south/east/west (or lat/lon for the panel), so it always
+// clears both checks and fetches -- this guard only ever short-
+// circuits an exact repeat, never a real refresh. Switching board also
+// clears it, since `board` is part of the viewport query string and
+// setBoardMode changes it before calling in.
+//
+// Panning away and back is deliberately NOT served from memory: only
+// the single most recent query is remembered per endpoint, not a
+// history of every viewport visited, so a place that got claimed by
+// another team while the visitor was looking elsewhere shows its new
+// colour on return instead of a stale cached one. That costs one extra
+// request per return trip, in exchange for this never being able to
+// turn into a cache that quietly serves wrong data -- see the docstring
+// on the two Key variables it would be tempting to grow into an LRU.
+let placesViewportKeyInFlight = null;
+let placesViewportKeyDone = null;
+let placesNearKeyInFlight = null;
+let placesNearKeyDone = null;
+
 async function loadPlacesViewport(map) {
+  const bounds = map.getBounds();
+  const params = placesViewportParams(bounds, map.getZoom());
+  const key = params.toString();
+  if (key === placesViewportKeyInFlight || key === placesViewportKeyDone) return;
+  placesViewportKeyInFlight = key;
   try {
-    const bounds = map.getBounds();
-    const data = await fetchPlacesInViewport(bounds, map.getZoom());
+    const data = await fetchPlacesInViewport(params);
+    placesViewportKeyDone = key;
     // One park, one mark: a park's centroid marker is suppressed
     // exactly where its own outline is also coming back, so the two
     // can never both draw at once. Driven by the actual ids present in
@@ -2474,6 +2545,13 @@ async function loadPlacesViewport(map) {
     );
   } catch (err) {
     console.error('MeshWars map2: failed to load places', err);
+  } finally {
+    // Only clear it if it is still this call's own key -- a second,
+    // differently-keyed call cannot already be in flight for this
+    // endpoint (each call checks and sets synchronously before its
+    // first await), so this is a defensive equality check, not a
+    // required one.
+    if (placesViewportKeyInFlight === key) placesViewportKeyInFlight = null;
   }
 }
 
@@ -2503,12 +2581,24 @@ function renderPlacesPanel(data) {
 }
 
 async function loadPlacesPanel(map) {
+  const center = map.getCenter();
+  const params = placesNearParams(center.lat, center.lng);
+  const key = params.toString();
+  // Same duplicate-request guard as loadPlacesViewport above, applied
+  // to /api/places/near instead -- see that function's comment for why
+  // both the in-flight and the last-completed check are needed, and
+  // why panning away and back deliberately still fetches rather than
+  // reusing a remembered response.
+  if (key === placesNearKeyInFlight || key === placesNearKeyDone) return;
+  placesNearKeyInFlight = key;
   try {
-    const center = map.getCenter();
-    const data = await fetchPlacesNear(center.lat, center.lng);
+    const data = await fetchPlacesNear(params);
+    placesNearKeyDone = key;
     renderPlacesPanel(data);
   } catch (err) {
     console.error('MeshWars map2: failed to load places panel', err);
+  } finally {
+    if (placesNearKeyInFlight === key) placesNearKeyInFlight = null;
   }
 }
 
@@ -3753,28 +3843,38 @@ async function main() {
     // Same call mc.js's boot() makes (setMode(defaultMode)) -- fills in
     // the panel's title/toggle state for the /config-derived `mode` set
     // in main() above, and does the same board/scoreboard/banner load
-    // the periodic refresh below repeats every 30s.
+    // the periodic refresh below repeats every 30s. It also loads the
+    // places layer + panel itself (see setBoardMode's own comment on
+    // why a board switch has to refetch places too) -- there used to be
+    // an explicit loadPlacesViewport(map)/loadPlacesPanel(map) pair
+    // right here as well, left over from before setBoardMode grew that
+    // refetch of its own. On this, the very first call, mode/viewport
+    // are unchanged from what setBoardMode just fetched, so that pair
+    // was asking the exact same question a second time on every single
+    // page load -- removed; the moveend handler further down still
+    // exists for every case that legitimately needs a refetch, and
+    // loadPlacesViewport/loadPlacesPanel's own duplicate-request guard
+    // (see its comment) means even a future re-add here would cost at
+    // most one skipped call, never a real second fetch.
     // Wrapped and re-thrown (not swallowed) rather than left bare: the
-    // overlay removal above no longer depends on these three calls
-    // completing, but a throw here would previously vanish silently
-    // past this point -- reporting it keeps that failure mode visible
-    // without changing what happens to the exception itself.
+    // overlay removal above no longer depends on this call completing,
+    // but a throw here would previously vanish silently past this point
+    // -- reporting it keeps that failure mode visible without changing
+    // what happens to the exception itself.
     try {
       setBoardMode(mode, map);
-      loadPlacesViewport(map);
-      loadPlacesPanel(map);
-      // Deliberately OUTSIDE the three calls above in effect: it is
-      // async and never awaited, so a slow or failing award fetch
-      // cannot delay or break the board coming up. It only ever runs
-      // when /results linked here with award params.
+      // Deliberately OUTSIDE the call above in effect: it is async and
+      // never awaited, so a slow or failing award fetch cannot delay or
+      // break the board coming up. It only ever runs when /results
+      // linked here with award params.
       // Before the award fetch: a linked view should be framed even if
       // the award geometry is slow or absent. showAwardFromUrl's own
       // fitBounds overrides it when there IS geometry to frame.
       goToViewFromUrl(map);
       showAwardFromUrl(map);
-      // t5_post_dataload: proves whether the three calls above complete
-      // (return control here) at all, independent of the overlay, which
-      // by this point has already been handled above regardless.
+      // t5_post_dataload: proves whether the call above completes
+      // (returns control here) at all, independent of the overlay,
+      // which by this point has already been handled above regardless.
       bootCheckpoint('t5_post_dataload', 't5_post_dataload');
     } catch (err) {
       sendClientLog('load_handler_threw', err && err.message);
