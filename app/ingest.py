@@ -44,8 +44,8 @@ below): it still records the same nodes the same way, but is now keyed
 on the active 'mt' mc_season instead of the retired `season` table,
 since that table is frozen history now and no longer rolls forward.
 
-mt_paint_source decides whether THIS module or app/freqmapper_ingest.py
-paints the Meshtastic board. It is DB-backed (app/db.py's
+mt_paint_source decides whether THIS module, app/freqmapper_ingest.py,
+or both paint the Meshtastic board. It is DB-backed (app/db.py's
 freqmapper_config singleton, admin-editable through
 app/admin_ops.py's /api/admin/paint), not settings.py -- read fresh via
 app/freqmapper_ingest.py's load_freqmapper_config on every poll cycle
@@ -53,15 +53,25 @@ app/freqmapper_ingest.py's load_freqmapper_config on every poll cycle
 operator's switch takes effect on the next cycle with no restart.
 settings.mt_paint_source (app/config.py) still exists as the seed value
 that singleton is bootstrapped from on first boot, and as the fallback
-if that row is somehow missing. Default is "meshview" -- unchanged from
-every line above. When it is "freqmapper" instead, the two position-
-painting paths below -- _poll_once's portnum=3 fetch and _backfill --
-are gated off entirely: neither fetches packets, scores, nor writes
-player_cell_ping. _refresh_roster (node names/roster) and
-_poll_nodeinfo (portnum=4, mt_node_key) are identity/roster concerns,
-not scoring, and keep running either way -- see
-app/freqmapper_ingest.py's own module docstring for the other half of
-this switch.
+if that row is somehow missing. Three values:
+
+- "meshview": only this module's position-painting paths run.
+- "freqmapper": the two position-painting paths below -- _poll_once's
+  portnum=3 fetch and _backfill -- are gated off entirely: neither
+  fetches packets, scores, nor writes player_cell_ping.
+- "both": this module runs exactly as it does under "meshview", and
+  app/freqmapper_ingest.py runs exactly as it does under "freqmapper",
+  concurrently. This is the default (app/config.py), and is not a
+  conflict that needs arbitrating here: app/mc_scoring.py's existing
+  cooldown/capture-window machinery already absorbs the same cell being
+  credited from two directions, the same as it would for two different
+  players painting it. There is deliberately no dedupe, priority, or
+  "which source wins" logic anywhere in either module.
+
+_refresh_roster (node names/roster) and _poll_nodeinfo (portnum=4,
+mt_node_key) are identity/roster concerns, not scoring, and keep
+running regardless of this switch -- see app/freqmapper_ingest.py's own
+module docstring for the other half of this switch.
 """
 from __future__ import annotations
 
@@ -268,7 +278,7 @@ class Ingestor:
         log.info(
             "ingest loop starting; poll=%ds paint_source=%s (%s)",
             settings.poll_interval_seconds, paint_source,
-            "meshview is painting" if paint_source == "meshview"
+            "meshview is painting" if paint_source != "freqmapper"
             else "meshview is NOT painting -- position poll and backfill are gated off",
         )
         # Snapshot roster on startup so we have something to render. This
@@ -397,9 +407,10 @@ class Ingestor:
 
         Gated off entirely when mt_paint_source (app/db.py's
         freqmapper_config, read fresh here rather than
-        settings.mt_paint_source -- see this module's docstring) is not
-        "meshview". Backfill exists purely to paint the board faster on
-        a cold start; when FreqMapper is the active paint source,
+        settings.mt_paint_source -- see this module's docstring) is
+        "freqmapper" -- i.e. runs for both "meshview" and "both".
+        Backfill exists purely to paint the board faster on a cold
+        start; when FreqMapper is the sole active paint source,
         meshview has nothing to backfill toward. Read once, here, since
         backfill itself only ever runs once, at startup -- unlike
         _poll_once below, there is no later cycle where a fresher read
@@ -410,7 +421,7 @@ class Ingestor:
             paint_source = load_freqmapper_config(conn)["mt_paint_source"]
         finally:
             conn.close()
-        if paint_source != "meshview":
+        if paint_source == "freqmapper":
             log.info("meshview backfill skipped -- mt_paint_source=%s", paint_source)
             return
 
@@ -503,9 +514,9 @@ class Ingestor:
         """One ingest cycle: position-packet painting (gated by
         mt_paint_source, read fresh from the database every cycle -- see
         this module's docstring and app/freqmapper_ingest.py's
-        load_freqmapper_config) followed by the NodeInfo identity pass,
-        which always runs regardless of which source is currently
-        painting.
+        load_freqmapper_config; runs for "meshview" and "both", skipped
+        for "freqmapper") followed by the NodeInfo identity pass, which
+        always runs regardless of which source is currently painting.
         """
         conn = connect()
         try:
@@ -517,12 +528,12 @@ class Ingestor:
             log.info(
                 "meshview: mt_paint_source=%s (%s)",
                 paint_source,
-                "meshview is painting" if paint_source == "meshview"
+                "meshview is painting" if paint_source != "freqmapper"
                 else "meshview is NOT painting -- position poll is gated off",
             )
             self._last_logged_paint_source = paint_source
 
-        if paint_source == "meshview":
+        if paint_source != "freqmapper":
             await self._poll_positions()
 
         # NodeInfo pass: passive accumulation into mt_node_key only (see
@@ -547,8 +558,8 @@ class Ingestor:
         don't need a server-side cursor because the API always returns
         newest-first and 100 packets is plenty of overlap between polls.
 
-        Only ever called when mt_paint_source == "meshview" -- see
-        _poll_once above.
+        Only ever called when mt_paint_source is "meshview" or "both"
+        (i.e. not "freqmapper") -- see _poll_once above.
         """
         now = int(time.time())
         # Season bookkeeping WRITES mc_season (see the matching comment in

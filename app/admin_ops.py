@@ -1249,9 +1249,10 @@ async def admin_paint_update(request: Request):
         return JSONResponse({"error": "bad request"}, status_code=400)
 
     mt_paint_source = body.get("mt_paint_source")
-    if mt_paint_source not in ("meshview", "freqmapper"):
+    if mt_paint_source not in ("meshview", "freqmapper", "both"):
         return JSONResponse(
-            {"error": "mt_paint_source must be 'meshview' or 'freqmapper'"}, status_code=400)
+            {"error": "mt_paint_source must be 'meshview', 'freqmapper', or 'both'"},
+            status_code=400)
 
     enabled = bool(body.get("enabled"))
     base_url = (body.get("base_url") or "").strip().rstrip("/")

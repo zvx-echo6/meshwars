@@ -392,9 +392,14 @@ CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verifi
 -- poll, no restart. mt_paint_source moves here too, off settings.py --
 -- it is the same single switch app/ingest.py's meshview poll/backfill
 -- and this table's own poller both read, so the two can never disagree
--- about which one is currently allowed to paint the Meshtastic board
--- (exactly one at a time -- see that column's own comment in
--- config.py, kept as this table's authoritative copy now).
+-- about which source(s) are currently allowed to paint the Meshtastic
+-- board. Three values: 'meshview', 'freqmapper', or 'both' -- see that
+-- column's own comment in config.py, kept as this table's authoritative
+-- copy now. Default is 'both': a fresh install runs both painters with
+-- no admin action, since the shared cooldown/capture machinery in
+-- app/mc_scoring.py already absorbs the same cell being touched by two
+-- sources -- see that column's own comment in config.py for why this is
+-- not a preference between the two, just the normal starting state.
 -- seed_freqmapper_config_from_env (app/freqmapper_ingest.py, called
 -- from init_db() below) bootstraps this row from settings.py's
 -- freqmapper_*/mt_paint_source values the first time it is ever
@@ -420,7 +425,7 @@ CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verifi
 -- earlier and clearing the cursor can still pick the event back up.
 CREATE TABLE IF NOT EXISTS freqmapper_config (
     id                     INTEGER PRIMARY KEY CHECK (id = 1),
-    mt_paint_source        TEXT NOT NULL DEFAULT 'meshview',
+    mt_paint_source        TEXT NOT NULL DEFAULT 'both',
     enabled                INTEGER NOT NULL DEFAULT 0,
     base_url               TEXT NOT NULL DEFAULT '',
     api_key                TEXT NOT NULL DEFAULT '',

@@ -233,21 +233,38 @@ class Settings(BaseSettings):
     # actually start counting from before relying on it.
     freqmapper_paint_from: str = ""
 
-    # Which upstream source paints the Meshtastic board: "meshview"
-    # (default -- today's behaviour, unchanged: app/ingest.py's
-    # position-packet poll and backfill score exactly as they always
-    # have) or "freqmapper" (app/ingest.py's position-painting paths --
-    # the portnum=3 poll and _backfill -- are gated off entirely; roster
-    # and nodeinfo keep running either way, since those are
-    # identity/roster concerns, not scoring). Exactly one may paint the
-    # Meshtastic board at a time -- this is the single switch both
-    # app/ingest.py and app/freqmapper_ingest.py read, so the mutual
-    # exclusion cannot be gotten wrong by checking two independent flags
-    # that could disagree. app/freqmapper_ingest.py's poll loop still
-    # runs (and dedupes) whenever freqmapper_enabled is true regardless
-    # of this value, so switching it later never replays history -- only
-    # the actual score/write is gated on it.
-    mt_paint_source: str = "meshview"
+    # Which upstream source(s) paint the Meshtastic board: "meshview"
+    # (app/ingest.py's position-packet poll and backfill score, exactly
+    # as before this switch existed), "freqmapper" (app/ingest.py's
+    # position-painting paths -- the portnum=3 poll and _backfill -- are
+    # gated off entirely; roster and nodeinfo keep running either way,
+    # since those are identity/roster concerns, not scoring), or "both"
+    # (both painters run, each exactly as if it were the sole selected
+    # source). This is the single switch both app/ingest.py and
+    # app/freqmapper_ingest.py read, so the two can never disagree about
+    # which source(s) are currently allowed to paint.
+    #
+    # Default is "both". Two sources touching the same cell is not a
+    # conflict that needs resolving here: app/mc_scoring.py's existing
+    # capture/defense window and per-repeater cooldown already absorb a
+    # cell being credited from more than one direction, the same as they
+    # would for two different players painting it. This is deliberately
+    # NOT a preference or priority between the two ingest paths -- both
+    # simply paint, unconditionally, with no dedupe or arbitration
+    # between them. ("FreqMapper is recommended" is guidance given to
+    # PLAYERS in the account page's Meshtastic setup copy, about which
+    # radio-side integration to use; it has no bearing on this switch.)
+    #
+    # app/freqmapper_ingest.py's poll loop still runs (and dedupes)
+    # whenever freqmapper_enabled is true regardless of this value, so
+    # switching it later never replays history -- only the actual
+    # score/write is gated on it. Changing this default does not rewrite
+    # any already-seeded freqmapper_config row (see
+    # seed_freqmapper_config_from_env in app/freqmapper_ingest.py, only
+    # ever applied while that row's updated_at is still 0) -- an
+    # existing deployment's stored choice is never overridden by a code
+    # upgrade.
+    mt_paint_source: str = "both"
 
     # Minimum Meshtastic position precision a packet must carry to score.
     # A Meshtastic node can report its position at reduced precision

@@ -49,20 +49,26 @@ never deleted: they are the seed source seed_freqmapper_config_from_env
 uses to populate this table's row on first boot, and the fallback
 load_freqmapper_config returns if that row is somehow missing.
 
-mt_paint_source is the single switch that decides whether meshview or
-FreqMapper is currently allowed to paint the Meshtastic board -- see
-that column's own comment in app/db.py, and app/ingest.py, whose
-position-packet poll and backfill read the same DB value (via
-load_freqmapper_config, not settings.mt_paint_source) to gate
-themselves off when it is "freqmapper". This module's poll loop keeps
-running (and keeps deduping on verification_id) whenever
-freqmapper_config.enabled is true REGARDLESS of mt_paint_source -- only
-the final score/write (mc_scoring.apply_paint + the player_cell_ping
-insert) is gated on it being "freqmapper" specifically. That means an
-operator can watch FreqMapper's own poll-cycle log lines (painted vs.
-skipped_inactive_source) before ever flipping the switch, and flipping it
-later never replays history: every event this loop has already seen is
-already recorded in freqmapper_verification by then.
+mt_paint_source is the single switch that decides which source(s) are
+currently allowed to paint the Meshtastic board -- see that column's
+own comment in app/db.py, and app/ingest.py, whose position-packet poll
+and backfill read the same DB value (via load_freqmapper_config, not
+settings.mt_paint_source) to gate themselves off when it is
+"freqmapper" alone. Three values: "meshview" (only app/ingest.py
+scores), "freqmapper" (only this module scores), or "both" (both
+score, each exactly as if it were the sole selected source -- this is
+the default; see that column's comment in app/config.py for why two
+sources touching the same cell needs no arbitration here, since
+app/mc_scoring.py's cooldown/capture-window machinery already absorbs
+it). This module's poll loop keeps running (and keeps deduping on
+verification_id) whenever freqmapper_config.enabled is true REGARDLESS
+of mt_paint_source -- only the final score/write (mc_scoring.apply_paint
++ the player_cell_ping insert) is gated on it being "freqmapper" or
+"both". That means an operator can watch FreqMapper's own poll-cycle
+log lines (painted vs. skipped_inactive_source) before ever flipping
+the switch, and flipping it later never replays history: every event
+this loop has already seen is already recorded in
+freqmapper_verification by then.
 
 Unlike before this table existed, run_forever() is started
 UNCONDITIONALLY by app/main.py and never exits early just because
@@ -398,7 +404,7 @@ class FreqMapperIngestor:
             log.info(
                 "freqmapper: mt_paint_source=%s (%s)",
                 cfg["mt_paint_source"],
-                "FreqMapper is painting" if cfg["mt_paint_source"] == "freqmapper"
+                "FreqMapper is painting" if cfg["mt_paint_source"] != "meshview"
                 else "FreqMapper is NOT painting -- events are still processed and deduped",
             )
             self._last_logged_paint_source = cfg["mt_paint_source"]
@@ -644,11 +650,12 @@ class FreqMapperIngestor:
         # id -- same rule every other ingest path in this app follows.
         cell = cell_id(lat, lon)
 
-        if mt_paint_source != "freqmapper":
+        if mt_paint_source == "meshview":
             # Fully processed and deduped above (this exact event will
             # never be reprocessed, even after a later switch), but
             # nothing is scored or written to the board while meshview is
-            # the active paint source. See the freqmapper_config.mt_paint_source
+            # the sole active paint source. Runs for "freqmapper" and
+            # "both" alike -- see the freqmapper_config.mt_paint_source
             # comment in app/db.py. The transition itself is logged once
             # per change in _poll_once above, not here -- this runs once
             # per event, and would otherwise spam the log on a page full
