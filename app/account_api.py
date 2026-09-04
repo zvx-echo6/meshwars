@@ -389,6 +389,29 @@ def _player_out(conn, player_id: int) -> dict | None:
     }
 
 
+def _has_unrevoked_key(conn, player_id: int) -> bool:
+    """Whether this player currently holds at least one live (not
+    revoked) API key -- GET /api/account's own has_api_key field below,
+    used ONLY so the Security panel's key control (frontend/account.js)
+    can tell "generate a first key" from "rotate the one you have"
+    apart, without that route ever seeing the key or its hash. Not
+    folded into _player_out() above: that helper also backs POST
+    /api/account/link-key's response, and this field has no business
+    in that route's shape -- a linked-by-key player always already has
+    one, by construction of how they got here. A player normally holds
+    at most one live key at a time (POST /api/account/rotate-key and
+    app/admin_api.py's reissue both revoke every existing key in the
+    same transaction that inserts the new one), so this is really a
+    yes/no rather than a count -- EXISTS-style LIMIT 1 is used anyway
+    rather than assuming that invariant holds everywhere forever.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM api_key WHERE player_id = ? AND revoked_at IS NULL LIMIT 1",
+        (player_id,),
+    ).fetchone()
+    return row is not None
+
+
 def _sessions_out(conn, account_id: int, *, current_token_hash: str) -> list[dict]:
     """Active (not revoked, not expired) sessions on this account --
     never returns token_hash itself, only enough for a person to
@@ -446,11 +469,22 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
     re-checks the session's actual role itself through
     app/admin_api.py's _role_guard() on every request, never trusting
     what this endpoint last reported.
+
+    `player.has_api_key`, when a player is linked, is whether that
+    player currently holds a live (not revoked) key -- see
+    _has_unrevoked_key()'s own docstring for why this exists at all
+    (frontend/account.js's Security panel needs to word its key control
+    as "generate a first key" or "rotate the one you have" without ever
+    being handed the key or its hash to check for itself) and why it is
+    added here rather than inside _player_out() itself.
     """
     conn = connect()
     try:
         identities = _identities_out(conn, session.account_id)
         player = _player_out(conn, session.player_id) if session.player_id is not None else None
+        if player is not None:
+            player = dict(player)
+            player["has_api_key"] = _has_unrevoked_key(conn, session.player_id)
         sessions_out = _sessions_out(conn, session.account_id, current_token_hash=session.token_hash)
         has_password = _has_password(conn, session.account_id)
         contact_email = _contact_email_out(conn, session.account_id)

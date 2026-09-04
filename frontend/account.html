@@ -413,7 +413,7 @@
               <h3 id="account-wizard-heading-done" class="account-title" tabindex="-1">You're in</h3>
               <p id="account-join-success" class="account-hint"></p>
               <div id="account-join-key-slot"></div>
-              <p class="account-hint">Setting up MeshMapper or the Meshtastic app for the first time? The <a href="/docs">Docs page</a> walks through it.</p>
+              <p id="account-join-closing-hint" class="account-hint"></p>
               <div class="account-wizard-actions">
                 <button type="button" id="account-wizard-done-continue-btn">I've saved my key</button>
               </div>
@@ -798,13 +798,13 @@
 
       <section id="account-key-panel" class="account-panel" hidden>
         <h3 id="api-key" class="account-title">API key</h3>
-        <p class="account-hint">Rotating your key immediately breaks anything still using the old one — including MeshMapper. You will need to paste the new key into MeshMapper's Settings, then API Endpoints, before wardriving works again.</p>
+        <p id="account-key-panel-hint" class="account-hint">Rotating your key immediately breaks anything still using the old one — including MeshMapper. You will need to paste the new key into MeshMapper's Settings, then API Endpoints, before wardriving works again.</p>
         <div id="account-rotate-key-error" class="account-error" role="alert" hidden></div>
         <button type="button" id="account-rotate-key-btn">Rotate key</button>
         <div id="account-rotate-key-confirm" class="account-rotate-key-confirm" hidden>
           <div class="account-warning-box account-warning-box-strong">
-            <strong>This revokes your current key the instant it finishes.</strong>
-            Anything still using it — most likely MeshMapper — stops working immediately, until you paste in the new one below. This cannot be undone.
+            <strong id="account-rotate-key-confirm-strong">This revokes your current key the instant it finishes.</strong>
+            <span id="account-rotate-key-confirm-detail">Anything still using it — most likely MeshMapper — stops working immediately, until you paste in the new one below. This cannot be undone.</span>
           </div>
           <div class="account-confirm-actions">
             <button type="button" id="account-rotate-key-confirm-btn">Yes, rotate my key</button>
@@ -832,7 +832,7 @@
 
   </main>
 
-  <script src="/static/account.js?v=20260904-12" type="module"></script>
+  <script src="/static/account.js?v=20260904-14" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260903-1" type="module"></script>
 </body>

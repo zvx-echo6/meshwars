@@ -182,7 +182,21 @@ def test_get_account_includes_linked_player(client, db_path):
 
     body = client.get("/api/account").json()
 
-    assert body["player"] == {"player_id": player_id, "display_name": "Malice", "team": "BLUE"}
+    # has_api_key is False here because _make_player() above inserts a
+    # player row directly and never an api_key row for it -- unlike a
+    # real /api/join, which mints one for every combination except a
+    # signed-in Meshtastic join (see app/join_api.py's join(), the
+    # "Create the player, and the key" step) (see
+    # app/account_api.py's _has_unrevoked_key() docstring for why this
+    # field exists at all: the Security panel's key control needs to
+    # word itself as "generate a first key" or "rotate the one you
+    # have").
+    assert body["player"] == {
+        "player_id": player_id,
+        "display_name": "Malice",
+        "team": "BLUE",
+        "has_api_key": False,
+    }
 
 
 def test_get_account_masks_identity_emails(client, db_path):

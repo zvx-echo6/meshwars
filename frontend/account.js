@@ -400,9 +400,54 @@ function updatePlayerLinkedCopy(player) {
   document.getElementById('account-player-team').textContent = `Team: ${player.team}`;
 }
 
+// ---- Security: API key panel wording (has-a-key vs never-had-one) --------
+//
+// #account-key-panel used to hardcode rotate-flavored copy -- "Rotate
+// key", "breaks anything still using the old one" -- for every player,
+// which is false for one who has never been shown a key at all. A
+// signed-in Meshtastic join is the main case that now actually stays
+// key-less: app/join_api.py's join() skips minting one entirely for
+// that combination (see its own comment at the "Create the player,
+// and the key" step), so has_api_key is genuinely false there, not
+// just hidden client-side. The same wording also covers whatever else
+// leaves a player with no live key, e.g. an operator revoking one with
+// nothing reissued. GET
+// /api/account's player.has_api_key (app/account_api.py's
+// _has_unrevoked_key()) is the single source of truth for which
+// wording applies. Called from renderPlayer() below so it stays in
+// sync with every path that already keeps the rest of the Player
+// panel current, and again after a successful generate/rotate (see
+// handleRotateKeyConfirm() below) since that call can flip a
+// never-had-one player straight into having-one.
+function renderKeyPanel(hasApiKey) {
+  const hintEl = document.getElementById('account-key-panel-hint');
+  const btnEl = document.getElementById('account-rotate-key-btn');
+  const confirmStrong = document.getElementById('account-rotate-key-confirm-strong');
+  const confirmDetail = document.getElementById('account-rotate-key-confirm-detail');
+  const confirmBtn = document.getElementById('account-rotate-key-confirm-btn');
+  if (hasApiKey) {
+    hintEl.textContent =
+      "Rotating your key immediately breaks anything still using the old one — including MeshMapper. "
+      + "You will need to paste the new key into MeshMapper's Settings, then API Endpoints, before wardriving works again.";
+    btnEl.textContent = 'Rotate key';
+    confirmStrong.textContent = 'This revokes your current key the instant it finishes.';
+    confirmDetail.textContent =
+      'Anything still using it — most likely MeshMapper — stops working immediately, until you paste in the new one below. This cannot be undone.';
+    confirmBtn.textContent = 'Yes, rotate my key';
+  } else {
+    hintEl.textContent =
+      "Generate an API key for your player. MeshCore players paste this into MeshMapper; Meshtastic doesn't need one unless you want it for something else.";
+    btnEl.textContent = 'Generate key';
+    confirmStrong.textContent = 'This creates your first API key.';
+    confirmDetail.textContent = "You'll only see it once, so copy it and save it somewhere safe.";
+    confirmBtn.textContent = 'Yes, generate my key';
+  }
+}
+
 function renderPlayer(player) {
   const linkedEl = document.getElementById('account-player-linked');
   const unlinkedEl = document.getElementById('account-player-unlinked');
+  renderKeyPanel(!!(player && player.has_api_key));
   if (player) {
     updatePlayerLinkedCopy(player);
     linkedEl.hidden = false;
@@ -480,6 +525,52 @@ const WIZARD_STEPS_WITH_PLAYER = new Set(['key-done', 'done', 'password']);
 // the separate "move focus to the offending field" rule for a failed
 // validation is handled by the individual handleWizard*Continue()
 // functions below instead, since only they know which field failed.
+// Every link inside the dialog opens in a new tab. Matt hit this: a link
+// followed in the same tab tears the whole dialog down with the page,
+// and on the key step that destroys a one-time API key that cannot be
+// recovered -- the same loss the "I've saved my key" gate exists to
+// prevent, arriving by a route that gate never watched. Applied by
+// walking the dialog rather than by hardcoding target="_blank" in the
+// markup, so a link added to any step later inherits this instead of
+// quietly reintroducing the hazard. rel goes on with it: target=_blank
+// without noopener hands the new page a live handle on this one.
+function forceWizardLinksToNewTab() {
+  const dialog = document.getElementById('account-wizard-dialog');
+  if (!dialog) return;
+  dialog.querySelectorAll('a[href]').forEach((a) => {
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+  });
+}
+
+// The browser's own "leave site?" prompt, armed ONLY while an unsaved
+// one-time key is on screen. Deliberately not armed for the rest of the
+// wizard: every other step can be started over at no cost, so prompting
+// there would be nagging. This step cannot -- the key is shown once and
+// only a hash of it is stored, so a navigation away from here is
+// unrecoverable, which is exactly the case beforeunload is for.
+//
+// Checks account-join-key-slot's own content rather than just this
+// step's visibility, because the step is also used for a Meshtastic
+// join, which shows no key at all (see handleJoinSubmit() above) --
+// nothing unrecoverable is on screen there, so this must not arm for
+// it.
+function wizardKeyIsUnsaved() {
+  const step = document.getElementById(WIZARD_STEP_IDS.done);
+  if (!step || step.hidden) return false;
+  const keySlot = document.getElementById('account-join-key-slot');
+  return !!(keySlot && keySlot.childElementCount > 0);
+}
+
+function guardWizardKeyUnload(e) {
+  if (!wizardKeyIsUnsaved()) return undefined;
+  e.preventDefault();
+  // Browsers ignore custom text here and show their own wording; the
+  // assignment is still required for the prompt to appear at all.
+  e.returnValue = '';
+  return '';
+}
+
 function showWizardStep(step) {
   Object.values(WIZARD_STEP_IDS).forEach((id) => {
     const el = document.getElementById(id);
@@ -489,6 +580,7 @@ function showWizardStep(step) {
   if (target) target.hidden = false;
   const introHint = document.getElementById('account-wizard-intro-hint');
   if (introHint) introHint.hidden = WIZARD_STEPS_WITH_PLAYER.has(step);
+  forceWizardLinksToNewTab();
   const heading = document.getElementById(WIZARD_HEADING_IDS[step]);
   if (heading) heading.focus();
 }
@@ -653,6 +745,9 @@ function openWizardDialog(opener) {
   if (!dialog || dialog.open) return;
   wizardDialogOpener = opener || null;
   dialog.showModal();
+  // Armed for the dialog's whole life; guardWizardKeyUnload() decides
+  // per-navigation whether it actually has anything to protect.
+  window.addEventListener('beforeunload', guardWizardKeyUnload);
   // Always starts back at the fork -- this can be a fresh open (the
   // boot-time auto-open, or the route-back button after an earlier
   // dismiss) as easily as a reopen mid-flow, and there's no signal
@@ -700,6 +795,7 @@ function handleWizardDialogCloseBtnClick() {
 // actual, ordinary job) take back over instead of staying suppressed --
 // see that function's own comment on why it's suppressed at all.
 function handleWizardDialogClosed() {
+  window.removeEventListener('beforeunload', guardWizardKeyUnload);
   wizardPasswordActive = false;
   if (lastAccountData) {
     renderOwesPasswordBanner(lastAccountData);
@@ -722,6 +818,63 @@ function handleWizardDialogClosed() {
 }
 
 // ---- Join (POST /api/join, session-authenticated) ------------------------
+
+// The wizard's closing step used to give the same hint no matter which
+// radio type was picked on the Join step ("Setting up MeshMapper or the
+// Meshtastic app..."). MeshMapper is the MeshCore wardriving app
+// (frontend/docs.html) -- Meshtastic does not use it at all, so a
+// Meshtastic player was being pointed at an app that plays no part in
+// their setup. Branches on the protocol selected on the Join step
+// instead; called from the join success handler below, before
+// showWizardStep('done') runs so its forceWizardLinksToNewTab() call
+// also covers whichever link this just inserted.
+function buildJoinClosingHint(protocol) {
+  const hint = document.getElementById('account-join-closing-hint');
+  if (!hint) return;
+  hint.replaceChildren();
+
+  if (protocol !== 'mt') {
+    // MeshCore: unchanged from before this function existed -- the key
+    // really does go into MeshMapper, so this copy is already correct.
+    hint.appendChild(document.createTextNode('Setting up MeshMapper for the first time? The '));
+    const docsLink = document.createElement('a');
+    docsLink.href = '/docs';
+    docsLink.textContent = 'Docs page';
+    hint.appendChild(docsLink);
+    hint.appendChild(document.createTextNode(' walks through it.'));
+    return;
+  }
+
+  // Meshtastic: there is no key on this path at all -- app/join_api.py
+  // does not mint one for a signed-in Meshtastic join, because nothing
+  // on this side consumes it (FreqMapper's ingest uses its own upstream
+  // credential, and check-ins match on registered node id) and the
+  // player is already bound to the account, so there is no later claim
+  // to authenticate either. An earlier draft of this line told the
+  // reader to save a key -- written when the key was merely hidden
+  // rather than skipped, and false the moment it actually was. What is
+  // left is where to go next: FreqMapper as the recommendation, then
+  // position packets as the fallback with the 2.8 caveat.
+  hint.appendChild(document.createTextNode(
+    'Meshtastic does not need an API key — nothing on your radio or in any app uses one. '
+    + 'You can generate one from Security below if you ever want it for something else. '
+    + 'Use FreqMapper: see the ',
+  ));
+  const setupLink = document.createElement('a');
+  setupLink.href = 'https://help.freqmapper.net/';
+  setupLink.textContent = 'setup guide';
+  hint.appendChild(setupLink);
+  hint.appendChild(document.createTextNode(' on the FreqMapper site, and install it at '));
+  const installLink = document.createElement('a');
+  installLink.href = 'https://dev.freqmapper.net';
+  installLink.textContent = 'dev.freqmapper.net';
+  hint.appendChild(installLink);
+  hint.appendChild(document.createTextNode(
+    ' — iOS via TestFlight, Android via APK. If you’d rather not, position data works too, but as of '
+    + 'Meshtastic 2.8, precise position isn’t sent over the freq51 channel. We recommend FreqMapper for '
+    + 'Meshtastic tile painting.',
+  ));
+}
 
 async function handleJoinSubmit(e) {
   e.preventDefault();
@@ -790,9 +943,33 @@ async function handleJoinSubmit(e) {
       .querySelectorAll('.account-team-swatch')
       .forEach((b) => { b.disabled = true; });
 
-    document.getElementById('account-join-success').textContent =
-      `You're registered for team ${data.team}. Copy your API key below — this is the only time it will ever be shown.`;
-    document.getElementById('account-join-key-slot').replaceChildren(buildCopyRow(data.key));
+    // Meshtastic doesn't get a key shown here at all -- and, for this
+    // signed-in path, none is minted server-side either (app/join_api.py's
+    // join(), the "Create the player, and the key" step): no app on
+    // that side ever stores one, so handing over a one-time secret
+    // here just to have nowhere to put it was confusing, not useful,
+    // and a linked player has nothing left for a key to claim. data.key
+    // is simply absent from the response now (not "" or null) -- see
+    // _registration_response() in app/join_api.py. POST
+    // /api/account/rotate-key works fine from this no-key starting
+    // point if the player wants one later, see account-key-panel below.
+    // wizardKeyIsUnsaved() keys off account-join-key-slot actually
+    // having content, not off this step merely being visible, so
+    // leaving that slot empty here is also what keeps the beforeunload
+    // guard from arming for a step with nothing unrecoverable on it.
+    const doneContinueBtn = document.getElementById('account-wizard-done-continue-btn');
+    if (protocol === 'mt') {
+      document.getElementById('account-join-success').textContent =
+        `You're registered for team ${data.team}.`;
+      document.getElementById('account-join-key-slot').replaceChildren();
+      doneContinueBtn.textContent = 'Continue';
+    } else {
+      document.getElementById('account-join-success').textContent =
+        `You're registered for team ${data.team}. Copy your API key below — this is the only time it will ever be shown.`;
+      document.getElementById('account-join-key-slot').replaceChildren(buildCopyRow(data.key));
+      doneContinueBtn.textContent = "I've saved my key";
+    }
+    buildJoinClosingHint(protocol);
     showWizardStep('done');
 
     // Re-fetch the canonical account object rather than building one
@@ -3099,6 +3276,12 @@ async function handleRotateKeyConfirm() {
   errEl.hidden = true;
   const confirmBtn = document.getElementById('account-rotate-key-confirm-btn');
   confirmBtn.disabled = true;
+  // Captured BEFORE the request -- whether there was actually an old
+  // key to retire decides which warning below is true. Falls back to
+  // "yes, there was one" (the safer, stricter wording) if lastAccountData
+  // hasn't been populated yet for some reason, rather than assuming the
+  // gentler first-key wording without evidence.
+  const hadKeyBefore = !lastAccountData || !lastAccountData.player || lastAccountData.player.has_api_key !== false;
   try {
     const res = await fetch('/api/account/rotate-key', { method: 'POST' });
     let data = null;
@@ -3116,16 +3299,29 @@ async function handleRotateKeyConfirm() {
     const strong = document.createElement('strong');
     strong.textContent = 'Copy this key now — this is the only time it will ever be shown.';
     warning.appendChild(strong);
-    warning.appendChild(document.createTextNode(
-      ' Closing or reloading this page loses it for good. MeshWars stores only a one-way hash of your key, '
-      + 'never the key itself, so there is no way for anyone, including an admin, to look it back up. The only '
-      + 'fix for a lost key is another rotation, which retires this one too. Your old key stopped working the '
-      + 'instant this one was issued — paste this into MeshMapper’s Settings, then API Endpoints, then API '
-      + 'Key, before you do anything else.',
-    ));
+    warning.appendChild(document.createTextNode(hadKeyBefore
+      ? (' Closing or reloading this page loses it for good. MeshWars stores only a one-way hash of your key, '
+        + 'never the key itself, so there is no way for anyone, including an admin, to look it back up. The only '
+        + 'fix for a lost key is another rotation, which retires this one too. Your old key stopped working the '
+        + 'instant this one was issued — paste this into MeshMapper’s Settings, then API Endpoints, then API '
+        + 'Key, before you do anything else.')
+      : (' Closing or reloading this page loses it for good. MeshWars stores only a one-way hash of your key, '
+        + 'never the key itself, so there is no way for anyone, including an admin, to look it back up. If you '
+        + 'lose it, generating a new one is the only fix.')));
     resultEl.appendChild(warning);
     resultEl.appendChild(buildCopyRow(data.key));
     resultEl.hidden = false;
+
+    // Now has a live key regardless of whether it did before -- keep
+    // lastAccountData and the panel wording above the result box (still
+    // on screen) in sync, same as handleTeamSwitchConfirm() above does
+    // for a team change.
+    if (lastAccountData && lastAccountData.player) {
+      lastAccountData = Object.assign({}, lastAccountData, {
+        player: Object.assign({}, lastAccountData.player, { has_api_key: true }),
+      });
+    }
+    renderKeyPanel(true);
   } catch (err) {
     showRotateKeyError('Could not reach the server. Check your connection and try again.');
   } finally {

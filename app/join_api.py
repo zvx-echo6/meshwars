@@ -157,13 +157,23 @@ def _config_link(raw_key: str) -> str:
     return f"meshmapper://custom-api?url={settings.public_host}/api/mc/ingest&key={raw_key}"
 
 
-def _registration_response(display_name: str, team: str, protocol: str | None, raw_key: str) -> dict:
+def _registration_response(
+    display_name: str, team: str, protocol: str | None, raw_key: str | None
+) -> dict:
+    # raw_key is None exactly when join() skipped minting a key (see
+    # its own comment at the "Create the player + key" step) -- an
+    # authenticated Meshtastic join. The "key" field is omitted
+    # entirely rather than sent as None/"" so the frontend can't
+    # mistake "no key" for a falsy key value it should still render;
+    # see handleJoinSubmit() in frontend/account.js, which already
+    # only reads data.key for the mc branch.
     resp: dict = {
         "display_name": display_name,
         "team": team,
         "protocol": protocol,
-        "key": raw_key,
     }
+    if raw_key is not None:
+        resp["key"] = raw_key
     if protocol == "mc":
         resp["config_link"] = _config_link(raw_key)
     return resp
@@ -336,18 +346,45 @@ async def join(
                     status_code=409,
                 )
 
-        # 7. Create the player + key.
+        # 7. Create the player, and the key -- except in exactly one
+        # case: a signed-in caller joining as Meshtastic. Every other
+        # combination keeps minting one:
+        #
+        # - Anonymous + mt: this player is NOT linked to any account
+        #   (session is None, so the account_id UPDATE below never
+        #   runs). POST /api/account/link-key is the ONLY way this
+        #   player can ever be claimed into an account later, and it
+        #   authenticates by this exact key. Skip minting here and an
+        #   anonymous Meshtastic joiner is permanently stranded --
+        #   never simplify this to "skip the key for all mt joins".
+        # - Anonymous + mc / authenticated + mc: unchanged -- MeshMapper
+        #   needs the key to configure its upstream connection
+        #   regardless of how the player got here.
+        # - Authenticated + mt: the only case skipped. The player is
+        #   already linked to the account in this same transaction
+        #   below, so there is nothing left for a key to claim, and no
+        #   Meshtastic ingest path (freqmapper_ingest.py's api_key
+        #   references are FreqMapper's own upstream credential, not a
+        #   player key; coverage and net check-ins match by node ID)
+        #   ever consumes a player key for this protocol. Minting one
+        #   anyway is what made the account page's Security panel show
+        #   "rotate" copy -- warning about breaking MeshMapper -- to a
+        #   player who has never touched MeshMapper and has no key in
+        #   use to break.
         cur = conn.execute(
             "INSERT INTO player(display_name, team, created_at) VALUES (?, ?, ?)",
             (display_name, team, now),
         )
         player_id = cur.lastrowid
 
-        raw_key = secrets.token_urlsafe(32)
-        conn.execute(
-            "INSERT INTO api_key(key_hash, player_id, issued_at) VALUES (?, ?, ?)",
-            (hash_secret(raw_key), player_id, now),
-        )
+        skip_key = session is not None and protocol == "mt"
+        raw_key = None
+        if not skip_key:
+            raw_key = secrets.token_urlsafe(32)
+            conn.execute(
+                "INSERT INTO api_key(key_hash, player_id, issued_at) VALUES (?, ?, ?)",
+                (hash_secret(raw_key), player_id, now),
+            )
 
         if node_ref is not None:
             conn.execute(
@@ -384,7 +421,9 @@ async def join(
     finally:
         conn.close()
 
-    # 8. Plaintext key shown once, plus the config link for MeshCore.
+    # 8. Plaintext key shown once, plus the config link for MeshCore --
+    # or, for the one skipped case above, no key field at all (see
+    # _registration_response()).
     return JSONResponse(
         _registration_response(display_name, team, protocol, raw_key),
         status_code=200,

@@ -273,3 +273,75 @@ def test_expired_session_falls_back_to_the_anonymous_invite_code_gate(client, db
     resp = client.post("/api/join", json=body)
     assert resp.status_code == 403
     assert resp.json() == {"error": "invalid invite code"}
+
+
+# ---- key-minting rule: skipped only for authenticated + mt -----------
+#
+# join()'s own comment at the "Create the player, and the key" step
+# spells out why: an anonymous Meshtastic join is not linked to any
+# account, so its key is the ONLY way that player can ever be claimed
+# later via POST /api/account/link-key -- it must still be minted. A
+# signed-in Meshtastic join is already linked to the calling account in
+# this same request, and no Meshtastic ingest path consumes a player
+# key, so minting one there just leaves a live, unused secret and makes
+# GET /api/account report has_api_key: true for a player who was never
+# shown a key at all. mc keeps minting in both cases -- MeshMapper needs
+# it regardless of how the player got here.
+
+def test_anonymous_mt_join_still_gets_a_key(client, db_path, monkeypatch):
+    monkeypatch.setattr(db.settings, "join_meshtastic_enabled", True)
+    body = _body(display_name="AnonMt", protocol="mt")
+    resp = client.post("/api/join", json=body)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "key" in data and data["key"]
+
+
+def test_anonymous_mc_join_still_gets_a_key(client, db_path):
+    body = _body(display_name="AnonMc", protocol="mc")
+    resp = client.post("/api/join", json=body)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "key" in data and data["key"]
+
+
+def test_authenticated_mc_join_still_gets_a_key(client, db_path):
+    _login(client, db_path)
+    body = _body(display_name="AuthMc", protocol="mc")
+    del body["invite_code"]
+    resp = client.post("/api/join", json=body)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "key" in data and data["key"]
+
+
+def test_authenticated_mt_join_gets_no_key(client, db_path, monkeypatch):
+    """The one skipped case: a signed-in caller joining as Meshtastic
+    gets a player, and it is linked to their account, but no api_key
+    row is ever created for it, and the response carries no "key" field
+    at all (not "" and not null -- see _registration_response()).
+    """
+    monkeypatch.setattr(db.settings, "join_meshtastic_enabled", True)
+    account_id = _login(client, db_path)
+    body = _body(display_name="AuthMt", protocol="mt")
+    del body["invite_code"]
+    resp = client.post("/api/join", json=body)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "key" not in data
+    assert "config_link" not in data
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    player_row = conn.execute(
+        "SELECT player_id, account_id FROM player WHERE display_name = 'AuthMt'"
+    ).fetchone()
+    key_row = conn.execute(
+        "SELECT 1 FROM api_key WHERE player_id = ?", (player_row["player_id"],)
+    ).fetchone()
+    conn.close()
+
+    # The player was still created and still linked to the account --
+    # only the key-minting is skipped, nothing else about this route.
+    assert player_row["account_id"] == account_id
+    assert key_row is None
