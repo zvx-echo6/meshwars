@@ -81,6 +81,11 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from .account_api import (
+    _ACCOUNT_SCOPED_TABLES,
+    _PLAYER_SCOPED_TABLES,
+    _tombstone_display_name,
+)
 from .auth import new_rate_limit_bucket
 from .client_ip import get_client_ip
 from .config import settings
@@ -156,7 +161,9 @@ def _admin_surface_enabled(conn) -> bool:
     ).fetchone() is not None
 
 
-async def _role_guard(request: Request, *, need: str = "admin") -> SessionPrincipal | JSONResponse:
+async def _role_guard(
+    request: Request, *, need: str = "admin", return_role: bool = False
+) -> SessionPrincipal | tuple[SessionPrincipal, str] | JSONResponse:
     """Replaces the old shared-secret _api_guard() for every route in
     this file and app/admin_ops.py except POST /api/admin/roles/claim
     itself (which cannot require a role -- see its own docstring).
@@ -233,6 +240,25 @@ async def _role_guard(request: Request, *, need: str = "admin") -> SessionPrinci
     session, it has its own 404-vs-401 decision to make first (whether
     the surface exists at all), which a raised HTTPException would
     short-circuit past.
+
+    `return_role`, when true, hands back `(session, role)` instead of
+    bare `session` on success -- `role` being the exact string this
+    function already read out of `account.role` to decide the `need`
+    check above ("admin" or "operator"; never None, since a None role
+    would already have failed that check). Every existing route only
+    ever needed a yes/no answer to "does this caller meet `need`", so
+    the bare-session return stays the default and every call site
+    keeps working unchanged. POST /api/admin/player/delete is the one
+    exception: it has to tell an admin apart from an operator, not
+    just confirm the caller is at least one of them, because the two
+    ranks get different answers there (see that route's own
+    docstring). Reading `account.role` a second time in that route,
+    separately from this function's own read of it two lines below,
+    would be the same fact fetched twice through two different code
+    paths that could in principle drift -- this parameter exists so
+    there is exactly one read of "what role does this caller hold",
+    reused by both the pass/fail decision here and that route's own
+    finer-grained one.
     """
     conn = connect()
     try:
@@ -268,7 +294,7 @@ async def _role_guard(request: Request, *, need: str = "admin") -> SessionPrinci
                 },
                 status_code=403,
             )
-        return session
+        return (session, role) if return_role else session
     finally:
         conn.close()
 
@@ -771,25 +797,190 @@ async def admin_player_enable(request: Request):
 
 @router.post("/api/admin/player/delete")
 async def admin_player_delete(request: Request):
-    """Permanently remove a player and everything that refers to them.
+    """Permanently remove a player -- the operator counterpart to
+    DELETE /api/account (app/account_api.py), brought onto that
+    route's "delete the person, keep the team" model rather than the
+    hard-delete-everything shape this route used to have. See
+    app/account_api.py's "account deletion" section comment for the
+    full table-by-table reasoning, which this route now shares
+    directly (`_PLAYER_SCOPED_TABLES`, `_ACCOUNT_SCOPED_TABLES`, and
+    `_tombstone_display_name()` are all imported from there, not
+    redefined here -- one definition of "what deletion means", used by
+    both the self-service and the operator door). Only what genuinely
+    differs on the operator path is documented below.
 
-    Unlike disable, which only flips a flag and can be reversed, this
-    deletes the player row, every key and radio binding they hold, their
-    MeshCore ping/stat history, their unique-painter credit, and every
-    square where they are the last painter -- along with that square's
-    score, capture-window, and capture-log rows, so nothing is left
-    pointing at a square that no longer exists.
+    This used to hard-delete the `player` row outright, plus every
+    square where this player was the last painter (mc_tile,
+    mc_tile_score, mc_tile_capture, mc_tile_capture_log) and
+    mc_tile_unique_painter -- rewriting a shared, possibly already-
+    published record (a square's capture history, a month's
+    standings) to serve the removal of one player, exactly the harm
+    app/account_api.py's own docstring explains at length. None of
+    that runs any more: `player` is tombstoned (display_name
+    overwritten with an unmistakable, uncollidable placeholder,
+    disabled_at set, account_id cleared) instead of deleted, and
+    mc_tile / mc_tile_capture_log / mc_tile_unique_painter and every
+    other shared-history table are left completely untouched. Do not
+    "restore" the square-deletion behavior -- it is not a missing
+    feature, it is the exact harm this change removes. (mc_tile_score
+    and mc_tile_capture were never player-keyed in the first place --
+    they key on (season_id, cell_id[, team]) alone -- so they were only
+    ever touched as a side effect of deleting the whole mc_tile row for
+    a square this player last painted; with that row no longer deleted,
+    neither is ever touched here again.)
 
-    The caller must supply the player's current display_name exactly;
-    a mismatch (or a player_id that doesn't exist) refuses with 409/404
-    rather than deleting on a stale or mistyped name. Everything below
-    runs in one transaction so a failure partway through cannot leave a
-    partial delete behind.
+    This also used to hard-delete only four of the eleven tables
+    _PLAYER_SCOPED_TABLES now covers (player_ingest_stat,
+    player_cell_ping, player_node, api_key), while deleting the
+    `player` row itself out from under the rest -- player_last_fix,
+    player_cell_repeater_credit, join_token, checkin_node_name,
+    mc_checkin_binding, mc_node_confirmation, mt_node_confirmation --
+    leaving every one of those pointing at a player_id that no longer
+    resolved to anything. That was a plain bug, independent of the
+    design question above, and is fixed the same way: every table in
+    _PLAYER_SCOPED_TABLES is hard-deleted, unconditionally, before
+    `player` is tombstoned.
+
+    ---- what is different from DELETE /api/account -----------------
+
+    - This acts on a TARGET player named in the request body
+      (`player_id`), not on the caller. There is no session.player_id
+      here at all -- see _role_guard() below for who is allowed to
+      make this call, which is an entirely separate question from
+      whose data it acts on.
+    - Authorization is this file's own role guard (admin or operator,
+      with active TOTP -- see _role_guard()'s own docstring),
+      unchanged from before this pass. This is not the caller
+      re-authenticating themselves the way DELETE /api/account
+      requires a fresh password/TOTP check on top of the session --
+      that check exists there because a browser's session cookie alone
+      doesn't prove who is currently at the keyboard; here, the
+      _role_guard() check on the OPERATOR's own account already covers
+      that, and there is no equivalent credential of the TARGET's to
+      ask for (an operator acting on someone else's account has no
+      reason to hold their password or TOTP secret).
+    - Confirmation is still the operator typing the target's current
+      display_name exactly (case-sensitive, no trimming) -- unchanged.
+      There is no _NO_PLAYER_CONFIRM_PHRASE equivalent here: every
+      target of this route, by definition, already has a player row to
+      read a display_name off of (the request identifies the player,
+      not an account), so that self-service-only fallback does not
+      apply.
+    - The target's linked account, if any (player.account_id), is
+      DELETED along with the player -- every _ACCOUNT_SCOPED_TABLES
+      row for it, then the account row itself, the exact same cascade
+      DELETE /api/account runs against the caller's own account.
+      Deliberately not just unlinked (clearing player.account_id the
+      way POST /api/admin/player/unlink-account does): unlinking is
+      the right call when the LINK itself is wrong (a misclick, a
+      shared radio claimed by the wrong side -- see that route's own
+      docstring) and both sides should go on existing, just not
+      attached to each other. Deleting a player is a different act
+      entirely -- it says this person's presence in the game is being
+      permanently ended -- and leaving their login (email/OAuth
+      identity, password hash, active sessions) sitting around,
+      unlinked but otherwise intact, would not "keep the team" the way
+      tombstoning `player` does; it would just leave a working set of
+      credentials for a person the operator has just erased, free to
+      link-key straight onto a fresh player and undo the point of this
+      call. So: tombstone the player, delete the account underneath it,
+      same as if that account holder had run DELETE /api/account
+      themselves -- except an operator initiated it instead of them.
+      Recorded in admin_action_log either way (see below), including
+      the account_id when one was deleted, so this is never a silent
+      side effect.
+
+      ---- an admin cannot use this route to reach a role-holder --------
+
+      Deleting the target's account is exactly the kind of act
+      /api/admin/roles/* deliberately keeps out of an admin's reach --
+      that section's own routes require the OPERATOR rank specifically
+      so an admin can never grant, revoke, or otherwise touch anyone's
+      account.role, including its own (see this module's own
+      docstring). Left alone, this route would have been a second door
+      into the same act: an admin who names a player linked to an
+      operator's (or another admin's) account would delete that
+      account, role and all, on the strength of the plain admin role
+      guard, with no role check of its own. So this route carries the
+      same boundary directly: once the target is resolved (below), if
+      the target has a linked account AND that account holds a role
+      (admin or operator, checked via the same account.role column
+      /api/admin/roles/* itself gates on) AND the caller's own rank is
+      exactly "admin" (not "operator"), the deletion is refused before
+      anything is written. An operator may still delete a role-holding
+      account through this route -- that matches the roles model
+      exactly, where operator is the one rank permitted to act on
+      accounts that hold roles at all.
+
+      The caller's rank for this check is read via
+      `_role_guard(request, return_role=True)`, not by a second,
+      separate query against `account.role` -- see that parameter's
+      own docstring for why: there is exactly one place this route
+      reads "what role does the caller hold", reused for both the
+      pass/fail decision inside the guard and this finer-grained one.
+
+      Refused with 409, not the generic 401 _role_guard() itself uses
+      for an insufficient rank. That generic 401 exists so a caller
+      who has not yet proven they hold ANY role learns nothing about
+      what exists above them -- see _role_guard()'s own docstring. That
+      reasoning does not transfer here: by this point the caller has
+      already cleared the admin role guard (a real, TOTP-active admin
+      account, not a probe), and has already named this exact target
+      by its exact, currently-correct display_name -- the same
+      confirmation this route has always required, checked above
+      before this section ever runs, so a wrong guess never reaches
+      this far. Nothing about which role the target's account holds is
+      handed to an admin who does not already know precisely who they
+      are naming. Trade-off accepted deliberately: an admin who
+      deliberately probes player_ids they can already see via GET
+      /api/admin/players (which lists every player's account_id
+      linkage already) still learns one additional bit here -- that a
+      specific, correctly-named target's account holds a role at all --
+      that route does not expose. Given the caller already has to
+      supply the target's exact current name to get this far, and the
+      refusal message follows the same "say what happened and why"
+      shape /api/admin/roles/grant's own 409s already use for their
+      own conflicts (see admin_roles_grant() above), a 409 with a real
+      explanation was judged more useful to a legitimate admin -- who
+      otherwise has no way to tell "refused because of the roles
+      boundary" from "player not found" from any other failure -- than
+      a bare 401 would be. A 403 was considered and rejected: nothing
+      about the caller's own eligibility is in question here (unlike
+      _role_guard()'s own TOTP 403), it is the TARGET's state that
+      blocks the action, which is exactly the shape admin_roles_grant()
+      already answers with 409, not 403.
+
+      Self-deletion: an operator naming their OWN player through this
+      route is unaffected by the check above -- the refusal only fires
+      when the CALLER's rank is "admin", and an operator's is not, so
+      an operator deleting themselves this way is allowed, the same as
+      every other role-holding target an operator may act on. This is
+      deliberate, not an oversight: DELETE /api/account (the
+      self-service route) already lets any signed-in account, role or
+      no role, delete itself, so refusing it here would only add a
+      second, inconsistent door onto the same already-permitted act.
+      An admin naming their OWN player is, by contrast, refused by
+      this same check -- their own account holds "admin", which is a
+      role -- with no special case needed: an admin who wants to
+      delete their own account already has the fitting door for that,
+      DELETE /api/account, which re-authenticates them as themselves
+      rather than routing it through the admin surface's confirm-by-
+      name flow.
+
+    ---- atomicity ----------------------------------------------------
+
+    Runs inside one WriteSession (app/db.py) -- the same primitive
+    DELETE /api/account uses, and the current-generation replacement
+    for this file's older manual connect()/BEGIN IMMEDIATE pairing
+    (see POST /api/admin/player/unlink-account's own comment on why it
+    already made this switch). Every player-scoped delete, the
+    tombstone UPDATE, and the account-scoped cascade (if any) commit
+    together or not at all.
     """
-    guard = await _role_guard(request)
+    guard = await _role_guard(request, return_role=True)
     if isinstance(guard, JSONResponse):
         return guard
-    session = guard
+    session, caller_role = guard
 
     try:
         body = await request.json()
@@ -802,106 +993,91 @@ async def admin_player_delete(request: Request):
     if not isinstance(display_name, str) or not display_name:
         return JSONResponse({"error": "display_name is required"}, status_code=400)
 
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    now = int(time.time())
+    async with WriteSession() as conn:
         row = conn.execute(
-            "SELECT display_name FROM player WHERE player_id = ?", (player_id,)
+            "SELECT display_name, account_id FROM player WHERE player_id = ?",
+            (player_id,),
         ).fetchone()
         if row is None:
-            conn.execute("ROLLBACK")
             return JSONResponse({"error": "player not found"}, status_code=404)
         if row["display_name"] != display_name:
-            conn.execute("ROLLBACK")
             return JSONResponse(
                 {"error": "display name does not match"}, status_code=409
             )
 
-        counts = {
-            "mc_tile": 0,
-            "mc_tile_score": 0,
-            "mc_tile_capture": 0,
-            "mc_tile_capture_log": 0,
-        }
+        target_account_id = row["account_id"]
 
-        # Squares where this player is the last painter. Each one, plus
-        # its score/capture/capture-log rows, is removed entirely rather
-        # than left behind pointing at nobody.
-        squares = conn.execute(
-            "SELECT season_id, cell_id FROM mc_tile WHERE last_player_id = ?",
-            (player_id,),
-        ).fetchall()
-        for sq in squares:
-            season_id, cell_id = sq["season_id"], sq["cell_id"]
+        # See this route's own docstring, "an admin cannot use this
+        # route to reach a role-holder", for the full reasoning. Only
+        # an admin (never an operator) is refused here, and only when
+        # the target actually has a linked account holding a role --
+        # an ordinary player, or a linked account with no role, is
+        # unaffected.
+        if caller_role == "admin" and target_account_id is not None:
+            target_role = conn.execute(
+                "SELECT role FROM account WHERE account_id = ?", (target_account_id,)
+            ).fetchone()["role"]
+            if target_role is not None:
+                return JSONResponse(
+                    {
+                        "error": f"that account holds the {target_role} role — "
+                        "an admin cannot delete an account that holds a role; "
+                        "an operator can still do this"
+                    },
+                    status_code=409,
+                )
+
+        # See this module's "account deletion" section comment in
+        # app/account_api.py for why each table below is here and why
+        # `player` survives, tombstoned, instead of being deleted too.
+        counts: dict[str, int] = {}
+        for table in _PLAYER_SCOPED_TABLES:
             c = conn.execute(
-                "DELETE FROM mc_tile_score WHERE season_id = ? AND cell_id = ?",
-                (season_id, cell_id),
+                f"DELETE FROM {table} WHERE player_id = ?", (player_id,)
             )
-            counts["mc_tile_score"] += c.rowcount
-            c = conn.execute(
-                "DELETE FROM mc_tile_capture WHERE season_id = ? AND cell_id = ?",
-                (season_id, cell_id),
+            counts[table] = c.rowcount
+
+        conn.execute(
+            "UPDATE player SET display_name = ?, disabled_at = ?, account_id = NULL "
+            "WHERE player_id = ?",
+            (_tombstone_display_name(player_id), now, player_id),
+        )
+
+        if target_account_id is not None:
+            for table in _ACCOUNT_SCOPED_TABLES:
+                c = conn.execute(
+                    f"DELETE FROM {table} WHERE account_id = ?", (target_account_id,)
+                )
+                counts[table] = c.rowcount
+            conn.execute(
+                "DELETE FROM account WHERE account_id = ?", (target_account_id,)
             )
-            counts["mc_tile_capture"] += c.rowcount
-            c = conn.execute(
-                "DELETE FROM mc_tile_capture_log WHERE season_id = ? AND cell_id = ?",
-                (season_id, cell_id),
-            )
-            counts["mc_tile_capture_log"] += c.rowcount
-            c = conn.execute(
-                "DELETE FROM mc_tile WHERE season_id = ? AND cell_id = ?",
-                (season_id, cell_id),
-            )
-            counts["mc_tile"] += c.rowcount
 
-        c = conn.execute(
-            "DELETE FROM mc_tile_unique_painter WHERE player_id = ?", (player_id,)
-        )
-        counts["mc_tile_unique_painter"] = c.rowcount
-
-        c = conn.execute(
-            "DELETE FROM player_ingest_stat WHERE player_id = ?", (player_id,)
-        )
-        counts["player_ingest_stat"] = c.rowcount
-
-        c = conn.execute(
-            "DELETE FROM player_cell_ping WHERE player_id = ?", (player_id,)
-        )
-        counts["player_cell_ping"] = c.rowcount
-
-        c = conn.execute(
-            "DELETE FROM player_node WHERE player_id = ?", (player_id,)
-        )
-        counts["player_node"] = c.rowcount
-
-        c = conn.execute("DELETE FROM api_key WHERE player_id = ?", (player_id,))
-        counts["api_key"] = c.rowcount
-
-        c = conn.execute("DELETE FROM player WHERE player_id = ?", (player_id,))
-        counts["player"] = c.rowcount
-
+        detail = f"player_id={player_id} ({display_name})"
+        if target_account_id is not None:
+            detail += f" account_id={target_account_id} (account also deleted)"
         _log_admin_action(
             conn, actor_account_id=session.account_id, action="player_delete",
-            detail=f"player_id={player_id} ({display_name})",
+            detail=detail, now=now,
         )
-
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
 
     # Same reasoning as revoke/disable: a deleted player's keys must stop
     # authenticating immediately, not once the auth cache TTL expires.
     ingestor = request.app.state.mc_ingestor
     ingestor.invalidate_player(player_id)
 
-    log.info("admin: deleted player %d (%s): %s", player_id, display_name, counts)
+    log.info(
+        "admin: deleted player %d (%s)%s: %s",
+        player_id, display_name,
+        f", also deleted account {target_account_id}" if target_account_id is not None else "",
+        counts,
+    )
     return {
         "deleted": True,
         "player_id": player_id,
         "display_name": display_name,
+        "account_id": target_account_id,
         "counts": counts,
     }
 

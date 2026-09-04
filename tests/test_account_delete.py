@@ -425,19 +425,6 @@ def test_shared_history_survives_and_still_resolves_to_the_tombstoned_name(clien
     conn.close()
 
 
-def test_admin_player_delete_route_is_untouched_by_this_change(db_path):
-    """Sanity guard, not a behavior test of admin_api.py (out of
-    scope, never edited here): confirms this file's changes did not
-    accidentally alter app/admin_api.py's own module source.
-    """
-    import subprocess
-    result = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD", "--", "app/admin_api.py"],
-        cwd="/home/zvx/projects/meshwars-dev", capture_output=True, text=True,
-    )
-    assert result.stdout.strip() == ""
-
-
 # =========================================================================
 # Re-authentication
 # =========================================================================

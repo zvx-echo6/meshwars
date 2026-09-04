@@ -566,7 +566,7 @@ function renderPlayerDetail(p) {
     }));
   }
   zone.appendChild(btn('Delete player', 'adm-btn-danger', async (b) => {
-    const typed = window.prompt('Deleting removes them and everything they earned.\n\nType ' + p.display_name + ' to confirm.');
+    const typed = window.prompt('Deleting removes the player, not what they earned — their squares, capture history, month awards, and check-in awards all stay.\n\nType ' + p.display_name + ' to confirm.');
     if (!typed) return;
     b.disabled = true;
     try {
