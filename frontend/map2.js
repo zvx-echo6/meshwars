@@ -322,8 +322,8 @@ const TEAM_COLORS = {
   BLUE: '#3d8bfd',
   PURPLE: '#b10dc9',
   YELLOW: '#ffdc00',
-  ORANGE: '#ff9020',
-  PINK: '#f01ec0',
+  ORANGE: '#ff8a00',
+  PINK: '#ff8ac6',
 };
 
 const TEAM_ORDER = Object.keys(TEAM_COLORS);
@@ -382,8 +382,25 @@ const HILLSHADE_ID = 'hillshade';
 // now need the weight that used to be neon-only when gold still sat on
 // a light basemap. Kept as a per-theme map (not a single constant) so
 // the two can still be told apart if a future theme needs to.
-const BOARD_FILL_OPACITY = { gold: 0.65, neon: 0.65 };
+const BOARD_FILL_OPACITY = { gold: 0.85, neon: 0.85 };
 const BOARD_LINE_WIDTH = { gold: 2, neon: 2 };
+
+// A black separator gutter, drawn under the team rim and over the fill,
+// so two cells held by different teams don't bleed into each other. It
+// has to be zoom-interpolated rather than flat: at Idaho's latitude a
+// 300m cell is only about 2.7px wide at zoom 10, 5.4px at 11, 10.7px at
+// 12, 21px at 13, 43px at 14. A flat 5px gutter, plus two 3px rims on
+// either side of it, would swallow the entire cell below zoom ~14 --
+// worth nothing at regional zoom, and actively harmful there, erasing
+// exactly the cell it exists to separate. So it fades in from zoom 11
+// and only reaches full width once a cell is large enough to carry it.
+const BOARD_SEP_WIDTH_ZOOM = ['interpolate', ['linear'], ['zoom'], 11, 0, 12, 0.6, 13, 1.5, 14, 3, 15, 4, 16, 5];
+
+// The team rim itself, replacing the flat BOARD_LINE_WIDTH above: it
+// starts at today's effective 2px and only widens to 3px once there is
+// also room for the separator gutter beside it, rather than the two
+// competing for the same handful of pixels at low zoom.
+const BOARD_LINE_WIDTH_ZOOM = ['interpolate', ['linear'], ['zoom'], 11, 1.5, 13, 2, 14, 2.5, 15, 3, 16, 3];
 
 // The baked hillshade archive carries real alpha -- transparent on flat
 // ground, black/white toward shadow/highlight. Both themes sit on the
@@ -2792,7 +2809,13 @@ function applyBasemapTheme(map) {
   const theme = currentTheme();
   map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
   map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
-  map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH[theme]);
+  // Zoom-interpolated, not per-theme (see BOARD_SEP_WIDTH_ZOOM/
+  // BOARD_LINE_WIDTH_ZOOM above) -- set here rather than in the
+  // addLayer literal because this theme pass runs after those
+  // addLayer calls and overwrites any paint property set earlier,
+  // same as every other line in this function.
+  map.setPaintProperty('board-line', 'line-width', BOARD_LINE_WIDTH_ZOOM);
+  map.setPaintProperty('board-sep', 'line-width', BOARD_SEP_WIDTH_ZOOM);
   map.setPaintProperty('park-boundaries-fill', 'fill-opacity', PARK_BOUNDARY_FILL_OPACITY[theme]);
   map.setPaintProperty('park-boundaries-fill', 'fill-color', PLACE_COLORS[theme]);
   map.setPaintProperty('park-boundaries-line', 'line-width', PARK_BOUNDARY_LINE_WIDTH[theme]);
@@ -3773,6 +3796,22 @@ async function main() {
         'line-width': 1,
       },
     });
+    // Dark separator gutter, added with beforeId 'board-line' so it
+    // lands under the team rim and over the fill. Color/opacity are
+    // fixed here since neither is theme-dependent; line-width is left
+    // at 0 until applyBasemapTheme sets it to BOARD_SEP_WIDTH_ZOOM --
+    // set it here instead and the theme pass would overwrite it anyway
+    // (see applyBasemapTheme's own comment on that).
+    map.addLayer({
+      id: 'board-sep',
+      type: 'line',
+      source: 'board',
+      paint: {
+        'line-color': '#000000',
+        'line-width': 0,
+        'line-opacity': 0.9,
+      },
+    }, 'board-line');
 
     // An award highlight sits ON TOP of the board: same squares, drawn
     // again opaque with a bright outline so the shape reads through the
