@@ -287,12 +287,17 @@ class Settings(BaseSettings):
     # the box):
     #   precision_bits=17 -> 2**15 * 1e-7 * 111320 =~ 365 m (still >= the
     #                        300 m cell -- not good enough)
-    #   precision_bits=18 -> 2**14 * 1e-7 * 111320 =~ 182 m (well under
-    #                        the 300 m cell -- the floor chosen below)
-    #   precision_bits=19 -> 2**13 * 1e-7 * 111320 =~  91 m
-    # 18 is the minimum: the first value whose box sits safely (roughly
-    # 40% smaller than the cell) under 300 m, rather than merely under it.
-    mt_min_precision_bits: int = 18
+    #   precision_bits=18 -> 2**14 * 1e-7 * 111320 =~ 182 m (under the
+    #                        300 m cell -- the bare minimum that passes)
+    #   precision_bits=19 -> 2**13 * 1e-7 * 111320 =~  91 m (the floor
+    #                        chosen below)
+    # 18 is not the floor here: it clears the 300 m cell, but only by
+    # about 40%, which is not much of a cushion for a security gate. 19
+    # is chosen instead for a comfortable margin over the cell (roughly
+    # 70% smaller, not merely smaller), at the cost of shutting out radios
+    # reporting exactly precision_bits=18, which would have passed under
+    # the old floor despite offering less margin than we now require.
+    mt_min_precision_bits: int = 19
 
     # A packet whose payload never carries precision_bits at all (older
     # firmware, or a meshview fork that omits it) cannot be scored

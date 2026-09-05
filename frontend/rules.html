@@ -333,7 +333,7 @@
 
           <h3 id="fairplay-precision">How precise your position has to be</h3>
           <p>A Meshtastic radio can be set to report its position roughly rather than exactly, and some are shipped that way. A rough position can put you anywhere inside a box a kilometre or more across, which is several squares wide &mdash; so a position that is not precise enough to say which square you were in claims nothing at all.</p>
-          <p>Squares are about 300 metres, so a position has to be good to roughly 180 metres or better to count. In the Meshtastic app that is the channel's position precision setting: leave it at full precision, or at least at the step that says within 182 metres. A packet that does not say how precise it is gets the same answer, because there is nothing to check &mdash; and the packets that omit it are the ones carrying no usable position in the first place.</p>
+          <p>Squares are about 300 metres, so a position has to be good to roughly 90 metres or better to count. In the Meshtastic app that is the channel's position precision setting: leave it at full precision, or at least at the step that says within 91 metres. A packet that does not say how precise it is gets the same answer, because there is nothing to check &mdash; and the packets that omit it are the ones carrying no usable position in the first place.</p>
           <p>This is a Meshtastic setting and it has no MeshCore equivalent. If you register a radio, drive somewhere with coverage, and nothing appears on the map, this is the first thing to look at.</p>
 
           <h3 id="fairplay-aircraft">Aircraft and impossible jumps</h3>
@@ -361,7 +361,7 @@
               <tr><th>What earns points</th><td>how many repeaters <em>you heard</em></td><td>how many MQTT feeders <em>heard you</em></td></tr>
               <tr><th>Registering</th><td>binds itself on your first wardrive</td><td>you add the node ID yourself</td></tr>
               <tr><th>Net check-in</th><td>your community's net channel</td><td>your community's net hashtag</td></tr>
-              <tr><th>Position precision</th><td>no setting to get wrong</td><td>must be good to ~180 m or the ping is refused</td></tr>
+              <tr><th>Position precision</th><td>no setting to get wrong</td><td>must be good to ~90 m or the ping is refused</td></tr>
               <tr><th>Going too fast</th><td>over ~100 mph is labelled airborne; the square still counts</td><td>over ~200 mph is refused outright; nothing is labelled airborne</td></tr>
             </tbody>
           </table>
