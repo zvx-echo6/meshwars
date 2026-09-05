@@ -383,6 +383,20 @@ const HILLSHADE_ID = 'hillshade';
 // a light basemap. Kept as a per-theme map (not a single constant) so
 // the two can still be told apart if a future theme needs to.
 const BOARD_FILL_OPACITY = { gold: 0.85, neon: 0.85 };
+
+// Below z13 board-line and board-sep are hidden outright (minzoom on both,
+// see their addLayer calls), so the fill is the ONLY thing drawing a cell
+// there. The team rim is the same colour at full opacity, so losing it takes
+// a little saturation off every cell edge; this lifts the fill slightly to
+// put it back. Deliberately a small lift: the rim was load-bearing when the
+// fill was 0.45, but at 0.85 the fill already carries the cell on its own.
+// z13+ holds today's 0.85 exactly, so nothing changes where the strokes are
+// visible. Per-theme to match every other paint constant in this file, even
+// though both themes currently agree.
+const BOARD_FILL_OPACITY_ZOOM = {
+  gold: ['interpolate', ['linear'], ['zoom'], 10, 0.92, 13, BOARD_FILL_OPACITY.gold],
+  neon: ['interpolate', ['linear'], ['zoom'], 10, 0.92, 13, BOARD_FILL_OPACITY.neon],
+};
 const BOARD_LINE_WIDTH = { gold: 2, neon: 2 };
 
 // A black separator gutter, drawn under the team rim and over the fill,
@@ -2808,7 +2822,7 @@ function currentTheme() {
 function applyBasemapTheme(map) {
   const theme = currentTheme();
   map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
-  map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY[theme]);
+  map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY_ZOOM[theme]);
   // Zoom-interpolated, not per-theme (see BOARD_SEP_WIDTH_ZOOM/
   // BOARD_LINE_WIDTH_ZOOM above) -- set here rather than in the
   // addLayer literal because this theme pass runs after those
@@ -3791,6 +3805,14 @@ async function main() {
       id: 'board-line',
       type: 'line',
       source: 'board',
+      // Below z13 a cell is at most ~10.8 px, and this rim is drawn in the
+      // team's own colour -- the same colour as the fill beneath it -- so at
+      // that size it mostly just fattens the cell rather than delineating it.
+      // Hiding it there costs tessellation and draw work at the zooms where
+      // density is highest and takes almost nothing off the screen. The cell
+      // edges you can actually see below z13 come from board-sep's dark
+      // gutter, which is deliberately left drawing.
+      minzoom: 13,
       paint: {
         'line-color': teamMatchExpression(),
         'line-width': 1,
@@ -3806,6 +3828,15 @@ async function main() {
       id: 'board-sep',
       type: 'line',
       source: 'board',
+      // NO minzoom here, deliberately. The plan this change comes from says
+      // this layer has "no visual effect at all" below z13 because
+      // BOARD_SEP_WIDTH_ZOOM is 0 px at z11 -- but it ramps to 0.6 px at z12
+      // and 1.5 px at z13, and that thin dark gutter is the ONLY thing
+      // separating one cell from the next down there. Hiding it was tried and
+      // reverted: the board collapsed into unbroken blobs of colour, with
+      // whole road corridors reading as one shape instead of a row of claimed
+      // squares. board-line, which IS hidden below z13, is the same colour as
+      // the fill and so contributes almost nothing by comparison.
       paint: {
         'line-color': '#000000',
         'line-width': 0,
