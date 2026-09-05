@@ -463,7 +463,7 @@ def cached_json_response(key: str, build) -> Response:
     return Response(content=body, media_type="application/json")
 
 
-def board_for(protocol: str) -> list[dict]:
+def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
     """Every owned cell in the active season for `protocol`, with bounds
     computed server-side so the browser never has to reimplement the
     grid maths in app.grid.
@@ -472,6 +472,20 @@ def board_for(protocol: str) -> list[dict]:
     /get-nodes route can build its own (richer) coverage list from the
     same raw ownership rows instead of re-deriving them -- see that
     module for how it enriches these with per-cell scores/capture time.
+
+    include_meta controls whether last_report_ts and paint_count are
+    emitted. They are ~26% of this payload uncompressed, and NOTHING on
+    the MeshCore path reads either one -- neither frontend/map2.js nor
+    frontend/mc.js mentions them -- so /api/mc/board asks for them to be
+    dropped. app/api.py's /get-nodes route DOES read both, copying them
+    into its own coverage list, so it keeps the default and is unaffected.
+    A parameter rather than an unconditional trim for exactly that reason:
+    the two callers want different shapes, and no test would catch
+    /get-nodes quietly losing a field.
+
+    The SELECT below still fetches both columns either way -- /get-nodes
+    needs them, and the cost being removed here is JSON serialisation and
+    the client's parse and heap, not the query.
     """
 
     def run(conn):
@@ -486,16 +500,18 @@ def board_for(protocol: str) -> list[dict]:
         out = []
         for r in rows:
             south, west, north, east = cell_bounds(r["cell_id"])
-            out.append({
+            cell = {
                 "cell_id": r["cell_id"],
                 "owner_team": r["owner_team"],
-                "last_report_ts": r["last_report_ts"],
-                "paint_count": r["paint_count"],
                 "south": south,
                 "west": west,
                 "north": north,
                 "east": east,
-            })
+            }
+            if include_meta:
+                cell["last_report_ts"] = r["last_report_ts"]
+                cell["paint_count"] = r["paint_count"]
+            out.append(cell)
         return out
 
     result = _safe_query(run)
@@ -510,7 +526,7 @@ async def mc_board() -> Response:
     every open map tab re-fetches on a timer -- served through
     cached_json_response so viewers share one build.
     """
-    return cached_json_response("mc_board", lambda: board_for(MC_PROTOCOL))
+    return cached_json_response("mc_board", lambda: board_for(MC_PROTOCOL, include_meta=False))
 
 
 def scores_for(protocol: str) -> dict:
