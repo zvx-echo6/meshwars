@@ -107,8 +107,8 @@ const TEAM_COLORS = {
   BLUE: '#3d8bfd',
   PURPLE: '#b10dc9',
   YELLOW: '#ffdc00',
-  ORANGE: '#ff9020',
-  PINK: '#f01ec0',
+  ORANGE: '#ff8a00',
+  PINK: '#ff8ac6',
 };
 const TEAM_ORDER = Object.keys(TEAM_COLORS);
 
