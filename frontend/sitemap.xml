@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- The public pages only: /admin is operator-only and excluded
-     from robots.txt, so it has no business in a sitemap either. No
+     from robots.txt, so it has no business in a sitemap either. The
+     other live routes are absent on purpose too: /map2 serves the same
+     page as / and canonicals to it, and /map-legacy, /account, /link
+     and /verify-totp each carry their own noindex. Anything added here
+     needs a canonical tag and no noindex, or it does not belong. No
      lastmod on any entry, since these pages change on deploys, not on a
      schedule, and there is no reliable per-page last-changed timestamp
      to report here; an invented one would be worse than none. -->
@@ -15,6 +19,9 @@
     <loc>https://meshwars.com/rules</loc>
   </url>
   <url>
+    <loc>https://meshwars.com/docs</loc>
+  </url>
+  <url>
     <loc>https://meshwars.com/about</loc>
   </url>
   <url>
@@ -22,5 +29,8 @@
   </url>
   <url>
     <loc>https://meshwars.com/api</loc>
+  </url>
+  <url>
+    <loc>https://meshwars.com/privacy</loc>
   </url>
 </urlset>
