@@ -208,7 +208,7 @@
         </div>
         <div class="protocol-card protocol-card-live">
           <div class="protocol-card-title">Meshtastic <span class="protocol-live-badge">Live</span> &mdash; in one community so far</div>
-          <p>The same seven-team, registered-player, grid-square game as MeshCore, but painting depends on FreqMapper's coverage, which is rolling out community by community. Register your node ID on the join page to play; squares are then claimed wherever your node's broadcast position falls inside FreqMapper's current coverage. See the Links below for exactly where that is right now.</p>
+          <p>The same seven-team, registered-player, grid-square game as MeshCore, but painting depends on FreqMapper's coverage, which is rolling out community by community. Register your node ID on the join page to play; squares are then claimed wherever your node's broadcast position falls inside FreqMapper's current coverage. See Where it's played below for exactly where that is right now.</p>
         </div>
       </div>
     </section>
@@ -221,13 +221,7 @@
     <section class="landing-panel">
       <h2 id="where" class="landing-panel-title">Where it's played</h2>
       <p>MeshWars is currently scoped for the western US and Texas. If you'd like to join the fun or need help, please reach out to malice in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a>.</p>
-      <div id="play-area-map" role="img" aria-label="Map of the MeshWars play area"></div>
-      <p class="mw-play-area-note">The outline is the live play area, read from the server &mdash; pings outside it are not scored. <a href="/">Open the board</a>.</p>
-    </section>
-
-    <section class="landing-panel">
-      <h2 id="links" class="landing-panel-title">Links</h2>
-      <p><strong>This is the current list of where MeshWars is actually playable.</strong> The docs, rules and join pages describe how coverage works without naming a community directly, and point back here for what's live right now &mdash; so this list, not those pages, is the one to check for the current answer. The rest are the open source projects MeshWars is built with.</p>
+      <p>The two boards don't work the same way here. MeshCore territory can be painted anywhere you can run MeshMapper &mdash; it isn't limited to a community, only to the play area below. Meshtastic territory is pulled from FreqMapper's coverage instead, which is rolling out community by community, so it only reaches where that coverage already does. What the communities below give you, on either board, is a home net to check in with.</p>
       <ul class="landing-links">
         <li>
           <a href="https://freq51.net" target="_blank" rel="noopener noreferrer">FREQ51 &mdash; Intermountain Mesh</a>
@@ -235,8 +229,21 @@
         </li>
         <li>
           <a href="https://mwmesh.com" target="_blank" rel="noopener noreferrer">Mountain West Mesh</a>
-          <span class="landing-link-desc">MeshCore: a community with a net configured for check-ins, and the directory both check-in identity and the join page's node picker draw from. MeshCore painting itself works anywhere MeshMapper does, not just here.</span>
+          <span class="landing-link-desc">MeshCore: a net configured for check-ins, and the directory both check-in identity and the join page's node picker draw from.</span>
         </li>
+        <li>
+          <a href="https://coloradomesh.org" target="_blank" rel="noopener noreferrer">Colorado Mesh</a>
+          <span class="landing-link-desc">MeshCore: another net configured for check-ins.</span>
+        </li>
+      </ul>
+      <div id="play-area-map" role="img" aria-label="Map of the MeshWars play area"></div>
+      <p class="mw-play-area-note">The outline is the live play area, read from the server &mdash; pings outside it are not scored. <a href="/">Open the board</a>.</p>
+    </section>
+
+    <section class="landing-panel">
+      <h2 id="links" class="landing-panel-title">Links</h2>
+      <p>The open source projects MeshWars is built with. For where you can actually play right now, see <a href="#where">Where it's played</a> above.</p>
+      <ul class="landing-links">
         <li>
           <a href="https://meshtastic.org" target="_blank" rel="noopener noreferrer">Meshtastic</a>
           <span class="landing-link-desc">The open source mesh radio project the Meshtastic board is built on.</span>
@@ -267,17 +274,14 @@
       </div>
     </div>
 
-    <p class="landing-disclaimer">
-      <strong>MeshWars reads two specific communities, not the mesh at large.</strong>
-      The Meshtastic board is built entirely from the <a href="https://freq51.net" target="_blank" rel="noopener noreferrer">FREQ51 Intermountain Mesh</a> meshview instance &mdash; your position and your net check-in both come from there, so a node heard only by gateways feeding some other instance will not score. On MeshCore, the squares you claim travel to us from MeshMapper wherever you are, but the weekly net is read from the <code>#weekly-net</code> channel on <a href="https://mwmesh.com" target="_blank" rel="noopener noreferrer">Mountain West Mesh</a>, so a check-in posted anywhere else earns nothing.
-      This is a limit of what MeshWars can currently see, not a judgement about which mesh is worth playing on. Widening it to other communities is under active consideration &mdash; if you run a mesh and want your people in the game, get in touch.
-    </p>
-    <p class="landing-footnote">MeshWars has a read API if you want to build a mesh bot, a Discord bot or a dashboard on this data. Keys are free, just ask. <a href="/api">API documentation</a>.</p>
+    <p class="landing-disclaimer"><strong>MeshWars reads from a specific set of mesh communities, not the mesh at large.</strong> Which ones are listed under <a href="#where">Where it's played</a> above, and that list grows as communities are added.
+        On MeshCore, the squares you claim reach us from MeshMapper wherever you are &mdash; only check-ins depend on a community, and they count only on a net MeshWars has been set up to read. On Meshtastic, both your squares and your check-ins come from the communities we read, so a node heard only by gateways feeding somewhere else will not score.
+        This is a limit of what MeshWars can currently see, not a judgement about which mesh is worth playing on. If you run a mesh and want your people in the game, get in touch.</p>
 
   </main>
 
   <footer class="mw-footer">
-    <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="/privacy">Privacy</a>.</p>
+    <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="/api">API documentation</a>. <a href="/privacy">Privacy</a>.</p>
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
