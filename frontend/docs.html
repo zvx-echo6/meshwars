@@ -358,7 +358,7 @@
           </figure>
 
           <h3 id="board-find">Finding a player</h3>
-          <p>Type a name into the player-search box and press Find. If they hold any squares, the map jumps to fit around their ground; either way you'll see their team, how many squares they currently hold, and their point total (tap it for the same breakdown the team totals use).</p>
+          <p>Searching for a player requires being signed in -- who holds which ground is the one thing MeshWars keeps behind a login, so a name is never tied to a place for an anonymous visitor. See the <a href="/privacy">privacy page</a> for why. Signed in, type a name into the player-search box and press Find. If they hold any squares, the map jumps to fit around their ground; either way you'll see their team, how many squares they currently hold, and their point total (tap it for the same breakdown the team totals use).</p>
           <figure class="docs-figure">
             <img src="/static/assets/docs/board-find-player.png" alt="The player-search result: 'Mitch (BLUE) holds no cells right now. Points: 0'." loading="lazy" />
             <figcaption>A search result for a player holding no ground right now.</figcaption>
@@ -438,6 +438,34 @@
           <h2>What changed recently</h2>
           <p>Player-visible changes, newest first. The full history lives in the repository's <code>CHANGELOG.md</code>.</p>
           <ul class="docs-changelog">
+            <li>
+              <span class="docs-changelog-date">2026-09-05</span>
+              <strong>You can sign in now, instead of only holding an API key.</strong> Connect GitHub, Google, Discord, a magic-link email, or a password from the account page -- it becomes your whole player dashboard: radios, setup-check, stats, honors, check-ins, team and security all in one place, and joining from inside it skips the invite code. See <a href="#account-signin">Accounts and signing in</a>.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-09-05</span>
+              Joining as Meshtastic while signed in no longer issues an API key -- nothing on that side ever used one. An anonymous Meshtastic join still gets one, and you can generate one later from Security either way. See <a href="#account-join-wizard">Joining through your account</a>.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-09-05</span>
+              <strong>Confirm a specific radio is yours directly</strong>, without waiting for it to resolve on its own -- MeshCore by triggering an advert, Meshtastic by sending a one-time broadcast code. See <a href="#account-checkin-name">Confirm my node</a>.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-09-05</span>
+              Two-factor authentication is now available on the password and magic-link sign-in doors, with recovery codes issued once. See <a href="#account-2fa">Two-factor authentication</a>.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-09-05</span>
+              <strong>You can delete your own account, player, and data.</strong> Your team keeps the squares and history you earned; only your name comes off them. See <a href="#account-delete">Deleting your account</a>.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-09-05</span>
+              Looking a player up by name on the map now requires signing in, and signed-in sessions store a device label like "Chrome on Windows" rather than your IP address. A new <a href="/privacy">Privacy page</a> covers what's stored and for how long.
+            </li>
+            <li>
+              <span class="docs-changelog-date">2026-09-05</span>
+              Colorado Mesh is now a configured MeshCore community alongside Mountain West Mesh -- see <a href="/about#where">Where it's played</a>.
+            </li>
             <li>
               <span class="docs-changelog-date">2026-09-02</span>
               <strong>The board's score figure now includes exploration points, and is labeled Score rather than Territory.</strong> Each team's number in the score panel is squares held plus check-in points plus exploration points, added together -- click it to see the breakdown. Players can also now switch teams once a month from the setup-check panel; see <a href="#switch-teams">Switching teams</a>.

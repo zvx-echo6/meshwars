@@ -2,6 +2,114 @@
 
 Notable, player-facing changes. Plain language, newest first.
 
+## 2026-09-05 — Sign in to MeshWars
+
+**You can sign in now, instead of only holding on to an API key.** From
+the account page, connect GitHub, Google, Discord, a magic-link email,
+or a password — any one of them gets you in, and you can connect more
+than one to the same account, so losing access to one doesn't lock you
+out as long as another still works. Signing in links to exactly one
+player. If you never want an account, the original flow — join with an
+invite code, get an API key, paste it in when you need to check
+anything — still works exactly as it always has.
+
+**Signing in turns the account page into your whole player dashboard.**
+Your radios (add or remove any time), a full setup-check and
+diagnostics without pasting a key, your stats, your check-in history,
+your honors, your team, and a Security section covering your sign-in
+methods, your password, your contact email, your API key, and every
+device you're currently signed in on, with sign-out available for one
+device or all of them at once.
+
+**Joining from inside the account page skips the invite code.** The
+invite-code join page is still there for anyone new. If you're already
+signed in, you join from the account page instead — straight into
+name, team, and radio type, no code needed, since being signed in
+already clears a higher bar than the code does.
+
+**If you join as Meshtastic while signed in, you no longer get an API
+key.** Nothing on the Meshtastic side — FreqMapper, check-ins — has
+ever used one, so a signed-in Meshtastic join now mints nothing to
+lose or misplace. The original anonymous join is unchanged and still
+issues one, since it's the only way an anonymous player can ever come
+back and claim their own player later. Either way, you can generate a
+key later from Security if you want one for something else.
+
+## 2026-09-05 — Confirm your node directly
+
+**A new way to prove a radio is yours, instead of waiting for it to
+line up on its own.** Net check-ins are normally matched automatically
+— by your registered node ID on Meshtastic, or by your registered
+contact's name on MeshCore — but that breaks the moment a radio's name
+or identity drifts from what MeshWars has on file. "Confirm my node,"
+on the account page, proves a specific radio is yours directly instead
+of waiting on that.
+
+**MeshCore proves it with an advert.** Type the name your radio is
+currently posting under, press Confirm my node, then trigger an advert
+from that same radio — a long-press of the side button, or "Send
+Advert"/"Flood Advert," on most devices. MeshWars watches the mesh for
+five minutes and shows you every node it heard advertising under that
+name; pick yours, and its public key is bound to your account, so a
+later name change on the radio won't break it again.
+
+**Meshtastic proves it with a one-time code.** No name to type — select
+Meshtastic and press Confirm my node, and you're handed a short code
+like `mw-3h7fpk4`. Send that exact text as a message on any channel on
+your mesh (it's fine buried in a longer sentence); MeshWars watches for
+it for five minutes and shows you which node it came from. Confirm
+it's yours, and that node ID is bound to your account.
+
+Either way, a radio already bound to someone else's account can't be
+claimed this way.
+
+## 2026-09-05 — Two-factor authentication, and deleting your own account
+
+**Two-factor authentication is optional, and lives in Security on the
+account page.** It adds an authenticator-app code on top of your
+password or magic-link email — the two sign-in doors MeshWars issues
+itself. GitHub, Discord and Google already have their own two-factor
+options on their side, so this only ever guards the two doors it can
+actually protect. You get ten recovery codes the one time you enable
+it — save them, since a lost authenticator with no recovery code left
+behind is a lost door.
+
+**You can delete your own account, player, and data.** "Delete my
+account," at the bottom of Security, permanently destroys every way
+you sign in — password, two-factor, and any connected provider —
+along with your session, your API key, and any radios linked to your
+player. It's confirmed by typing your own display name (plus a
+two-factor code if you have one enabled), and it can't be undone. What
+it doesn't touch is the shared game record: the squares your team
+holds stay with the team, and your past check-ins, honors and
+captures stay in the record — they just no longer say your name. A new
+Privacy page, linked from every page's footer, spells out exactly what
+survives and what doesn't.
+
+## 2026-09-05 — Looking up a player by name now requires signing in
+
+**Finding where a specific player is on the map now requires a
+session.** The score panel's player-search box, and the API behind it,
+used to answer "where is this person right now" for anyone —
+unauthenticated, with no login of any kind required. It now asks you
+to sign in first; a logged-out search says so plainly instead of just
+failing. Nothing else about the map changed — squares, teams and
+territory are exactly as public as they've always been. What required
+signing in was specifically the link between a name and a location.
+
+**Signed-in sessions now remember which browser and OS you used, never
+your IP address.** The account page's Sessions list already showed
+this; what changed is what's actually stored behind it — a label like
+"Chrome on Windows" rather than a raw device fingerprint, and no IP
+address at all, not even a hashed one. Existing sessions were rewritten
+to match, not just new ones going forward.
+
+## 2026-09-05 — Colorado Mesh joins the roster
+
+**Colorado Mesh is now a configured MeshCore community**, alongside
+Mountain West Mesh — another net you can check in with. See Where It's
+Played on the About page for the current list.
+
 ## 2026-09-02 — Switch teams, once a month
 
 **Picked the wrong team, or just want to play somewhere else?** You can
