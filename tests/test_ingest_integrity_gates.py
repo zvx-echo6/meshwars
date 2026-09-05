@@ -226,13 +226,15 @@ def test_extract_position_missing_precision_bits_is_none():
 
 
 def test_real_ingest_rejects_low_precision_position(db_path):
-    """A packet whose radio truncated its position to a box far bigger
-    than the ~300m cell must be refused: no square painted, no
-    player_last_fix recorded, and the rejection counted."""
+    """A packet one precision step below the floor must be refused even
+    though its ~182m box is still smaller than the ~300m cell -- the
+    floor demands a comfortable margin under the cell, not the bare
+    minimum that merely fits. No square painted, no player_last_fix
+    recorded, and the rejection counted."""
     _seed_player_and_node(db_path, player_id=1, node_ref="0a0a0a0a")
     season_id = _season_id(db_path)
 
-    too_coarse = settings.mt_min_precision_bits - 1  # e.g. 17: ~365m box
+    too_coarse = settings.mt_min_precision_bits - 1  # e.g. 18: ~182m box
     packet = _packet(1001, 0x0A0A0A0A, LAT, LON, NOW, too_coarse)
 
     ingestor = Ingestor(FakeMeshviewClient(_one_feeder()))
@@ -267,7 +269,7 @@ def test_real_ingest_accepts_high_precision_position(db_path):
     _seed_player_and_node(db_path, player_id=1, node_ref="0a0a0a0a")
     season_id = _season_id(db_path)
 
-    good = settings.mt_min_precision_bits  # exactly at the floor: ~182m, well under 300m
+    good = settings.mt_min_precision_bits  # exactly at the floor: ~91m, well under 300m
     packet = _packet(1003, 0x0A0A0A0A, LAT, LON, NOW, good)
 
     ingestor = Ingestor(FakeMeshviewClient(_one_feeder()))
