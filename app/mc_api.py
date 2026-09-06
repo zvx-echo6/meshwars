@@ -517,9 +517,26 @@ def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
         season = active_season(conn, protocol)
         if not season:
             return []
+        # ORDER BY is not cosmetic here. Without it this query has no
+        # defined order at all -- it had an EMERGENT one, whatever index the
+        # planner fell through to, stable only while the set of indexes did
+        # not change. Adding idx_mc_tile_grid changed it: rows had been
+        # arriving grouped by team (idx_mc_tile_owner) and began arriving in
+        # grid order, so the payload reordered with byte-for-byte identical
+        # CONTENT and every ETag in the wild was invalidated at once, costing
+        # every client one pointless full re-index. Pinning the order to the
+        # data means future index work cannot do that again.
+        #
+        # Grid order is also the right order to pin to: spatially adjacent
+        # cells land adjacent in the payload, which compresses better than
+        # team-grouped order and matches how Stage 2's chunks will group. The
+        # index delivers exactly this order for a season_id equality, so this
+        # is a sorted scan and not a sort step -- EXPLAIN QUERY PLAN shows
+        # SEARCH ... USING INDEX idx_mc_tile_grid with no TEMP B-TREE.
         rows = conn.execute(
             "SELECT cell_id, owner_team, last_report_ts, paint_count "
-            "  FROM mc_tile WHERE season_id = ? AND owner_team IS NOT NULL",
+            "  FROM mc_tile WHERE season_id = ? AND owner_team IS NOT NULL"
+            "  ORDER BY lat_idx, lon_idx",
             (season["id"],),
         ).fetchall()
         out = []
