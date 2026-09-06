@@ -353,7 +353,7 @@ function teamName(name, team) {
 // The hillshade source used to be planet-dem.pmtiles, the one archive
 // still on navi: a raw elevation DEM shaded in the browser at ~11.3MB
 // per view, ninety-five percent of the page's weight. It is now
-// meshwars-hillshade-alpha.pmtiles -- finished imagery, pre-rendered
+// meshwars-hillshade-alpha-v4.pmtiles -- finished imagery, pre-rendered
 // once across the play area at the dark theme's exaggeration -- so
 // navi is out of the runtime path entirely. This is the second bake:
 // the first (meshwars-hillshade.pmtiles, kept on disk as a rollback)
@@ -362,8 +362,8 @@ function teamName(name, team) {
 // carries a real alpha channel -- converted losslessly from the same
 // greyscale pixels, no DEM work re-run -- so flat ground is
 // transparent again and only the relief itself darkens or lightens.
-const TILE_REV = '20260825b';
-const DEM_URL = `/tiles/meshwars-hillshade-alpha.pmtiles?r=${TILE_REV}`;
+const TILE_REV = 'na-alpha2-20260906';
+const DEM_URL = `/tiles/na-hillshade-alpha2.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
@@ -3458,6 +3458,19 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 // geolocation, when it resolves, is layered on top afterward rather
 // than gating it.
 const FALLBACK_VIEW_BOUNDS = [[-116.21, 37.00], [-109.05, 43.62]];
+
+// World pan-anywhere camera. This is a map-camera-only change: it does
+// not touch playAreaBounds/play_area above, which keep gating ingest
+// acceptance (see app/config.py's play_area_* settings and
+// app/grid.py's in_play_area()) and the geolocation-fix sanity check
+// further below. Web Mercator can't represent past roughly +/-85.05
+// degrees latitude, hence 85 here rather than a full 90.
+// NOTE: kept just inside +/-180 (not exactly -180/180) -- MapLibre has
+// a known bug where a maxBounds spanning the exact full 360 degrees is
+// ambiguous about which way it wraps, and clamps every setCenter/pan
+// to lng=180 (confirmed by hand against this deployment). 179.9 is
+// still effectively the whole world.
+const WORLD_MAX_BOUNDS = [[-179.9, -85], [179.9, 85]];
 const GEOLOCATION_TIMEOUT_MS = 5000;
 const GEOLOCATION_ZOOM = 11; // city-level -- close enough to orient, not so close it feels like a snap-to
 
@@ -3669,9 +3682,9 @@ async function main() {
       container: 'map',
       bounds: FALLBACK_VIEW_BOUNDS, // opening view -- see its own comment above; geolocation (below, once loaded) can move off it
       fitBoundsOptions: { padding: 40 },
-      minZoom: 4,   // roughly the whole play area in view
+      minZoom: 2,   // roughly the whole play area in view
       maxZoom: 17,  // well past the 300 m grid; squares stay legible
-      ...(playAreaBounds ? { maxBounds: playAreaBounds } : {}),
+      maxBounds: WORLD_MAX_BOUNDS, // pan-anywhere, see WORLD_MAX_BOUNDS above
       // Pitching made the hillshade render with holes -- the DEM tiles are
       // not all there once the camera tilts, with nothing erroring to say
       // so -- and it took bandwidth from 8 MB to 32 MB for a worse picture.
@@ -3700,7 +3713,7 @@ async function main() {
             attribution: '© OpenStreetMap contributors © CARTO',
             maxzoom: 20,
           },
-          // meshwars-hillshade-alpha.pmtiles is finished imagery (WEBP
+          // meshwars-hillshade-alpha-v4.pmtiles is finished imagery (WEBP
           // tiles, z0-12, RGBA), not elevation data -- there is nothing
           // left for the browser to shade, so this is a plain raster
           // source, not raster-dem, and carries no `encoding`. maxzoom
@@ -3724,6 +3737,16 @@ async function main() {
             id: HILLSHADE_ID,
             type: 'raster',
             source: 'hillshade-source',
+            // Fix for the visible grid lines along every hillshade tile
+            // boundary once the archive switched to real alpha=0 on flat
+            // ground: MapLibre's default linear resampling blends an opaque
+            // texel against a transparent (RGB=0, i.e. BLACK) one across the
+            // tile edge, producing a dark fringe. Nearest-neighbour sampling
+            // never blends across that boundary.
+            paint: {
+              'raster-resampling': 'nearest',
+              'raster-fade-duration': 0,
+            },
             // No `maxzoom` here (see the overzoom comment near
             // ROUTE_LINE_WIDTH) -- the map's own maxZoom is 17, and a
             // plain raster layer just keeps reusing the source's last
