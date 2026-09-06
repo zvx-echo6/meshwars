@@ -397,6 +397,20 @@ const BOARD_FILL_OPACITY = { gold: 0.85, neon: 0.85 };
 // today's 0.85 exactly, so nothing changes where the rim is drawn. Per-theme
 // to match every other paint constant in this file, even though both themes
 // currently agree.
+// At k>0 a rendered block stands for 4^k cells and carries how many of them
+// the leading team actually holds. Multiplying the zoom curve by that density
+// is what stops an aggregate view lying: a block one sixteenth painted should
+// read as a faint claim, not as solid held ground the way a contested one
+// does. Floor at 0.35 rather than 0 so a barely-touched block is still
+// visible -- invisible ground is as wrong as solid ground.
+//
+// k=0 features carry no density at all, so the coalesce returns 1 and the
+// curve is untouched. Native zooms therefore render exactly as they did.
+const BOARD_DENSITY_FLOOR = 0.35;
+const densityScaled = (zoomExpr) => ['*', zoomExpr,
+  ['interpolate', ['linear'], ['coalesce', ['get', 'density'], 1],
+   0, BOARD_DENSITY_FLOOR, 1, 1]];
+
 const BOARD_FILL_OPACITY_ZOOM = {
   gold: ['interpolate', ['linear'], ['zoom'], 10, 0.92, 13, BOARD_FILL_OPACITY.gold],
   neon: ['interpolate', ['linear'], ['zoom'], 10, 0.92, 13, BOARD_FILL_OPACITY.neon],
@@ -704,7 +718,9 @@ let lastBoardEtag = null;
 // answered from timings alone -- a refresh that skipped the reindex and one
 // that merely finished quickly look identical -- so the counters say it
 // outright. Read from the console or a headless harness.
-window.__mwBoardStats = { fetches: 0, notModified: 0, setDataCalls: 0 };
+window.__mwBoardStats = { fetches: 0, notModified: 0, setDataCalls: 0,
+                          chunkLoads: 0, chunksFetched: 0, chunksCached: 0, lastFeatures: 0,
+                          chunkRequests: 0, chunk304s: 0 };
 
 async function fetchBoard(c) {
   const headers = lastBoardEtag ? { 'If-None-Match': lastBoardEtag } : undefined;
@@ -768,28 +784,65 @@ function cellIndicesFor(lat, lon) {
 }
 
 const __mwChunkCache = new Map();   // "clat_clon" -> { k, f }
+const __mwChunkEtags = new Map();  // request url -> last ETag seen for it
 let __mwChunkK = null;              // k the cache currently holds
+let __mwChunkBoard = null;          // which board's cells the cache holds
 
-// Chunk ids covering `bounds`, padded by `pad` chunks on every side.
-function computeChunkIds(bounds, zoom, pad = 1) {
+// How much margin to load beyond the viewport, as a FRACTION OF THE VIEWPORT
+// rather than as a whole chunk.
+//
+// Padding by one chunk sounds natural and is badly behaved, because a chunk is
+// a fixed size while the viewport is not. Measured on the live board: one chunk
+// of padding loads 7.3x the viewport area at z12 and 52x at z14, where a 0.0864
+// deg chunk dwarfs a 0.0283 deg viewport. Padding by 30% of the viewport instead
+// gives 4.4x at z12 and 11.7x at z14 -- 948 features down to 208 there -- and
+// self-tunes across the zoom bands instead of being wrong at both ends.
+//
+// The cost is less free panning when zoomed in: at z14 the old margin was
+// 0.1229 deg and this is 0.019, so a moderate pan now triggers a fetch. That
+// fetch is two chunks, which is why this is the right side of the trade.
+const CHUNK_PAD_FRACTION = 0.30;
+
+// Chunk ids covering `bounds` plus that margin.
+function computeChunkIds(bounds, zoom, padFraction = CHUNK_PAD_FRACTION) {
   const k = chunkKForZoom(zoom);
   const kc = k + CHUNK_SHIFT;
-  const [laS, loW] = cellIndicesFor(bounds.getSouth(), bounds.getWest());
-  const [laN, loE] = cellIndicesFor(bounds.getNorth(), bounds.getEast());
-  const c0 = laS >> kc, c1 = laN >> kc;
-  const d0 = loW >> kc, d1 = loE >> kc;
+  const S = bounds.getSouth(), N = bounds.getNorth();
+  const W = bounds.getWest(), E = bounds.getEast();
+  const padLat = (N - S) * padFraction;
+  const padLon = (E - W) * padFraction;
+  const [c0] = cellIndicesFor(S - padLat, 0), [c1] = cellIndicesFor(N + padLat, 0);
+  const d0 = cellIndicesFor(0, W - padLon)[1], d1 = cellIndicesFor(0, E + padLon)[1];
+  const a0 = c0 >> kc, a1 = c1 >> kc, b0 = d0 >> kc, b1 = d1 >> kc;
   const ids = [];
-  for (let a = c0 - pad; a <= c1 + pad; a++) {
-    for (let b = d0 - pad; b <= d1 + pad; b++) ids.push(a + '_' + b);
+  for (let a = a0; a <= a1; a++) {
+    for (let b = b0; b <= b1; b++) ids.push(a + '_' + b);
   }
   return { k, kc, ids };
 }
 
-async function fetchChunks(ids, z) {
+async function fetchChunks(ids, z, board) {
   if (!ids.length) return { k: chunkKForZoom(z), chunks: {} };
-  const res = await fetch('/api/mc/chunks?z=' + encodeURIComponent(z) +
-                          '&ids=' + encodeURIComponent(ids.join(',')));
+  // The board is part of the request, not assumed. Two boards share this
+  // endpoint and asking for the wrong one returns real-looking squares from
+  // the other game.
+  const b = board || (typeof mode !== 'undefined' ? mode : 'meshcore');
+  const url = '/api/mc/chunks?z=' + encodeURIComponent(z) +
+              '&board=' + encodeURIComponent(b) +
+              '&ids=' + encodeURIComponent(ids.join(','));
+  const prev = __mwChunkEtags.get(url);
+  const res = await fetch(url, prev ? { headers: { 'If-None-Match': prev } } : undefined);
+  window.__mwBoardStats.chunkRequests += 1;
+  // 304: this exact request returned this exact body last time, so the caller
+  // already holds it. Signalled as null rather than an empty chunk set, which
+  // would read as "these chunks are empty" and blank real ground.
+  if (res.status === 304) {
+    window.__mwBoardStats.chunk304s += 1;
+    return null;
+  }
   if (!res.ok) throw new Error('chunk fetch failed: ' + res.status);
+  const et = res.headers.get('ETag');
+  if (et) __mwChunkEtags.set(url, et);
   return res.json();
 }
 
@@ -800,29 +853,41 @@ async function loadChunksFor(bounds, zoom) {
   // A k change means every cached feature is the wrong SHAPE, not merely the
   // wrong place -- k=0 features are cells, k>0 features are super-cells with a
   // density. Mixing them would render nonsense, so the cache is flushed whole.
-  if (__mwChunkK !== null && __mwChunkK !== k) __mwChunkCache.clear();
+  // A board change invalidates the cache for the same reason a k change does,
+  // and more dangerously: the cells are the wrong GAME, not merely the wrong
+  // shape, and they would look entirely plausible on screen.
+  const board = (typeof mode !== 'undefined' ? mode : 'meshcore');
+  if ((__mwChunkK !== null && __mwChunkK !== k) ||
+      (__mwChunkBoard !== null && __mwChunkBoard !== board)) {
+    __mwChunkCache.clear();
+  }
   __mwChunkK = k;
+  __mwChunkBoard = board;
 
   const missing = ids.filter((id) => !__mwChunkCache.has(id));
   if (missing.length) {
-    const body = await fetchChunks(missing, zoom);
-    for (const [id, ch] of Object.entries(body.chunks || {})) {
-      __mwChunkCache.set(id, { k: body.k, f: ch.f || [] });
+    const body = await fetchChunks(missing, zoom, board);
+    // null means 304 -- the same request already answered, and since a chunk
+    // is only fetched when it is MISSING from the cache, that can only happen
+    // after the cache was cleared. Nothing to merge; the next moveend refills.
+    if (body) {
+      for (const [id, ch] of Object.entries(body.chunks || {})) {
+        __mwChunkCache.set(id, { k: body.k, f: ch.f || [] });
+      }
     }
   }
 
   // Evict anything more than two chunk-widths outside the viewport. Keeping
   // the immediate ring is what makes a small pan free; keeping everything
   // would make the cache grow without bound over a long session.
-  const kc = k + CHUNK_SHIFT;
-  const [laS, loW] = cellIndicesFor(bounds.getSouth(), bounds.getWest());
-  const [laN, loE] = cellIndicesFor(bounds.getNorth(), bounds.getEast());
-  const a0 = (laS >> kc) - 2, a1 = (laN >> kc) + 2;
-  const b0 = (loW >> kc) - 2, b1 = (loE >> kc) + 2;
+  // Keep a wider ring than we load, so a pan back does not refetch what was
+  // just dropped. Two viewport-widths out, by the same fraction-of-viewport
+  // logic the padding uses.
+  const keep = computeChunkIds(bounds, zoom, CHUNK_PAD_FRACTION + 2.0);
+  const keepSet = new Set(keep.ids);
   let evicted = 0;
   for (const id of Array.from(__mwChunkCache.keys())) {
-    const [a, b] = id.split('_').map(Number);
-    if (a < a0 || a > a1 || b < b0 || b > b1) { __mwChunkCache.delete(id); evicted++; }
+    if (!keepSet.has(id)) { __mwChunkCache.delete(id); evicted++; }
   }
   return { k, requested: ids.length, fetched: missing.length, evicted, cached: __mwChunkCache.size };
 }
@@ -866,6 +931,49 @@ function buildChunkCollection() {
   return { type: 'FeatureCollection', features };
 }
 
+// ---- the swap ----------------------------------------------------------
+//
+// Which path feeds the board source. 'chunks' is the default; 'whole' is the
+// pre-Stage-2 path, kept working rather than deleted so the two can be compared
+// on the same build. Switch with ?boardsrc=whole in the URL, or at runtime with
+// window.__mwBoardSource('whole'|'chunks'), which reloads the board in place.
+// A way back that does not need a deploy is the point.
+let __mwBoardSrc = (() => {
+  try {
+    const v = new URLSearchParams(location.search).get('boardsrc');
+    return v === 'whole' || v === 'chunks' ? v : 'chunks';
+  } catch { return 'chunks'; }
+})();
+
+// Load the viewport's chunks and hand the result to the board source. Replaces
+// what loadBoardData() does for the whole-board path, and is the only thing
+// that calls setData on the chunk path.
+async function loadBoardChunks(map) {
+  try {
+    const stats = await loadChunksFor(map.getBounds(), map.getZoom());
+    const fc = buildChunkCollection();
+    map.getSource('board').setData(fc);
+    window.__mwBoardStats.setDataCalls += 1;
+    window.__mwBoardStats.chunkLoads += 1;
+    window.__mwBoardStats.chunksFetched += stats.fetched;
+    window.__mwBoardStats.chunksCached = stats.cached;
+    window.__mwBoardStats.lastFeatures = fc.features.length;
+    return stats;
+  } catch (err) {
+    console.error('MeshWars map2: chunk load failed', err);
+    return null;
+  }
+}
+
+// The one entry point everything else calls. force=true means an explicit
+// user refresh: drop the caches so it does real work rather than answering
+// from a 304 or a warm chunk cache.
+async function refreshBoard(map, force = false) {
+  if (__mwBoardSrc === 'whole') return loadBoardData(map, force);
+  if (force) __mwChunkCache.clear();
+  return loadBoardChunks(map);
+}
+
 window.__mwChunks = {
   CHUNK_SHIFT,
   CELL_LAT_DEG,
@@ -877,7 +985,10 @@ window.__mwChunks = {
   load: loadChunksFor,
   build: buildChunkCollection,
   cache: __mwChunkCache,
-  clear() { __mwChunkCache.clear(); __mwChunkK = null; },
+  clear() { __mwChunkCache.clear(); __mwChunkEtags.clear(); __mwChunkK = null; __mwChunkBoard = null; },
+  PAD_FRACTION: CHUNK_PAD_FRACTION,
+  source: () => __mwBoardSrc,
+  board: () => __mwChunkBoard,
   // The third-implementation check, runnable in place rather than reasoned
   // about. Expected values are the ones SQLite and Python already agree on.
   selfTest() {
@@ -1733,7 +1844,7 @@ function buildScoreboardControl(map) {
 
   div.querySelector('#mc-refresh-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    loadBoardData(map, true);   // force: a user asking to refresh must get a real one
+    refreshBoard(map, true);   // force: a user asking to refresh must get a real one
     loadScoreboard();
   });
 
@@ -1798,7 +1909,9 @@ function setBoardMode(newMode, map) {
   mode = newMode === 'meshtastic' ? 'meshtastic' : 'meshcore';
   applyProtocolChrome();
   updateToggleButtons();
-  loadBoardData(map);
+  // Through refreshBoard, not loadBoardData: on the chunk path the cache holds
+  // the OTHER board's cells at this point and must be rebuilt, not reused.
+  refreshBoard(map, true);
   loadScoreboard();
   refreshWinnerBanner();
   // Place claims are per board, so the pins have to be refetched too --
@@ -3011,7 +3124,8 @@ function currentTheme() {
 function applyBasemapTheme(map) {
   const theme = currentTheme();
   map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
-  map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY_ZOOM[theme]);
+  map.setPaintProperty('board-fill', 'fill-opacity',
+                       densityScaled(BOARD_FILL_OPACITY_ZOOM[theme]));
   // Zoom-interpolated, not per-theme (see BOARD_SEP_WIDTH_ZOOM/
   // BOARD_LINE_WIDTH_ZOOM above) -- set here rather than in the
   // addLayer literal because this theme pass runs after those
@@ -4158,7 +4272,10 @@ async function main() {
     // Refresh map button (buildScoreboardControl) and unlike the
     // player-lookup Find (doPlayerFind), which fits deliberately.
     setInterval(() => {
-      loadBoardData(map);
+      // On the chunk path this re-requests only the chunks the viewport
+      // already holds, not the whole board. force is false, so an unchanged
+      // board answers 304 and nothing is re-indexed.
+      refreshBoard(map);
       loadScoreboard();
       refreshWinnerBanner();
     }, REFRESH_INTERVAL_MS);
@@ -4176,6 +4293,10 @@ async function main() {
       placesRefreshTimer = setTimeout(() => {
         loadPlacesViewport(map);
         loadPlacesPanel(map);
+        // The board joins this callback rather than adding a second moveend
+        // handler: two handlers means two debounce timers and two request
+        // bursts for one gesture.
+        if (__mwBoardSrc === 'chunks') loadBoardChunks(map);
       }, 250);
     });
 

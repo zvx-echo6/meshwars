@@ -760,19 +760,39 @@ def chunks_for(protocol: str, k: int, ids: list[tuple[int, int]]) -> dict:
     return result if result is not None else {}
 
 
+# Boards are named the way a person would, with the two-letter database codes
+# accepted too. Spelled to match app/public_api.py's /api/v1/board exactly --
+# same parameter name, same accepted values -- rather than inventing a second
+# convention for the same idea.
+_CHUNK_BOARDS = {
+    "meshcore": MC_PROTOCOL, "mc": MC_PROTOCOL,
+    "meshtastic": MT_PROTOCOL, "mt": MT_PROTOCOL,
+}
+
+
 @router.get("/api/mc/chunks")
-async def mc_chunks(z: float = 12.0, ids: str = "") -> Response:
+async def mc_chunks(request: Request, z: float = 12.0, ids: str = "",
+                    board: str = "meshcore") -> Response:
     """Owned cells in the requested lattice chunks, aggregated for zoom `z`.
 
-    Additive and unused by the map so far: the board still loads through
-    /api/mc/board. Nothing here touches board_for(), so that route's ETag --
-    and /get-nodes' and /api/v1/board's shapes -- are unaffected.
+    `board` is NOT optional in spirit even though it defaults. The map serves
+    two boards and this route once hardcoded MeshCore, which would have drawn
+    MeshCore territory on the Meshtastic board -- right grid, right teams,
+    entirely wrong data, and no error anywhere to notice it by. chunks_for()
+    always took a protocol; only the route was fixed to one.
 
-    Not served through cached_json_response: that cache is keyed per route
-    and this route's body depends on the query string, so a single entry
-    would serve one viewport's chunks to every other viewport. Stage 4's
-    per-chunk versioning is where caching belongs.
+    Not served through cached_json_response: that cache is keyed per route and
+    this body depends on the query string, so one entry would serve one
+    viewport's chunks -- and now one board's -- to every other request. Stage
+    4's per-chunk versioning is where caching belongs.
     """
+    protocol = _CHUNK_BOARDS.get((board or "").strip().lower())
+    if protocol is None:
+        return JSONResponse(
+            {"error": "bad board", "detail": "expected one of %s, got %r"
+             % (", ".join(sorted(_CHUNK_BOARDS)), board)},
+            status_code=400,
+        )
     k = chunk_k_for_zoom(z)
     parsed = []
     for raw in ids.split(","):
@@ -786,8 +806,21 @@ async def mc_chunks(z: float = 12.0, ids: str = "") -> Response:
                 status_code=400,
             )
         parsed.append(cid)
-    body = {"k": k, "chunks": chunks_for(MC_PROTOCOL, k, parsed)}
-    return JSONResponse(body)
+    body = {"k": k, "board": board.strip().lower(),
+            "chunks": chunks_for(protocol, k, parsed)}
+    # Same content-digest ETag as /api/mc/board (see cached_json_response).
+    # A chunk response is deterministic given (board, k, ids, board state), so
+    # an unchanged viewport answers 304 with no body and the client skips the
+    # rebuild. This is deliberately INSTEAD of Stage 4's per-chunk version
+    # counters: it reuses machinery already proven here, and it never touches
+    # the ingest path the way bumping a counter on every ownership change
+    # would. Measured first -- a viewport refetch is 51 KB against the board's
+    # 2.5 MB -- so this is worth having but was never load-bearing.
+    raw = json.dumps(body, separators=(",", ":")).encode()
+    etag = '"%s"' % hashlib.sha256(raw).hexdigest()[:32]
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(content=raw, media_type="application/json", headers={"ETag": etag})
 
 
 @router.get("/api/mc/scores")
