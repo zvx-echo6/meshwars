@@ -397,20 +397,6 @@ const BOARD_FILL_OPACITY = { gold: 0.85, neon: 0.85 };
 // today's 0.85 exactly, so nothing changes where the rim is drawn. Per-theme
 // to match every other paint constant in this file, even though both themes
 // currently agree.
-// At k>0 a rendered block stands for 4^k cells and carries how many of them
-// the leading team actually holds. Multiplying the zoom curve by that density
-// is what stops an aggregate view lying: a block one sixteenth painted should
-// read as a faint claim, not as solid held ground the way a contested one
-// does. Floor at 0.35 rather than 0 so a barely-touched block is still
-// visible -- invisible ground is as wrong as solid ground.
-//
-// k=0 features carry no density at all, so the coalesce returns 1 and the
-// curve is untouched. Native zooms therefore render exactly as they did.
-const BOARD_DENSITY_FLOOR = 0.35;
-const densityScaled = (zoomExpr) => ['*', zoomExpr,
-  ['interpolate', ['linear'], ['coalesce', ['get', 'density'], 1],
-   0, BOARD_DENSITY_FLOOR, 1, 1]];
-
 const BOARD_FILL_OPACITY_ZOOM = {
   gold: ['interpolate', ['linear'], ['zoom'], 10, 0.92, 13, BOARD_FILL_OPACITY.gold],
   neon: ['interpolate', ['linear'], ['zoom'], 10, 0.92, 13, BOARD_FILL_OPACITY.neon],
@@ -777,7 +763,18 @@ const CHUNK_SHIFT = 5;
 const CELL_LAT_DEG = 0.0027;
 const CELL_LON_DEG = 0.00384;
 
-const chunkKForZoom = (z) => Math.max(0, 12 - Math.floor(z));
+// k is 0 at every zoom. The zoom ladder that aggregated cells into 2^k blocks
+// at low zoom was REJECTED and removed from the client: at k>=5 a block spans
+// 9.6 km and draws as solid team colour, so a handful of claimed cells along a
+// highway rendered as an entire valley held. That is not a lower-resolution
+// view of the board, it is a false one, and the whole-board view it replaced
+// was correct -- only slow. Chunking is here to make that same picture cheap,
+// not to change it.
+//
+// The server still accepts k and still has the aggregation, unused. Removing
+// it would be churn, and it may suit something that is not the board.
+const CHUNK_K = 0;
+const chunkKForZoom = () => CHUNK_K;
 
 function cellIndicesFor(lat, lon) {
   return [Math.floor(lat / CELL_LAT_DEG), Math.floor(lon / CELL_LON_DEG)];
@@ -828,6 +825,7 @@ async function fetchChunks(ids, z, board) {
   // the other game.
   const b = board || (typeof mode !== 'undefined' ? mode : 'meshcore');
   const url = '/api/mc/chunks?z=' + encodeURIComponent(z) +
+              '&k=' + CHUNK_K +
               '&board=' + encodeURIComponent(b) +
               '&ids=' + encodeURIComponent(ids.join(','));
   const prev = __mwChunkEtags.get(url);
@@ -850,15 +848,12 @@ async function fetchChunks(ids, z, board) {
 // has drifted far enough away to be unlikely to come back.
 async function loadChunksFor(bounds, zoom) {
   const { k, ids } = computeChunkIds(bounds, zoom);
-  // A k change means every cached feature is the wrong SHAPE, not merely the
-  // wrong place -- k=0 features are cells, k>0 features are super-cells with a
-  // density. Mixing them would render nonsense, so the cache is flushed whole.
-  // A board change invalidates the cache for the same reason a k change does,
-  // and more dangerously: the cells are the wrong GAME, not merely the wrong
-  // shape, and they would look entirely plausible on screen.
+  // Only a board change can invalidate now: with k fixed at 0 there are no
+  // zoom bands to cross, so every cached feature is always a real cell. A
+  // board change still matters, and more than a k change ever did -- the cells
+  // would be the wrong GAME, and would look entirely plausible on screen.
   const board = (typeof mode !== 'undefined' ? mode : 'meshcore');
-  if ((__mwChunkK !== null && __mwChunkK !== k) ||
-      (__mwChunkBoard !== null && __mwChunkBoard !== board)) {
+  if (__mwChunkBoard !== null && __mwChunkBoard !== board) {
     __mwChunkCache.clear();
     // The validators MUST go with the data they validate. Dropping the cache
     // while keeping the ETags means the refetch sends If-None-Match for a body
@@ -906,31 +901,16 @@ async function loadChunksFor(bounds, zoom) {
 // source already takes.
 function buildChunkCollection() {
   const features = [];
-  for (const { k, f } of __mwChunkCache.values()) {
-    const span = 1 << k;                       // cells per side of a block
+  for (const { f } of __mwChunkCache.values()) {
     for (const row of f) {
-      const [a, b, team] = row;
-      // k=0 rows are [lat_idx, lon_idx, team]; k>0 rows are
-      // [slat, slon, team, painted, slots] and a block spans 2^k cells.
-      const latIdx = k === 0 ? a : a * span;
-      const lonIdx = k === 0 ? b : b * span;
+      const [latIdx, lonIdx, team] = row;
       const south = latIdx * CELL_LAT_DEG;
-      const north = (latIdx + span) * CELL_LAT_DEG;
+      const north = (latIdx + 1) * CELL_LAT_DEG;
       const west = lonIdx * CELL_LON_DEG;
-      const east = (lonIdx + span) * CELL_LON_DEG;
-      const props = { team };
-      if (k === 0) {
-        props.cell_id = a + '_' + b;
-      } else {
-        props.painted = row[3];
-        props.slots = row[4];
-        // Drives fill-opacity at aggregate zooms: a block 5% painted should
-        // not read as solid ground the way a fully contested one does.
-        props.density = row[4] ? row[3] / row[4] : 0;
-      }
+      const east = (lonIdx + 1) * CELL_LON_DEG;
       features.push({
         type: 'Feature',
-        properties: props,
+        properties: { cell_id: latIdx + '_' + lonIdx, team },
         geometry: {
           type: 'Polygon',
           coordinates: [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
@@ -939,49 +919,6 @@ function buildChunkCollection() {
     }
   }
   return { type: 'FeatureCollection', features };
-}
-
-// ---- the swap ----------------------------------------------------------
-//
-// Which path feeds the board source. 'chunks' is the default; 'whole' is the
-// pre-Stage-2 path, kept working rather than deleted so the two can be compared
-// on the same build. Switch with ?boardsrc=whole in the URL, or at runtime with
-// window.__mwBoardSource('whole'|'chunks'), which reloads the board in place.
-// A way back that does not need a deploy is the point.
-let __mwBoardSrc = (() => {
-  try {
-    const v = new URLSearchParams(location.search).get('boardsrc');
-    return v === 'whole' || v === 'chunks' ? v : 'chunks';
-  } catch { return 'chunks'; }
-})();
-
-// Load the viewport's chunks and hand the result to the board source. Replaces
-// what loadBoardData() does for the whole-board path, and is the only thing
-// that calls setData on the chunk path.
-async function loadBoardChunks(map) {
-  try {
-    const stats = await loadChunksFor(map.getBounds(), map.getZoom());
-    const fc = buildChunkCollection();
-    map.getSource('board').setData(fc);
-    window.__mwBoardStats.setDataCalls += 1;
-    window.__mwBoardStats.chunkLoads += 1;
-    window.__mwBoardStats.chunksFetched += stats.fetched;
-    window.__mwBoardStats.chunksCached = stats.cached;
-    window.__mwBoardStats.lastFeatures = fc.features.length;
-    return stats;
-  } catch (err) {
-    console.error('MeshWars map2: chunk load failed', err);
-    return null;
-  }
-}
-
-// The one entry point everything else calls. force=true means an explicit
-// user refresh: drop the caches so it does real work rather than answering
-// from a 304 or a warm chunk cache.
-async function refreshBoard(map, force = false) {
-  if (__mwBoardSrc === 'whole') return loadBoardData(map, force);
-  if (force) __mwChunkCache.clear();
-  return loadBoardChunks(map);
 }
 
 window.__mwChunks = {
@@ -3134,8 +3071,7 @@ function currentTheme() {
 function applyBasemapTheme(map) {
   const theme = currentTheme();
   map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
-  map.setPaintProperty('board-fill', 'fill-opacity',
-                       densityScaled(BOARD_FILL_OPACITY_ZOOM[theme]));
+  map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY_ZOOM[theme]);
   // Zoom-interpolated, not per-theme (see BOARD_SEP_WIDTH_ZOOM/
   // BOARD_LINE_WIDTH_ZOOM above) -- set here rather than in the
   // addLayer literal because this theme pass runs after those

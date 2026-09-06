@@ -772,7 +772,7 @@ _CHUNK_BOARDS = {
 
 @router.get("/api/mc/chunks")
 async def mc_chunks(request: Request, z: float = 12.0, ids: str = "",
-                    board: str = "meshcore") -> Response:
+                    board: str = "meshcore", k: int | None = None) -> Response:
     """Owned cells in the requested lattice chunks, aggregated for zoom `z`.
 
     `board` is NOT optional in spirit even though it defaults. The map serves
@@ -793,7 +793,18 @@ async def mc_chunks(request: Request, z: float = 12.0, ids: str = "",
              % (", ".join(sorted(_CHUNK_BOARDS)), board)},
             status_code=400,
         )
-    k = chunk_k_for_zoom(z)
+    # k is explicit now. The map asks for k=0 at every zoom: the aggregation
+    # the ladder provided was REJECTED, because a k>=5 block is 9.6 km across
+    # and renders as solid team colour, so a few cells along a highway read as
+    # a whole valley held. That is not a coarser picture of the truth, it is a
+    # different claim. The ladder and the k>0 aggregation below are left in
+    # place, reachable by passing k, because they may be useful for something
+    # that is not the board -- but nothing calls them today.
+    if k is None:
+        k = chunk_k_for_zoom(z)
+    if k < 0 or k > 12:
+        return JSONResponse({"error": "bad k", "detail": "expected 0..12, got %r" % k},
+                            status_code=400)
     parsed = []
     for raw in ids.split(","):
         raw = raw.strip()
