@@ -860,6 +860,15 @@ async function loadChunksFor(bounds, zoom) {
   if ((__mwChunkK !== null && __mwChunkK !== k) ||
       (__mwChunkBoard !== null && __mwChunkBoard !== board)) {
     __mwChunkCache.clear();
+    // The validators MUST go with the data they validate. Dropping the cache
+    // while keeping the ETags means the refetch sends If-None-Match for a body
+    // we no longer hold, the server correctly answers 304, and the board stays
+    // BLANK until something else triggers a reload. Caught on preview: z10 ->
+    // z12 rendered nothing until the next pan, and a board switch showed an
+    // empty map in both directions. An earlier comment here reasoned that a
+    // 304 after a flush was harmless because "the next moveend refills" --
+    // it is not harmless, that is a blank map in the meantime.
+    __mwChunkEtags.clear();
   }
   __mwChunkK = k;
   __mwChunkBoard = board;
@@ -867,9 +876,10 @@ async function loadChunksFor(bounds, zoom) {
   const missing = ids.filter((id) => !__mwChunkCache.has(id));
   if (missing.length) {
     const body = await fetchChunks(missing, zoom, board);
-    // null means 304 -- the same request already answered, and since a chunk
-    // is only fetched when it is MISSING from the cache, that can only happen
-    // after the cache was cleared. Nothing to merge; the next moveend refills.
+    // null means 304: this exact request already answered with this exact body,
+    // so the caller still holds it. Reaching here with an EMPTY cache would be
+    // a bug -- see the etag flush in the invalidation above, which is what
+    // guarantees a fetch after a flush is a real 200.
     if (body) {
       for (const [id, ch] of Object.entries(body.chunks || {})) {
         __mwChunkCache.set(id, { k: body.k, f: ch.f || [] });
