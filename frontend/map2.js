@@ -384,15 +384,19 @@ const HILLSHADE_ID = 'hillshade';
 // the two can still be told apart if a future theme needs to.
 const BOARD_FILL_OPACITY = { gold: 0.85, neon: 0.85 };
 
-// Below z13 board-line and board-sep are hidden outright (minzoom on both,
-// see their addLayer calls), so the fill is the ONLY thing drawing a cell
-// there. The team rim is the same colour at full opacity, so losing it takes
-// a little saturation off every cell edge; this lifts the fill slightly to
-// put it back. Deliberately a small lift: the rim was load-bearing when the
-// fill was 0.45, but at 0.85 the fill already carries the cell on its own.
-// z13+ holds today's 0.85 exactly, so nothing changes where the strokes are
-// visible. Per-theme to match every other paint constant in this file, even
-// though both themes currently agree.
+// Below z13 board-line is hidden (minzoom on that layer only -- board-sep
+// deliberately keeps drawing, see both addLayer calls). So what is lost down
+// there is the team rim, not the cell's outline: the rim is the same colour
+// as the fill at full opacity, and losing it takes a little saturation off
+// every cell edge. This lifts the fill slightly to put that back. The dark
+// gutter that actually delineates one cell from the next is board-sep's, and
+// it is still there.
+//
+// Deliberately a small lift: the rim was load-bearing when the fill was 0.45,
+// but at 0.85 the fill already carries the cell on its own. z13+ holds
+// today's 0.85 exactly, so nothing changes where the rim is drawn. Per-theme
+// to match every other paint constant in this file, even though both themes
+// currently agree.
 const BOARD_FILL_OPACITY_ZOOM = {
   gold: ['interpolate', ['linear'], ['zoom'], 10, 0.92, 13, BOARD_FILL_OPACITY.gold],
   neon: ['interpolate', ['linear'], ['zoom'], 10, 0.92, 13, BOARD_FILL_OPACITY.neon],
