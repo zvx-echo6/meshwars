@@ -731,6 +731,166 @@ async function fetchBoard(c) {
   };
 }
 
+// ===== Lattice chunk loader (docs: meshwars-map-performance-v3 s7/s10) ==
+//
+// Stage 2 piece 2: written, exercisable, and NOT on the live path. The board
+// still loads through fetchBoard()/loadBoardData() exactly as before; piece 3
+// is the swap. Everything here hangs off window.__mwChunks so it can be driven
+// from a console or a headless harness without being wired to the map.
+//
+// A chunk is a 32x32 block of the integer lattice at shift k, identified by
+// (lat_idx >> kc, lon_idx >> kc) with kc = k + 5. k = max(0, 12 - zoom) holds
+// a rendered block near 11 px from z4 to z12, then native cells grow from z13.
+//
+// THE SHIFT IS THE PART TO BE CAREFUL WITH. lon_idx is negative across the
+// whole western hemisphere and this is the THIRD implementation of the same
+// arithmetic -- SQLite's, Python's, and now JavaScript's. All three must floor
+// rather than truncate toward zero or the same cell lands in different chunks
+// on different sides of the wire, which shows up as randomly missing squares
+// rather than as an error. JS `>>` is a 32-bit signed shift and does floor;
+// lat_idx/lon_idx are five digits, nowhere near the 32-bit boundary. Verified
+// against the values already confirmed in the other two: -33>>5 === -2,
+// -1>>5 === -1, -29142>>5 === -911. __mwChunks.selfTest() re-runs that check.
+const CHUNK_SHIFT = 5;
+
+// The grid, restated on the client for the first time. board_for() sends
+// per-cell bounds precisely so the browser need not know these; a chunk
+// response sends indices instead, so the client has to derive the rectangle
+// itself. These MUST match app/grid.py -- if they drift, chunk geometry drifts
+// with them and nothing errors.
+const CELL_LAT_DEG = 0.0027;
+const CELL_LON_DEG = 0.00384;
+
+const chunkKForZoom = (z) => Math.max(0, 12 - Math.floor(z));
+
+function cellIndicesFor(lat, lon) {
+  return [Math.floor(lat / CELL_LAT_DEG), Math.floor(lon / CELL_LON_DEG)];
+}
+
+const __mwChunkCache = new Map();   // "clat_clon" -> { k, f }
+let __mwChunkK = null;              // k the cache currently holds
+
+// Chunk ids covering `bounds`, padded by `pad` chunks on every side.
+function computeChunkIds(bounds, zoom, pad = 1) {
+  const k = chunkKForZoom(zoom);
+  const kc = k + CHUNK_SHIFT;
+  const [laS, loW] = cellIndicesFor(bounds.getSouth(), bounds.getWest());
+  const [laN, loE] = cellIndicesFor(bounds.getNorth(), bounds.getEast());
+  const c0 = laS >> kc, c1 = laN >> kc;
+  const d0 = loW >> kc, d1 = loE >> kc;
+  const ids = [];
+  for (let a = c0 - pad; a <= c1 + pad; a++) {
+    for (let b = d0 - pad; b <= d1 + pad; b++) ids.push(a + '_' + b);
+  }
+  return { k, kc, ids };
+}
+
+async function fetchChunks(ids, z) {
+  if (!ids.length) return { k: chunkKForZoom(z), chunks: {} };
+  const res = await fetch('/api/mc/chunks?z=' + encodeURIComponent(z) +
+                          '&ids=' + encodeURIComponent(ids.join(',')));
+  if (!res.ok) throw new Error('chunk fetch failed: ' + res.status);
+  return res.json();
+}
+
+// Load whatever the viewport needs that is not already cached, then drop what
+// has drifted far enough away to be unlikely to come back.
+async function loadChunksFor(bounds, zoom) {
+  const { k, ids } = computeChunkIds(bounds, zoom);
+  // A k change means every cached feature is the wrong SHAPE, not merely the
+  // wrong place -- k=0 features are cells, k>0 features are super-cells with a
+  // density. Mixing them would render nonsense, so the cache is flushed whole.
+  if (__mwChunkK !== null && __mwChunkK !== k) __mwChunkCache.clear();
+  __mwChunkK = k;
+
+  const missing = ids.filter((id) => !__mwChunkCache.has(id));
+  if (missing.length) {
+    const body = await fetchChunks(missing, zoom);
+    for (const [id, ch] of Object.entries(body.chunks || {})) {
+      __mwChunkCache.set(id, { k: body.k, f: ch.f || [] });
+    }
+  }
+
+  // Evict anything more than two chunk-widths outside the viewport. Keeping
+  // the immediate ring is what makes a small pan free; keeping everything
+  // would make the cache grow without bound over a long session.
+  const kc = k + CHUNK_SHIFT;
+  const [laS, loW] = cellIndicesFor(bounds.getSouth(), bounds.getWest());
+  const [laN, loE] = cellIndicesFor(bounds.getNorth(), bounds.getEast());
+  const a0 = (laS >> kc) - 2, a1 = (laN >> kc) + 2;
+  const b0 = (loW >> kc) - 2, b1 = (loE >> kc) + 2;
+  let evicted = 0;
+  for (const id of Array.from(__mwChunkCache.keys())) {
+    const [a, b] = id.split('_').map(Number);
+    if (a < a0 || a > a1 || b < b0 || b > b1) { __mwChunkCache.delete(id); evicted++; }
+  }
+  return { k, requested: ids.length, fetched: missing.length, evicted, cached: __mwChunkCache.size };
+}
+
+// Everything cached, as one FeatureCollection in the same shape the board
+// source already takes.
+function buildChunkCollection() {
+  const features = [];
+  for (const { k, f } of __mwChunkCache.values()) {
+    const span = 1 << k;                       // cells per side of a block
+    for (const row of f) {
+      const [a, b, team] = row;
+      // k=0 rows are [lat_idx, lon_idx, team]; k>0 rows are
+      // [slat, slon, team, painted, slots] and a block spans 2^k cells.
+      const latIdx = k === 0 ? a : a * span;
+      const lonIdx = k === 0 ? b : b * span;
+      const south = latIdx * CELL_LAT_DEG;
+      const north = (latIdx + span) * CELL_LAT_DEG;
+      const west = lonIdx * CELL_LON_DEG;
+      const east = (lonIdx + span) * CELL_LON_DEG;
+      const props = { team };
+      if (k === 0) {
+        props.cell_id = a + '_' + b;
+      } else {
+        props.painted = row[3];
+        props.slots = row[4];
+        // Drives fill-opacity at aggregate zooms: a block 5% painted should
+        // not read as solid ground the way a fully contested one does.
+        props.density = row[4] ? row[3] / row[4] : 0;
+      }
+      features.push({
+        type: 'Feature',
+        properties: props,
+        geometry: {
+          type: 'Polygon',
+          coordinates: [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
+        },
+      });
+    }
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+window.__mwChunks = {
+  CHUNK_SHIFT,
+  CELL_LAT_DEG,
+  CELL_LON_DEG,
+  kForZoom: chunkKForZoom,
+  cellIndicesFor,
+  compute: computeChunkIds,
+  fetch: fetchChunks,
+  load: loadChunksFor,
+  build: buildChunkCollection,
+  cache: __mwChunkCache,
+  clear() { __mwChunkCache.clear(); __mwChunkK = null; },
+  // The third-implementation check, runnable in place rather than reasoned
+  // about. Expected values are the ones SQLite and Python already agree on.
+  selfTest() {
+    const cases = [[-33, 5, -2], [-1, 5, -1], [-29142, 5, -911],
+                   [-25704, 5, -804], [-32033, 5, -1002], [16180, 5, 505],
+                   [-29142, 7, -228]];
+    return cases.map(([v, sh, want]) => ({
+      expr: v + ' >> ' + sh, got: v >> sh, want, ok: (v >> sh) === want,
+    }));
+  },
+};
+
+
 // ===== Territory panel (ported from frontend/mc.js) =====
 //
 // The scoreboard/roster/history/top-players/player-lookup panel and the
