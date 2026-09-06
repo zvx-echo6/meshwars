@@ -921,6 +921,49 @@ function buildChunkCollection() {
   return { type: 'FeatureCollection', features };
 }
 
+// ---- the swap ----------------------------------------------------------
+//
+// Which path feeds the board source. 'chunks' is the default; 'whole' is the
+// pre-Stage-2 path, kept working rather than deleted so the two can be compared
+// on the same build. Switch with ?boardsrc=whole in the URL, or at runtime with
+// window.__mwBoardSource('whole'|'chunks'), which reloads the board in place.
+// A way back that does not need a deploy is the point.
+let __mwBoardSrc = (() => {
+  try {
+    const v = new URLSearchParams(location.search).get('boardsrc');
+    return v === 'whole' || v === 'chunks' ? v : 'chunks';
+  } catch { return 'chunks'; }
+})();
+
+// Load the viewport's chunks and hand the result to the board source. Replaces
+// what loadBoardData() does for the whole-board path, and is the only thing
+// that calls setData on the chunk path.
+async function loadBoardChunks(map) {
+  try {
+    const stats = await loadChunksFor(map.getBounds(), map.getZoom());
+    const fc = buildChunkCollection();
+    map.getSource('board').setData(fc);
+    window.__mwBoardStats.setDataCalls += 1;
+    window.__mwBoardStats.chunkLoads += 1;
+    window.__mwBoardStats.chunksFetched += stats.fetched;
+    window.__mwBoardStats.chunksCached = stats.cached;
+    window.__mwBoardStats.lastFeatures = fc.features.length;
+    return stats;
+  } catch (err) {
+    console.error('MeshWars map2: chunk load failed', err);
+    return null;
+  }
+}
+
+// The one entry point everything else calls. force=true means an explicit
+// user refresh: drop the caches so it does real work rather than answering
+// from a 304 or a warm chunk cache.
+async function refreshBoard(map, force = false) {
+  if (__mwBoardSrc === 'whole') return loadBoardData(map, force);
+  if (force) __mwChunkCache.clear();
+  return loadBoardChunks(map);
+}
+
 window.__mwChunks = {
   CHUNK_SHIFT,
   CELL_LAT_DEG,
