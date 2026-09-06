@@ -31,6 +31,7 @@ MC_PROTOCOL explicitly, same as before this module had a second caller.
 from __future__ import annotations
 
 import re
+import hashlib
 import json
 import sqlite3
 import time
@@ -426,12 +427,22 @@ def season_team_checkin_points(conn, season_id: int) -> dict[str, float]:
 
 # ---- board response cache ---------------------------------------------
 
-# key -> (built_at_monotonic, serialized JSON bytes). Small and bounded:
-# one entry per cached route, never per request or per caller.
-_BOARD_CACHE: dict[str, tuple[float, bytes]] = {}
+# key -> (built_at_monotonic, serialized JSON bytes, etag). Small and
+# bounded: one entry per cached route, never per request or per caller.
+#
+# The etag lives INSIDE the per-key entry, deliberately. app/api.py's
+# /get-nodes deliberately splits its cache into mt_board_authed and
+# mt_board_public so a cached authenticated build can never be served to a
+# public request -- see the comment at that call site. A shared or global
+# etag would reopen exactly that hole from the other direction: a validator
+# minted against the authenticated body would match an If-None-Match on the
+# public one, and the server would answer 304 to a client holding a body it
+# was never entitled to. Keying the etag with the bytes it was computed from
+# makes that impossible by construction rather than by care.
+_BOARD_CACHE: dict[str, tuple[float, bytes, str]] = {}
 
 
-def cached_json_response(key: str, build) -> Response:
+def cached_json_response(key: str, build, request: Request | None = None) -> Response:
     """Serve `build()`'s result as JSON, reusing the bytes for up to
     settings.board_cache_seconds.
 
@@ -452,15 +463,29 @@ def cached_json_response(key: str, build) -> Response:
     """
     ttl = settings.board_cache_seconds
     now = time.monotonic()
+
+    def answer(body: bytes, etag: str) -> Response:
+        # A client that already holds these exact bytes gets 304 and no body,
+        # which lets it skip both the transfer and -- the expensive half --
+        # re-indexing an unchanged board into geojson-vt. First load carries
+        # no If-None-Match, so it falls through to the full 200 below.
+        if request is not None and request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        return Response(content=body, media_type="application/json", headers={"ETag": etag})
+
     if ttl > 0:
         hit = _BOARD_CACHE.get(key)
         if hit is not None and now - hit[0] < ttl:
-            return Response(content=hit[1], media_type="application/json")
+            return answer(hit[1], hit[2])
 
     body = json.dumps(build(), separators=(",", ":")).encode()
+    # Hashed once per REBUILD, not per request -- the whole point of caching
+    # the serialized bytes is that neither serializing nor digesting them
+    # happens on the hot path.
+    etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
     if ttl > 0:
-        _BOARD_CACHE[key] = (now, body)
-    return Response(content=body, media_type="application/json")
+        _BOARD_CACHE[key] = (now, body, etag)
+    return answer(body, etag)
 
 
 def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
@@ -519,14 +544,16 @@ def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
 
 
 @router.get("/api/mc/board")
-async def mc_board() -> Response:
+async def mc_board(request: Request) -> Response:
     """Every owned cell in the active MeshCore season. See board_for().
 
     The heaviest route on the site by an order of magnitude, and the one
     every open map tab re-fetches on a timer -- served through
     cached_json_response so viewers share one build.
     """
-    return cached_json_response("mc_board", lambda: board_for(MC_PROTOCOL, include_meta=False))
+    return cached_json_response(
+        "mc_board", lambda: board_for(MC_PROTOCOL, include_meta=False), request
+    )
 
 
 def scores_for(protocol: str) -> dict:

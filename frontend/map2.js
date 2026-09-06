@@ -691,9 +691,34 @@ function boundsToPolygon(cell) {
 // /get-nodes returns {coverage, repeaters} -- same reasoning and same
 // unwrap as mc.js's fetchBoardCells. Both cell shapes (south/west/
 // north/east/owner_team/cell_id) match boundsToPolygon either way.
+// Validator for the last board body this page received, sent back as
+// If-None-Match so an unchanged board costs a 304 and nothing else. Held
+// per page, not per map: there is one board source.
+let lastBoardEtag = null;
+
+// Deliberately observable. "Did setData actually get skipped?" cannot be
+// answered from timings alone -- a refresh that skipped the reindex and one
+// that merely finished quickly look identical -- so the counters say it
+// outright. Read from the console or a headless harness.
+window.__mwBoardStats = { fetches: 0, notModified: 0, setDataCalls: 0 };
+
 async function fetchBoard(c) {
-  const res = await fetch(c.boardEndpoint);
+  const headers = lastBoardEtag ? { 'If-None-Match': lastBoardEtag } : undefined;
+  const res = await fetch(c.boardEndpoint, headers ? { headers } : undefined);
+  window.__mwBoardStats.fetches += 1;
+
+  // 304: the board we already hold is current. Return null rather than an
+  // empty FeatureCollection -- an empty collection would be indistinguishable
+  // from a genuinely empty board and would blank the map.
+  if (res.status === 304) {
+    window.__mwBoardStats.notModified += 1;
+    return null;
+  }
   if (!res.ok) throw new Error(`board fetch failed: ${res.status}`);
+
+  const etag = res.headers.get('ETag');
+  if (etag) lastBoardEtag = etag;
+
   const data = await res.json();
   const cells = Array.isArray(data) ? data : (Array.isArray(data.coverage) ? data.coverage : []);
   return {
@@ -1544,7 +1569,7 @@ function buildScoreboardControl(map) {
 
   div.querySelector('#mc-refresh-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    loadBoardData(map);
+    loadBoardData(map, true);   // force: a user asking to refresh must get a real one
     loadScoreboard();
   });
 
@@ -3080,10 +3105,20 @@ function setupLayerSwitcher(map) {
   applyAvailability();
 }
 
-async function loadBoardData(map) {
+// force=true is the explicit "Refresh map" button. Without clearing the
+// validator that button would send If-None-Match, get a 304, skip setData
+// and appear to do nothing -- a visible control that silently stopped
+// working, which is worse than the refresh stutter this change removes.
+async function loadBoardData(map, force = false) {
   try {
+    if (force) lastBoardEtag = null;
     const board = await fetchBoard(cfg());
+    // null means 304: the board has not changed, so do NOT re-index it.
+    // Skipping this is the entire point -- setData re-runs geojson-vt over
+    // every feature, which is what makes a refresh landing mid-pan stutter.
+    if (board === null) return;
     map.getSource('board').setData(board);
+    window.__mwBoardStats.setDataCalls += 1;
   } catch (err) {
     console.error('MeshWars map2: failed to load board', err);
   }
