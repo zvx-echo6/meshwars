@@ -26,6 +26,20 @@ def cell_id(lat: float, lon: float) -> str:
     return f"{lat_idx}_{lon_idx}"
 
 
+def cell_indices(cid: str) -> tuple[int, int]:
+    """Return (lat_idx, lon_idx) for a cell id.
+
+    The inverse of cell_id() above, and the single definition of how a
+    cell id splits -- mc_tile stores these as columns (see app/db.py's
+    lat_idx/lon_idx) so a chunk can be found by an indexed range scan
+    instead of a string parse per row. Anything writing an mc_tile row
+    must fill them from here rather than re-deriving the split, so the
+    columns and the id can never disagree about which cell they mean.
+    """
+    lat_str, lon_str = cid.split("_")
+    return (int(lat_str), int(lon_str))
+
+
 def cell_bounds(cid: str) -> tuple[float, float, float, float]:
     """Return (south, west, north, east) for a cell id."""
     lat_str, lon_str = cid.split("_")

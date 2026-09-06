@@ -476,6 +476,14 @@ CREATE TABLE IF NOT EXISTS mc_season_team_tally (
 
 -- One row per (season, cell) that has ever been captured. No neutral
 -- state: a cell either has an owner row or does not exist yet.
+-- lat_idx/lon_idx are cell_id's two halves, stored as integers so a
+-- rectangular block of the grid can be found by an indexed range scan
+-- rather than by parsing every row's id. They are redundant with cell_id
+-- by construction and must never disagree with it: everything writing a
+-- row here fills them from app/grid.py's cell_indices(), which is the
+-- single definition of how an id splits. Nullable only so the migration
+-- that added them to existing databases could backfill; a row written by
+-- this application always has both.
 CREATE TABLE IF NOT EXISTS mc_tile (
     season_id       INTEGER NOT NULL,
     cell_id         TEXT NOT NULL,
@@ -483,6 +491,8 @@ CREATE TABLE IF NOT EXISTS mc_tile (
     last_player_id  INTEGER NOT NULL,
     last_report_ts  INTEGER NOT NULL,
     paint_count     INTEGER NOT NULL DEFAULT 0,
+    lat_idx         INTEGER,
+    lon_idx         INTEGER,
     PRIMARY KEY (season_id, cell_id)
 );
 CREATE INDEX IF NOT EXISTS idx_mc_tile_owner ON mc_tile(season_id, owner_team);
@@ -1854,6 +1864,35 @@ MIGRATIONS = [
     # captures eligible for the exploration awards rather than silently
     # disqualifying history.
     "ALTER TABLE mc_tile_capture_log ADD COLUMN by_air INTEGER NOT NULL DEFAULT 0",
+    # mc_tile's grid columns (see that table's SCHEMA comment above).
+    #
+    # The index is PLAIN, not partial. It was specified as
+    #   ... WHERE owner_team IS NOT NULL
+    # which is always true: owner_team is declared NOT NULL, so the
+    # predicate excludes no rows. SQLite folds an always-true term away and
+    # is then unable to prove the partial index's own predicate holds, so
+    # the index becomes structurally unusable -- EXPLAIN QUERY PLAN skips
+    # it and INDEXED BY reports "no query solution". Same rows, same size,
+    # never chosen. Verified against a copy of the live board before this
+    # went in; the plain form is used, with season_id as an equality seek
+    # and lat_idx as a range.
+    #
+    # The backfill is guarded on lat_idx IS NULL rather than run
+    # unconditionally: MIGRATIONS re-runs on every boot, and an unguarded
+    # UPDATE would rewrite every row of the table each time the process
+    # starts.
+    #
+    # The index belongs here rather than beside idx_mc_tile_owner in SCHEMA
+    # because SCHEMA executes BEFORE this list, so on an existing database
+    # it would run against columns that do not exist yet -- the same
+    # ordering trap already documented for player.active above.
+    "ALTER TABLE mc_tile ADD COLUMN lat_idx INTEGER",
+    "ALTER TABLE mc_tile ADD COLUMN lon_idx INTEGER",
+    "UPDATE mc_tile SET"
+    "  lat_idx = CAST(SUBSTR(cell_id, 1, INSTR(cell_id, '_') - 1) AS INTEGER),"
+    "  lon_idx = CAST(SUBSTR(cell_id, INSTR(cell_id, '_') + 1) AS INTEGER)"
+    " WHERE lat_idx IS NULL OR lon_idx IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_mc_tile_grid ON mc_tile(season_id, lat_idx, lon_idx)",
     "ALTER TABLE tile ADD COLUMN last_packet_id INTEGER",
     "ALTER TABLE tile_unique_painter ADD COLUMN paint_count INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_out_of_area INTEGER NOT NULL DEFAULT 0",

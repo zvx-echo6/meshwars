@@ -57,6 +57,7 @@ import logging
 import sqlite3
 from dataclasses import dataclass
 
+from .grid import cell_indices
 from .config import settings
 
 log = logging.getLogger("mc_scoring")
@@ -411,10 +412,21 @@ def apply_paint(
     if tile is None:
         # No owner row yet -- there is no neutral state, so the first
         # team to paint an empty cell takes it immediately.
+        # lat_idx/lon_idx are filled here, at the ONLY statement in the
+        # codebase that creates an mc_tile row. The two UPDATEs below touch
+        # existing rows and inherit them, and there is no DELETE path at all
+        # -- see app/account_api.py's _PLAYER_SCOPED_TABLES (mc_tile is
+        # absent) and app/admin_api.py's delete-player docstring, which
+        # records that removing a player's squares was itself the harm that
+        # change was made to stop. If a delete path is ever added, whatever
+        # reinserts the row must fill these columns too, or a chunk range
+        # scan will silently miss it.
+        lat_idx, lon_idx = cell_indices(cell_id)
         conn.execute(
             "INSERT INTO mc_tile(season_id, cell_id, owner_team, last_player_id, "
-            "last_report_ts, paint_count) VALUES (?, ?, ?, ?, ?, 1)",
-            (season_id, cell_id, team, player_id, ts),
+            "last_report_ts, paint_count, lat_idx, lon_idx) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+            (season_id, cell_id, team, player_id, ts, lat_idx, lon_idx),
         )
         record_capture(conn, season_id, cell_id, team, ts)
         # This is a real capture -- unowned ground just became owned --
