@@ -33,6 +33,7 @@ from __future__ import annotations
 import re
 import hashlib
 import json
+import math
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -642,6 +643,151 @@ def scores_for(protocol: str) -> dict:
             for t in team_list()
         ],
     }
+
+
+# ---- lattice chunks (docs: meshwars-map-performance-v3 section 7) -------
+#
+# A chunk is a 32x32 block of the integer lattice at shift k, identified by
+# (lat_idx >> kc, lon_idx >> kc) where kc = k + 5. The client asks for the
+# chunks covering its viewport and merges them; the server answers each from
+# an indexed range scan on Stage 1's idx_mc_tile_grid.
+#
+# k comes from the zoom ladder k = max(0, 12 - z), which holds a rendered
+# block at ~11 px all the way from z4 to z12 and then lets native cells grow
+# from z13 -- verified against CELL_LON_DEG and Web-Mercator rather than
+# taken from the plan.
+#
+# THE SHIFT IS THE THING TO BE CAREFUL ABOUT. lon_idx is negative across the
+# whole western hemisphere, and a chunk id is computed on both sides of the
+# wire. SQLite's >> and Python's >> were checked against each other on real
+# negative values including the -1 and -33 boundaries and agree exactly
+# (floor semantics, not truncate-toward-zero); anything computing chunk ids
+# in a third language needs the same check before it is trusted.
+CHUNK_SHIFT = 5                      # 32x32 cells per chunk, so kc = k + 5
+
+
+def chunk_k_for_zoom(z: float) -> int:
+    """Lattice shift for a map zoom. See the ladder above."""
+    return max(0, 12 - int(math.floor(z)))
+
+
+def _parse_chunk_id(raw: str) -> tuple[int, int] | None:
+    """"<clat>_<clon>" -> (clat, clon), or None if it is not that.
+
+    Same "<a>_<b>" shape as a cell id (app/grid.py), and negative on the
+    second half for the same reason, so it is parsed the same way rather
+    than with a split that would treat the minus as a separator.
+    """
+    parts = raw.split("_")
+    if len(parts) != 2:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        return None
+
+
+def chunks_for(protocol: str, k: int, ids: list[tuple[int, int]]) -> dict:
+    """Owned cells inside each requested chunk, aggregated at shift k.
+
+    k = 0 emits one feature per cell, [lat_idx, lon_idx, team].
+
+    k > 0 emits one feature per super-cell that has any owned cell in it,
+    [slat, slon, team, painted, slots], where the team is the PLURALITY
+    owner of that super-cell, painted is how many of its cells that team
+    holds, and slots is 4**k -- the number of cells a super-cell contains,
+    so the client can drive opacity by density without another round trip.
+
+    The plurality tie-break is alphabetical by team name, fixed and applied
+    in SQL, so two teams level on a super-cell always resolve the same way.
+    Without it the colour of a contested block would depend on row order and
+    could flip between requests with no score having changed.
+    """
+    if not ids:
+        return {}
+    kc = k + CHUNK_SHIFT
+
+    def run(conn):
+        season = active_season(conn, protocol)
+        if not season:
+            return {}
+        out: dict[str, dict] = {}
+        for clat, clon in ids:
+            la0, la1 = clat << kc, (clat + 1) << kc
+            lo0, lo1 = clon << kc, (clon + 1) << kc
+            if k == 0:
+                rows = conn.execute(
+                    "SELECT lat_idx, lon_idx, owner_team FROM mc_tile "
+                    " WHERE season_id = ? AND owner_team IS NOT NULL"
+                    "   AND lat_idx >= ? AND lat_idx < ?"
+                    "   AND lon_idx >= ? AND lon_idx < ?"
+                    " ORDER BY lat_idx, lon_idx",
+                    (season["id"], la0, la1, lo0, lo1),
+                ).fetchall()
+                feats = [[r["lat_idx"], r["lon_idx"], r["owner_team"]] for r in rows]
+            else:
+                # One row per (super-cell, team) with its count, then the
+                # plurality per super-cell. Ordering by count DESC then team
+                # ASC and taking the first per group is what makes the
+                # tie-break deterministic.
+                rows = conn.execute(
+                    "SELECT lat_idx >> ? AS slat, lon_idx >> ? AS slon,"
+                    "       owner_team, COUNT(*) AS n FROM mc_tile"
+                    " WHERE season_id = ? AND owner_team IS NOT NULL"
+                    "   AND lat_idx >= ? AND lat_idx < ?"
+                    "   AND lon_idx >= ? AND lon_idx < ?"
+                    " GROUP BY slat, slon, owner_team"
+                    " ORDER BY slat, slon, n DESC, owner_team ASC",
+                    (k, k, season["id"], la0, la1, lo0, lo1),
+                ).fetchall()
+                slots = 4 ** k
+                feats = []
+                seen = set()
+                for r in rows:
+                    key = (r["slat"], r["slon"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    feats.append([r["slat"], r["slon"], r["owner_team"], r["n"], slots])
+            # Version is a placeholder until Stage 4 gives every chunk a real
+            # one. Emitted now, and emitted per chunk rather than per
+            # response, so the client's cache can be keyed on it from the
+            # start and Stage 4 becomes a server-side change alone.
+            out["%d_%d" % (clat, clon)] = {"v": 0, "f": feats}
+        return out
+
+    result = _safe_query(run)
+    return result if result is not None else {}
+
+
+@router.get("/api/mc/chunks")
+async def mc_chunks(z: float = 12.0, ids: str = "") -> Response:
+    """Owned cells in the requested lattice chunks, aggregated for zoom `z`.
+
+    Additive and unused by the map so far: the board still loads through
+    /api/mc/board. Nothing here touches board_for(), so that route's ETag --
+    and /get-nodes' and /api/v1/board's shapes -- are unaffected.
+
+    Not served through cached_json_response: that cache is keyed per route
+    and this route's body depends on the query string, so a single entry
+    would serve one viewport's chunks to every other viewport. Stage 4's
+    per-chunk versioning is where caching belongs.
+    """
+    k = chunk_k_for_zoom(z)
+    parsed = []
+    for raw in ids.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        cid = _parse_chunk_id(raw)
+        if cid is None:
+            return JSONResponse(
+                {"error": "bad chunk id", "detail": "expected <lat>_<lon>, got %r" % raw},
+                status_code=400,
+            )
+        parsed.append(cid)
+    body = {"k": k, "chunks": chunks_for(MC_PROTOCOL, k, parsed)}
+    return JSONResponse(body)
 
 
 @router.get("/api/mc/scores")
