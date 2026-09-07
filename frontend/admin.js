@@ -31,6 +31,16 @@ let allAccounts = [];       // GET /api/admin/accounts -- every account, not jus
 // api()'s own comment for why the response body cannot.
 let panelLoaded = false;
 
+// True for as long as the pointer is inside the traffic chart -- set by
+// trafficChart()'s own mouseenter/mouseleave. pollTraffic() (below
+// loadTraffic()) checks this before every tick: the chart's crosshair
+// and tooltip live only in that SVG's in-memory state, not CSS, so
+// re-running renderTraffic() out from under a mid-hover pointer would
+// silently drop them even though the pointer never moved. Skipping the
+// tick is enough -- the next one, 30s later, picks it up once the
+// operator has moved on.
+let trafficHovering = false;
+
 // Same seven teams settings.teams_list serves and the join page's own
 // team-picker offers (frontend/join.js's TEAM_ORDER) -- duplicated
 // rather than imported, same reasoning as everywhere else on this site
@@ -633,15 +643,75 @@ function trafficChart(daily, tipEl) {
   }
 
   svg.addEventListener('mousemove', (ev) => {
+    trafficHovering = true;
     const rect = svg.getBoundingClientRect();
     const frac = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
     const idx = Math.round(frac * (points.length - 1));
     showAt(Math.max(0, Math.min(points.length - 1, idx)));
   });
-  svg.addEventListener('mouseleave', hide);
+  svg.addEventListener('mouseleave', () => {
+    trafficHovering = false;
+    hide();
+  });
 
   return wrap;
 }
+
+// ---- traffic auto-refresh ----------------------------------------------
+// The panel above loads once in refreshAll() like everything else; this
+// keeps it current after that without an operator-triggered reload, by
+// polling the exact same route and re-running the exact same
+// renderTraffic() on a timer -- no separate live-update path (no SSE, no
+// websocket) for one stat block.
+const TRAFFIC_POLL_MS = 30000;
+let trafficTimer = null;
+
+async function pollTraffic() {
+  // Nothing to poll for before sign-in, and no point -- api() would
+  // just 401 through its own showNoAccess() handling for every tick
+  // until the operator signs in, which is wasted traffic for a panel
+  // nobody can see yet. showApp()/showNoAccess() start and stop this
+  // timer, so myRole tracks the panel's own visibility already; this
+  // check only guards the one tick that can land in between (the
+  // immediate visibilitychange refresh, below).
+  if (!myRole || trafficHovering) return;
+  try {
+    const d = await api('/api/admin/traffic?days=30');
+    renderTraffic(document.getElementById('traffic-body'), d);
+  } catch (e) {
+    // Unlike loadTraffic()'s own catch above (the first paint, with
+    // nothing on screen yet to protect), a failed background refresh
+    // leaves whatever numbers are already showing exactly as they are.
+    // A transient network blip is not a reason to blank a panel that
+    // was working a moment ago, and the timer keeps ticking regardless
+    // -- the next poll gets its own try, nothing here stops it.
+  }
+}
+
+function startTrafficPolling() {
+  if (trafficTimer) return; // already running -- e.g. a second showApp()
+  trafficTimer = setInterval(pollTraffic, TRAFFIC_POLL_MS);
+}
+
+function stopTrafficPolling() {
+  clearInterval(trafficTimer);
+  trafficTimer = null;
+}
+
+// Page Visibility API: a panel left open in a background tab has no
+// operator watching it, so there is no reason to hit the server every
+// 30s -- paused on hidden, and given one immediate refresh on becoming
+// visible again (rather than waiting up to another 30s for the next
+// tick) so the operator never comes back to numbers that are already
+// stale by the time they look.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopTrafficPolling();
+  } else {
+    pollTraffic();
+    startTrafficPolling();
+  }
+});
 
 // ---- players ----------------------------------------------------------
 
@@ -2000,6 +2070,7 @@ async function refreshAll() {
 function showNoAccess(message) {
   myRole = null;
   panelLoaded = false;
+  stopTrafficPolling(); // no panel on screen for it to update any more
   document.getElementById('app').hidden = true;
   document.getElementById('login').hidden = false;
   document.getElementById('login-err').textContent = message || '';
@@ -2012,6 +2083,10 @@ async function showApp() {
   const wanted = location.hash.slice(1);
   show(document.querySelector('.adm-section[data-section="' + wanted + '"]') ? wanted : 'overview');
   await refreshAll();
+  // refreshAll() above just did the equivalent of one poll tick (its
+  // own loadTraffic() call) -- start the recurring timer from here
+  // rather than double-fetching immediately.
+  startTrafficPolling();
 }
 
 // Asks whether the CURRENT session (if any) can use this panel at all --
