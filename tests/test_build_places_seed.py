@@ -314,3 +314,171 @@ def test_match_sanity_check_keeps_huge_area_right_at_the_score_boundary():
     exactly 0.5 is not weak evidence and must not be rejected."""
     assert bps._match_passes_sanity_check(
         area_m2=bps.MATCH_AREA_SANITY_CEILING_M2 * 2, name_score=bps.MATCH_AREA_SANITY_MIN_SCORE)
+
+
+# ---------------------------------------------------------------------
+# BOUNDARY CLEANUP, PASS 2 (2026-09-07, continuing the sanity check
+# above): duplicate geometry / designation-vs-scale / administrative
+# envelope -- see _clean_matched_park_boundaries()'s own module comment
+# above _match_passes_sanity_check for the full reasoning.
+# ---------------------------------------------------------------------
+
+
+def test_duplicate_geometry_rejects_the_inherited_copy():
+    """The confirmed shipped-seed case: "Tonto State Fish Hatchery" and
+    "Tonto Natural Bridge State Park" both matched Tonto National
+    Forest's own polygon. Neither carries a big-scale designation, so
+    the group has no single top-tier winner -- both lose the boundary."""
+    keep = bps._resolve_duplicate_boundary_group(
+        ["Tonto State Fish Hatchery", "Tonto Natural Bridge State Park"])
+    assert keep == [False, False]
+
+
+def test_duplicate_geometry_keeps_the_legitimate_owner_of_a_shared_boundary():
+    """The confirmed shipped-seed case this rule generalizes from:
+    "Cherokee Hills Scenic Byway Scenic Site" shared its exact area with
+    the legitimately-matched "Cherokee Wildlife Management Area" --
+    the scenic site is point-scale, the WMA is not, so the WMA alone
+    keeps the boundary."""
+    keep = bps._resolve_duplicate_boundary_group(
+        ["Cherokee Wildlife Management Area", "Cherokee Hills Scenic Byway Scenic Site"])
+    assert keep == [True, False]
+
+
+def test_duplicate_geometry_does_not_punish_an_ambiguous_name_for_its_partner():
+    """A real, correctly-sized "Ruby Lake National Wildlife Refuge" must
+    not be dragged down just because its duplicate partner ("Fort Ruby
+    National Historic Site") is a clearly bogus point-scale name --
+    "National Wildlife Refuge" alone is never treated as automatically
+    big-scale (some real refuges are tiny, some are huge), but it is
+    still the only non-point-scale name in this group, so it wins."""
+    keep = bps._resolve_duplicate_boundary_group(
+        ["Ruby Lake National Wildlife Refuge", "Fort Ruby National Historic Site"])
+    assert keep == [True, False]
+
+
+def test_duplicate_geometry_rejects_both_on_a_tie_between_two_legitimate_designations():
+    """Teton Wilderness Area and Jedediah Smith Wilderness Area share one
+    2,366.3 km^2 polygon in the shipped seed -- both are a "Wilderness
+    Area", so neither outranks the other, and there is no name evidence
+    left to award the boundary to either one. Fails open to stripping
+    both rather than guessing."""
+    keep = bps._resolve_duplicate_boundary_group(
+        ["Teton Wilderness Area", "Jedediah Smith Wilderness Area"])
+    assert keep == [False, False]
+
+
+def test_point_scale_designation_flags_the_documented_keywords():
+    for name in (
+        "Tonto State Fish Hatchery",
+        "Tonto Natural Bridge State Park",
+        "Oklahoma Route 66 Museum State Historic Site",
+        "Cherokee Hills Scenic Byway Scenic Site",
+        "South Pass Overlook BLM Interpretive Site",
+        "ZOLD - Red Spring Picnic Area BLM Recreation Management Area",
+        "Notch Peak Trailhead BLM Recreation Management Area",
+    ):
+        assert bps._is_point_scale_designation(name), name
+
+
+def test_big_scale_designation_flags_national_forest_park_monument_wilderness():
+    for name in (
+        "Flathead National Forest",
+        "Yosemite National Park",
+        "Grand Staircase-Escalante BLM National Monument",
+        "Frank Church-River of No Return Wilderness Area Wilderness Area",
+        "Little Missouri National Grassland",
+    ):
+        assert bps._is_big_scale_designation(name), name
+    # An ordinary Wildlife Management Area/Refuge/Recreation Area name
+    # is deliberately NOT treated as big-scale -- see the module comment
+    # above _duplicate_boundary_tier() for why (real sizes vary too much
+    # to trust either way).
+    for name in (
+        "Cherokee Wildlife Management Area",
+        "San Bernard National Wildlife Refuge",
+        "Steens Mountain BLM Special Recreation Management Area",
+    ):
+        assert not bps._is_big_scale_designation(name), name
+
+
+def test_clean_matched_park_boundaries_rejects_a_national_forest_with_a_genuinely_huge_boundary():
+    """A national forest with a legitimate, unique multi-thousand-km^2
+    boundary must survive the whole cleanup pass untouched -- this is
+    the MUST-SURVIVE regression case (Flathead National Forest, the
+    largest legitimate match measured in the shipped seed)."""
+    rows = [
+        {"ref_code": "US-4502", "name": "Flathead National Forest",
+         "area_m2": 13_613_884_004.0, "geom_wkt": "POLYGON(...)", "area_frac_outside": 0.9884},
+    ]
+    stripped = bps._clean_matched_park_boundaries(rows)
+    assert stripped == {}
+    assert rows[0]["area_m2"] == 13_613_884_004.0
+
+
+def test_clean_matched_park_boundaries_strips_an_administrative_envelope():
+    """A Wetland Management District is stripped unconditionally, even
+    with no duplicate partner and regardless of size."""
+    rows = [
+        {"ref_code": "US-0270", "name": "Iowa Wetland Management District",
+         "area_m2": 50_831_300_000.0, "geom_wkt": "POLYGON(...)", "area_frac_outside": 1.0},
+    ]
+    stripped = bps._clean_matched_park_boundaries(rows)
+    assert stripped == {"US-0270": "administrative envelope"}
+    assert rows[0]["area_m2"] == ""
+    assert rows[0]["geom_wkt"] == ""
+    assert rows[0]["area_frac_outside"] == ""
+
+
+def test_clean_matched_park_boundaries_full_pipeline_on_the_confirmed_examples():
+    """End-to-end over a small mixed batch: the inherited duplicate pair
+    is rejected, the legitimate owner of a shared boundary is kept, a
+    point-scale designation over the ceiling is rejected on its own, and
+    an unrelated national forest is untouched."""
+    rows = [
+        {"ref_code": "TONTO-FH", "name": "Tonto State Fish Hatchery",
+         "area_m2": 11_601_596_788.0, "geom_wkt": "g", "area_frac_outside": ""},
+        {"ref_code": "TONTO-NB", "name": "Tonto Natural Bridge State Park",
+         "area_m2": 11_601_596_788.0, "geom_wkt": "g", "area_frac_outside": ""},
+        {"ref_code": "CHEROKEE-WMA", "name": "Cherokee Wildlife Management Area",
+         "area_m2": 18_034_700_000.0, "geom_wkt": "g", "area_frac_outside": ""},
+        {"ref_code": "FISH-HATCHERY-LONE", "name": "Willamette State Fish Hatchery",
+         "area_m2": 6_803_203_000.0, "geom_wkt": "g", "area_frac_outside": ""},
+        {"ref_code": "FLATHEAD", "name": "Flathead National Forest",
+         "area_m2": 13_613_884_004.0, "geom_wkt": "g", "area_frac_outside": 0.9884},
+    ]
+    stripped = bps._clean_matched_park_boundaries(rows)
+    assert set(stripped) == {"TONTO-FH", "TONTO-NB", "FISH-HATCHERY-LONE"}
+    by_code = {r["ref_code"]: r for r in rows}
+    assert by_code["TONTO-FH"]["area_m2"] == ""
+    assert by_code["TONTO-NB"]["area_m2"] == ""
+    assert by_code["FISH-HATCHERY-LONE"]["area_m2"] == ""
+    assert by_code["CHEROKEE-WMA"]["area_m2"] == 18_034_700_000.0
+    assert by_code["FLATHEAD"]["area_m2"] == 13_613_884_004.0
+
+
+def test_clean_matched_park_boundaries_ignores_matches_below_the_materiality_floor():
+    """Two small parks coincidentally sharing a tiny area (well under
+    DUPLICATE_CLEANUP_MIN_AREA_M2) are out of scope for this cleanup --
+    see that constant's own comment for why."""
+    rows = [
+        {"ref_code": "A", "name": "Some Trailhead", "area_m2": 50_000.0,
+         "geom_wkt": "g", "area_frac_outside": ""},
+        {"ref_code": "B", "name": "Some Other Park", "area_m2": 50_000.0,
+         "geom_wkt": "g", "area_frac_outside": ""},
+    ]
+    stripped = bps._clean_matched_park_boundaries(rows)
+    assert stripped == {}
+
+
+def test_known_bogus_boundary_match_is_stripped_even_with_no_generic_signal():
+    """San Bernard National Wildlife Refuge: no duplicate partner in the
+    seed and "National Wildlife Refuge" is not a point-scale designation
+    -- only the named-exception list catches this one."""
+    rows = [
+        {"ref_code": "US-0553", "name": "San Bernard National Wildlife Refuge",
+         "area_m2": 8_323_760_445.0, "geom_wkt": "g", "area_frac_outside": ""},
+    ]
+    stripped = bps._clean_matched_park_boundaries(rows)
+    assert list(stripped) == ["US-0553"]
+    assert rows[0]["area_m2"] == ""

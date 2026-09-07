@@ -207,6 +207,7 @@ import datetime
 import io
 import math
 import os
+import re
 import sys
 import urllib.request
 
@@ -824,6 +825,251 @@ def _match_passes_sanity_check(area_m2: float, name_score: float) -> bool:
     return not (area_m2 > MATCH_AREA_SANITY_CEILING_M2 and name_score < MATCH_AREA_SANITY_MIN_SCORE)
 
 
+# --------------------------------------------------------------------
+# BOUNDARY CLEANUP, PASS 2 (added 2026-09-07, continuing the sanity
+# check above): _match_passes_sanity_check only ever sees ONE candidate
+# at a time, so it cannot catch the dominant failure mode -- a small,
+# specifically-named feature (a fish hatchery, a natural bridge) whose
+# accepted match is actually the CONTAINING unit's own boundary
+# (a national forest, a wildlife refuge complex), byte-identical to
+# whatever legitimate row separately matched the very same polygon
+# under its own name. Confirmed shipped-seed case: "Tonto State Fish
+# Hatchery" and "Tonto Natural Bridge State Park" both carry Tonto
+# National Forest's own 11,601.6 km^2 -- neither is a national forest,
+# and neither is anywhere near that size in reality (a hatchery is a
+# building complex; the natural bridge park is well under 10 km^2).
+#
+# Three checks run over the WHOLE set of matched rows, after
+# match_parks()'s per-candidate loop and per-candidate sanity check --
+# see _clean_matched_park_boundaries() below for how they combine:
+#
+#   1. DUPLICATE GEOMETRY (_resolve_duplicate_boundary_group): when two
+#      or more matched parks carry the identical PAD-US area (to the
+#      nearest m^2 -- area_m2 comes straight from PAD-US's own
+#      GIS_Acres field, so an exact match this precise is not
+#      coincidence -- it is the same polygon), at most one of them can
+#      really own it. Ranked by _is_big_scale_designation(): a name
+#      carrying an unmistakably large-format designation (National
+#      Forest/Park/Monument/Grassland, Wilderness, National Conservation
+#      or Recreation Area) outranks everything else, and a point-scale
+#      name (_is_point_scale_designation() below) always loses. Exactly
+#      one top-tier member wins the boundary; the rest are stripped.
+#      Zero, or more than one, top-tier member (e.g. Teton Wilderness
+#      Area and Jedediah Smith Wilderness Area sharing one 2,366.3 km^2
+#      polygon -- both are a "Wilderness Area", so neither outranks the
+#      other) -- there is no name evidence here strong enough to award
+#      the boundary to any one of them, so the whole group is stripped.
+#      That is a deliberate fail-safe, not a guess: a false rejection
+#      leaves a real park as a point (still on the board, still
+#      capturable, just not crediting a boundary it cannot prove), while
+#      a wrong guess would leave a bogus multi-thousand-km^2 credit zone
+#      standing under the reachable-ring credit model.
+#
+#   2. DESIGNATION-VS-SCALE (_is_point_scale_designation): reinforces
+#      (1) and also catches a point-scale name that happens to be the
+#      ONLY match on its polygon, with no duplicate to compare against
+#      (nothing else in this seed shares San Bernard National Wildlife
+#      Refuge's bogus 8,323.8 km^2, for instance, but that one is not a
+#      point-scale designation either -- see
+#      _KNOWN_BOGUS_BOUNDARY_MATCHES below for why it needs a named
+#      exception instead). A museum, fish hatchery, natural bridge,
+#      scenic byway/site, historic site, visitor/interpretive center,
+#      picnic area, trailhead, or campground should never own a
+#      boundary in the hundreds of km^2, let alone thousands --
+#      POINT_SCALE_AREA_CEILING_M2 (500 km^2) sits comfortably above
+#      Fort Sill National Historic Site's own legitimate 379.3 km^2
+#      (an entire Army post, not a point at all) and below every
+#      confirmed-bogus case measured in the shipped seed (816 km^2 and
+#      up). This is a keyword-GATED ceiling, not a blanket one -- see
+#      MATCH_AREA_SANITY_CEILING_M2's own comment above for why a
+#      blanket ceiling cannot work in this data (a bogus museum match
+#      can outsize a legitimate national forest).
+#
+#   3. ADMINISTRATIVE ENVELOPE (_is_administrative_envelope_designation):
+#      a "Wetland Management District" boundary is genuine, not
+#      inherited -- but it is a multi-county, sometimes multi-state
+#      administrative footprint of scattered easement parcels, not
+#      contiguous ground anyone walks onto. Crediting it under the
+#      reachable-ring credit model (see app/places_seed.py) would credit
+#      an entire district from one grid square. Stripped unconditionally
+#      regardless of size or duplicate status. Individual "National
+#      Waterfowl Production Area" units are NOT included here even
+#      though the same federal program administers them -- every one of
+#      those in this seed is already parcel-sized (under 30 km^2), so
+#      there is nothing here to strip; the district-level name is what
+#      bundles a whole state's scattered parcels into one polygon.
+#
+# All three passes are scoped to matched boundaries >=
+# DUPLICATE_CLEANUP_MIN_AREA_M2 (100 km^2): below that, a mismatched or
+# duplicate boundary's own credit-zone footprint is not the
+# multi-county-scale problem this cleanup targets, and the dataset has
+# thousands of small, harmless coincidental duplicates (two named
+# features sharing one tiny parking-lot-sized polygon) that are not
+# this failure mode at all -- rewriting all of them is out of scope for
+# this pass. Every example named above already sits three to four
+# orders of magnitude past this floor.
+DUPLICATE_CLEANUP_MIN_AREA_M2 = 1e8  # 100 km^2
+POINT_SCALE_AREA_CEILING_M2 = 5e8  # 500 km^2
+
+_POINT_SCALE_DESIGNATION_RE = re.compile(
+    r"museum|fish hatchery|natural bridge|scenic byway|scenic site|"
+    r"historic site|visitor'?s? center|interpretive site|picnic area|"
+    r"trailhead|campground",
+    re.IGNORECASE,
+)
+
+_BIG_SCALE_DESIGNATION_RE = re.compile(
+    r"national forest|national grassland|national historical park|"
+    r"national park|national monument|wilderness area|\bwilderness\b|"
+    r"national conservation area|national recreation area",
+    re.IGNORECASE,
+)
+
+_ADMIN_ENVELOPE_DESIGNATION_RE = re.compile(
+    r"wetland management district",
+    re.IGNORECASE,
+)
+
+
+def _is_point_scale_designation(name: str) -> bool:
+    """True if `name` carries a designation that should never own a
+    multi-hundred-km^2 boundary -- see POINT_SCALE_AREA_CEILING_M2's own
+    comment above for the "or similar" list and why 500 km^2 is the
+    cutoff."""
+    return bool(_POINT_SCALE_DESIGNATION_RE.search(name))
+
+
+def _is_big_scale_designation(name: str) -> bool:
+    """True if `name` carries a designation that legitimately can own a
+    multi-thousand-km^2 boundary -- see _resolve_duplicate_boundary_group()'s
+    own comment above for how this ranks a duplicate-geometry group."""
+    return bool(_BIG_SCALE_DESIGNATION_RE.search(name))
+
+
+def _is_administrative_envelope_designation(name: str) -> bool:
+    """True if `name` is a multi-county/multi-state administrative
+    footprint (a Wetland Management District) rather than contiguous
+    ground -- see ADMINISTRATIVE ENVELOPE's own comment above."""
+    return bool(_ADMIN_ENVELOPE_DESIGNATION_RE.search(name))
+
+
+def _duplicate_boundary_tier(name: str) -> int:
+    """Ranks one name's plausibility as the true owner of a
+    duplicate-geometry group -- see _resolve_duplicate_boundary_group()'s
+    own comment. 2: an unmistakably large-format designation (National
+    Forest/Park/Monument/Grassland, Wilderness, National Conservation or
+    Recreation Area) that legitimately can own a multi-thousand-km^2
+    boundary. 0: a point-scale designation that never can. 1: everything
+    else (a Wildlife Management Area, a National Wildlife Refuge, a BLM
+    Recreation/Herd Management Area, ...) -- these vary enormously in
+    real size and are neither confirmed-plausible nor confirmed-implausible
+    from the name alone."""
+    if _is_point_scale_designation(name):
+        return 0
+    if _is_big_scale_designation(name):
+        return 2
+    return 1
+
+
+def _resolve_duplicate_boundary_group(names: list) -> list:
+    """Given the names of every matched park row that shares one exact
+    matched-boundary area, return a same-length list of which of them
+    keeps the boundary -- see DUPLICATE GEOMETRY's own comment above for
+    the ranking rule this implements. A pulled-out function so the rule
+    is testable without needing PAD-US/GDAL to reach it.
+
+    The winner is whichever member sits at the highest
+    _duplicate_boundary_tier() in the group, but ONLY if it is alone
+    there -- a tie at any tier (including two point-scale names tied at
+    the bottom) means no member's own name gives enough evidence to
+    award the boundary to any one of them, so the whole group loses it.
+    This is what keeps a legitimate ambiguous-tier match (a real,
+    correctly-sized "Ruby Lake National Wildlife Refuge") from being
+    dragged down just because ITS duplicate partner is a clearly bogus
+    point-scale name ("Fort Ruby National Historic Site") that isn't
+    itself tier 1 -- the refuge is the only tier-1 name in that group, so
+    it wins outright even though "National Wildlife Refuge" alone is
+    never treated as automatically big-scale."""
+    if len(names) < 2:
+        return [True] * len(names)
+    tiers = [_duplicate_boundary_tier(n) for n in names]
+    top = max(tiers)
+    winners = [t == top for t in tiers]
+    if sum(winners) == 1:
+        return winners
+    return [False] * len(names)
+
+
+# Known-bad matches that neither generic check above can catch: no
+# duplicate partner exists anywhere in this seed to compare against
+# (DUPLICATE GEOMETRY has nothing to rank), and the designation itself
+# is not inherently point-scale (DESIGNATION-VS-SCALE has no keyword to
+# key on -- a "National Wildlife Refuge" legitimately spans thousands of
+# km^2 for Desert, Cabeza Prieta, Charles M. Russell, and Sheldon NWRs,
+# all confirmed present and legitimate in this same seed). Confirmed bad
+# by direct, out-of-band verification against the real refuge, not by
+# any rule this script can run on its own -- keyed by ref_code (POTA
+# reference) rather than name, since that is the stable, unique key
+# match_parks() writes to `ref_code`.
+_KNOWN_BOGUS_BOUNDARY_MATCHES = {
+    "US-0553": "San Bernard National Wildlife Refuge matched an 8,323.8 "
+               "km^2 polygon; the real refuge is ~110 km^2.",
+}
+
+
+def _clean_matched_park_boundaries(matched_rows: list) -> dict:
+    """Mutates `matched_rows` in place, clearing the boundary
+    (area_m2/geom_wkt/area_frac_outside, all reset to "") on any row
+    whose match fails DUPLICATE GEOMETRY, DESIGNATION-VS-SCALE,
+    ADMINISTRATIVE ENVELOPE, or the named-exception list above -- see
+    this section's own module comment for all four. Each row in
+    `matched_rows` must be a dict with "name", "ref_code", "area_m2"
+    (a float in m^2, or "" if unmatched), "geom_wkt", and
+    "area_frac_outside" keys -- this is called both by match_parks()
+    (a full rebuild) and by a standalone patch against the already-built
+    seed (no GDAL/PAD-US needed, since every input here is a plain
+    Python value already sitting in the CSV).
+
+    Returns {ref_code: reason} for every row stripped, for reporting."""
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for i, row in enumerate(matched_rows):
+        area = row["area_m2"]
+        if area != "" and area >= DUPLICATE_CLEANUP_MIN_AREA_M2:
+            groups[round(float(area))].append(i)
+
+    stripped = {}
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        keep_flags = _resolve_duplicate_boundary_group([matched_rows[i]["name"] for i in idxs])
+        for i, keep in zip(idxs, keep_flags):
+            if not keep:
+                stripped[matched_rows[i]["ref_code"]] = "duplicate geometry"
+
+    for row in matched_rows:
+        rc = row["ref_code"]
+        area = row["area_m2"]
+        if rc in stripped or area == "":
+            continue
+        area = float(area)
+        if area >= POINT_SCALE_AREA_CEILING_M2 and _is_point_scale_designation(row["name"]):
+            stripped[rc] = "point-scale designation"
+        elif _is_administrative_envelope_designation(row["name"]):
+            stripped[rc] = "administrative envelope"
+        elif rc in _KNOWN_BOGUS_BOUNDARY_MATCHES:
+            stripped[rc] = "known bad match: " + _KNOWN_BOGUS_BOUNDARY_MATCHES[rc]
+
+    for row in matched_rows:
+        if row["ref_code"] in stripped:
+            row["area_m2"] = ""
+            row["geom_wkt"] = ""
+            row["area_frac_outside"] = ""
+
+    return stripped
+
+
 def match_parks(pota_csv: str, out_path: str) -> None:
     """Run on navi:  python3 build_places_seed.py match-parks pota.csv parks_matched.csv
 
@@ -899,14 +1145,18 @@ def match_parks(pota_csv: str, out_path: str) -> None:
     tree = STRtree(geoms)
     print(f"padus: {len(geoms)} candidate polygons loaded for matching", file=sys.stderr)
 
-    with open(pota_csv, encoding="utf-8") as fh, \
-         open(out_path, "w", newline="", encoding="utf-8") as out:
+    with open(pota_csv, encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
-        w = csv.writer(out)
-        w.writerow(SEED_FIELDS)
         matched = 0
         total = 0
         rejected_sanity = []
+        # Buffered here (rather than written straight out row-by-row, as
+        # every other stage does) so _clean_matched_park_boundaries() can
+        # see the WHOLE set of matches at once -- its duplicate-geometry
+        # check needs every row that might share one boundary before it
+        # can tell which of them, if any, really owns it. See that
+        # function's own module comment above _match_passes_sanity_check.
+        out_rows = []
         for row in reader:
             total += 1
             lat = float(row["lat"])
@@ -985,10 +1235,11 @@ def match_parks(pota_csv: str, out_path: str) -> None:
                     clipped = g
                 simplified = clipped.simplify(0.0008, preserve_topology=True)
                 geom_wkt = simplified.wkt
-            w.writerow(["park", row["reference"], name, f"{lat:.6f}", f"{lon:.6f}",
-                        POINTS["park"], "POTA/PAD-US" if best is not None else "POTA",
-                        f"{area_m2:.0f}" if area_m2 != "" else "", geom_wkt, "",
-                        f"{frac_outside:.4f}" if frac_outside != "" else ""])
+            out_rows.append({
+                "ref_code": row["reference"], "name": name, "lat": lat, "lon": lon,
+                "source": "POTA/PAD-US" if best is not None else "POTA",
+                "area_m2": area_m2, "geom_wkt": geom_wkt, "area_frac_outside": frac_outside,
+            })
         print(f"parks: {matched}/{total} matched a PAD-US boundary "
               f"({total - matched} unmatched, kept as points)", file=sys.stderr)
         if rejected_sanity:
@@ -997,6 +1248,25 @@ def match_parks(pota_csv: str, out_path: str) -> None:
                   f"name score < {MATCH_AREA_SANITY_MIN_SCORE}):", file=sys.stderr)
             for rname, rarea_km2, rscore in rejected_sanity:
                 print(f"    {rarea_km2:12.1f} km^2  score={rscore:.3f}  {rname}", file=sys.stderr)
+
+        cleaned = _clean_matched_park_boundaries(out_rows)
+        if cleaned:
+            print(f"parks: stripped {len(cleaned)} boundary match(es) in the "
+                  "post-match cleanup pass (duplicate geometry / point-scale "
+                  "designation / administrative envelope / known bad match):",
+                  file=sys.stderr)
+            by_ref = {r["ref_code"]: r for r in out_rows}
+            for ref_code, reason in sorted(cleaned.items()):
+                print(f"    {by_ref[ref_code]['name']} ({ref_code}): {reason}", file=sys.stderr)
+
+    with open(out_path, "w", newline="", encoding="utf-8") as out:
+        w = csv.writer(out)
+        w.writerow(SEED_FIELDS)
+        for r in out_rows:
+            w.writerow(["park", r["ref_code"], r["name"], f"{r['lat']:.6f}", f"{r['lon']:.6f}",
+                        POINTS["park"], r["source"],
+                        f"{r['area_m2']:.0f}" if r["area_m2"] != "" else "", r["geom_wkt"], "",
+                        f"{r['area_frac_outside']:.4f}" if r["area_frac_outside"] != "" else ""])
 
 
 # --------------------------------------------------------------------
