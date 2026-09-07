@@ -53,6 +53,7 @@ import re
 import smtplib
 import ssl
 from email.message import EmailMessage
+from email.utils import formataddr, formatdate, make_msgid
 
 from .config import settings
 
@@ -170,10 +171,28 @@ def _send_sync(to_address: str, link_url: str, purpose: str = PURPOSE_SIGN_IN) -
     sending should get the older, narrower wording rather than silence.
     """
     subject, lead = _MAIL_COPY[purpose]
+    from_address = settings.smtp_from_address
+    # The domain half of the configured sender address, used only to
+    # make the Message-ID look like it belongs to this deployment (RFC
+    # 5322 section 3.6.4 -- the right-hand side of a Message-ID is
+    # conventionally the sending domain). Never hardcode
+    # "meshwars.com" here: this is public AGPL software, and other
+    # operators run it under their own domain.
+    from_domain = from_address.rpartition("@")[2] or from_address
+
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = settings.smtp_from_address
+    # Display name form ("Display Name <address>") for readability in
+    # a mail client -- see settings.smtp_from_name's own comment in
+    # app/config.py. This is cosmetic only: the SMTP *envelope* sender
+    # (what the mail server actually signs DKIM against and what
+    # delivery routes on) is passed explicitly to send_message() below
+    # as the bare from_address, never this display-name form.
+    msg["From"] = formataddr((settings.smtp_from_name, from_address))
     msg["To"] = to_address
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=from_domain)
+    msg["X-Mailer"] = "MeshWars"
     msg.set_content(
         f"{lead}\n\n"
         f"{link_url}\n\n"
@@ -188,7 +207,14 @@ def _send_sync(to_address: str, link_url: str, purpose: str = PURPOSE_SIGN_IN) -
         with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=context, timeout=timeout) as smtp:
             if settings.smtp_username:
                 smtp.login(settings.smtp_username, settings.smtp_password)
-            smtp.send_message(msg)
+            # from_addr/to_addrs passed explicitly (rather than left
+            # for send_message() to derive from the headers) so the
+            # SMTP envelope sender is always the bare from_address,
+            # never the "Display Name <address>" form now in the From
+            # header -- the mail server signs DKIM against the
+            # envelope-from domain (rspamd use_domain = "envelope"),
+            # and that must keep matching from_address exactly.
+            smtp.send_message(msg, from_addr=from_address, to_addrs=[to_address])
     else:
         # STARTTLS -- connect plain, then upgrade before sending
         # anything sensitive (credentials, the message itself). The
@@ -199,7 +225,9 @@ def _send_sync(to_address: str, link_url: str, purpose: str = PURPOSE_SIGN_IN) -
             smtp.starttls(context=ssl.create_default_context())
             if settings.smtp_username:
                 smtp.login(settings.smtp_username, settings.smtp_password)
-            smtp.send_message(msg)
+            # See the SMTP_SSL branch above for why from_addr/to_addrs
+            # are explicit here too.
+            smtp.send_message(msg, from_addr=from_address, to_addrs=[to_address])
 
 
 async def send_magic_link_email(

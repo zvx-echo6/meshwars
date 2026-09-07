@@ -785,6 +785,15 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_address: str = "admin@meshwars.com"
 
+    # Display name shown alongside smtp_from_address in the mailed
+    # link's From header (rendered as "Display Name <address>" -- see
+    # app/email_login.py's _send_sync()). Purely cosmetic: the SMTP
+    # envelope sender used for delivery and DKIM signing stays the bare
+    # smtp_from_address, never this name. Defaults to "MeshWars" since
+    # this is public AGPL software other operators run under their own
+    # domain -- override per deployment via SMTP_FROM_NAME.
+    smtp_from_name: str = "MeshWars"
+
     # "starttls" (default -- connect on the plain-text port, typically
     # 587, then upgrade the connection via STARTTLS before sending
     # anything else) or "implicit" (TLS from the very first byte,

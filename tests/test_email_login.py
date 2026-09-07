@@ -115,17 +115,35 @@ def test_send_magic_link_email_runs_off_the_event_loop(monkeypatch):
         def login(self, *a):
             pass
 
-        def send_message(self, msg):
-            pass
+        def send_message(self, msg, from_addr=None, to_addrs=None):
+            seen["msg"] = msg
+            seen["from_addr"] = from_addr
+            seen["to_addrs"] = to_addrs
 
     monkeypatch.setattr(email_login.smtplib, "SMTP", _FakeSMTP)
     monkeypatch.setattr(settings, "smtp_host", "smtp.test")
     monkeypatch.setattr(settings, "smtp_tls_mode", "starttls")
+    monkeypatch.setattr(settings, "smtp_from_address", "admin@example.test")
+    monkeypatch.setattr(settings, "smtp_from_name", "MeshWars")
 
     _run(email_login.send_magic_link_email("dev@example.com", "https://mw.test/auth/email/callback?token=x"))
 
     assert "thread" in seen
     assert seen["thread"] is not main_thread
+
+    # The envelope sender passed explicitly to send_message() must stay
+    # the bare address -- see _send_sync()'s own comment on why: the
+    # mail server signs DKIM against the envelope-from domain, and that
+    # must keep matching smtp_from_address exactly, never the
+    # "Display Name <address>" form now in the From header.
+    assert seen["from_addr"] == "admin@example.test"
+    assert seen["to_addrs"] == ["dev@example.com"]
+
+    sent_msg = seen["msg"]
+    assert sent_msg["From"] == "MeshWars <admin@example.test>"
+    assert sent_msg["Date"] is not None
+    assert sent_msg["Message-ID"].endswith("@example.test>")
+    assert sent_msg["X-Mailer"] == "MeshWars"
 
 
 def test_send_magic_link_email_wraps_smtp_failure_in_email_send_error(monkeypatch):
