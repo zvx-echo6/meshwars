@@ -342,20 +342,22 @@ function teamName(name, team) {
 // All three overlay archives -- public lands, USFS roads/trails, and
 // the hillshade below -- now ship with the game itself (same-origin
 // /tiles/, see app/api.py's tiles_dir mount) rather than being fetched
-// from navi at runtime -- navi's archives got rebuilt in place, keeping
-// the same filename, and a browser that already held byte ranges of
-// the previous file would happily keep serving them against a file
+// cross-origin from the build host at runtime -- that host's archives
+// got rebuilt in place, keeping the same filename, and a browser that
+// already held byte ranges of the previous file would happily keep
+// serving them against a file
 // that had since changed shape underneath it. That showed up as a
 // region silently missing rather than as an error. Bump TILE_REV
 // whenever a served archive changes, so the URL changes and nothing
 // stale can survive.
 //
 // The hillshade source used to be planet-dem.pmtiles, the one archive
-// still on navi: a raw elevation DEM shaded in the browser at ~11.3MB
-// per view, ninety-five percent of the page's weight. It is now
-// meshwars-hillshade-alpha-v4.pmtiles -- finished imagery, pre-rendered
-// once across the play area at the dark theme's exaggeration -- so
-// navi is out of the runtime path entirely. This is the second bake:
+// still fetched from the build host: a raw elevation DEM shaded in the
+// browser at ~11.3MB per view, ninety-five percent of the page's
+// weight. It is now meshwars-hillshade-alpha-v4.pmtiles -- finished
+// imagery, pre-rendered once across the play area at the dark theme's
+// exaggeration -- so the build host is out of the runtime path
+// entirely. This is the second bake:
 // the first (meshwars-hillshade.pmtiles, kept on disk as a rollback)
 // stored opaque greyscale, which painted flat ground the same opaque
 // grey as a shadowed ridge and washed out the whole map. This archive
@@ -3050,7 +3052,7 @@ function watchTheme(map) {
 //   usfs roads     z6  - z14
 //   usfs trails    z6  - z14
 //   public-lands   z4  - z12
-// These floors are real limits of navi's archives (tippecanoe flags
+// These floors are real limits of the source archives (tippecanoe flags
 // baked in at build time), not a style choice, so each layer below
 // declares an explicit `minzoom` matching them, and LAYER_TOGGLES
 // carries the same numbers so the switcher greys out an entry (with a

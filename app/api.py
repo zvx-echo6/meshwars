@@ -1058,9 +1058,10 @@ def mount(app: FastAPI) -> None:
         app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
         # Terrain/overlay PMTiles archives (USFS roads+trails, public
-        # lands) -- previously fetched cross-origin from navi at runtime,
-        # which broke every time navi's archives were rebuilt in place: a
-        # browser holding byte ranges of the old file kept serving them
+        # lands) -- previously fetched cross-origin from the build host at
+        # runtime, which broke every time that host's archives were
+        # rebuilt in place: a browser holding byte ranges of the old file
+        # kept serving them
         # against a file that had since changed shape underneath it.
         # Same-origin now, so no CORS is needed. NOT a StaticFiles mount
         # -- see the module comment above tile_file() for why: the

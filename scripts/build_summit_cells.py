@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Build app/reference/summit_cells.csv -- the squares that credit a summit.
 
-RUNS ON navi (100.64.0.27), NOT on an app host: it needs the planet DEM
-at /data/nav/dem/planet-dem.pmtiles (705GB, terrarium-encoded WEBP), which
-is why the result ships precomputed instead of being derived at load time.
-Requires the `pmtiles` and `PIL` packages, both already present there.
+RUN THIS ON WHATEVER HOST HAS THE SOURCE DEM MOUNTED, not on an app host:
+it needs a global terrain DEM in PMTiles form (705GB, terrarium-encoded
+WEBP), which is why the result ships precomputed instead of being derived
+at load time. Requires the `pmtiles` and `PIL` packages.
 
-    python3 scripts/build_summit_cells.py summits.txt out.csv
+Point it at the DEM with the MW_DEM env var (see DEM_PATH below), or edit
+that constant directly if you'd rather hardcode a path for your own setup:
+
+    MW_DEM=/path/to/planet-dem.pmtiles \\
+        python3 scripts/build_summit_cells.py summits.txt out.csv
 
 `summits.txt` is "ref_code|name|lat|lon|elevation_ft" per line, taken from
 the `place` table where ref_type='summit'.
@@ -58,10 +62,17 @@ CELL_LAT, CELL_LON = 0.0027, 0.00384   # must match app/grid.py
 H_RADIUS_M = 1500.0
 V_TOL_M = 200.0
 FT = 0.3048
-DEM_PATH = os.environ.get("MW_DEM", "/data/nav/dem/planet-dem.pmtiles")
+DEM_PATH = os.environ.get("MW_DEM", "")
 
 
 def _open_dem():
+    if not DEM_PATH:
+        raise SystemExit(
+            "No DEM path set. Point MW_DEM at the planet DEM PMTiles "
+            "archive (terrarium-encoded), e.g. "
+            "MW_DEM=/path/to/planet-dem.pmtiles python3 "
+            "scripts/build_summit_cells.py ..."
+        )
     from pmtiles.reader import MmapSource, Reader
     fh = open(DEM_PATH, "rb")
     reader = Reader(MmapSource(fh))

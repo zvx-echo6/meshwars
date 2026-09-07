@@ -84,7 +84,8 @@ log = logging.getLogger("places_seed")
 
 _DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv")
 # Summit -> squares, built by scripts/build_summit_cells.py against the
-# planet DEM on navi. A summit's squares cannot be derived here the way a
+# planet DEM (see that script's docstring for where it runs). A
+# summit's squares cannot be derived here the way a
 # park's are from its boundary: the test is terrain (within 1.5km AND
 # within 200m of the summit's own elevation, plus the peak's own square), and the app host has no
 # elevation data. So it ships precomputed, same as the seed itself.
