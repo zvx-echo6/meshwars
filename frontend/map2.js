@@ -3234,6 +3234,24 @@ function setupLayerSwitcher(map) {
     const entry = { checkbox, layerIds, minZoom, row, textNode, baseText, wanted: checkbox.checked };
     entries.push(entry);
 
+    // Every layer this switcher governs is added to the style already
+    // visible (see setupOverlayLayers/setupPlacesLayer/the HILLSHADE_ID
+    // layer in main()'s style object -- none of them set an initial
+    // layout.visibility), so the checkbox's checked/unchecked markup in
+    // map2.html is not actually authoritative on its own until this runs.
+    // applyAvailability() below only touches a layer's visibility when it
+    // detects checkbox.checked !== shouldBeChecked, which is a no-op the
+    // very first time a checkbox already starts unchecked (wanted is false,
+    // shouldBeChecked is false, nothing looks changed) -- leaving an
+    // unticked box next to a layer still drawn on the map. Set the real
+    // layout visibility here, unconditionally, from the checkbox's actual
+    // starting state so an unchecked box always means a hidden layer from
+    // the very first paint.
+    const initialVisibility = checkbox.checked ? 'visible' : 'none';
+    for (const layerId of layerIds) {
+      map.setLayoutProperty(layerId, 'visibility', initialVisibility);
+    }
+
     checkbox.addEventListener('change', () => {
       entry.wanted = checkbox.checked;
       const visibility = checkbox.checked ? 'visible' : 'none';
