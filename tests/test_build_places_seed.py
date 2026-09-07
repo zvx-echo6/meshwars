@@ -200,3 +200,117 @@ def test_utility_parcel_exclusions_unaffected_by_the_school_rule():
     exre = bps._compile_exclude_park_name_re()
     for name in ("Community Garden Park", "Detention Basin Park", "Water Tower Park"):
         assert exre.search(name), name
+
+
+# ---------------------------------------------------------------------
+# PARK-SIZE SCORING (2026-09-07, "Yosemite pays the same as a pocket
+# park"): _frac_area_outside_city() replaces the centroid-in-circle test
+# for a park with a matched boundary -- see that function's own comment
+# and PARK_REMOTE_AREA_FRAC above match_parks() for the reasoning and
+# the 0.5 cutoff.
+# ---------------------------------------------------------------------
+
+from shapely.geometry import box  # noqa: E402
+
+
+def _one_anchor_bucket(lat: float, lon: float, radius_m: float) -> dict:
+    key = (bps.math.floor(lat / bps._ANCHOR_BUCKET_DEG), bps.math.floor(lon / bps._ANCHOR_BUCKET_DEG))
+    return {key: [(lat, lon, radius_m)]}
+
+
+def test_frac_area_outside_city_large_mostly_remote_park_is_mostly_outside():
+    """A big (~55km x 50km) park with only a small town's circle
+    brushing one corner of it -- almost all of its own area must fall
+    outside that circle, well past PARK_REMOTE_AREA_FRAC."""
+    big_park = box(-114.05, 43.75, -113.55, 44.25)
+    buckets = _one_anchor_bucket(43.76, -114.04, 3000.0)  # a small 3km-radius town at one corner
+    frac = bps._frac_area_outside_city(big_park, buckets)
+    assert frac > bps.PARK_REMOTE_AREA_FRAC
+    assert frac > 0.95, frac
+
+
+def test_frac_area_outside_city_large_park_entirely_inside_one_city_is_in_city():
+    """A large park (Golden Gate Park/Central Park style -- big, but
+    trivially easy to reach) sitting entirely inside one big city's own
+    circle must measure close to 0% outside, not remote just for being
+    a large polygon -- Matt was explicit that size alone must not read
+    as remote."""
+    city_park = box(-116.22, 43.59, -116.17, 43.64)
+    buckets = _one_anchor_bucket(43.615, -116.195, 20000.0)  # a 20km-radius city containing it
+    frac = bps._frac_area_outside_city(city_park, buckets)
+    assert frac < bps.PARK_REMOTE_AREA_FRAC
+    assert frac < 0.05, frac
+
+
+def test_frac_area_outside_city_no_nearby_anchor_is_fully_outside():
+    """Deep backcountry, nothing in range -- the whole park counts as
+    outside, same as _in_city_limits returning False when it finds
+    nothing nearby."""
+    remote_park = box(-114.05, 43.75, -113.55, 44.25)
+    frac = bps._frac_area_outside_city(remote_park, {})
+    assert frac == 1.0
+
+
+def test_score_points_park_with_area_frac_outside_uses_it_over_the_point_test():
+    """A park with a matched boundary (area_frac_outside populated) is
+    scored from that fraction, not the point-based in-city test -- even
+    when the row's own lat/lon sits inside a buckets anchor that would
+    otherwise say 'in city'."""
+    buckets = _one_anchor_bucket(43.6, -116.2, 50000.0)  # huge anchor covering the point below
+    row_remote = {
+        "ref_type": "park", "lat": "43.6001", "lon": "-116.2001",
+        "area_frac_outside": "0.97",
+    }
+    assert bps.score_points(row_remote, buckets) == (bps.REMOTE_POINTS["park"], "remote_by_area")
+
+    row_in_city = {
+        "ref_type": "park", "lat": "43.6001", "lon": "-116.2001",
+        "area_frac_outside": "0.10",
+    }
+    assert bps.score_points(row_in_city, buckets) == (bps.IN_CITY_POINTS, "in_city_by_area")
+
+
+def test_score_points_park_without_area_frac_outside_falls_back_to_point_test():
+    """An unmatched park (area_frac_outside == "") still uses the plain
+    point-based in-city test -- nothing regresses for the parks that
+    have no boundary to measure."""
+    buckets = _one_anchor_bucket(43.6, -116.2, 5000)
+    row = {"ref_type": "park", "lat": "43.6001", "lon": "-116.2001", "area_frac_outside": ""}
+    assert bps.score_points(row, buckets) == (bps.IN_CITY_POINTS, "in_city")
+
+
+# ---------------------------------------------------------------------
+# BOUNDARY SANITY CHECK (2026-09-07, "a roadside museum does not have a
+# 21,000 km^2 boundary"): _match_passes_sanity_check() rejects a match
+# only when BOTH the area is implausible AND the name evidence behind
+# it was weak -- see MATCH_AREA_SANITY_CEILING_M2's own comment.
+# ---------------------------------------------------------------------
+
+
+def test_match_sanity_check_rejects_huge_area_with_weak_name_score():
+    """The confirmed shipped-seed case: "Cherokee Hills Scenic Byway
+    Scenic Site" matched to the same 18,034.7 km^2 polygon as the
+    legitimate "Cherokee Wildlife Management Area", scoring only 0.25
+    on the name-token test -- must be rejected."""
+    assert not bps._match_passes_sanity_check(area_m2=18_034_700_000, name_score=0.25)
+
+
+def test_match_sanity_check_keeps_legitimate_huge_match_with_strong_name_score():
+    """Flathead National Forest's own 13,613.9 km^2 boundary, matched at
+    a near-exact name score -- must NOT be rejected just for being
+    enormous."""
+    assert bps._match_passes_sanity_check(area_m2=13_613_900_000, name_score=1.0)
+
+
+def test_match_sanity_check_keeps_small_area_even_with_weak_name_score():
+    """A weak name match on an ordinarily-sized boundary is exactly what
+    the lenient contains-branch is FOR -- the sanity check must never
+    touch a match under the area ceiling, however weak its name score."""
+    assert bps._match_passes_sanity_check(area_m2=5_000_000, name_score=0.05)
+
+
+def test_match_sanity_check_keeps_huge_area_right_at_the_score_boundary():
+    """MATCH_AREA_SANITY_MIN_SCORE (0.5) is inclusive -- a match scoring
+    exactly 0.5 is not weak evidence and must not be rejected."""
+    assert bps._match_passes_sanity_check(
+        area_m2=bps.MATCH_AREA_SANITY_CEILING_M2 * 2, name_score=bps.MATCH_AREA_SANITY_MIN_SCORE)
