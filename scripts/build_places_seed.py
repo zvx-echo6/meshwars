@@ -694,6 +694,43 @@ def _name_score(a: str, b: str) -> float:
 # in particular. See this change's own commit message for that number.
 PARK_REMOTE_AREA_FRAC = 0.5
 
+# Diagnostic counters only -- never read by scoring logic itself, just
+# by callers (the recompute pass, tests) that want to know how often
+# _frac_area_outside_city had to repair an invalid geometry or, worse,
+# still hit a GEOSException after repairing -- see that function's own
+# "INVALID GEOMETRY" comment. Single-element lists so a caller that
+# imports these by name still sees future mutations (a plain int would
+# be re-bound, not shared).
+GEOS_REPAIR_COUNT = [0]
+GEOS_FALLBACK_COUNT = [0]
+
+
+# CLIPPED-GEOMETRY GUARD (added 2026-09-07, "Humboldt-Toiyabe National
+# Forest went 25 -> 5 on a re-rate pass"): match_parks() stores geom
+# clipped to a ~6km buffer around the park's own point (see that clip's
+# own comment) -- fine for the geometry's original purpose (map
+# display near where someone actually stood), fatal if fed back into
+# _frac_area_outside_city as if it were the whole park. A park's own
+# `area_m2` column is untouched by the clip (it comes straight from
+# PAD-US's GIS_Acres, not from the stored geometry), so a clipped row
+# is caught by comparing the two: if the row's real area is far bigger
+# than what its stored geometry's own bounding box could possibly
+# contain, that geometry cannot be the whole park and must not be
+# trusted for this test. Ratio 1.5x is deliberately loose (a real,
+# unclipped, irregularly-shaped park's bbox is often 1.2-1.4x its own
+# area already, from the bbox padding around a non-rectangular shape)
+# -- this is a clipped/not-clipped gate, not a shape-tightness
+# measurement. The 20 km^2 floor exists so an honestly small, honestly
+# irregular park's bbox padding alone can't trip it.
+CLIPPED_GEOM_AREA_RATIO = 1.5
+CLIPPED_GEOM_MIN_AREA_M2 = 20e6  # 20 km^2
+
+
+class ClippedGeometryError(ValueError):
+    """Raised by _frac_area_outside_city when true_area_m2 says the
+    geometry it was handed cannot be the whole park -- see
+    CLIPPED_GEOM_AREA_RATIO's own comment above."""
+
 
 def _anchors_near_bbox(minlon: float, minlat: float, maxlon: float, maxlat: float,
                         buckets: dict) -> list:
@@ -739,7 +776,47 @@ def _local_aeqd_transform(lon0: float, lat0: float):
     return osr.CoordinateTransformation(src, local)
 
 
-def _frac_area_outside_city(geom, buckets: dict) -> float:
+def _bbox_anchor_shortcut(minlon: float, minlat: float, maxlon: float, maxlat: float,
+                           anchors: list) -> float | None:
+    """Cheap pre-check against a park's plain lon/lat bounding box,
+    before _frac_area_outside_city pays for a real AEQD projection plus
+    a shapely union/intersection over its (sometimes very large,
+    sometimes just plain invalid -- see that function's own comment)
+    polygon. Two cases need no geometry work at all to answer
+    correctly, using nothing but haversine distance:
+
+      - The bbox is entirely within a SINGLE anchor's circle (every
+        corner within its radius) -- the polygon it bounds is a subset
+        of the bbox, so it is entirely inside that circle too. Fully
+        covered, fraction 0.0.
+      - EVERY anchor's circle falls short of the bbox entirely (not
+        even the nearest point on the bbox to that anchor is within
+        its radius) -- the polygon cannot touch any of them either.
+        Fully outside, fraction 1.0.
+
+    Anything else -- some anchor's circle clips the bbox but does not
+    swallow it whole -- is genuinely ambiguous without looking at the
+    real shape, so this returns None and the caller falls through to
+    the full computation. Corner/nearest-point distances use plain
+    haversine on the lon/lat box, not a geodesically exact rectangle
+    distance -- an approximation, like the rest of this pipeline's
+    short-range distance math, but a safe one here: it only ever
+    short-circuits the two unambiguous cases above, never invents a
+    fraction in between."""
+    corners = [(minlat, minlon), (minlat, maxlon), (maxlat, minlon), (maxlat, maxlon)]
+    any_anchor_reaches = False
+    for a_lat, a_lon, radius_m in anchors:
+        farthest = max(_haversine_m(a_lat, a_lon, clat, clon) for clat, clon in corners)
+        if farthest <= radius_m:
+            return 0.0
+        near_lat = min(max(a_lat, minlat), maxlat)
+        near_lon = min(max(a_lon, minlon), maxlon)
+        if _haversine_m(a_lat, a_lon, near_lat, near_lon) <= radius_m:
+            any_anchor_reaches = True
+    return None if any_anchor_reaches else 1.0
+
+
+def _frac_area_outside_city(geom, buckets: dict, true_area_m2: float | None = None) -> float:
     """Fraction (0.0-1.0) of geom's own area that lies outside every
     nearby Census-place circle from app/reference/places.csv -- see
     PARK_REMOTE_AREA_FRAC above for what this feeds into. geom must be
@@ -747,20 +824,74 @@ def _frac_area_outside_city(geom, buckets: dict) -> float:
     own 6 km clip comment for why a clipped geometry cannot be used
     here.
 
-    Projects geom and every candidate anchor into a local azimuthal-
-    equidistant plane centred on geom's own centroid (see
+    true_area_m2 (optional -- match_parks()/fetch_padus_parks() never
+    need to pass it, since they call this on the full polygon before
+    it is ever clipped) is the row's own independently-known real area
+    (PAD-US's GIS_Acres, unaffected by any storage clip). When given,
+    this refuses to answer at all -- raising ClippedGeometryError
+    rather than a confident, wrong fraction -- if geom's own bounding
+    box could not possibly contain an area that large: see
+    CLIPPED_GEOM_AREA_RATIO's own comment for why and the exact test.
+    This is what stands between a caller that (against this function's
+    own advice above) feeds it a clipped `geom` column read back out of
+    the shipped CSV, and a repeat of the Humboldt-Toiyabe National
+    Forest failure -- a 12,976 km^2 forest whose clipped ~80 km^2
+    storage window happened to sit inside a nearby city's circle,
+    scoring the whole forest in-city on nothing but that fragment.
+
+    _bbox_anchor_shortcut above answers most rows for the cost of a
+    few haversine calls -- deep backcountry (no anchor in reach at
+    all) and a park that sits nowhere near a circle's edge both need
+    no real geometry work. Only a park whose bbox genuinely straddles
+    an anchor circle's boundary falls through to the rest of this
+    function: project geom and every candidate anchor into a local
+    azimuthal-equidistant plane centred on geom's own centroid (see
     _local_aeqd_transform) so each anchor's circle is a true circle in
-    real metres, then measures how much of geom's area that union of
+    real metres, then measure how much of geom's area that union of
     circles fails to cover. No nearby anchor at all (deep backcountry,
     nothing in reach) counts as the whole park being outside -- same as
-    _in_city_limits returning False when it finds nothing in range."""
+    _in_city_limits returning False when it finds nothing in range.
+
+    INVALID GEOMETRY (added 2026-09-07, "one malformed PAD-US polygon
+    killed a 77,000-row re-rate pass at row 30,000"): a park's stored
+    boundary can be self-intersecting -- either inherited from PAD-US
+    itself, or introduced by match_parks()'s own simplify() despite
+    preserve_topology=True, which does not guarantee validity, only
+    that it tries to preserve it. The reprojection into local AEQD
+    coordinates can carry that invalidity (or introduce fresh
+    self-intersections of its own from floating-point drift) into
+    geom_local, and shapely's intersection() raises GEOSException
+    ("side location conflict") rather than returning a wrong answer
+    when it hits one. shapely.make_valid() repairs both operands
+    before the intersection runs; on the rare case where GEOS still
+    can't resolve it, this falls back to the same point-in-circle test
+    _in_city_limits uses everywhere else, applied to geom's own
+    centroid -- fully in (0.0) or fully out (1.0), never a real
+    fraction, since there is no reliable area left to measure. That
+    fallback is logged by score_points()'s own caller in the recompute
+    pass, keyed by ref_code -- this function has no ref_code to name."""
     import shapely
+    from shapely.errors import GEOSException
     from shapely.ops import transform as shapely_transform
 
     minlon, minlat, maxlon, maxlat = geom.bounds
+
+    if true_area_m2 is not None and true_area_m2 > CLIPPED_GEOM_MIN_AREA_M2:
+        bbox_area_m2 = _bbox_area_m2([minlat, maxlat], [minlon, maxlon])
+        if true_area_m2 > CLIPPED_GEOM_AREA_RATIO * bbox_area_m2:
+            raise ClippedGeometryError(
+                f"geom bbox ({bbox_area_m2/1e6:.1f} km^2) cannot hold a "
+                f"{true_area_m2/1e6:.1f} km^2 park -- this geometry is a "
+                "storage clip, not the whole boundary"
+            )
+
     anchors = _anchors_near_bbox(minlon, minlat, maxlon, maxlat, buckets)
     if not anchors:
         return 1.0
+
+    shortcut = _bbox_anchor_shortcut(minlon, minlat, maxlon, maxlat, anchors)
+    if shortcut is not None:
+        return shortcut
 
     centroid = geom.centroid
     xform = _local_aeqd_transform(centroid.x, centroid.y)
@@ -770,6 +901,9 @@ def _frac_area_outside_city(geom, buckets: dict) -> float:
         return (px, py)
 
     geom_local = shapely_transform(_proj, geom)
+    if not geom_local.is_valid:
+        geom_local = shapely.make_valid(geom_local)
+        GEOS_REPAIR_COUNT[0] += 1
     area = geom_local.area
     if area <= 0:
         return 0.0
@@ -777,7 +911,18 @@ def _frac_area_outside_city(geom, buckets: dict) -> float:
     circles = [shapely.Point(_proj(lon, lat)).buffer(radius_m, quad_segs=32)
                for lat, lon, radius_m in anchors]
     covered = shapely.unary_union(circles)
-    inside = geom_local.intersection(covered).area
+    if not covered.is_valid:
+        covered = shapely.make_valid(covered)
+        GEOS_REPAIR_COUNT[0] += 1
+
+    try:
+        inside = geom_local.intersection(covered).area
+    except GEOSException:
+        GEOS_FALLBACK_COUNT[0] += 1
+        for a_lat, a_lon, radius_m in anchors:
+            if _haversine_m(centroid.y, centroid.x, a_lat, a_lon) <= radius_m:
+                return 0.0
+        return 1.0
     return max(0.0, min(1.0, 1.0 - inside / area))
 
 

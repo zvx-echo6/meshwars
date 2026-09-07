@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import build_places_seed as bps  # noqa: E402
@@ -249,6 +251,70 @@ def test_frac_area_outside_city_no_nearby_anchor_is_fully_outside():
     remote_park = box(-114.05, 43.75, -113.55, 44.25)
     frac = bps._frac_area_outside_city(remote_park, {})
     assert frac == 1.0
+
+
+def test_frac_area_outside_city_invalid_geometry_does_not_raise():
+    """A self-intersecting ('bowtie') polygon -- PAD-US ships a handful
+    of these, and match_parks()'s own simplify() can introduce fresh
+    ones despite preserve_topology=True -- must not blow up a recompute
+    pass with a GEOSException (a real 77,000-row re-rate died at row
+    30,000 on exactly this before the make_valid()/fallback repair was
+    added). Uses the same small anchor circle brushing one corner as
+    the mostly-remote case above -- not fully covered, not fully
+    missed -- so the bbox shortcut can't answer it and the real
+    repair-then-intersect (or centroid-fallback) path actually runs."""
+    from shapely.geometry import Polygon
+
+    bowtie = Polygon([(-114.05, 43.75), (-113.55, 44.25), (-114.05, 44.25), (-113.55, 43.75)])
+    assert not bowtie.is_valid
+    buckets = _one_anchor_bucket(43.76, -114.04, 3000.0)
+    frac = bps._frac_area_outside_city(bowtie, buckets)
+    assert 0.0 <= frac <= 1.0
+
+
+# ---------------------------------------------------------------------
+# CLIPPED-GEOMETRY GUARD (2026-09-07, "Humboldt-Toiyabe National Forest
+# went 25 -> 5 on a re-rate pass"): match_parks() stores geom clipped
+# to a ~6km window around the park's own point; feeding that clipped
+# window back into _frac_area_outside_city as if it were the whole
+# park (as a CSV-patch recompute pass, run without PAD-US access to
+# regenerate the true boundary, is tempted to do) silently mis-scores
+# any park bigger than that window. true_area_m2 is the guard against
+# exactly that -- see CLIPPED_GEOM_AREA_RATIO's own comment.
+# ---------------------------------------------------------------------
+
+
+def test_frac_area_outside_city_refuses_a_clipped_geometry():
+    """A small (~8km x 12km) stored geometry standing in for a park
+    whose real area is 12,976 km^2 (Humboldt-Toiyabe National Forest's
+    actual size) must be refused outright, not scored as if that
+    fragment were the whole park."""
+    clipped_window = box(-119.913, 39.498, -119.826, 39.606)
+    buckets = _one_anchor_bucket(39.55, -119.87, 50000.0)  # a big anchor swallowing the fragment whole
+    with pytest.raises(bps.ClippedGeometryError):
+        bps._frac_area_outside_city(clipped_window, buckets, true_area_m2=12_976e6)
+
+
+def test_frac_area_outside_city_accepts_a_genuinely_small_park():
+    """A real, honestly small/irregular park (well under the 20 km^2
+    floor, and under the 1.5x ratio even above it) must NOT trip the
+    guard just for having a bbox somewhat larger than its own area --
+    an irregular shape's bbox padding is normal, not a clip artifact."""
+    small_park = box(-116.001, 43.599, -115.999, 43.601)  # ~0.05 km^2 bbox
+    buckets = _one_anchor_bucket(43.6, -116.0, 5000.0)
+    frac = bps._frac_area_outside_city(small_park, buckets, true_area_m2=30_000.0)  # 0.03 km^2
+    assert 0.0 <= frac <= 1.0
+
+
+def test_frac_area_outside_city_no_true_area_skips_the_guard():
+    """true_area_m2 defaults to None -- match_parks()/fetch_padus_parks()
+    call this on the full, pre-clip polygon and never pass it, so the
+    guard must stay off by default rather than requiring every real
+    call site to thread an extra argument through."""
+    clipped_window = box(-119.913, 39.498, -119.826, 39.606)
+    buckets = _one_anchor_bucket(39.55, -119.87, 50000.0)
+    frac = bps._frac_area_outside_city(clipped_window, buckets)
+    assert 0.0 <= frac <= 1.0
 
 
 def test_score_points_park_with_area_frac_outside_uses_it_over_the_point_test():

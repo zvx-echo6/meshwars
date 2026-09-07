@@ -148,3 +148,63 @@ def test_anchorage_now_covered_nationally():
 def test_non_us_city_correctly_reads_remote():
     name, lat, lon = NON_US_CITY
     assert places.is_outside_town(lat, lon) is True
+
+
+# ---------------------------------------------------------------------
+# Seed-level regression: the anchor tests above cover app/places.py's
+# runtime lookup, but the actual scored value a player sees lives in
+# app/reference/places_worth_going.csv's `points` column, baked in at
+# seed-build time (see docs/features/places.md's "Values and the cap").
+# That column does not automatically follow an anchor-set change --
+# it took an explicit re-rate pass (2026-09-07) to bring the shipped
+# seed in line with the widened anchor set this file tests, and
+# nothing stops a future anchor change from shipping without a
+# matching re-rate. This reads the real seed CSV directly (a plain
+# csv.DictReader over ~77k rows, not a places_seed.load_places_seed()
+# call -- that loader's own tests avoid the real file because a full
+# load's park-boundary geometry work takes on the order of a minute;
+# this only needs one row's two columns) so a future regeneration that
+# reverts to the old anchor set, or otherwise forgets to re-rate,
+# fails here instead of silently shipping Golden Gate Park as "remote"
+# again.
+# ---------------------------------------------------------------------
+
+import csv
+import os
+
+_SEED_CSV_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "app", "reference", "places_worth_going.csv"
+)
+
+
+def _seed_row(ref_code: str) -> dict:
+    with open(_SEED_CSV_PATH, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            if row["ref_code"] == ref_code:
+                return row
+    raise AssertionError(f"{ref_code} not found in {_SEED_CSV_PATH}")
+
+
+def test_golden_gate_park_seed_rates_in_city():
+    """Golden Gate Park (PADUS-181249) is a large PAD-US-matched park
+    that used to score the flat remote rate (25) under the old
+    place-only anchor set -- its own centre point/whole shape sits
+    comfortably inside San Francisco, but the pre-urban-area anchor
+    model missed it the same way it missed San Francisco generally
+    (see this file's module docstring). Post re-rate it must land at
+    the in-city rate (5) via the whole-park area-fraction test."""
+    row = _seed_row("PADUS-181249")
+    assert row["name"] == "Golden Gate Park"
+    assert row["points"] == "5"
+    assert row["points_reason"] == "in_city_by_area"
+
+
+def test_alcatraz_seed_rates_in_city():
+    """Alcatraz Island National Historic Site (US-7888) has no matched
+    PAD-US boundary, so it is scored by the plain point test rather
+    than the area-fraction one -- a different code path than Golden
+    Gate Park above, worth covering separately."""
+    row = _seed_row("US-7888")
+    assert row["name"] == "Alcatraz Island National Historic Site"
+    assert row["points"] == "5"
+    assert row["points_reason"] == "in_city"
