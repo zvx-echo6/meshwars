@@ -98,6 +98,7 @@ from .email_login import format_notice_timestamp
 from .mc_ingest import hash_secret
 from .node_ref import normalize_node_ref, normalize_public_key
 from .sessions import SessionPrincipal, optional_session
+from .traffic import build_traffic_report
 
 log = logging.getLogger("admin_api")
 
@@ -526,6 +527,44 @@ async def admin_accounts(request: Request):
                 "last_login_at": a["last_login_at"],
             })
         return out
+    finally:
+        conn.close()
+
+
+@router.get("/api/admin/traffic")
+async def admin_traffic(request: Request, days: int = 30):
+    """Page views, unique visitors, and new-visitor counts for the admin
+    panel's traffic tab -- see app/traffic.py's own module docstring and
+    build_traffic_report() for the full reasoning (salted-hash identity,
+    the content-type rule that decides what counts as a page view, and
+    why bot hits are recorded but walled off from every human figure).
+
+    `days` (default 30, clamped to [1, 365] inside build_traffic_report
+    itself, so an out-of-range value here is never a 400 -- it is just
+    clamped to the nearest valid window) selects how many trailing days
+    (today inclusive) the `daily`/`top_paths`/`top_referrers` sections
+    cover. Response shape:
+
+        {
+          "today":  {"views": int, "uniques": int, "new_visitors": int, "bot_views": int},
+          "daily":  [{"day": "YYYY-MM-DD", "views": int, "uniques": int,
+                      "new_visitors": int, "bot_views": int}, ...],  # ascending, zero-filled
+          "top_paths":     [{"path": str, "views": int}, ...],       # up to 10, human hits only
+          "top_referrers": [{"referrer": str, "views": int}, ...],   # up to 10, human hits only
+          "since": "YYYY-MM-DD",  # earliest day this deployment has ANY recorded traffic data
+        }
+
+    Read-only, so this uses the same `need="admin"` default _role_guard()
+    default every other GET in this file uses -- an admin can see this,
+    not only an operator.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+
+    conn = connect()
+    try:
+        return build_traffic_report(conn, days)
     finally:
         conn.close()
 
