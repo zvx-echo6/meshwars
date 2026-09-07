@@ -1096,12 +1096,15 @@ _DEFAULT_PLACES_CSV = os.path.join(
 # builds below, in degrees. Must be bigger than the largest possible
 # search radius in EITHER direction so a 3x3-bucket neighbourhood around
 # a place's own bucket can never miss a real match. The largest anchor
-# radius in app/reference/places.csv is ~25.3km; converting that to
-# degrees of longitude (the more demanding direction, since a degree of
-# longitude covers fewer metres than a degree of latitude everywhere
-# except the equator) at this play area's northernmost latitude (49.29N,
-# cos ~0.652) gives ~0.35 degrees -- 1.0 degree buckets leave a wide,
-# deliberate margin over that, not a tight fit.
+# radius in app/reference/places.csv is ~38.0km (2026-09-07: place file
+# grew a second row source, Census urban areas, to close a coverage gap
+# -- see scripts/build_places_csv.py's module docstring; was ~25.3km
+# with place rows alone). Converting 38.0km to degrees of longitude (the
+# more demanding direction, since a degree of longitude covers fewer
+# metres than a degree of latitude everywhere except the equator) at
+# this play area's northernmost latitude (49.29N, cos ~0.652) gives
+# ~0.52 degrees -- 1.0 degree buckets still leave a wide, deliberate
+# margin over that, not a tight fit.
 _ANCHOR_BUCKET_DEG = 1.0
 
 
