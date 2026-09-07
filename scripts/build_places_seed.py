@@ -1095,16 +1095,25 @@ _DEFAULT_PLACES_CSV = os.path.join(
 # Anchor bucket size for the coarse spatial index _load_city_anchors
 # builds below, in degrees. Must be bigger than the largest possible
 # search radius in EITHER direction so a 3x3-bucket neighbourhood around
-# a place's own bucket can never miss a real match. The largest anchor
-# radius in app/reference/places.csv is ~38.0km (2026-09-07: place file
-# grew a second row source, Census urban areas, to close a coverage gap
-# -- see scripts/build_places_csv.py's module docstring; was ~25.3km
-# with place rows alone). Converting 38.0km to degrees of longitude (the
-# more demanding direction, since a degree of longitude covers fewer
-# metres than a degree of latitude everywhere except the equator) at
-# this play area's northernmost latitude (49.29N, cos ~0.652) gives
-# ~0.52 degrees -- 1.0 degree buckets still leave a wide, deliberate
-# margin over that, not a tight fit.
+# a place's own bucket can never miss a real match. Converting a radius
+# to degrees of longitude (the more demanding direction, since a degree
+# of longitude covers fewer metres than a degree of latitude everywhere
+# except the equator, and covers less the further from the equator you
+# are) depends on the anchor's OWN latitude, so this can't be checked
+# by radius alone -- 2026-09-07 (place file went from the western play
+# area only to the full 50 states + DC, see scripts/build_places_csv.py's
+# module docstring) measured the worst radius/latitude ratio across
+# every anchor in the actual file rather than assuming the largest
+# radius is also the worst case: 0.81 degrees, from a ~47.2km-radius
+# Alaska anchor at 58.4N (cos ~0.526) -- New York's own anchor is
+# larger in absolute terms (~51.7km) but sits at a low enough latitude
+# (40.7N, cos ~0.758) that it converts to a smaller 0.61 degrees. Both,
+# and every other anchor checked, land comfortably under the 1.0 degree
+# bucket size -- this script's own candidate queries never leave the
+# western play area (NORTH/SOUTH/WEST/EAST above are unchanged), so
+# only anchors near that area could actually matter to a lookup here,
+# but the property was verified against the whole file rather than
+# trusting that argument alone.
 _ANCHOR_BUCKET_DEG = 1.0
 
 
