@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""SUPERSEDED (2026-09-07) -- DO NOT WIRE IN, DO NOT DELETE YET.
+"""SUPERSEDED AND DEAD (2026-09-07) -- the replacement landed; DO NOT
+WIRE IN, DO NOT DELETE YET.
 
 This script's population-based radius formula (see FORMULA below) was
 measured against 6,378 US cities with known Census areas (comparing
@@ -10,14 +11,19 @@ not predict a city's physical extent well enough for this to be more
 than a stopgap -- the Boise/SLC/Denver 3-city sanity check below looked
 defensible, but 6,378 cities tell a different story than 3 do.
 
-REPLACEMENT IN PROGRESS: a hybrid approach -- Census areas inside the
-US (app/reference/places.csv, unchanged and unaffected by any of this),
-OpenStreetMap administrative boundaries outside the US -- is being
-built now to replace this file's non-US rows. It is not on disk yet.
-Until it lands: this script and app/reference/places_global.csv stay
-exactly as they are (neither is wired into merge()'s default -- see
-"NOT wired in" below, still true), kept only as the last-resort
-fallback, not deleted, not upgraded to a default.
+REPLACEMENT LANDED (2026-09-07, same day): the hybrid approach --
+Census areas inside the US, OpenStreetMap administrative boundaries
+outside it -- described below as "in progress" has been built and
+merged directly into app/reference/places.csv itself (see
+scripts/build_places_osm_anchors.py), NOT into a separate
+places_global.csv the way this script's own output was. app/places.py's
+Frontier award and build_places_seed.py's score_points() in-city test
+both read app/reference/places.csv already, by default, with no code
+changes -- so the replacement is live for both the instant that file
+changed, without ever calling anything in this script. This script and
+its output (app/reference/places_global.csv) are now fully dead: kept
+only as a historical fallback per the instruction below, not deleted,
+not upgraded to a default (there is no default left to upgrade it to).
 
 Builds app/reference/places_global.csv -- worldwide city anchors for
 scripts/build_places_seed.py's merge stage (score_points()'s in-city

@@ -41,6 +41,19 @@ future regeneration that drops the urban-area stage, reintroduces a
 bbox/play-area filter, or otherwise shrinks coverage fails loudly here
 instead of silently shipping "remote" landmarks in the middle of
 downtown San Francisco (or New Orleans, or Orlando) again.
+
+WORLDWIDE EXPANSION (2026-09-07, scripts/build_places_osm_anchors.py):
+the anchor set is no longer US-only -- every non-US place used to read
+"remote" by default (Census is a US-only source), which was wrong once
+the game went worldwide. The US side above is completely unchanged
+(same Census rows, same tests); the new WORLD_CITIES coverage below
+guards the added OpenStreetMap side the same way -- a future
+regeneration that drops the OSM stage, reintroduces a US-only scope, or
+otherwise loses non-US coverage fails loudly here instead of silently
+shipping "remote" for London or Tokyo again. NON_US_CITY (the negative
+control) changed from Toronto to Point Nemo for exactly this reason:
+Toronto is now correctly covered by a real OSM anchor, so it stopped
+being a valid "nothing anchors here" control.
 """
 from __future__ import annotations
 
@@ -74,15 +87,49 @@ EASTERN_CITIES = [
 
 COVERED_CITIES = WESTERN_CITIES + EASTERN_CITIES
 
-# A genuine negative control: outside the US entirely, so Census data
-# (US-only) has nothing to anchor near it under any scope this file has
-# ever used. Reading as remote here is correct, not a miss -- non-US
-# anchors are a separate, not-yet-made scope decision (see
-# scripts/build_places_csv.py's "OUT OF SCOPE, DELIBERATELY"). Note
-# this is NOT Anchorage: Alaska is one of the 50 states, so now that
-# the anchor set is national (not play-area-bboxed), Anchorage is
-# correctly covered -- see test_anchorage_now_covered_nationally below.
-NON_US_CITY = ("Toronto, ON, Canada", 43.6532, -79.3832)
+# Added 2026-09-07, worldwide expansion (scripts/build_places_osm_anchors.py):
+# a spread of major non-US cities across every inhabited continent,
+# confirmed covered by the real shipped file. Deliberately excludes a
+# handful of major cities (Mumbai, Cairo, Johannesburg, Stockholm,
+# Reykjavik) that are KNOWN, understood misses under the current OSM
+# classification rule -- in each case a real, well-populated place=city
+# node exists, but the containing administrative boundary in OSM is
+# named differently from the city's common name (e.g. Mumbai's node
+# sits inside a boundary named "Greater Mumbai"/"Brihanmumbai", not
+# "Mumbai"), so the exact-normalized-name-match rule never connects
+# them. That is a real, reported limitation of the classification rule,
+# not something this test should paper over by asserting coverage that
+# does not exist.
+WORLD_CITIES = [
+    ("London, UK", 51.5074, -0.1278),
+    ("Paris, France", 48.8566, 2.3522),
+    ("Tokyo, Japan", 35.6762, 139.6503),
+    ("Berlin, Germany", 52.5200, 13.4050),
+    ("Madrid, Spain", 40.4168, -3.7038),
+    ("Rome, Italy", 41.9028, 12.4964),
+    ("Sydney, Australia", -33.8688, 151.2093),
+    ("Toronto, Canada", 43.6532, -79.3832),
+    ("Mexico City, Mexico", 19.4326, -99.1332),
+    ("Sao Paulo, Brazil", -23.5505, -46.6333),
+    ("Buenos Aires, Argentina", -34.6037, -58.3816),
+    ("Delhi, India", 28.7041, 77.1025),
+    ("Shanghai, China", 31.2304, 121.4737),
+    ("Seoul, South Korea", 37.5665, 126.9780),
+    ("Nairobi, Kenya", -1.2921, 36.8219),
+    ("Istanbul, Turkey", 41.0082, 28.9784),
+    ("Moscow, Russia", 55.7558, 37.6173),
+    ("Auckland, New Zealand", -36.8485, 174.7633),
+]
+
+# A genuine negative control: literally the farthest point on Earth
+# from any land -- "Point Nemo", the oceanic pole of inaccessibility in
+# the South Pacific, ~2,700km from the nearest coastline in any
+# direction. Reading as remote here is correct under any anchor set
+# this file could ever hold, worldwide expansion included -- unlike the
+# old control (Toronto), which stopped being valid the moment the OSM
+# expansion correctly gave Toronto a real anchor (see
+# test_toronto_specifically_covered_by_worldwide_expansion below).
+NON_US_CITY = ("Point Nemo (oceanic pole of inaccessibility)", -48.876, -123.393)
 
 
 def test_places_data_loaded():
@@ -148,6 +195,36 @@ def test_anchorage_now_covered_nationally():
 def test_non_us_city_correctly_reads_remote():
     name, lat, lon = NON_US_CITY
     assert places.is_outside_town(lat, lon) is True
+
+
+def test_world_cities_are_covered():
+    """Guards the OSM (non-US) side of the 2026-09-07 worldwide
+    expansion the same way test_major_cities_are_covered guards the US
+    Census side -- a regeneration that drops the OSM stage, reverts to
+    a US-only scope, or otherwise loses non-US coverage fails loudly
+    here instead of silently shipping "remote" for London or Tokyo."""
+    failures = []
+    for name, lat, lon in WORLD_CITIES:
+        if places.is_outside_town(lat, lon):
+            dist = places.distance_to_nearest_town_m(lat, lon)
+            failures.append(f"{name}: distance to nearest anchor edge = {dist:.0f}m")
+    assert not failures, "these world cities read as outside every anchor circle:\n" + "\n".join(failures)
+
+
+def test_toronto_specifically_covered_by_worldwide_expansion():
+    """A first attempt at the US-exclusion test (three lat/lon bounding
+    boxes for CONUS/Alaska/Hawaii) measured wrong here: Toronto sits
+    inside a CONUS-shaped box because the US-Canada border is not a
+    rectangle -- Canada's populated strip east of Minnesota (Toronto,
+    Ottawa, Montreal) sits well south of the 49th parallel, squarely in
+    that box's latitude band. The bbox silently dropped Toronto's real
+    OSM anchor entirely. Real point-in-polygon containment against
+    OSM's own "United States" country boundary (see
+    scripts/build_places_osm_anchors.py) has no such failure mode --
+    this pins Toronto specifically so that regression cannot recur
+    silently."""
+    lat, lon = 43.6532, -79.3832
+    assert places.distance_to_nearest_town_m(lat, lon) == 0.0
 
 
 # ---------------------------------------------------------------------
