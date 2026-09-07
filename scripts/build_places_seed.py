@@ -788,7 +788,11 @@ def match_parks(pota_csv: str, out_path: str) -> None:
 # false positive the acreage floor cannot: community gardens and
 # single-purpose utility parcels (detention/retention basins, water
 # towers, substations, lift/pump stations, rights-of-way) that PAD-US's
-# LP designation also sweeps in even at a normal park's size.
+# LP designation also sweeps in even at a normal park's size -- and
+# (added 2026-09-07) elementary-and-below campuses school districts
+# register as their own local parks; see _ExcludeParkName below for the
+# details and the DROP-before-KEEP ordering that keeps a junior high,
+# senior high, or college on the board while an elementary comes off.
 LOCAL_PARK_DESIGNATIONS = {"LP", "LREC"}
 LOCAL_PARK_MANAGER_TYPES = {"LOC", "DIST"}
 # RAISED 2026-08-24 from an initial 0.1 acre: the 0.1 floor kept every
@@ -803,15 +807,101 @@ LOCAL_PARK_MANAGER_TYPES = {"LOC", "DIST"}
 MIN_PARK_ACRES = 1.0  # ~43,560 sq ft -- below this is a sliver, not a park
 
 
+_UTILITY_EXCLUDE_RE_SRC = (
+    r"community\s+garden|detention|retention\s*(basin|pond)?|stormwater|"
+    r"water\s+tower|\btank\b|substation|lift\s+station|pump\s+station|"
+    r"right.?of.?way|\beasement\b|parking\s+(lot|structure|garage)|"
+    r"comfort\s+station|maintenance\s+(yard|facility|shop)"
+)
+
+# ELEMENTARY SCHOOL EXCLUSION (added 2026-09-07, Matt's decision;
+# NARROWED same day after the reachable-ring credit change landed --
+# see below) -- school districts register plenty of their own campuses
+# as PAD-US "local parks" (Des_Tp LP/LREC; see the comment above
+# MIN_PARK_ACRES). An elementary-and-below campus is not a destination
+# worth sending a player to stand outside of with an antenna, so
+# elementary, primary, grade-school, K-6/K-8, and pre-K/preschool
+# campuses come off the board.
+#
+# Junior high, middle school, senior high, college, and university
+# campuses STAY -- the original 2026-09-07 cut also dropped junior
+# high/middle school, but Matt reversed that part the same day once
+# the reachable-ring credit change (see app/places_seed.py's
+# REACHABLE-RING CREDIT note) meant a school now credits from the
+# public sidewalk outside its fence, not just from standing on campus.
+# That removed the actual objection (sending a player onto school
+# grounds) for every grade EXCEPT the youngest, where a lone kid-height
+# fence line still isn't a place worth routing a game to. Confirmed
+# case: "West Junior High School" (Boise, PADUS-84489) must survive
+# this filter.
+_SCHOOL_DROP_RE_SRC = (
+    r"\belem(?:entary)?\b|primary\s+school|grade\s+school|"
+    r"\bk-?[68]\b|preschool|pre-?k\b|intermediate\s+school"
+)
+_SCHOOL_KEEP_RE_SRC = (
+    r"junior\s+high|jr\.?\s*high|\bjh\b|middle\s+school|"
+    r"senior\s+high|high\s+school|\buniversity\b|\bcollege\b|"
+    r"\binstitute\b|\bseminary\b"
+)
+
+
+class _ExcludeParkName:
+    """Callable predicate, `.search(name)` (same interface as a
+    compiled `re.Pattern`, so the one call site below does not need to
+    know this isn't a single regex) -- True if a PAD-US local-park name
+    should be dropped from the seed.
+
+    Three buckets, checked in this exact ORDER (order matters -- see
+    below):
+
+      1. DROP: an elementary-and-below school name (_SCHOOL_DROP_RE).
+      2. KEEP: a junior high, middle school, senior high, college,
+         university, institute, or seminary (_SCHOOL_KEEP_RE) --
+         explicit rather than relying on the default below, so the
+         classification is legible and testable as three buckets, not
+         two.
+      3. Everything else falls through to the ORIGINAL utility-parcel
+         exclusion (community garden, detention basin, water tower,
+         substation, lift/pump station, right-of-way, easement, parking
+         structure, maintenance yard) -- unrelated to schools, unchanged
+         since before this addition.
+
+    Anything none of the above classifies -- the common case -- is
+    KEPT by default. That default matters: most names this cannot
+    classify are real parks that merely happen to be NAMED after a
+    school ("Blackwell School National Park", "Elgin School House State
+    Park", "Galloway School Park") rather than being a school campus
+    itself. Deleting a national park to remove an elementary school is a
+    much worse error than the reverse.
+
+    ORDER MATTERS between (1) and (2), even though the DROP and KEEP
+    word lists no longer share an obvious substring the way the
+    original (wider) cut did: a real combined campus can still be named
+    something like "Lincoln Elementary and Middle School", which
+    matches BOTH "elementary" (DROP) and "middle school" (KEEP) as
+    substrings of the same name. DROP is tested first so a campus that
+    is even PARTLY elementary-and-below still comes off the board,
+    rather than a later-grade word in the same name accidentally
+    rescuing it. (tests/test_build_places_seed.py pins this ordering
+    down directly.)
+    """
+
+    def __init__(self):
+        import re
+        self._school_drop_re = re.compile(_SCHOOL_DROP_RE_SRC, re.IGNORECASE)
+        self._school_keep_re = re.compile(_SCHOOL_KEEP_RE_SRC, re.IGNORECASE)
+        self._utility_exclude_re = re.compile(_UTILITY_EXCLUDE_RE_SRC, re.IGNORECASE)
+
+    def search(self, name: str) -> bool:
+        if self._school_drop_re.search(name):
+            return True
+        if self._school_keep_re.search(name):
+            return False
+        return bool(self._utility_exclude_re.search(name))
+
+
 def _compile_exclude_park_name_re():
-    import re
-    return re.compile(
-        r"community\s+garden|detention|retention\s*(basin|pond)?|stormwater|"
-        r"water\s+tower|\btank\b|substation|lift\s+station|pump\s+station|"
-        r"right.?of.?way|\beasement\b|parking\s+(lot|structure|garage)|"
-        r"comfort\s+station|maintenance\s+(yard|facility|shop)",
-        re.IGNORECASE,
-    )
+    return _ExcludeParkName()
 
 
 # ~500 m -- same "hand-entered centre point can land just outside its

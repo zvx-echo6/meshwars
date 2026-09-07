@@ -94,3 +94,109 @@ def test_score_points_remote_park_and_landmark_unaffected():
     landmark_row = {"ref_type": "landmark", "lat": "44.1", "lon": "-113.8"}
     assert bps.score_points(park_row, buckets) == (25, "remote")
     assert bps.score_points(landmark_row, buckets) == (10, "remote")
+
+
+# ---------------------------------------------------------------------
+# _compile_exclude_park_name_re(): elementary-and-below schools come off
+# the board (2026-09-07, Matt's decision, narrowed the same day to spare
+# junior high/middle school once the reachable-ring credit change made a
+# school creditable from the public sidewalk outside its fence -- see
+# docs/features/places.md and app/places_seed.py's REACHABLE-RING CREDIT
+# note). Junior high, middle school, senior high, college, and
+# university names all stay; only elementary-and-below comes off.
+# ---------------------------------------------------------------------
+
+
+def test_elementary_school_park_name_is_excluded():
+    exre = bps._compile_exclude_park_name_re()
+    for name in (
+        "Lincoln Elementary School",
+        "Roosevelt Elem",
+        "Franklin Intermediate School",
+        "Sunrise Grade School",
+        "Lincoln K-8 School",
+        "Lincoln K-6 School",
+        "Little Learners Preschool",
+        "Sunshine Pre-K Center",
+        "Willamette Primary School",
+    ):
+        assert exre.search(name), name
+
+
+def test_junior_high_and_middle_school_park_names_are_kept():
+    """Reversed same day as the original cut -- see the module comment
+    above _SCHOOL_DROP_RE_SRC for why junior high/middle school no
+    longer come off."""
+    exre = bps._compile_exclude_park_name_re()
+    for name in (
+        "Whitman Junior High School",
+        "Whitman Jr High",
+        "Whitman Jr. High School",
+        "Lewis & Clark Middle School",
+    ):
+        assert not exre.search(name), name
+
+
+def test_west_junior_high_school_survives_the_filter():
+    """The confirming case Matt named directly: a real PAD-US row
+    (Boise, PADUS-84489, 0.12 km^2, 5 points) that the original wider
+    cut would have dropped and the narrowed rule must keep."""
+    exre = bps._compile_exclude_park_name_re()
+    assert not exre.search("West Junior High School")
+
+
+def test_senior_high_college_university_park_names_are_kept():
+    exre = bps._compile_exclude_park_name_re()
+    for name in (
+        "Boise Senior High School",
+        "Capital High School",
+        "Boise State University",
+        "North Idaho College",
+        "Idaho Fish and Game Institute",
+        "Seminary Oaks Park",
+    ):
+        assert not exre.search(name), name
+
+
+def test_unclassifiable_school_named_park_defaults_to_kept():
+    """Most names this filter cannot resolve either way are real parks
+    that merely happen to be NAMED after a school, not a school campus
+    itself -- deleting a national park to catch an elementary school
+    would be a far worse mistake than the reverse, so these must default
+    to kept."""
+    exre = bps._compile_exclude_park_name_re()
+    for name in (
+        "Blackwell School National Park",
+        "Elgin School House State Park",
+        "Galloway School Park",
+    ):
+        assert not exre.search(name), name
+
+
+def test_drop_is_evaluated_before_keep_for_a_combined_campus_name():
+    """ORDERING TEST -- the specific bug this must not regress. A real
+    combined campus can be named e.g. "Lincoln Elementary and Middle
+    School": it matches BOTH the DROP pattern ("elementary") and the
+    KEEP pattern ("middle school") as substrings of the very same name.
+    If KEEP were (wrongly) checked before DROP, this name would match
+    "middle school" and get kept outright, before the elementary-grade
+    word ever had a chance to exclude it. DROP must be evaluated first
+    so a campus that is even partly elementary-and-below still comes
+    off the board.
+    """
+    exre = bps._compile_exclude_park_name_re()
+    name = "Lincoln Elementary and Middle School"
+    import re
+    assert re.search(bps._SCHOOL_DROP_RE_SRC, name, re.IGNORECASE), \
+        "test fixture must actually match the DROP pattern"
+    assert re.search(bps._SCHOOL_KEEP_RE_SRC, name, re.IGNORECASE), \
+        "test fixture must actually match the KEEP pattern too -- otherwise this isn't testing ordering"
+    assert exre.search(name), "DROP must win when a name matches both patterns"
+
+
+def test_utility_parcel_exclusions_unaffected_by_the_school_rule():
+    """The original, unrelated exclusions (community gardens, utility
+    parcels) must still work exactly as before."""
+    exre = bps._compile_exclude_park_name_re()
+    for name in ("Community Garden Park", "Detention Basin Park", "Water Tower Park"):
+        assert exre.search(name), name

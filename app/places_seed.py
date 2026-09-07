@@ -51,12 +51,13 @@ filter, POTA-to-PAD-US matching (scripts/build_places_seed.py's
 match_parks()) found a boundary for roughly 61%; the rest have
 area_m2/geom NULL. This loader does not treat "unmatched" as "small":
 an unmatched park is loaded with rotates=0 (always active, never
-rotating) and scores its point's own cell like a landmark, exactly the
+rotating) and scores a 3x3 block of cells around its point, exactly the
 same containment rule a genuinely-smaller-than-a-cell matched park gets
--- but for a different reason. A matched park scores by the >50%
-boundary rule instead, but ONLY if its boundary is at least one grid
-cell in area; a matched park smaller than a cell also falls back to
-scoring its point's own cell, same as an unmatched one.
+-- but for a different reason. A matched park scores by the any-
+intersection-plus-one-ring rule instead (see the REACHABLE-RING CREDIT
+note below), but ONLY if its boundary is at least one grid cell in
+area; a matched park smaller than a cell also falls back to the same
+3x3 point block, same as an unmatched one.
 
 Why unmatched parks are permanent rather than rotating: rotates=1 is
 supposed to mean "this is a small, town-scale destination", and a
@@ -78,7 +79,7 @@ import time
 from shapely import wkt as shapely_wkt
 from shapely.geometry import MultiPolygon, Polygon, box as shapely_box
 
-from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
+from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, cell_indices, distance_m
 
 log = logging.getLogger("places_seed")
 
@@ -156,7 +157,39 @@ US_SOTA_ASSOCIATIONS = frozenset({
     "W9",
 })
 
-_MIN_OVERLAP_FRACTION = 0.5  # ">50% inside the boundary"
+# REACHABLE-RING CREDIT (changed 2026-09-07, "reward the trip, not the
+# trespass") -- credit zones used to be pure geometry: a point place
+# scored only the single cell its point fell in (uncapturable if that
+# point sits inside a fence -- a school playground, say), and a
+# boundary-matched park scored only cells more than 50% INSIDE the
+# boundary, which for something like Rocky Mountain Arsenal National
+# Wildlife Refuge (60 km^2, mostly closed to the public) excluded the
+# entire reachable perimeter along with the real interior. Matt's
+# framing: "they can't ENTER it but they still WENT to it" -- someone
+# standing at the fence line, the trailhead, or the visitor centre made
+# the trip even where they cannot legally cross the line, and the game
+# should credit that.
+#
+# Now every place's credit zone is expanded outward by one ring of
+# cells (see _ring_expand below) from its base geometry test, EXCEPT
+# summits -- a SOTA activation requires physically standing on the
+# summit itself, which is the entire point of that game mode, so
+# summits keep their own single square (or terrain-qualified set, see
+# _load_summit_cells) with no ring added.
+def _ring_expand(cells: set[str]) -> set[str]:
+    """`cells` plus every cell adjacent to one of them, including
+    diagonally -- one ring of cells added outward from the set. A pure
+    index computation over cell ids (see app/grid.cell_indices), not a
+    second geometry pass, so it is cheap even for a set with tens of
+    thousands of cells (the largest boundary-matched parks).
+    """
+    expanded: set[str] = set(cells)
+    for cid in cells:
+        lat_idx, lon_idx = cell_indices(cid)
+        for d_lat in (-1, 0, 1):
+            for d_lon in (-1, 0, 1):
+                expanded.add(f"{lat_idx + d_lat}_{lon_idx + d_lon}")
+    return expanded
 
 # SUMMIT/LANDMARK DOUBLE-DIP FILTER (added 2026-08-25) -- some SOTA
 # summits carry a fire lookout, and OSM separately maps that lookout as
@@ -320,23 +353,28 @@ def _cell_area_m2(lat: float) -> float:
     """Area in m^2 of the grid cell containing latitude `lat`. Longitude
     degrees compress toward the poles (cos(lat)); latitude degrees do
     not -- same model app/grid.py's fixed-degree cell already uses, just
-    converted to an area for the >50%-of-a-cell size test."""
+    converted to an area for the "is this park at least one cell in
+    area" size test."""
     lat_m = CELL_LAT_DEG * _METERS_PER_DEG_LAT
     lon_m = CELL_LON_DEG * _METERS_PER_DEG_LAT * math.cos(math.radians(lat))
     return lat_m * lon_m
 
 
-def _park_cells(geom: Polygon | MultiPolygon, lat: float) -> set[str]:
-    """Cell ids where more than half the CELL's own area lies inside
-    `geom`. Walked per polygon part of a MultiPolygon (a national forest
-    made of scattered units, say) rather than over the union's bounding
-    box, so the empty ground between distant parts is never iterated.
+def _park_cells(geom: Polygon | MultiPolygon) -> set[str]:
+    """Cell ids whose area intersects `geom` AT ALL (changed 2026-09-07
+    from ">50% inside the boundary" -- see the REACHABLE-RING CREDIT
+    note above _ring_expand for why). Walked per polygon part of a
+    MultiPolygon (a national forest made of scattered units, say)
+    rather than over the union's bounding box, so the empty ground
+    between distant parts is never iterated.
 
-    The fraction compares CELL area to CELL area (both in raw degree^2
-    units, never converted to meters) -- a ratio of two areas that share
-    the same local longitude compression cancels it out, so no metric
-    conversion is needed here the way _cell_area_m2 needs one to compare
-    against an absolute size in meters.
+    This is the base set only -- the caller (load_places_seed) still
+    runs it through _ring_expand() to add one ring of cells outward, so
+    the reachable perimeter (anyone standing just outside the boundary)
+    credits too, not just the sliver of cells the polygon itself
+    touches. No longer needs `lat`: the old area-ratio test compared
+    cell area to cell area at a given latitude, but a plain
+    intersects() test has no area comparison left to make.
     """
     parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
     cells: set[str] = set()
@@ -349,10 +387,7 @@ def _park_cells(geom: Polygon | MultiPolygon, lat: float) -> set[str]:
                 cid = f"{lat_idx}_{lon_idx}"
                 south, west, north, east = cell_bounds(cid)
                 cell_poly = shapely_box(west, south, east, north)
-                inter = cell_poly.intersection(part)
-                if inter.is_empty:
-                    continue
-                if (inter.area / cell_poly.area) > _MIN_OVERLAP_FRACTION:
+                if cell_poly.intersects(part):
                     cells.add(cid)
     return cells
 
@@ -425,9 +460,10 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         "kept": {"summit": 0, "park": 0, "landmark": 0},
         # Of kept parks: matched a PAD-US boundary at all, vs not.
         "park_matched": 0, "park_unmatched": 0,
-        # Of the MATCHED ones only: at/above one grid cell (scores by
-        # the >50% rule, always active) vs below one cell (scores its
-        # point, rotates like a landmark).
+        # Of the MATCHED ones only: at/above one grid cell (scores any
+        # intersecting cell plus one ring outward, always active) vs
+        # below one cell (scores a 3x3 point block, rotates like a
+        # landmark).
         "park_matched_larger": 0, "park_matched_smaller": 0,
         # Reconcile outcome: rows flipped active->inactive this pass
         # because they were not present in this load at all (never
@@ -557,25 +593,31 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                 if ref_type == "park":
                     if geom_wkt and area_m2 is not None and area_m2 >= _cell_area_m2(lat):
                         # Matched boundary at or above one grid cell:
-                        # score by the >50%-of-cell rule, always active.
+                        # score any cell the boundary intersects at all,
+                        # PLUS one ring of cells outward from that set --
+                        # see the REACHABLE-RING CREDIT note above
+                        # _ring_expand. Always active.
                         geom = shapely_wkt.loads(geom_wkt)
-                        cells = _park_cells(geom, lat)
+                        cells = _ring_expand(_park_cells(geom))
                         rotates = False
                         stats["park_matched"] += 1
                         stats["park_matched_larger"] += 1
                         if not cells:
-                            # Boundary matched but no cell clears 50% (a
-                            # sliver, or a simplification artifact) --
-                            # fall back to the point so the park is not
-                            # silently unscoreable.
-                            cells = {cell_id(lat, lon)}
+                            # Boundary matched but the polygon touches no
+                            # cell at all (a sliver, or a simplification
+                            # artifact) -- fall back to the point's own
+                            # ring so the park is not silently
+                            # unscoreable.
+                            cells = _ring_expand({cell_id(lat, lon)})
                     else:
                         # Either unmatched (no boundary at all) or
                         # matched but smaller than one cell -- both
-                        # score their point's own cell. Unmatched stays
+                        # score a 3x3 block around their point (the
+                        # point's own cell plus its ring), same reachable
+                        # rule a landmark gets below. Unmatched stays
                         # permanent (rotates=False); a genuinely small
                         # matched park rotates like a landmark.
-                        cells = {cell_id(lat, lon)}
+                        cells = _ring_expand({cell_id(lat, lon)})
                         if geom_wkt and area_m2 is not None:
                             stats["park_matched"] += 1
                             stats["park_matched_smaller"] += 1
@@ -589,9 +631,21 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                     # is absent or has no row for this summit -- which is
                     # exactly the behaviour summits had before, so a
                     # missing artifact degrades rather than breaks.
+                    # Deliberately NOT ring-expanded (unlike every other
+                    # ref_type, see the REACHABLE-RING CREDIT note above
+                    # _ring_expand): a SOTA activation requires physically
+                    # reaching the summit, and that is the point of the
+                    # game mode.
                     cells = summit_cells.get(row["ref_code"]) or {cell_id(lat, lon)}
                 else:
-                    cells = {cell_id(lat, lon)}
+                    # Landmark: the point's own cell plus one ring around
+                    # it (a 3x3 block) -- see the REACHABLE-RING CREDIT
+                    # note above _ring_expand. A landmark's point can
+                    # land inside a fence (a school, private property)
+                    # with no boundary data at all to test against, so
+                    # the ring is the only way this game credits the
+                    # sidewalk outside it.
+                    cells = _ring_expand({cell_id(lat, lon)})
 
                 stats["kept"][ref_type] += 1
 
