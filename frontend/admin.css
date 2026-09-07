@@ -304,6 +304,15 @@ body {
 .adm-body {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
+  /* Named areas, not left to auto-placement -- .adm-nav and the
+     ".adm-traffic" sidebar block (admin.html, directly below the nav's
+     closing tag) share column 1 stacked in two rows, while .adm-main
+     keeps spanning both of those rows in column 2 exactly as it did
+     when there were only two children here. Auto-placement alone would
+     instead lay the three children out left-to-right, top-to-bottom --
+     nav, then the traffic block, THEN main -- shoving main into the
+     narrow 180px column on row two. */
+  grid-template-areas: "nav main" "traffic main";
   gap: 0;
   max-width: 1180px;
   margin: 0 auto;
@@ -315,6 +324,7 @@ body {
    directly under the topbar rather than under the topbar's old
    pre-nav position. */
 .adm-nav {
+  grid-area: nav;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -361,7 +371,112 @@ body {
 .adm-nav-item.active .adm-nav-badge { color: var(--mw-gold); }
 .adm-nav-badge.adm-nav-badge-bad { color: var(--adm-bad-text); }
 
-.adm-main { padding: 18px 22px 80px; }
+/* ---- traffic (sidebar) -------------------------------------------------
+   A small persistent stat block directly under the section nav -- not a
+   section itself, so it carries none of .adm-h2/.adm-nav-item's
+   trappings. See admin.js's loadTraffic()/renderTraffic()/trafficChart()
+   for what fills it in, and this stylesheet's own top-of-file rule
+   (colours only ever come from a --mw-*/--adm-* token, never a literal
+   hex) for why every colour below is one of those, unchanged, so every
+   skin -- including neon -- restyles this the same way it restyles
+   everything else on the page. */
+.adm-traffic {
+  grid-area: traffic;
+  padding: 14px 10px 20px;
+  border-right: 1px solid var(--mw-line);
+}
+
+/* Deliberately quieter than .adm-h2/.adm-h3 -- this is not a section
+   heading, and should not read as one next to Overview/Players/etc. in
+   the nav just above it. */
+.adm-traffic-h {
+  margin: 0 0 8px;
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+}
+
+.adm-traffic-hero {
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: var(--mw-text-1);
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.adm-traffic-sub {
+  font-size: 0.75rem;
+  color: var(--mw-text-6);
+  margin: 2px 0 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.adm-traffic-chart-wrap {
+  position: relative;
+  width: 100%;
+}
+
+/* width:100% + a fixed pixel height is what preserveAspectRatio="none"
+   (set on the element itself in trafficChart()) stretches to -- the
+   viewBox's 300x44 units then map onto whatever width this sidebar
+   column actually has. */
+.adm-traffic-chart {
+  display: block;
+  width: 100%;
+  height: 44px;
+}
+
+.adm-traffic-line {
+  fill: none;
+  stroke: var(--mw-accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.adm-traffic-line-dot { fill: var(--mw-accent); }
+
+/* Recessive on purpose -- the only thing drawn behind the line itself;
+   no gridlines, no axis ticks. */
+.adm-traffic-baseline { stroke: var(--mw-line); stroke-width: 1; }
+
+.adm-traffic-hoverline { stroke: var(--mw-line-strong); stroke-width: 1; }
+
+.adm-traffic-hoverdot {
+  fill: var(--mw-accent);
+  stroke: var(--mw-ink);
+  stroke-width: 1;
+}
+
+.adm-traffic-tip {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  transform: translateX(-50%);
+  background: var(--mw-raised);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 0.6875rem;
+  color: var(--mw-text-2);
+  white-space: nowrap;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  /* Above the chart's own hover dot/crosshair and anything else in the
+     sidebar column, never above the topbar/nav (both un-positioned or
+     using their own much larger stacking context). */
+  z-index: 1;
+}
+
+.adm-traffic-note {
+  margin: 8px 0 0;
+  font-size: 0.6875rem;
+  color: var(--mw-text-6);
+  line-height: 1.4;
+}
+
+.adm-main { grid-area: main; padding: 18px 22px 80px; }
 
 .adm-h2 {
   font-size: 1.25rem;
@@ -447,7 +562,14 @@ body {
      mobile width, so an unwrappable string anywhere in main was
      stretching the whole column, and the sidebar along with it, past
      the viewport on Nets/Paint/Players. */
-  .adm-body { grid-template-columns: minmax(0, 1fr); }
+  .adm-body {
+    grid-template-columns: minmax(0, 1fr);
+    /* One column now, so the desktop "nav main" / "traffic main" areas
+       (a two-column shape) no longer apply -- restacked single-file:
+       nav, then the traffic block, then main, matching the same order
+       they already appear in admin.html. */
+    grid-template-areas: "nav" "traffic" "main";
+  }
   .adm-nav {
     flex-direction: row;
     flex-wrap: wrap;
@@ -457,6 +579,7 @@ body {
     max-height: none;
     padding: 10px;
   }
+  .adm-traffic { border-right: 0; border-bottom: 1px solid var(--mw-line); }
   .adm-main { padding: 16px 14px 60px; }
 }
 

@@ -367,6 +367,205 @@ function renderSeasons(boards) {
   });
 }
 
+// ---- traffic (sidebar) -------------------------------------------------
+// A small persistent stat block under the section nav, not a section of
+// its own -- Matt was explicit: no new nav entry, visible regardless of
+// which section is open. Loaded once alongside everything else in
+// refreshAll() below, same as loadOverview()/loadPlayers()/etc.
+//
+// See app/traffic.py's own module docstring for what GET
+// /api/admin/traffic counts (salted-hash identity, the content-type
+// rule for what is a page view, bot hits walled off from every human
+// figure) -- this file only renders the aggregate that route already
+// computed server-side.
+
+async function loadTraffic() {
+  const host = document.getElementById('traffic-body');
+  try {
+    const d = await api('/api/admin/traffic?days=30');
+    renderTraffic(host, d);
+  } catch (e) {
+    // A stat panel with nothing to show is not the kind of failure
+    // that should steal the status line from whatever the operator is
+    // actually doing, or take the rest of the panel down with it --
+    // see api()'s own comment on why 401/403 already routed elsewhere
+    // above this catch ever runs. One quiet line, nothing thrown.
+    host.replaceChildren(el('p', { className: 'adm-hint', text: 'Traffic unavailable' }));
+  }
+}
+
+function renderTraffic(host, d) {
+  host.replaceChildren();
+
+  const daily = d.daily || [];
+  // build_traffic_report() always zero-fills one entry per day in the
+  // window (app/traffic.py), so this is never actually an empty array
+  // for the fixed ?days=30 above -- it is here as a floor under a
+  // response shape this file does not control, not a case expected to
+  // fire in practice.
+  if (!daily.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No data yet' }));
+    return;
+  }
+
+  // The case that WILL fire, right after this ships: every zero-filled
+  // day is genuinely zero because there is no recorded traffic at all
+  // yet. Distinct from a flat but nonzero trend (a steady few visitors
+  // a day for a month), which is real data and gets the chart, just
+  // drawn flat -- see trafficChart()'s own `range === 0` handling.
+  const totalRecorded = daily.reduce((sum, r) => sum + r.views + r.bot_views, 0);
+  if (totalRecorded === 0) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No data yet' }));
+    return;
+  }
+
+  const today = d.today || { uniques: 0, new_visitors: 0, views: 0 };
+  host.appendChild(el('div', { className: 'adm-traffic-hero', text: String(today.uniques) }));
+  host.appendChild(el('div', {
+    className: 'adm-traffic-sub',
+    text: today.new_visitors + ' new · ' + today.views + ' views',
+  }));
+
+  host.appendChild(trafficChart(daily));
+
+  host.appendChild(el('p', {
+    className: 'adm-traffic-note',
+    text: 'Bots excluded · since ' + d.since,
+  }));
+}
+
+// Hand-written inline SVG, no chart library -- one series (unique
+// visitors/day) so no legend either; the heading above already names
+// it. Coordinates are drawn in a fixed viewBox and stretched to the
+// sidebar's actual width by preserveAspectRatio="none" on the <svg>
+// itself (set in CSS via width:100%), so the hit-test math below works
+// entirely in viewBox units and never has to read the element's
+// rendered size except once, in getBoundingClientRect(), to convert a
+// mouse position back into that same space.
+function trafficChart(daily) {
+  const W = 300, H = 44, PAD_X = 4, PAD_Y = 5;
+  const NS = 'http://www.w3.org/2000/svg';
+
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('class', 'adm-traffic-chart');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label',
+    'Daily unique visitors, last ' + daily.length + ' days');
+
+  const values = daily.map((r) => r.uniques);
+  const min = Math.min.apply(null, values);
+  const max = Math.max.apply(null, values);
+  // A flat series -- every day the same count -- has no range to
+  // normalise a y-position against; dividing by (max - min) would
+  // divide by zero. Drawn as a flat line at mid-height instead of
+  // collapsing onto the baseline, which would otherwise misread a
+  // healthy, steady site as "zero all month".
+  const range = max - min;
+
+  const points = daily.map((r, i) => ({
+    x: daily.length === 1 ? W / 2 : PAD_X + (i / (daily.length - 1)) * (W - PAD_X * 2),
+    y: range === 0 ? H / 2 : PAD_Y + (1 - (r.uniques - min) / range) * (H - PAD_Y * 2),
+    row: r,
+  }));
+
+  // Baseline -- a single recessive rule, nothing else drawn behind the
+  // line (no gridlines, no axes, per the project's chart standard).
+  const base = document.createElementNS(NS, 'line');
+  base.setAttribute('x1', '0');
+  base.setAttribute('x2', String(W));
+  base.setAttribute('y1', String(H - 1));
+  base.setAttribute('y2', String(H - 1));
+  base.setAttribute('class', 'adm-traffic-baseline');
+  svg.appendChild(base);
+
+  if (points.length === 1) {
+    // One day of data -- a line needs two points, so this is a single
+    // dot rather than a degenerate/invisible path.
+    const dot = document.createElementNS(NS, 'circle');
+    dot.setAttribute('cx', String(points[0].x));
+    dot.setAttribute('cy', String(points[0].y));
+    dot.setAttribute('r', '3.5');
+    dot.setAttribute('class', 'adm-traffic-line-dot');
+    svg.appendChild(dot);
+  } else {
+    const path = document.createElementNS(NS, 'path');
+    const dAttr = points
+      .map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(2) + ',' + p.y.toFixed(2))
+      .join(' ');
+    path.setAttribute('d', dAttr);
+    path.setAttribute('class', 'adm-traffic-line');
+    svg.appendChild(path);
+  }
+
+  // Hover furniture -- crosshair, dot, and the rect that carries the
+  // mousemove listener -- built once here and toggled in showAt()/hide()
+  // below, rather than created and torn down on every move.
+  const hoverLine = document.createElementNS(NS, 'line');
+  hoverLine.setAttribute('y1', '0');
+  hoverLine.setAttribute('y2', String(H));
+  hoverLine.setAttribute('class', 'adm-traffic-hoverline');
+  hoverLine.style.display = 'none';
+  svg.appendChild(hoverLine);
+
+  const hoverDot = document.createElementNS(NS, 'circle');
+  hoverDot.setAttribute('r', '3.5');
+  hoverDot.setAttribute('class', 'adm-traffic-hoverdot');
+  hoverDot.style.display = 'none';
+  svg.appendChild(hoverDot);
+
+  // The hit target is the full SVG height, not the 2px line -- a
+  // transparent rect covering the whole viewBox carries the listener so
+  // the pointer never has to land on the line itself.
+  const hit = document.createElementNS(NS, 'rect');
+  hit.setAttribute('x', '0');
+  hit.setAttribute('y', '0');
+  hit.setAttribute('width', String(W));
+  hit.setAttribute('height', String(H));
+  hit.setAttribute('fill', 'transparent');
+  svg.appendChild(hit);
+
+  const wrap = el('div', { className: 'adm-traffic-chart-wrap' });
+  const tip = el('div', { className: 'adm-traffic-tip' });
+  tip.hidden = true;
+  wrap.appendChild(svg);
+  wrap.appendChild(tip);
+
+  function showAt(i) {
+    const p = points[i];
+    hoverLine.setAttribute('x1', String(p.x));
+    hoverLine.setAttribute('x2', String(p.x));
+    hoverLine.style.display = '';
+    hoverDot.setAttribute('cx', String(p.x));
+    hoverDot.setAttribute('cy', String(p.y));
+    hoverDot.style.display = '';
+    tip.hidden = false;
+    tip.textContent = p.row.day + ' — ' + p.row.uniques + ' unique, ' + p.row.new_visitors + ' new';
+    // Positioned as a percentage of the wrap's own width, not a fixed
+    // pixel offset -- the SVG is stretched to the sidebar's real width
+    // by preserveAspectRatio="none", so only a fraction of the viewBox
+    // x-coordinate carries over correctly.
+    tip.style.left = ((p.x / W) * 100) + '%';
+  }
+
+  function hide() {
+    hoverLine.style.display = 'none';
+    hoverDot.style.display = 'none';
+    tip.hidden = true;
+  }
+
+  svg.addEventListener('mousemove', (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const frac = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
+    const idx = Math.round(frac * (points.length - 1));
+    showAt(Math.max(0, Math.min(points.length - 1, idx)));
+  });
+  svg.addEventListener('mouseleave', hide);
+
+  return wrap;
+}
+
 // ---- players ----------------------------------------------------------
 
 function renderRadio(p, r) {
@@ -1709,6 +1908,7 @@ function badge(id, value, bad) {
 async function refreshAll() {
   const loads = [
     loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
+    loadTraffic(),
   ];
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
