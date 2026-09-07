@@ -117,6 +117,24 @@
         <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
       </nav>
 
+      <!-- Compact, persistent traffic summary -- NOT a section: no
+           data-section attribute, no nav-item, no nav-badge. Matt was
+           explicit that this stays a small sidebar block, visible under
+           the section nav regardless of which section is open, not a
+           new admin surface. Its own grid area ("traffic", set on
+           .adm-body in admin.css) puts it directly below .adm-nav in
+           the sidebar column while .adm-main keeps spanning both rows
+           on the right. Populated by admin.js's loadTraffic() /
+           renderTraffic() / trafficChart() -- see those for the trend
+           chart and its zero/one-day/flat-data handling, and
+           app/traffic.py for what GET /api/admin/traffic counts. -->
+      <div class="adm-traffic" id="traffic-panel">
+        <h3 class="adm-traffic-h">Traffic</h3>
+        <div id="traffic-body">
+          <p class="adm-hint">Loading&hellip;</p>
+        </div>
+      </div>
+
       <main class="adm-main">
 
         <section class="adm-section" data-section="overview">

@@ -155,6 +155,9 @@
 
           <h3 id="store-positions">Positions</h3>
           <p>Each ping updates your last known position; it overwrites the previous one rather than piling up a history. Pings and repeater credit are stored at roughly 300-metre grid-cell resolution, not exact coordinates, and are deleted 48 hours after they're recorded. An earlier table that held finer-grained position tied to radio identity was found in an audit and dropped outright &mdash; it no longer exists in any form.</p>
+
+          <h3 id="store-traffic">Site traffic</h3>
+          <p>This one applies to every visitor to meshwars.com, not just players. The site counts page views so the operator can see how many people are looking at it. What it stores is a salted, one-way hash of your address and browser together &mdash; never the address itself, never the browser string itself, and there's no way to turn the hash back into either. That hash is kept for 90 days and used only to produce aggregate counts: page views, how many distinct visitors showed up, and how many of those were new. Automated traffic (search crawlers, uptime monitors, and the like) is recognised and counted separately, never mixed into the visitor numbers above.</p>
         </section>
 
         <section id="kept-forever">
@@ -172,6 +175,7 @@
               <tr><th>Message buffer</th><td>48 hours</td></tr>
               <tr><th>Duplicate-detection ledger</th><td>72 hours</td></tr>
               <tr><th>Unresolved check-in sender log</th><td>60 days</td></tr>
+              <tr><th>Site traffic hashes</th><td>90 days</td></tr>
               <tr><th>Sign-in tickets and two-factor challenges</th><td>consumed, or expired and swept</td></tr>
               <tr><th>Dead session rows (signed out, revoked or expired)</th><td>swept about an hour later</td></tr>
             </tbody>
@@ -202,7 +206,7 @@
             <li><strong>Sign-in providers</strong> (Google, GitHub, Discord) &mdash; they receive only what a sign-in requires, and return your subject id, email and verified flag. Nothing else comes back, and nothing else is kept.</li>
             <li><strong>Email</strong> &mdash; sent through an SMTP server the operator configures. A sign-in email contains only the sign-in link.</li>
           </ul>
-          <p>There is no analytics or telemetry of any kind in the backend.</p>
+          <p>There is no third-party analytics or telemetry of any kind in the backend. Page-view counting (see &ldquo;Site traffic&rdquo; above) is done entirely in-house on this server &mdash; nothing about your visit is sent to an outside service to make it work.</p>
         </section>
 
         <section id="cookies">
@@ -211,7 +215,7 @@
           <p>The only thing MeshWars keeps in your browser's local storage is whether you've dismissed a notice, tagged to that notice's version. There is no identity of any kind in it.</p>
         </section>
 
-        <p class="rules-footnote">Last reviewed 2026-09-04.</p>
+        <p class="rules-footnote">Last reviewed 2026-09-07.</p>
 
       </div>
     </div>
