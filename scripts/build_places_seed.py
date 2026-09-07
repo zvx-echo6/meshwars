@@ -1811,28 +1811,52 @@ _DEFAULT_PLACES_CSV = os.path.join(
 )
 
 # Anchor bucket size for the coarse spatial index _load_city_anchors
-# builds below, in degrees. Must be bigger than the largest possible
-# search radius in EITHER direction so a 3x3-bucket neighbourhood around
-# a place's own bucket can never miss a real match. Converting a radius
-# to degrees of longitude (the more demanding direction, since a degree
-# of longitude covers fewer metres than a degree of latitude everywhere
-# except the equator, and covers less the further from the equator you
-# are) depends on the anchor's OWN latitude, so this can't be checked
-# by radius alone -- 2026-09-07 (place file went from the western play
-# area only to the full 50 states + DC, see scripts/build_places_csv.py's
-# module docstring) measured the worst radius/latitude ratio across
-# every anchor in the actual file rather than assuming the largest
-# radius is also the worst case: 0.81 degrees, from a ~47.2km-radius
-# Alaska anchor at 58.4N (cos ~0.526) -- New York's own anchor is
-# larger in absolute terms (~51.7km) but sits at a low enough latitude
-# (40.7N, cos ~0.758) that it converts to a smaller 0.61 degrees. Both,
-# and every other anchor checked, land comfortably under the 1.0 degree
-# bucket size -- this script's own candidate queries never leave the
-# western play area (NORTH/SOUTH/WEST/EAST above are unchanged), so
-# only anchors near that area could actually matter to a lookup here,
-# but the property was verified against the whole file rather than
-# trusting that argument alone.
+# builds below, in degrees -- purely an INDEXING granularity (how far
+# apart two buckets are), not a search-window guarantee (see
+# _in_city_limits below for that, which used to conflate the two). Must
+# be bigger than the largest anchor's own radius converted to degrees of
+# longitude AT THAT ANCHOR'S OWN LATITUDE, so no anchor's circle can
+# reach past its immediate neighbouring bucket. Converting a radius to
+# degrees of longitude depends on latitude (a degree of longitude covers
+# fewer metres than a degree of latitude everywhere except the equator,
+# and covers less the further from the equator you are), so this was
+# checked against every anchor in the actual file rather than assuming
+# the largest radius is also the worst case: 0.81 degrees, from a
+# ~47.2km-radius Alaska anchor at 58.4N (cos ~0.526) -- New York's own
+# anchor is larger in absolute terms (~51.7km) but sits at a low enough
+# latitude (40.7N, cos ~0.758) that it converts to a smaller 0.61
+# degrees. Both, and every other anchor checked, land comfortably under
+# the 1.0 degree bucket size.
+#
+# STALE ASSUMPTION REMOVED (2026-09-07): this comment used to also lean
+# on "this script's own candidate queries never leave the western play
+# area" to justify scanning a fixed 3x3 neighbourhood of buckets around
+# the QUERY point. That is a claim about the QUERY's own latitude --
+# a different question from the anchor-indexing one above -- and it
+# went false the moment fetch_sota()/fetch_pota()/extract_landmarks()
+# stopped bbox-filtering to that play area (see the module's "WORLDWIDE
+# EXPANSION" note): a landmark or park can now be scored anywhere on
+# Earth, including genuinely high-latitude places (Alaska, Scandinavia,
+# northern Canada, Patagonia) where a degree of longitude shrinks well
+# below the ~80km/degree the old fixed +-1-bucket window assumed.
+# _in_city_limits below no longer leans on that assumption at all: it
+# derives its own search window per query from the query's OWN latitude
+# and the largest anchor radius actually loaded (_anchor_reach_m /
+# _anchor_lat_bucket_span / _anchor_lon_bucket_span, plus
+# _wrap_anchor_lon_bucket for the antimeridian) -- the same fix
+# app/places.py already applies to its own, independent copy of this
+# pattern (see that module's _lat_bucket_span/_lon_bucket_span/
+# _wrap_lon_bucket). The real, derived guarantee is: for any query point
+# anywhere on Earth, every anchor whose circle could contain it is
+# found -- not "queries stay where we already checked."
 _ANCHOR_BUCKET_DEG = 1.0
+
+# Metres per degree of latitude -- close enough to constant across the
+# globe (110.57km at the equator to 111.69km at the poles) to treat as
+# one figure everywhere, same reasoning and value as app/places.py's own
+# _METRES_PER_DEGREE_LAT. Longitude buckets convert this further by
+# cos(latitude) -- see _anchor_lon_bucket_span.
+_METRES_PER_DEGREE_LAT = 111_320.0
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1849,14 +1873,29 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
+class _AnchorBuckets(dict):
+    """dict subclass returned by _load_city_anchors, identical in every
+    way to a plain {(lat_bucket, lon_bucket): [(lat, lon, radius_m)]}
+    dict (every existing reader -- _anchors_near_bbox, _in_city_limits --
+    just calls .get()/.values() on it, unaware of the difference) except
+    that it also carries the largest anchor radius among its own entries
+    as `max_radius_m`, computed once at load time rather than re-scanned
+    on every _in_city_limits call. See _anchor_reach_m for the fallback
+    that keeps a plain dict (a test fixture built by hand, bypassing
+    _load_city_anchors entirely) working too."""
+    max_radius_m: float = 0.0
+
+
 def _load_city_anchors(path: str) -> dict[tuple[int, int], list[tuple[float, float, float]]]:
     """Reads app/reference/places.csv (lat,lon,effective_radius_m,
     comment lines starting with '#') and buckets each anchor into a
     coarse (lat_bucket, lon_bucket) grid at _ANCHOR_BUCKET_DEG
     resolution, so _in_city_limits below only has to haversine-check
-    anchors in a place's own 3x3-bucket neighbourhood instead of every
-    anchor in the country."""
-    buckets: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    anchors in a place's own latitude-sized neighbourhood instead of
+    every anchor in the country (see _anchor_lat_bucket_span /
+    _anchor_lon_bucket_span -- no longer a fixed 3x3)."""
+    buckets = _AnchorBuckets()
+    max_radius_m = 0.0
     with open(path, encoding="utf-8", newline="") as fh:
         for line in fh:
             line = line.strip()
@@ -1866,18 +1905,87 @@ def _load_city_anchors(path: str) -> dict[tuple[int, int], list[tuple[float, flo
             lat, lon, radius_m = float(lat_s), float(lon_s), float(radius_s)
             key = (math.floor(lat / _ANCHOR_BUCKET_DEG), math.floor(lon / _ANCHOR_BUCKET_DEG))
             buckets.setdefault(key, []).append((lat, lon, radius_m))
+            if radius_m > max_radius_m:
+                max_radius_m = radius_m
+    buckets.max_radius_m = max_radius_m
     return buckets
+
+
+def _anchor_reach_m(buckets: dict) -> float:
+    """Metres the bucket scan below must guarantee reaching from any
+    query point: the largest anchor radius among `buckets`' own anchors,
+    so an anchor whose circle could contain the query point is never
+    missed regardless of where it sits. Reads the precomputed
+    max_radius_m off a real _AnchorBuckets table (the ~35k-anchor
+    production case, where rescanning every call would be the expensive
+    part); falls back to scanning `buckets` itself for a plain dict
+    handed in directly (test fixtures with a handful of anchors, where
+    that scan costs nothing)."""
+    cached = getattr(buckets, "max_radius_m", None)
+    if cached is not None:
+        return cached
+    return max((r for anchors in buckets.values() for _, _, r in anchors), default=0.0)
+
+
+def _anchor_lat_bucket_span(reach_m: float) -> int:
+    """Latitude buckets to extend above and below the query's own bucket
+    to guarantee `reach_m` metres of north-south coverage -- same
+    derivation as app/places.py's _lat_bucket_span."""
+    return max(1, math.ceil(reach_m / _METRES_PER_DEGREE_LAT))
+
+
+def _anchor_lon_bucket_span(lat: float, reach_m: float) -> int:
+    """Longitude buckets to extend east and west of the query's own
+    bucket to guarantee `reach_m` metres of east-west coverage AT THIS
+    LATITUDE -- same derivation as app/places.py's _lon_bucket_span.
+    Capped at 180: past that the caller scans every longitude bucket
+    instead (see _in_city_limits)."""
+    cos_lat = math.cos(math.radians(lat))
+    if cos_lat < 1e-9:
+        # Within a hair of a pole: a degree of longitude is essentially
+        # a point, so no finite span would do -- scan every bucket.
+        return 180
+    return min(180, math.ceil(reach_m / (_METRES_PER_DEGREE_LAT * cos_lat)))
+
+
+def _wrap_anchor_lon_bucket(bucket: int) -> int:
+    """Normalise a longitude bucket index to the [-180, 179] range
+    _load_city_anchors actually keys buckets with (floor() of a
+    longitude in [-180, 180)), so a scan that walks past +179 or below
+    -180 finds the antimeridian-wrapped bucket instead of an empty one
+    -- same as app/places.py's _wrap_lon_bucket."""
+    return ((bucket + 180) % 360) - 180
 
 
 def _in_city_limits(lat: float, lon: float, buckets: dict) -> bool:
     """True if (lat, lon) falls within ANY anchor's effective_radius_m
     -- see _load_city_anchors and the module docstring's "SCORING BY
-    EFFORT, NOT CATEGORY" for what this radius means."""
+    EFFORT, NOT CATEGORY" for what this radius means.
+
+    The bucket neighbourhood scanned is sized per query (2026-09-07),
+    not a fixed 3x3: enough longitude buckets to cover the largest
+    loaded anchor radius at the QUERY's own latitude, and enough
+    latitude buckets to cover it too. A fixed +-1-bucket window used to
+    rest on "queries never leave the western play area" -- true once,
+    false now that SOTA/POTA/OSM landmarks are worldwide (see
+    _ANCHOR_BUCKET_DEG's own comment). Mirrors app/places.py's
+    distance_to_nearest_town_m exactly, minus the "return the distance"
+    part -- this only needs a yes/no."""
+    reach_m = _anchor_reach_m(buckets)
     lat_b = math.floor(lat / _ANCHOR_BUCKET_DEG)
     lon_b = math.floor(lon / _ANCHOR_BUCKET_DEG)
-    for d_lat in (-1, 0, 1):
-        for d_lon in (-1, 0, 1):
-            for a_lat, a_lon, radius_m in buckets.get((lat_b + d_lat, lon_b + d_lon), ()):
+    lat_span = _anchor_lat_bucket_span(reach_m)
+    lon_span = _anchor_lon_bucket_span(lat, reach_m)
+    full_lon_sweep = lon_span >= 180
+    lon_offsets = range(-180, 180) if full_lon_sweep else range(-lon_span, lon_span + 1)
+    for d_lat in range(-lat_span, lat_span + 1):
+        plat = lat_b + d_lat
+        for dlon in lon_offsets:
+            # In a full sweep dlon IS already a bucket key (-180..179);
+            # otherwise it is an offset from the query's own bucket that
+            # may need wrapping at the antimeridian.
+            plon = dlon if full_lon_sweep else _wrap_anchor_lon_bucket(lon_b + dlon)
+            for a_lat, a_lon, radius_m in buckets.get((plat, plon), ()):
                 if _haversine_m(lat, lon, a_lat, a_lon) <= radius_m:
                     return True
     return False

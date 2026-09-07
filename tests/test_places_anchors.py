@@ -170,15 +170,22 @@ def test_non_us_city_correctly_reads_remote():
 # ---------------------------------------------------------------------
 
 import csv
+import gzip
 import os
 
+# .gz (2026-09-07, the worldwide expansion -- see app/places_seed.py's
+# _open_csv) -- this test predates that change and used to open the
+# plain CSV directly; gzip.open(path, "rt") is the same gunzip-
+# transparently-or-not helper that module uses, duplicated here rather
+# than imported so this test file does not need app/ on its path for a
+# two-line file open.
 _SEED_CSV_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "app", "reference", "places_worth_going.csv"
+    os.path.dirname(__file__), "..", "app", "reference", "places_worth_going.csv.gz"
 )
 
 
 def _seed_row(ref_code: str) -> dict:
-    with open(_SEED_CSV_PATH, newline="", encoding="utf-8") as fh:
+    with gzip.open(_SEED_CSV_PATH, "rt", newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             if row["ref_code"] == ref_code:
                 return row

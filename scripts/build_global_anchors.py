@@ -1,5 +1,25 @@
 #!/usr/bin/env python3
-"""Builds app/reference/places_global.csv -- worldwide city anchors for
+"""SUPERSEDED (2026-09-07) -- DO NOT WIRE IN, DO NOT DELETE YET.
+
+This script's population-based radius formula (see FORMULA below) was
+measured against 6,378 US cities with known Census areas (comparing
+each city's formula-derived radius, fed that city's real population,
+against its actual Census-derived radius in app/reference/places.csv):
+R^2 = 0.214, median relative error 27%, p90 79%. Population alone does
+not predict a city's physical extent well enough for this to be more
+than a stopgap -- the Boise/SLC/Denver 3-city sanity check below looked
+defensible, but 6,378 cities tell a different story than 3 do.
+
+REPLACEMENT IN PROGRESS: a hybrid approach -- Census areas inside the
+US (app/reference/places.csv, unchanged and unaffected by any of this),
+OpenStreetMap administrative boundaries outside the US -- is being
+built now to replace this file's non-US rows. It is not on disk yet.
+Until it lands: this script and app/reference/places_global.csv stay
+exactly as they are (neither is wired into merge()'s default -- see
+"NOT wired in" below, still true), kept only as the last-resort
+fallback, not deleted, not upgraded to a default.
+
+Builds app/reference/places_global.csv -- worldwide city anchors for
 scripts/build_places_seed.py's merge stage (score_points()'s in-city
 test), keeping app/reference/places.csv's US Census anchors untouched
 and filling in the rest of the world from GeoNames.
@@ -157,6 +177,12 @@ def main(us_places_csv: str = US_PLACES_CSV, out_path: str = OUT_CSV) -> None:
         geo_rows.append((lat, lon, radius_for_population(pop)))
 
     with open(out_path, "w", encoding="utf-8", newline="") as out:
+        out.write("# SUPERSEDED (2026-09-07) -- non-US rows below are a population-based\n")
+        out.write("# estimate measured at R^2=0.214, median relative error 27%, p90 79%\n")
+        out.write("# against 6,378 real US Census city areas. Being replaced by a hybrid\n")
+        out.write("# Census (US) + OpenStreetMap administrative boundary (non-US) file,\n")
+        out.write("# not yet built. Not wired into merge()'s default. See this script's\n")
+        out.write("# own module docstring.\n")
         out.write("# lat,lon,effective_radius_m -- worldwide city anchors for\n")
         out.write("# score_points()'s in-city test (docs/features/places.md). US rows are\n")
         out.write("# the untouched original app/reference/places.csv (US Census 2024\n")

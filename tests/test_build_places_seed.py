@@ -9,6 +9,7 @@ not via a dotted package import.
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -558,3 +559,111 @@ def test_known_bogus_boundary_match_is_stripped_even_with_no_generic_signal():
     stripped = bps._clean_matched_park_boundaries(rows)
     assert list(stripped) == ["US-0553"]
     assert rows[0]["area_m2"] == ""
+
+
+# ---------------------------------------------------------------------
+# _in_city_limits' OWN latitude-aware bucket scan (2026-09-07) -- this
+# script's independent copy of the same bug app/places.py's
+# distance_to_nearest_town_m was fixed for (see
+# tests/test_places_bucketing.py). _in_city_limits used to scan a fixed
+# 3x3 neighbourhood of whole-degree buckets around the query point on
+# the strength of "this script's own candidate queries never leave the
+# western play area" (see the comment that used to sit above
+# _ANCHOR_BUCKET_DEG). That assumption went false the moment
+# fetch_sota()/fetch_pota()/extract_landmarks() stopped bbox-filtering
+# to the play area: a landmark or park can now be scored anywhere on
+# Earth, including high-latitude places (Alaska, Scandinavia, northern
+# Canada, Patagonia) where a degree of longitude shrinks well below what
+# a fixed +-1-bucket window assumed.
+# ---------------------------------------------------------------------
+
+
+def _anchor_buckets_with_one(anchors) -> bps._AnchorBuckets:
+    """Build a real _AnchorBuckets table (not a plain dict) from
+    `anchors` ((lat, lon, radius_m) tuples), the same way
+    _load_city_anchors does -- so these tests exercise the fast,
+    precomputed-max_radius_m path _in_city_limits actually takes in
+    production, not just the plain-dict scanning fallback the other
+    tests in this file happen to use."""
+    buckets = bps._AnchorBuckets()
+    max_radius_m = 0.0
+    for lat, lon, radius_m in anchors:
+        key = (math.floor(lat / bps._ANCHOR_BUCKET_DEG), math.floor(lon / bps._ANCHOR_BUCKET_DEG))
+        buckets.setdefault(key, []).append((lat, lon, radius_m))
+        max_radius_m = max(max_radius_m, radius_m)
+    buckets.max_radius_m = max_radius_m
+    return buckets
+
+
+def _in_city_limits_pre_fix(lat: float, lon: float, buckets: dict) -> bool:
+    """The OLD _in_city_limits: a hardcoded 3x3 neighbourhood of
+    whole-degree buckets around the query's own bucket, no matter the
+    query's latitude or the anchor's radius. Reimplemented here (not
+    imported -- the real function no longer works this way) purely so
+    the high-latitude test below can demonstrate it actually fails
+    against this logic, not just pass trivially against both."""
+    lat_b = math.floor(lat / bps._ANCHOR_BUCKET_DEG)
+    lon_b = math.floor(lon / bps._ANCHOR_BUCKET_DEG)
+    for d_lat in (-1, 0, 1):
+        for d_lon in (-1, 0, 1):
+            for a_lat, a_lon, radius_m in buckets.get((lat_b + d_lat, lon_b + d_lon), ()):
+                if bps._haversine_m(lat, lon, a_lat, a_lon) <= radius_m:
+                    return True
+    return False
+
+
+def test_in_city_limits_antimeridian_wrap_finds_the_anchor_on_the_other_side():
+    """A query just east of the antimeridian must still find an anchor
+    just west of it -- _load_city_anchors buckets by floor(lon), so
+    179.95 and -179.95 land in buckets 179 and -180, geographic
+    neighbours but numeric opposites."""
+    query_lat, query_lon = 0.0, 179.95
+    anchor_lat, anchor_lon = 0.0, -179.95
+    actual = bps._haversine_m(query_lat, query_lon, anchor_lat, anchor_lon)
+    buckets = _anchor_buckets_with_one([(anchor_lat, anchor_lon, actual + 5_000)])
+
+    assert bps._in_city_limits(query_lat, query_lon, buckets) is True
+
+
+def test_in_city_limits_high_latitude_point_the_old_fixed_3x3_would_have_missed():
+    """The actual bug: at 80N one degree of longitude is only ~19km, so
+    an anchor three degrees of longitude away (outside the old fixed
+    +-1-bucket window) can still have a large enough radius to cover the
+    query point. Confirms BOTH sides: the fixed 3x3 genuinely fails this
+    case (proving the test is not vacuous), and the real, fixed
+    _in_city_limits finds it."""
+    query_lat, query_lon = 80.0, 10.0
+    anchor_lat, anchor_lon = 80.0, 13.0
+    actual = bps._haversine_m(query_lat, query_lon, anchor_lat, anchor_lon)
+    # 3 degrees of longitude at 80N is far outside the old +-1 bucket
+    # scan, but comfortably inside this anchor's circle.
+    buckets = _anchor_buckets_with_one([(anchor_lat, anchor_lon, actual + 5_000)])
+
+    assert _in_city_limits_pre_fix(query_lat, query_lon, buckets) is False, (
+        "test fixture must actually defeat the old fixed 3x3 scan -- otherwise "
+        "this proves nothing about the fix"
+    )
+    assert bps._in_city_limits(query_lat, query_lon, buckets) is True
+
+
+def test_in_city_limits_equatorial_query_still_scans_a_small_number_of_buckets():
+    """Performance is the reason bucketing exists at all -- a low-
+    latitude query (where a degree of longitude is close to its full
+    ~111km) must still keep the window small, not silently pay the
+    high-latitude cost everywhere."""
+    reach_m = 51_700.0  # roughly the largest US anchor radius on file
+    lat_span = bps._anchor_lat_bucket_span(reach_m)
+    lon_span = bps._anchor_lon_bucket_span(0.0, reach_m)
+    buckets_scanned = (2 * lat_span + 1) * (2 * lon_span + 1)
+    assert buckets_scanned <= 9, f"expected a 3x3-ish window at the equator, got {buckets_scanned}"
+
+
+def test_in_city_limits_plain_dict_fixture_still_works():
+    """A plain dict (not built via _load_city_anchors, so it has no
+    precomputed max_radius_m -- exactly what every OTHER test in this
+    file passes to score_points()) must still get a correct, safe
+    fallback: _anchor_reach_m scans the dict itself rather than trusting
+    a missing attribute."""
+    buckets = _buckets_with_one_anchor(80.0, 13.0, 5_000.0 + bps._haversine_m(80.0, 10.0, 80.0, 13.0))
+    assert not isinstance(buckets, bps._AnchorBuckets)
+    assert bps._in_city_limits(80.0, 10.0, buckets) is True

@@ -1,3 +1,9 @@
+# SUPERSEDED (2026-09-07) -- non-US rows below are a population-based
+# estimate measured at R^2=0.214, median relative error 27%, p90 79%
+# against 6,378 real US Census city areas. Being replaced by a hybrid
+# Census (US) + OpenStreetMap administrative boundary (non-US) file,
+# not yet built. Not wired into merge()'s default. See this script's
+# own module docstring.
 # lat,lon,effective_radius_m -- worldwide city anchors for
 # score_points()'s in-city test (docs/features/places.md). US rows are
 # the untouched original app/reference/places.csv (US Census 2024
