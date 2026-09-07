@@ -551,6 +551,189 @@ def merge(dedup_path: str, us_boundary_path: str, census_path: str, out_path: st
     print(f"TOTAL final anchors: {n_census + len(osm_rows):,} -> {out_path}", file=sys.stderr)
 
 
+FALLBACK_PLACE_VALUES = {"city", "town"}
+# Fitted 2026-09-07 against 6,378 US Census cities with known land area
+# (see this script's `fallback` docstring below for the full rationale
+# and the accuracy caveat -- this same relation was measured and
+# REJECTED as the primary anchor method).
+FALLBACK_RADIUS_A = 2.0524
+FALLBACK_RADIUS_B = 0.3138
+
+
+def _fallback_radius_m(population: float) -> float:
+    return 10.0 ** (FALLBACK_RADIUS_A + FALLBACK_RADIUS_B * math.log10(population))
+
+
+# --------------------------------------------------------------------
+# Stage 5: fallback -- anywhere (needs app/ importable, i.e. run from a
+# checkout of this repo; the place_points.csv it reads is the same
+# planet extraction classify() uses, so at planet scale it wants
+# navi's copy the way classify/extract-us-boundary do).
+# --------------------------------------------------------------------
+def fallback(points_path: str, census_path: str, out_path: str) -> None:
+    """Fills the gap the four stages above leave: a real, well-populated
+    settlement whose containing OSM administrative boundary is named
+    differently from the settlement itself (Mumbai's boundary is
+    "Greater Mumbai"; Johannesburg's, Cairo's, and Stockholm's likewise
+    fail the exact-normalized-name-match rule classify() uses) gets NO
+    anchor at all under the boundary-only approach, even though OSM
+    knows exactly where the settlement is via its place=city/town POINT
+    -- just not as a boundary. Every landmark in an affected city was
+    reading as remote wilderness (25 points) before this stage existed.
+
+    DECIDED APPROACH (Matt, 2026-09-07): where no boundary anchor
+    already covers a settlement, fall back to the settlement's own OSM
+    point with a radius ESTIMATED from population, rather than leaving
+    it unanchored. Restricted to place=city or place=town nodes/ways
+    carrying a usable (parses as a positive number) `population` tag --
+    place=village and place=hamlet are excluded even with a population
+    tag, and city/town WITHOUT one are excluded too, so this adds one
+    fallback circle per substantial, population-attested settlement
+    instead of millions of hamlet-sized dots blowing up the file.
+
+    COVERAGE CHECK: a candidate is skipped if it is already inside some
+    EXISTING anchor's circle (checked via app.places.
+    distance_to_nearest_town_m against `census_path` as it stands
+    BEFORE this stage runs -- a real boundary anchor, Census or OSM, is
+    always strictly authoritative and this stage never overrides or
+    duplicates one, only fills a gap). This is the same bucket-scan
+    lookup the game itself uses at runtime, not a reimplementation, so
+    there is no risk of the build-time check and the runtime answer
+    disagreeing.
+
+    RADIUS: log10(radius_m) = 2.0524 + 0.3138 * log10(population) --
+    fitted against 6,378 US Census cities with known Census land area
+    (~1.6km at 5,000 people, ~4.2km at 100,000, ~10.7km at 2,000,000).
+    ACCURACY CAVEAT, IMPORTANT: this exact relation was measured and
+    REJECTED as this file's primary anchor method elsewhere in this
+    pipeline -- R^2 = 0.214, median relative error 27%, p90 79%.
+    Population is a poor predictor of a city's physical extent. It is
+    used here anyway, deliberately, because the alternative for these
+    settlements is no anchor at all, and "roughly the right city" beats
+    "reads as wilderness." Do not read this stage's existence as a
+    reversal of that earlier rejection.
+
+    MARKING: fallback rows are appended after a dedicated comment
+    header (this function's own, distinct from the HYBRID header above
+    it) so they stay visually and programmatically distinguishable from
+    the boundary-derived rows above -- grep for "FALLBACK" or take
+    every data row from that header onward.
+    """
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(_HERE, ".."))
+    from app import places as places_mod
+
+    # Point the runtime loader at the file as it stands right now (pre-
+    # fallback) and force a fresh load -- this process may have already
+    # imported/loaded app.places for an unrelated reason, and a stale
+    # cached bucket set would silently miss the boundary rows just
+    # written by an earlier stage in the same run.
+    places_mod._DATA_PATH = census_path
+    places_mod._BUCKETS = None
+    places_mod._MAX_RADIUS_M = 0.0
+    places_mod._load()
+
+    n_points = 0
+    n_wrong_place = 0
+    n_no_population = 0
+    n_candidates = 0
+    n_covered = 0
+    fallback_rows = []
+    with open(points_path, newline="", encoding="utf-8") as f:
+        r = csv.reader(f)
+        next(r)  # header
+        for row in r:
+            if len(row) != 7:
+                continue
+            n_points += 1
+            osm_type, osm_id, name, place, lat, lon, population = row
+            if place not in FALLBACK_PLACE_VALUES:
+                n_wrong_place += 1
+                continue
+            population = population.strip()
+            if not population:
+                n_no_population += 1
+                continue
+            try:
+                pop = float(population)
+            except ValueError:
+                n_no_population += 1
+                continue
+            if pop <= 0:
+                n_no_population += 1
+                continue
+            n_candidates += 1
+            lat_f, lon_f = float(lat), float(lon)
+            if places_mod.distance_to_nearest_town_m(lat_f, lon_f) == 0.0:
+                n_covered += 1
+                continue
+            radius_m = _fallback_radius_m(pop)
+            fallback_rows.append((round(lat_f, 4), round(lon_f, 4), round(radius_m)))
+
+    with open(census_path, encoding="utf-8") as f:
+        existing = f.read()
+    n_existing = sum(
+        1 for line in existing.splitlines()
+        if line.strip() and not line.startswith("#")
+    )
+    new_total = n_existing + len(fallback_rows)
+    existing = re.sub(
+        r"# [\d,]+ rows total\.\n",
+        f"# {new_total:,} rows total (includes the FALLBACK section below).\n",
+        existing,
+        count=1,
+    )
+
+    fallback_header = (
+        "# ---------------------------------------------------------------------\n"
+        "# FALLBACK: place-point anchors (2026-09-07, this script's `fallback`\n"
+        "# stage). Some real, well-populated settlements -- Mumbai, Cairo,\n"
+        "# Johannesburg, Stockholm among them -- have NO anchor above because\n"
+        "# OSM names the containing administrative boundary differently from\n"
+        "# the settlement (Mumbai's boundary is \"Greater Mumbai\"), so the\n"
+        "# exact-normalized-name-match rule above never connects them, and\n"
+        "# every landmark in an affected city would otherwise score as remote\n"
+        "# wilderness. These rows fall back to the settlement's own OSM POINT\n"
+        f"# instead of a boundary ({n_points:,} place points read; {n_wrong_place:,}\n"
+        "# were neither place=city nor place=town and skipped outright;\n"
+        f"# {n_no_population:,} of the remainder had no usable population tag and\n"
+        f"# were skipped; {n_candidates:,} qualified as candidates; {n_covered:,} of\n"
+        "# those were already inside some existing boundary anchor's circle\n"
+        "# -- Census or OSM, always authoritative over this section -- and\n"
+        f"# were skipped so nothing here ever overrides or duplicates one;\n"
+        f"# {len(fallback_rows):,} were genuinely uncovered and are the rows below).\n"
+        "# Radius is ESTIMATED from population:\n"
+        "#     log10(radius_m) = 2.0524 + 0.3138 * log10(population)\n"
+        "# fitted against 6,378 US Census cities with known land area (~1.6km\n"
+        "# at 5,000 people, ~4.2km at 100,000, ~10.7km at 2,000,000).\n"
+        "# ACCURACY CAVEAT: this same relation was measured and REJECTED as\n"
+        "# this file's primary anchor method (R^2 = 0.214, median relative\n"
+        "# error 27%, p90 79%) -- population is a poor predictor of a city's\n"
+        "# physical extent. Used here anyway because the alternative for\n"
+        "# these settlements is no anchor at all, and \"roughly the right\n"
+        "# city\" beats \"reads as wilderness.\"\n"
+        f"# {len(fallback_rows):,} fallback rows below.\n"
+        "# ---------------------------------------------------------------------\n"
+    )
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(existing)
+        if not existing.endswith("\n"):
+            f.write("\n")
+        f.write(fallback_header)
+        for lat, lon, radius in fallback_rows:
+            f.write(f"{lat},{lon},{int(radius)}\n")
+
+    print(f"place points read: {n_points:,}", file=sys.stderr)
+    print(f"skipped, not city/town: {n_wrong_place:,}", file=sys.stderr)
+    print(f"skipped, no usable population: {n_no_population:,}", file=sys.stderr)
+    print(f"candidates (city/town with population): {n_candidates:,}", file=sys.stderr)
+    print(f"skipped, already covered by an existing anchor: {n_covered:,}", file=sys.stderr)
+    print(f"fallback rows added: {len(fallback_rows):,}", file=sys.stderr)
+    print(f"pre-fallback anchor rows: {n_existing:,}", file=sys.stderr)
+    print(f"TOTAL final anchors: {new_total:,} -> {out_path}", file=sys.stderr)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="stage", required=True)
@@ -574,6 +757,11 @@ def main() -> None:
     p.add_argument("--census-csv", default=CENSUS_PLACES_CSV)
     p.add_argument("--out", default=CENSUS_PLACES_CSV)
 
+    p = sub.add_parser("fallback")
+    p.add_argument("--points", default=DEFAULT_PLACE_POINTS)
+    p.add_argument("--census-csv", default=CENSUS_PLACES_CSV)
+    p.add_argument("--out", default=CENSUS_PLACES_CSV)
+
     args = ap.parse_args()
     if args.stage == "classify":
         classify(args.admin, args.points, args.out)
@@ -583,6 +771,8 @@ def main() -> None:
         extract_us_boundary(args.admin, args.out)
     elif args.stage == "merge":
         merge(args.dedup, args.us_boundary, args.census_csv, args.out)
+    elif args.stage == "fallback":
+        fallback(args.points, args.census_csv, args.out)
 
 
 if __name__ == "__main__":

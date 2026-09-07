@@ -54,6 +54,23 @@ shipping "remote" for London or Tokyo again. NON_US_CITY (the negative
 control) changed from Toronto to Point Nemo for exactly this reason:
 Toronto is now correctly covered by a real OSM anchor, so it stopped
 being a valid "nothing anchors here" control.
+
+PLACE-POINT FALLBACK (2026-09-07, scripts/build_places_osm_anchors.py
+`fallback` stage): the boundary-only OSM stages above still miss real,
+well-populated cities whose containing administrative boundary is
+named differently from the settlement itself -- Mumbai ("Greater
+Mumbai"), Cairo, Johannesburg, and Stockholm confirmed among them, plus
+Lagos (a near miss, short by under 2km due to the same water-inflation
+this file's other docstrings describe). Every landmark in one of these
+cities read as remote wilderness (25 points) before this stage existed.
+The fallback closes the gap by falling back to the settlement's own OSM
+point (restricted to place=city/place=town nodes with a usable
+population tag, and only where no existing boundary anchor already
+covers the point -- a real boundary anchor is always authoritative)
+with a radius ESTIMATED from population. FALLBACK_CITIES below guards
+this specifically so a regeneration that drops the fallback stage, or
+narrows its admission rule, fails loudly here instead of silently
+shipping these five as remote again.
 """
 from __future__ import annotations
 
@@ -89,17 +106,22 @@ COVERED_CITIES = WESTERN_CITIES + EASTERN_CITIES
 
 # Added 2026-09-07, worldwide expansion (scripts/build_places_osm_anchors.py):
 # a spread of major non-US cities across every inhabited continent,
-# confirmed covered by the real shipped file. Deliberately excludes a
-# handful of major cities (Mumbai, Cairo, Johannesburg, Stockholm,
-# Reykjavik) that are KNOWN, understood misses under the current OSM
-# classification rule -- in each case a real, well-populated place=city
-# node exists, but the containing administrative boundary in OSM is
-# named differently from the city's common name (e.g. Mumbai's node
-# sits inside a boundary named "Greater Mumbai"/"Brihanmumbai", not
-# "Mumbai"), so the exact-normalized-name-match rule never connects
-# them. That is a real, reported limitation of the classification rule,
-# not something this test should paper over by asserting coverage that
-# does not exist.
+# confirmed covered by the real shipped file. Used to deliberately
+# exclude a handful of major cities (Mumbai, Cairo, Johannesburg,
+# Stockholm, Reykjavik) that were KNOWN, understood misses under the
+# boundary-only OSM classification rule -- in each case a real,
+# well-populated place=city node exists, but the containing
+# administrative boundary in OSM is named differently from the city's
+# common name (e.g. Mumbai's node sits inside a boundary named "Greater
+# Mumbai"/"Brihanmumbai", not "Mumbai"), so the exact-normalized-name-
+# match rule never connects them. That gap is now closed by the
+# place-point fallback stage added the same day (see FALLBACK_CITIES
+# below, and this file's docstring) for Mumbai, Cairo, Johannesburg,
+# and Stockholm specifically (Reykjavik happens to be covered by the
+# same fallback too, though it is not separately pinned here) -- so
+# WORLD_CITIES itself still does not include them, to keep this list's
+# job narrowly "boundary-derived coverage" rather than conflating it
+# with the fallback's separate, lower-confidence method.
 WORLD_CITIES = [
     ("London, UK", 51.5074, -0.1278),
     ("Paris, France", 48.8566, 2.3522),
@@ -225,6 +247,41 @@ def test_toronto_specifically_covered_by_worldwide_expansion():
     silently."""
     lat, lon = 43.6532, -79.3832
     assert places.distance_to_nearest_town_m(lat, lon) == 0.0
+
+
+# Added 2026-09-07, place-point fallback stage
+# (scripts/build_places_osm_anchors.py `fallback`): these five cities'
+# containing OSM administrative boundary is named differently from the
+# settlement (Mumbai's is "Greater Mumbai"), or -- Lagos -- the real
+# boundary undershoots the settlement point by under 2km from water
+# inflation, so none of them ever anchor under the boundary-only stages
+# above. Verified MISSES against the shipped file before this stage
+# existed. The fallback closes each with the settlement's own OSM point
+# plus a population-estimated radius (see this file's module docstring
+# and the `fallback` stage's own docstring for the fit and its
+# accuracy caveat).
+FALLBACK_CITIES = [
+    ("Mumbai, India", 19.0760, 72.8777),
+    ("Cairo, Egypt", 30.0444, 31.2357),
+    ("Johannesburg, South Africa", -26.2041, 28.0473),
+    ("Stockholm, Sweden", 59.3293, 18.0686),
+    ("Lagos, Nigeria", 6.5244, 3.3792),
+]
+
+
+def test_fallback_cities_now_covered():
+    """Guards the place-point fallback stage the same way
+    test_world_cities_are_covered guards the boundary-derived OSM side
+    -- a regeneration that drops the fallback stage, or narrows its
+    place=city/place=town + population admission rule, fails loudly
+    here instead of silently shipping Mumbai, Cairo, Johannesburg,
+    Stockholm, or Lagos as remote wilderness again."""
+    failures = []
+    for name, lat, lon in FALLBACK_CITIES:
+        if places.is_outside_town(lat, lon):
+            dist = places.distance_to_nearest_town_m(lat, lon)
+            failures.append(f"{name}: distance to nearest anchor edge = {dist:.0f}m")
+    assert not failures, "these cities read as outside every anchor circle:\n" + "\n".join(failures)
 
 
 # ---------------------------------------------------------------------
