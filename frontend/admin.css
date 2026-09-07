@@ -304,37 +304,79 @@ body {
 .adm-body {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
-  /* Named areas, not left to auto-placement -- .adm-nav and the
-     ".adm-traffic" sidebar block (admin.html, directly below the nav's
-     closing tag) share column 1 stacked in two rows, while .adm-main
-     keeps spanning both of those rows in column 2 exactly as it did
-     when there were only two children here. Auto-placement alone would
-     instead lay the three children out left-to-right, top-to-bottom --
-     nav, then the traffic block, THEN main -- shoving main into the
-     narrow 180px column on row two. */
-  grid-template-areas: "nav main" "traffic main";
+  /* A plain two-column, ONE-row grid -- .adm-side (admin.html: a single
+     wrapper around .adm-nav and .adm-traffic together) is column 1,
+     .adm-main is column 2. This used to be a two-row grid with .adm-nav
+     and .adm-traffic as separate row-1/row-2 areas and .adm-main
+     spanning both rows to keep filling the whole right-hand column --
+     that shape is what caused the traffic panel to render on top of
+     the section nav in production (see .adm-side's own comment above
+     it in admin.html for the mechanism: a grid item spanning two
+     auto-sized rows forces the track-sizing algorithm to distribute
+     .adm-main's own height across BOTH rows, inflating .adm-nav's row
+     far past .adm-nav's real content -- which in turn gave .adm-nav's
+     position: sticky an enormous, wrong containing block, so it never
+     released while scrolling and .adm-traffic (a plain, non-sticky
+     sibling below it) scrolled up underneath it). A single row sidesteps
+     that whole class of bug: .adm-side and .adm-main are now two
+     ordinary single-row grid items, each sized to its own content,
+     nothing spans anything. */
+  grid-template-areas: "side main";
   gap: 0;
   max-width: 1180px;
   margin: 0 auto;
 }
 
-/* top/max-height: 43px was .adm-topbar's own measured height -- now
-   offset by --mw-nav-h on top of that (the site nav, further up
-   still) the same way .adm-topbar's own top offset is, so this sticks
-   directly under the topbar rather than under the topbar's old
-   pre-nav position. */
+/* The sidebar column as ONE grid item -- see .adm-body's own comment
+   above for why this exists at all (nothing here should ever again let
+   .adm-main's height reach back and inflate .adm-nav's box). align-self:
+   start keeps this sized to its own content (.adm-nav + .adm-traffic
+   stacked) instead of stretching to match .adm-main's height, which is
+   usually taller and would otherwise be the default (grid's align-items:
+   stretch) -- exactly the same failure mode this whole rule exists to
+   avoid, just one level up.
+
+   position: sticky lives HERE, on the wrapper, not on .adm-nav alone --
+   that was tried first and still overlapped .adm-traffic, for a
+   different reason than the grid-row bug above: a stickily positioned
+   element only offsets itself, it does not reserve space for or move
+   any sibling. With .adm-nav sticky and .adm-traffic a plain sibling
+   below it in normal flow, .adm-traffic kept its own static position
+   and scrolled up the page at the ordinary rate the moment ANY
+   scrolling happened, while .adm-nav stayed pinned near the top of the
+   viewport -- so .adm-traffic slid in underneath the still-visible nav
+   within the first ~100px of scroll, overlapping it exactly like the
+   grid-row bug did, just sooner. Making .adm-side itself the sticky
+   element instead means .adm-nav and .adm-traffic move as ONE rigid
+   unit -- .adm-traffic can never be anywhere but directly below
+   .adm-nav, at any scroll position, because there is no longer a
+   sticky/non-sticky pair that can drift apart. top/max-height/
+   overflow-y are unchanged from .adm-nav's old copy of these three
+   (43px is .adm-topbar's own measured height, offset by --mw-nav-h,
+   the site nav further up, the same way .adm-topbar's own top offset
+   is) -- this still sticks directly under the topbar and is still
+   bounded to the visible viewport, with its own scrollbar if
+   .adm-nav's section list ever grows past that, but now that bound
+   applies to the nav+traffic unit together rather than to .adm-nav
+   alone. */
+.adm-side {
+  grid-area: side;
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+  min-width: 0;
+  position: sticky;
+  top: calc(var(--mw-nav-h) + 43px);
+  max-height: calc(100vh - var(--mw-nav-h) - 43px);
+  overflow-y: auto;
+}
+
 .adm-nav {
-  grid-area: nav;
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 18px 10px 40px;
   border-right: 1px solid var(--mw-line);
-  position: sticky;
-  top: calc(var(--mw-nav-h) + 43px);
-  align-self: start;
-  max-height: calc(100vh - var(--mw-nav-h) - 43px);
-  overflow-y: auto;
 }
 
 .adm-nav-item {
@@ -381,7 +423,6 @@ body {
    skin -- including neon -- restyles this the same way it restyles
    everything else on the page. */
 .adm-traffic {
-  grid-area: traffic;
   padding: 14px 10px 20px;
   border-right: 1px solid var(--mw-line);
 }
@@ -600,19 +641,24 @@ body {
      the viewport on Nets/Paint/Players. */
   .adm-body {
     grid-template-columns: minmax(0, 1fr);
-    /* One column now, so the desktop "nav main" / "traffic main" areas
-       (a two-column shape) no longer apply -- restacked single-file:
-       nav, then the traffic block, then main, matching the same order
-       they already appear in admin.html. */
-    grid-template-areas: "nav" "traffic" "main";
+    /* One column now, so the desktop "side main" shape no longer
+       applies -- restacked single-file: .adm-side (nav, then the
+       traffic block, in that order inside it), then main. */
+    grid-template-areas: "side" "main";
+  }
+  /* position/max-height live on .adm-side itself now (see its own
+     comment in the desktop rules above), so cancelling them at mobile
+     width happens here instead of on .adm-nav. */
+  .adm-side {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
   }
   .adm-nav {
     flex-direction: row;
     flex-wrap: wrap;
     border-right: 0;
     border-bottom: 1px solid var(--mw-line);
-    position: static;
-    max-height: none;
     padding: 10px;
   }
   .adm-traffic { border-right: 0; border-bottom: 1px solid var(--mw-line); }
