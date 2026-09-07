@@ -3463,14 +3463,15 @@ const FALLBACK_VIEW_BOUNDS = [[-116.21, 37.00], [-109.05, 43.62]];
 // not touch playAreaBounds/play_area above, which keep gating ingest
 // acceptance (see app/config.py's play_area_* settings and
 // app/grid.py's in_play_area()) and the geolocation-fix sanity check
-// further below. Web Mercator can't represent past roughly +/-85.05
-// degrees latitude, hence 85 here rather than a full 90.
-// NOTE: kept just inside +/-180 (not exactly -180/180) -- MapLibre has
-// a known bug where a maxBounds spanning the exact full 360 degrees is
-// ambiguous about which way it wraps, and clamps every setCenter/pan
-// to lng=180 (confirmed by hand against this deployment). 179.9 is
-// still effectively the whole world.
-const WORLD_MAX_BOUNDS = [[-179.9, -85], [179.9, 85]];
+// further below.
+//
+// No maxBounds is set at all, deliberately. Constraining the camera to a
+// world-sized box is NOT the same as leaving it unconstrained: MapLibre
+// refuses to zoom out past the point where maxBounds fills the viewport,
+// and letterboxes with empty bars when the world is narrower than the
+// window (at zoom 2 the world is only 1024 px). A world-spanning
+// maxBounds therefore produced black bars and a zoom floor on wide
+// displays. Omitting it entirely is what actually opens the map.
 const GEOLOCATION_TIMEOUT_MS = 5000;
 const GEOLOCATION_ZOOM = 11; // city-level -- close enough to orient, not so close it feels like a snap-to
 
@@ -3684,7 +3685,6 @@ async function main() {
       fitBoundsOptions: { padding: 40 },
       minZoom: 2,   // roughly the whole play area in view
       maxZoom: 17,  // well past the 300 m grid; squares stay legible
-      maxBounds: WORLD_MAX_BOUNDS, // pan-anywhere, see WORLD_MAX_BOUNDS above
       // Pitching made the hillshade render with holes -- the DEM tiles are
       // not all there once the camera tilts, with nothing erroring to say
       // so -- and it took bandwidth from 8 MB to 32 MB for a worse picture.
@@ -3894,11 +3894,12 @@ async function main() {
         if (mapViewerInteracted) return;
         const lng = pos.coords.longitude;
         const lat = pos.coords.latitude;
-        // A fix outside the configured play area would just get clamped
-        // by maxBounds above -- fighting that clamp reads as a broken,
-        // jittery fly-to rather than "no move happened", so detect it
-        // up front and stay on the fallback box instead. No playAreaBounds
-        // at all (server unreachable) means nothing to check against.
+        // A fix outside the configured play area is not somewhere the
+        // opening view should jump to -- flying the camera off to a
+        // viewer far outside the play area reads as a broken auto-pan
+        // rather than orientation, so detect it up front and stay on the
+        // fallback box instead. No playAreaBounds at all (server
+        // unreachable) means nothing to check against.
         if (playAreaBounds) {
           const [[west, south], [east, north]] = playAreaBounds;
           if (lng < west || lng > east || lat < south || lat > north) return;
