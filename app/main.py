@@ -19,6 +19,7 @@ from .ingest import Ingestor
 from .mc_ingest import McIngestor
 from .meshview_client import MeshviewClient
 from .mqtt_subscriber import MqttSubscriber
+from .traffic import TrafficMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -180,6 +181,19 @@ app = FastAPI(
 # any route this refactor didn't touch.
 app.add_exception_handler(HTTPException, http_exception_as_error_body)
 
+
+# Server-side page-view counting (app/traffic.py) for the admin panel's
+# traffic tab. Added FIRST, before GZipMiddleware and CORSMiddleware
+# below -- Starlette wraps middleware in the REVERSE of add_middleware()
+# call order (the last one added ends up outermost), so adding this
+# first makes it the INNERMOST middleware, closest to the router: it
+# sees each response exactly as the route handler produced it, with the
+# real status code and the real, pre-compression Content-Type, before
+# GZipMiddleware's own wrapping or CORSMiddleware's own header
+# injection ever touch it. See TrafficMiddleware's own docstring for why
+# that ordering is the more obviously correct place to sit, even though
+# nothing here strictly depends on it (GZip never changes Content-Type).
+app.add_middleware(TrafficMiddleware)
 
 # The board routes return highly repetitive JSON -- thousands of cell
 # records sharing the same handful of keys and team names -- and every

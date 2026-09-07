@@ -1842,6 +1842,101 @@ CREATE TABLE IF NOT EXISTS account_totp_challenge (
     expires_at   INTEGER NOT NULL,
     consumed_at  INTEGER
 );
+
+-- ---------------------------------------------------------------------
+-- Server-side traffic analytics (app/traffic.py): page views, unique
+-- visitors, and new-visitor counts for the admin panel's traffic tab,
+-- counted from inside this app itself rather than a third-party
+-- analytics script -- nothing about a visit is ever sent to an outside
+-- service, and nothing here can be blocked by a browser extension the
+-- way a client-side tracker can be.
+--
+-- Every table below is keyed on `day`, a UTC calendar date string
+-- ('YYYY-MM-DD') -- NOT settings.checkin_net_timezone/local time (the
+-- convention app/checkin.py's own net_date_for_ts() uses for a weekly
+-- net scoped to one region's clock), and NOT an epoch timestamp. UTC
+-- because this is a public website with visitors in every timezone,
+-- so there is no single "local" that would mean anything for a global
+-- page-view count. A plain string rather than an epoch keeps every
+-- query below (BETWEEN, ORDER BY, GROUP BY) a simple string comparison
+-- that already sorts and ranges correctly for ISO 8601 dates, with no
+-- need to call SQLite's own date() function on every row.
+--
+-- No visitor is ever identified by their real IP address or their raw
+-- User-Agent string -- see settings.traffic_salt's own comment in
+-- app/config.py for the full hashing scheme
+-- (sha256(salt + ip + user_agent), truncated to 16 hex characters) and
+-- why the salt is what makes that irreversible rather than merely
+-- obscured.
+CREATE TABLE IF NOT EXISTS site_visitor (
+    visitor_hash    TEXT PRIMARY KEY,             -- app/traffic.py's _hash_visitor()
+    first_seen      TEXT NOT NULL,                -- UTC day string of this visitor's first-ever hit
+    last_seen       TEXT NOT NULL,                -- UTC day string of this visitor's most recent hit
+    hits            INTEGER NOT NULL DEFAULT 0,   -- lifetime page-view count, all days combined
+    is_bot          INTEGER NOT NULL DEFAULT 0    -- app/traffic.py's _is_bot_user_agent()
+);
+
+-- Retention (app/traffic.py's prune_stale_traffic(), riding along on
+-- ordinary request traffic at most once a day) deletes by last_seen, so
+-- this is the one query pattern that benefits from an index beyond the
+-- primary key.
+CREATE INDEX IF NOT EXISTS idx_site_visitor_first_seen ON site_visitor(first_seen);
+
+-- One row per (day, visitor) -- this is what makes "unique visitors
+-- today" and "new visitors today" EXACT, computed directly from this
+-- table's own rows, with no nightly rollup job needed to derive them
+-- from a raw hit log: uniques-for-a-day is just COUNT(*) of rows for
+-- that day, and new-visitors-for-a-day is COUNT(*) of rows for that day
+-- whose visitor_hash has no earlier row in this same table (see
+-- app/traffic.py's build_traffic_report() for the exact query, joined
+-- to site_visitor.is_bot so a bot's presence never counts toward either
+-- HUMAN figure).
+--
+-- `views` carries a per-day, per-visitor hit count -- the one field
+-- beyond what a bare (day, visitor_hash) presence table would need,
+-- added so a day's TOTAL page views (not just its unique visitor
+-- count), split into human and bot totals by joining to
+-- site_visitor.is_bot, can both be read straight out of this one table.
+-- Without it, this table could only ever answer "how many distinct
+-- people," never "how many page loads" -- the same role site_visitor's
+-- own `hits` column already plays for a visitor's LIFETIME total,
+-- scoped down here to one day.
+CREATE TABLE IF NOT EXISTS site_visit_day (
+    day             TEXT NOT NULL,
+    visitor_hash    TEXT NOT NULL,
+    views           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, visitor_hash)
+);
+
+-- Per-path daily view counts, for the admin panel's "top pages" list.
+-- HUMAN HITS ONLY -- a crawler methodically walking every page on the
+-- site would otherwise dominate this ranking and make it useless for
+-- the thing it exists to answer ("what are real visitors actually
+-- looking at"). Bot traffic is still fully recorded (site_visitor's
+-- own is_bot flag, and rolled into site_visit_day.views for the
+-- bot_views total), just never broken down by path here.
+CREATE TABLE IF NOT EXISTS site_path_daily (
+    day             TEXT NOT NULL,
+    path            TEXT NOT NULL,
+    views           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, path)
+);
+
+-- Per-referrer daily view counts, for the admin panel's "where visitors
+-- came from" list. Same human-only reasoning as site_path_daily above.
+-- Only ever scheme+host (e.g. "https://old-rival-site.com"), never a
+-- full URL -- a full referrer URL can carry a path and query string
+-- that leak what a visitor was doing on the SENDING site, which is
+-- somebody else's visitor to protect, not just noise to strip. A
+-- self-referral (this deployment linking to itself) is dropped entirely
+-- rather than recorded, since "meshwars.com referred a visitor to
+-- meshwars.com" is not information anyone asked this feature for.
+CREATE TABLE IF NOT EXISTS site_referrer_daily (
+    day             TEXT NOT NULL,
+    referrer        TEXT NOT NULL,
+    views           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, referrer)
+);
 """
 
 
