@@ -589,13 +589,40 @@ def test_totp_activate_sends_no_notice_without_verified_contact(totp_client, db_
 # app/admin_api.py
 # =========================================================================
 
+class _FakeMcIngestor:
+    """Minimal invalidate_player() stub -- app/admin_api.py's
+    admin_player_reissue() calls request.app.state.mc_ingestor.
+    invalidate_player() after commit (same cache-staleness fix
+    every revoke/disable/delete route applies); admin_player_issue_key()
+    deliberately does NOT call it (see that route's own docstring), so
+    this fake exists only so reissue's own call has something to land
+    on.
+    """
+
+    def invalidate_player(self, player_id: int) -> None:
+        pass
+
+
 @pytest.fixture
 def admin_client(db_path):
     app = FastAPI()
     app.include_router(admin_router)
     app.include_router(account_router)
     app.add_exception_handler(HTTPException, http_exception_as_error_body)
+    app.state.mc_ingestor = _FakeMcIngestor()
     return TestClient(app)
+
+
+def _link_player(path: str, account_id: int, display_name: str, *, team: str = "RED") -> int:
+    conn = sqlite3.connect(path)
+    cur = conn.execute(
+        "INSERT INTO player(display_name, team, created_at, account_id) VALUES (?, ?, ?, ?)",
+        (display_name, team, int(time.time()), account_id),
+    )
+    conn.commit()
+    player_id = cur.lastrowid
+    conn.close()
+    return player_id
 
 
 def test_role_grant_notifies_target_with_operator_initiated_wording(admin_client, db_path, monkeypatch):
@@ -650,3 +677,78 @@ def test_role_grant_succeeds_even_when_notice_send_raises(admin_client, db_path,
     role = conn.execute("SELECT role FROM account WHERE account_id = ?", (target_id,)).fetchone()[0]
     conn.close()
     assert role == "admin"
+
+
+# =========================================================================
+# HTTP-level, event 8: admin-issued vs. reissued player key --
+# app/admin_api.py -- these two routes behave differently (issue_key is
+# additive and never revokes anything; reissue revokes every prior key)
+# and, after a coordinator-flagged copy bug, now carry DIFFERENT wording
+# reflecting that -- issue_key's own notice makes no claim about a
+# previous key, reissue's says the previous key stopped working.
+# =========================================================================
+
+def test_admin_issue_key_notice_makes_no_claim_about_previous_keys(admin_client, db_path, monkeypatch):
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+    calls = _stub_notice_send(monkeypatch, account_api_module)
+    operator_id = _make_account(db_path, role="admin", totp_active=True)
+    target_id = _make_account(db_path)
+    _set_contact_email(db_path, target_id, "target@example.com", verified=True)
+    player_id = _link_player(db_path, target_id, "Malice")
+    _login_as(admin_client, operator_id)
+
+    resp = admin_client.post("/api/admin/player/issue_key", json={"player_id": player_id})
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["subject"] == "A new API key was issued for your MeshWars player"
+    assert call["heading"] == "A new API key was issued"
+    assert call["lines"][0] == "A new API key was issued for the player Malice on " + \
+        format_notice_timestamp(resp.json()["issued_at"]) + "."
+    assert "previous key" not in call["lines"][0].lower()
+    assert "stopped working" not in call["lines"][0].lower()
+
+
+def test_admin_reissue_notice_says_previous_key_stopped_working(admin_client, db_path, monkeypatch):
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+    calls = _stub_notice_send(monkeypatch, account_api_module)
+    operator_id = _make_account(db_path, role="admin", totp_active=True)
+    target_id = _make_account(db_path)
+    _set_contact_email(db_path, target_id, "target@example.com", verified=True)
+    player_id = _link_player(db_path, target_id, "Malice")
+    _login_as(admin_client, operator_id)
+
+    resp = admin_client.post(
+        "/api/admin/player/reissue", json={"player_id": player_id, "display_name": "Malice"}
+    )
+
+    assert resp.status_code == 200
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["subject"] == "Your MeshWars player API key was reissued"
+    assert call["heading"] == "Your API key was reissued"
+    assert "was reissued on" in call["lines"][0]
+    assert "The previous key stopped working." in call["lines"][0]
+
+
+def test_admin_issue_key_and_reissue_never_include_the_raw_key(admin_client, db_path, monkeypatch):
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+    calls = _stub_notice_send(monkeypatch, account_api_module)
+    operator_id = _make_account(db_path, role="admin", totp_active=True)
+    target_id = _make_account(db_path)
+    _set_contact_email(db_path, target_id, "target@example.com", verified=True)
+    player_id = _link_player(db_path, target_id, "Malice")
+    _login_as(admin_client, operator_id)
+
+    r1 = admin_client.post("/api/admin/player/issue_key", json={"player_id": player_id})
+    r2 = admin_client.post(
+        "/api/admin/player/reissue", json={"player_id": player_id, "display_name": "Malice"}
+    )
+
+    raw_key_1 = r1.json()["key"]
+    raw_key_2 = r2.json()["key"]
+    for call in calls:
+        blob = " ".join(call["lines"]) + call["subject"] + call["heading"]
+        assert raw_key_1 not in blob
+        assert raw_key_2 not in blob

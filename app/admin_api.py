@@ -1366,7 +1366,7 @@ async def admin_player_issue_key(request: Request):
             heading="A new API key was issued",
             lines=(
                 f"A new API key was issued for the player {display_name} on "
-                f"{format_notice_timestamp(now)}. Any previous key stopped working.",
+                f"{format_notice_timestamp(now)}.",
                 "This was done by a MeshWars operator, not by you.",
                 "If you weren't expecting it, reply to this message.",
             ),
@@ -1500,11 +1500,11 @@ async def admin_player_reissue(request: Request):
     if target_account_id is not None:
         await _notify_security(
             target_account_id, contact_email,
-            subject="A new API key was issued for your MeshWars player",
-            heading="A new API key was issued",
+            subject="Your MeshWars player API key was reissued",
+            heading="Your API key was reissued",
             lines=(
-                f"A new API key was issued for the player {display_name} on "
-                f"{format_notice_timestamp(now)}. Any previous key stopped working.",
+                f"The API key for the player {display_name} was reissued on "
+                f"{format_notice_timestamp(now)}. The previous key stopped working.",
                 "This was done by a MeshWars operator, not by you.",
                 "If you weren't expecting it, reply to this message.",
             ),
