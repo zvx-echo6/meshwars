@@ -428,6 +428,13 @@ body {
   height: 44px;
 }
 
+/* stroke-width is drawn in the SAME non-uniformly-scaled coordinate
+   space preserveAspectRatio="none" stretches (see .adm-traffic-chart
+   just above and trafficChart()'s own comment in admin.js) unless told
+   otherwise -- vector-effect="non-scaling-stroke", set on the <path>
+   itself in admin.js, is what keeps this a true 2px regardless of that
+   stretch. This rule only sets the parts vector-effect does not:
+   colour, join/cap style, no fill. */
 .adm-traffic-line {
   fill: none;
   stroke: var(--mw-accent);
@@ -436,38 +443,61 @@ body {
   stroke-linecap: round;
 }
 
-.adm-traffic-line-dot { fill: var(--mw-accent); }
-
 /* Recessive on purpose -- the only thing drawn behind the line itself;
-   no gridlines, no axis ticks. */
+   no gridlines, no axis ticks. Also non-scaling-stroke'd in admin.js,
+   same reason as the line above. */
 .adm-traffic-baseline { stroke: var(--mw-line); stroke-width: 1; }
 
 .adm-traffic-hoverline { stroke: var(--mw-line-strong); stroke-width: 1; }
 
-.adm-traffic-hoverdot {
-  fill: var(--mw-accent);
-  stroke: var(--mw-ink);
-  stroke-width: 1;
+/* The single point marker -- both the static one-day dot and the
+   hover dot reuse this class. A plain CSS circle, not an SVG one; see
+   trafficChart()'s own comment in admin.js for why an SVG <circle>
+   would render as an ellipse here. Centred on its own (left, top) via
+   the negative margin, since trafficChart() sets those as a plain
+   top-left position, not a transform. pointer-events: none so the
+   dot -- which visually sits on top of the SVG's own hit-test rect --
+   never itself becomes the mousemove target and stalls the hover
+   tracking underneath it. */
+.adm-traffic-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: var(--mw-accent);
+  border: 1px solid var(--mw-ink);
+  pointer-events: none;
 }
 
+/* A reserved row, not a floating box -- see renderTraffic()'s own
+   comment in admin.js for why: a tooltip anchored to the hovered
+   point's x-position used to sit on top of adm-traffic-sub and could
+   run past this 180px column's own edge at the first/last day.
+   visibility: hidden (not display: none, not hidden the attribute) is
+   the load-bearing part -- it keeps this element's box, border and
+   padding included, in the layout whether or not anything is
+   hovered, so nothing above or below it ever shifts when a hover
+   starts or ends; only its paint toggles, via .is-active below.
+   white-space/overflow/text-overflow keep it to exactly one line and
+   truncate gracefully if a date/count combination is ever too wide
+   for the column, rather than wrapping and quietly outgrowing the
+   reserved height above. */
 .adm-traffic-tip {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  transform: translateX(-50%);
+  margin: 4px 0 8px;
+  padding: 3px 6px;
   background: var(--mw-raised);
   border: 1px solid var(--mw-line-strong);
   border-radius: 4px;
-  padding: 4px 6px;
   font-size: 0.6875rem;
   color: var(--mw-text-2);
-  white-space: nowrap;
-  pointer-events: none;
   font-variant-numeric: tabular-nums;
-  /* Above the chart's own hover dot/crosshair and anything else in the
-     sidebar column, never above the topbar/nav (both un-positioned or
-     using their own much larger stacking context). */
-  z-index: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  visibility: hidden;
 }
+.adm-traffic-tip.is-active { visibility: visible; }
 
 .adm-traffic-note {
   margin: 8px 0 0;
@@ -475,6 +505,12 @@ body {
   color: var(--mw-text-6);
   line-height: 1.4;
 }
+
+/* The date substring only -- "Bots excluded · since" is free to wrap
+   at this column's width, but a date must never split mid-string (it
+   did, rendering "2026-08-" on one line and "09" on the next before
+   this existed). */
+.adm-traffic-date { white-space: nowrap; }
 
 .adm-main { grid-area: main; padding: 18px 22px 80px; }
 

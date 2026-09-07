@@ -426,12 +426,36 @@ function renderTraffic(host, d) {
     text: today.new_visitors + ' new · ' + today.views + ' views',
   }));
 
-  host.appendChild(trafficChart(daily));
+  // A reserved-height row for the hover readout, ABOVE the chart and
+  // BELOW the resting "N new / M views" line -- its own space, not a
+  // box floated over either one. An earlier version anchored the
+  // tooltip to the hovered point's x-position, directly above the
+  // chart, which put it exactly on top of adm-traffic-sub (losing that
+  // stat while reading this one) and risked spilling outside this
+  // 180px column at the first/last day where the anchor point sits
+  // right at the column's own edge. A fixed row can't do either: it
+  // never overlaps another stat because a full row is reserved for it
+  // whether or not anything is hovered (see .adm-traffic-tip's
+  // visibility:hidden in admin.css -- hidden, not display:none, so it
+  // keeps its box and nothing else shifts when it appears), and its
+  // text sits inside the row's own width instead of being anchored to
+  // a point that can sit anywhere from one edge of the chart to the
+  // other.
+  const tip = el('div', { className: 'adm-traffic-tip' });
+  host.appendChild(tip);
 
-  host.appendChild(el('p', {
-    className: 'adm-traffic-note',
-    text: 'Bots excluded · since ' + d.since,
-  }));
+  host.appendChild(trafficChart(daily, tip));
+
+  const note = el('p', { className: 'adm-traffic-note' });
+  note.appendChild(document.createTextNode('Bots excluded · since '));
+  // A separate nowrap span for just the date -- "Bots excluded · since"
+  // is free to wrap onto its own line at this column's width, but the
+  // date itself (2026-08-09) must never split across the wrap point,
+  // which is exactly what happened when the whole line was one plain
+  // text node: the browser wrapped wherever there was space, including
+  // mid-date, and rendered "2026-08-" / "09" on two lines.
+  note.appendChild(el('span', { className: 'adm-traffic-date', text: d.since }));
+  host.appendChild(note);
 }
 
 // Hand-written inline SVG, no chart library -- one series (unique
@@ -442,7 +466,27 @@ function renderTraffic(host, d) {
 // entirely in viewBox units and never has to read the element's
 // rendered size except once, in getBoundingClientRect(), to convert a
 // mouse position back into that same space.
-function trafficChart(daily) {
+//
+// `tipEl`, if given, is the reserved-row element (built in
+// renderTraffic() above) this chart's hover state writes its readout
+// into -- kept outside this function rather than built in here so it
+// can live in the DOM between adm-traffic-sub and this chart, never on
+// top of either.
+//
+// Density note: at 30 points across a ~160-180px column the line is
+// inherently a lot of short zigzagging segments -- that is real data,
+// not rendering noise, and neither the data window nor the values
+// themselves are touched here to soften it (Matt was explicit: don't
+// smooth the data). What IS deliberate: stroke-linejoin/linecap: round
+// (admin.css) already takes the harshest edge off each angle, and the
+// straight point-to-point segments below are kept straight rather than
+// curve-fit through a spline -- a curve would overshoot between real
+// samples and read as data between days that was never recorded, which
+// is the same misrepresentation smoothing the values would cause, just
+// moved into the rendering step instead of the data step. So: no
+// further change beyond the two real defects (stroke width, hover
+// placement) fixed elsewhere in this function.
+function trafficChart(daily, tipEl) {
   const W = 300, H = 44, PAD_X = 4, PAD_Y = 5;
   const NS = 'http://www.w3.org/2000/svg';
 
@@ -478,42 +522,45 @@ function trafficChart(daily) {
   base.setAttribute('y1', String(H - 1));
   base.setAttribute('y2', String(H - 1));
   base.setAttribute('class', 'adm-traffic-baseline');
+  // See the path's own vector-effect comment below -- the same
+  // non-uniform-scale hairline problem applies to every stroked line
+  // in this chart, this one included.
+  base.setAttribute('vector-effect', 'non-scaling-stroke');
   svg.appendChild(base);
 
-  if (points.length === 1) {
-    // One day of data -- a line needs two points, so this is a single
-    // dot rather than a degenerate/invisible path.
-    const dot = document.createElementNS(NS, 'circle');
-    dot.setAttribute('cx', String(points[0].x));
-    dot.setAttribute('cy', String(points[0].y));
-    dot.setAttribute('r', '3.5');
-    dot.setAttribute('class', 'adm-traffic-line-dot');
-    svg.appendChild(dot);
-  } else {
+  if (points.length > 1) {
     const path = document.createElementNS(NS, 'path');
     const dAttr = points
       .map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(2) + ',' + p.y.toFixed(2))
       .join(' ');
     path.setAttribute('d', dAttr);
     path.setAttribute('class', 'adm-traffic-line');
+    // The viewBox is 300x44 but CSS stretches the <svg> to roughly
+    // 160-180px wide with preserveAspectRatio="none" (~0.55-0.6x
+    // horizontally, 1x vertically, since the element's CSS height
+    // matches the viewBox height exactly). A plain stroke-width is
+    // drawn IN that coordinate space and then scaled along with
+    // everything else, so a "2px" stroke comes out thinner on
+    // near-vertical segments than near-horizontal ones -- squashed
+    // by the larger of the two scale factors -- which is what made
+    // the whole line read as a wispy hairline rather than a clean,
+    // consistent 2px one. vector-effect="non-scaling-stroke" draws the
+    // stroke AFTER the coordinate transform instead of before it, so
+    // it stays a true 2 device pixels everywhere along the path
+    // regardless of how the viewBox itself is stretched.
+    path.setAttribute('vector-effect', 'non-scaling-stroke');
     svg.appendChild(path);
   }
 
-  // Hover furniture -- crosshair, dot, and the rect that carries the
-  // mousemove listener -- built once here and toggled in showAt()/hide()
+  // The crosshair -- built once here and toggled in showAt()/hide()
   // below, rather than created and torn down on every move.
   const hoverLine = document.createElementNS(NS, 'line');
   hoverLine.setAttribute('y1', '0');
   hoverLine.setAttribute('y2', String(H));
   hoverLine.setAttribute('class', 'adm-traffic-hoverline');
+  hoverLine.setAttribute('vector-effect', 'non-scaling-stroke');
   hoverLine.style.display = 'none';
   svg.appendChild(hoverLine);
-
-  const hoverDot = document.createElementNS(NS, 'circle');
-  hoverDot.setAttribute('r', '3.5');
-  hoverDot.setAttribute('class', 'adm-traffic-hoverdot');
-  hoverDot.style.display = 'none';
-  svg.appendChild(hoverDot);
 
   // The hit target is the full SVG height, not the 2px line -- a
   // transparent rect covering the whole viewBox carries the listener so
@@ -527,32 +574,62 @@ function trafficChart(daily) {
   svg.appendChild(hit);
 
   const wrap = el('div', { className: 'adm-traffic-chart-wrap' });
-  const tip = el('div', { className: 'adm-traffic-tip' });
-  tip.hidden = true;
   wrap.appendChild(svg);
-  wrap.appendChild(tip);
+
+  // The point marker (both the single-day static dot and the hover
+  // dot) is a plain CSS-positioned <div>, not an SVG <circle> -- an SVG
+  // circle lives in the same non-uniformly-scaled coordinate space the
+  // path's vector-effect comment above describes, and vector-effect
+  // only fixes STROKE width under that scale, not fill geometry: a
+  // `<circle r="3.5">` would still render as a narrow ellipse, not a
+  // dot. A CSS div sized in real pixels sidesteps the scale entirely --
+  // vertical position maps 1:1 (the viewBox height and the rendered
+  // height are equal by construction, see H/.adm-traffic-chart's own
+  // height in admin.css), and horizontal position is a percentage of
+  // the wrap's own width -- so it is a true circle at every width the
+  // sidebar ever renders at, not just the one this was eyeballed in.
+  const dot = el('div', { className: 'adm-traffic-dot' });
+  dot.style.display = 'none';
+  wrap.appendChild(dot);
+
+  function placeDot(i) {
+    const p = points[i];
+    dot.style.left = ((p.x / W) * 100) + '%';
+    dot.style.top = p.y + 'px';
+    dot.style.display = '';
+  }
+
+  if (points.length === 1) {
+    // One day of data -- a line needs two points, so this is a single
+    // dot, shown permanently, rather than a degenerate/invisible path.
+    // Nothing to hover into that a static dot does not already show.
+    placeDot(0);
+    return wrap;
+  }
 
   function showAt(i) {
     const p = points[i];
     hoverLine.setAttribute('x1', String(p.x));
     hoverLine.setAttribute('x2', String(p.x));
     hoverLine.style.display = '';
-    hoverDot.setAttribute('cx', String(p.x));
-    hoverDot.setAttribute('cy', String(p.y));
-    hoverDot.style.display = '';
-    tip.hidden = false;
-    tip.textContent = p.row.day + ' — ' + p.row.uniques + ' unique, ' + p.row.new_visitors + ' new';
-    // Positioned as a percentage of the wrap's own width, not a fixed
-    // pixel offset -- the SVG is stretched to the sidebar's real width
-    // by preserveAspectRatio="none", so only a fraction of the viewBox
-    // x-coordinate carries over correctly.
-    tip.style.left = ((p.x / W) * 100) + '%';
+    placeDot(i);
+    if (tipEl) {
+      // MM-DD, not the full YYYY-MM-DD -- the year is redundant this
+      // close to today (the footnote below already anchors the window
+      // with a full "since YYYY-MM-DD"), and dropping it is what keeps
+      // "unique"/"new" as whole words instead of ellipsis-truncated in
+      // this 180px column, at every day in the range including the
+      // widest values (11 unique, 8 new -- checked against this exact
+      // stub data during the fix for this defect).
+      tipEl.textContent = p.row.day.slice(5) + ' — ' + p.row.uniques + ' unique, ' + p.row.new_visitors + ' new';
+      tipEl.classList.add('is-active');
+    }
   }
 
   function hide() {
     hoverLine.style.display = 'none';
-    hoverDot.style.display = 'none';
-    tip.hidden = true;
+    dot.style.display = 'none';
+    if (tipEl) tipEl.classList.remove('is-active');
   }
 
   svg.addEventListener('mousemove', (ev) => {
