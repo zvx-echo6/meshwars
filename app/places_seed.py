@@ -83,11 +83,13 @@ import os
 import re
 import sqlite3
 import gzip
+import hashlib
 import time
 
 from shapely import wkt as shapely_wkt
 from shapely.geometry import MultiPolygon, Polygon, box as shapely_box
 
+from .config import settings
 from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
 
 log = logging.getLogger("places_seed")
@@ -109,6 +111,25 @@ def _open_csv(path: str, **kwargs):
     if path.endswith(".gz"):
         return gzip.open(path, "rt", **kwargs)
     return open(path, **kwargs)
+
+
+def _sha256_file(path: str) -> str:
+    """Content hash of path's raw bytes (the .gz's compressed bytes for
+    the seed -- decompressing first would cost the very thing this
+    fingerprint exists to avoid paying on every boot). Read in 1MB
+    chunks so this never holds the whole file in memory at once, though
+    at ~47MB and ~0.5MB for the two files that fingerprint this seed it
+    would hardly matter. Missing file -> a stable constant, same as the
+    old size+mtime fingerprint's OSError fallback, so an absent
+    summit_cells.csv does not re-trigger a load every startup."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return "none"
+    return h.hexdigest()
 
 
 def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
@@ -452,67 +473,100 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         log.warning("places_seed: %s not found -- places feature will have no data", _DATA_PATH)
         return stats
 
-    # Cheap fingerprint (size + mtime, not a content hash -- this file
-    # is 9+MB and hashing it is not what makes a re-run slow; the park
-    # boundary geometry work below is, at roughly a minute for ~3,500
-    # matched parks) so an unchanged CSV across a routine restart skips
-    # the whole pass rather than repeating a minute of shapely work on
-    # every boot. `cursor` is app/db.py's existing generic key/value
-    # table (get_cursor/set_cursor) -- read/written directly here rather
-    # than imported, since importing app.db from a module app.db itself
+    # Fingerprint is a sha256 CONTENT hash (2026-09-07), not size+mtime.
+    # size+mtime looked cheap when this file was 9MB and seemed like the
+    # obviously right choice at the time, but it silently broke the one
+    # thing it exists for: CT 113 (and every other host) deploys by
+    # `git reset --hard`, which stamps a FRESH mtime on every tracked
+    # file on every deploy regardless of whether its bytes moved. That
+    # made "unchanged since last load" false on every single deploy, not
+    # just ones that touched the seed, forcing the full multi-minute
+    # reconcile pass on every boot after every deploy -- observed 205s
+    # for the worldwide 1.4M-row seed, over mw-deploy's 180s health-check
+    # timeout, so a routine unrelated-file deploy could outright fail to
+    # come healthy. A content hash only changes when the bytes actually
+    # do. Hashing the shipped 47MB places_worth_going.csv.gz (compressed,
+    # not the ~136MB decompressed) and the 0.5MB summit_cells.csv is
+    # sub-second either way -- nowhere close to what makes a real reload
+    # slow (the shapely park-boundary work below, ~minutes for the full
+    # worldwide set) -- so trading size+mtime for a hash costs nothing
+    # and fixes the every-deploy-reloads bug outright.
+    #
+    # `cursor` is app/db.py's existing generic key/value table (get_
+    # cursor/set_cursor) -- read/written directly here rather than
+    # imported, since importing app.db from a module app.db itself
     # imports would be circular.
     #
     # _RECONCILE_VERSION rides along in the fingerprint string so a code
-    # upgrade alone -- CSV byte-for-byte unchanged -- still forces one
-    # full pass. Without it, a DB that already recorded this exact CSV's
-    # fingerprint under the OLD insert-only loader (no reconcile at all)
-    # would skip forever after upgrading to this fix: the file never
-    # changes again, so "unchanged since last load" would stay true
-    # indefinitely and the stale rows this fix exists to clean up would
-    # never actually get cleaned up. Bump this whenever the reconcile
-    # mechanics OR the per-row _classify_row rules change in a way that
-    # requires re-running against an already-fingerprinted CSV -- the
-    # named-summits-only filter (2026-08-24) is exactly that case: the
-    # CSV's bytes are unchanged, only which rows get kept changed, so a
-    # DB fingerprinted before this filter landed needs the version bump
-    # to actually deactivate the newly-excluded summits rather than
-    # trusting a fingerprint recorded under the old, looser rule.
+    # upgrade alone -- seed bytes unchanged -- still forces one full
+    # pass. Without it, a DB that already recorded this exact seed's
+    # fingerprint under an older loader would skip forever after
+    # upgrading, and whatever the new version changed (which rows get
+    # kept, how their cells are computed) would never actually apply.
+    # Bump this whenever the reconcile mechanics OR the per-row
+    # _classify_row rules change in a way that requires re-running
+    # against an already-fingerprinted seed -- the named-summits-only
+    # filter (2026-08-24, v2) and the summit/landmark double-dip filter
+    # (2026-08-25, v3) are exactly that case: the seed's bytes were
+    # unchanged, only which rows get kept changed, so a DB fingerprinted
+    # under the previous version needed the bump to actually deactivate
+    # the newly-excluded rows rather than trusting a looser rule's
+    # fingerprint. v4 (2026-08-31) is the same story for summit_cells.csv:
+    # summits stopped being a single square and became their terrain-
+    # qualified set, so a DB fingerprinted under v3 would keep the old
+    # one-square-per-summit mapping forever without the bump.
     #
-    # v3 (2026-08-25): the summit/landmark double-dip filter
-    # (_SUMMIT_COLOCATION_RADIUS_M) is new -- same "CSV bytes unchanged,
-    # which rows get kept changed" situation, so a DB fingerprinted
-    # under v2 needs this bump to actually deactivate the newly-excluded
-    # co-located landmarks.
-    #
-    # v4 (2026-08-31): summits stopped being a single square and became
-    # their terrain-qualified set (reference/summit_cells.csv, see
-    # _load_summit_cells). The seed CSV's own bytes did not move, but
-    # every summit's place_cell rows did, so a DB fingerprinted under v3
-    # would keep the old one-square-per-summit mapping forever without
-    # this bump.
-    _RECONCILE_VERSION = 4
-    st = os.stat(_DATA_PATH)
+    # v5 (2026-09-07): fingerprint algorithm itself changed (size+mtime
+    # -> sha256), per the note above. A v4 fingerprint is a different
+    # STRING SHAPE from a v5 one even where the underlying file is
+    # unchanged, so it can never accidentally compare equal -- this
+    # version bump is really just documentation here, not what forces
+    # the reload (the algorithm change already does that on its own),
+    # but every previous entry in this list bumps the version for a
+    # fingerprint-invalidating change, so this one does too.
+    _RECONCILE_VERSION = 5
+    seed_hash = _sha256_file(_DATA_PATH)
     # summit_cells.csv rides along in the fingerprint too. It decides
     # every summit's place_cell rows but is a SEPARATE file from the seed
     # CSV, so a change to it alone would leave the fingerprint untouched
-    # and the old mapping loaded forever. (Tightening the radius from 5km
-    # to 1.5km only reloaded because the deploy happened to rewrite the
-    # seed CSV and move its mtime -- luck, not design.) Missing file
-    # contributes a constant, so its absence is stable rather than
-    # re-triggering a load every startup.
-    try:
-        sc = os.stat(_SUMMIT_CELLS_PATH)
-        summit_fp = f"{sc.st_size}:{int(sc.st_mtime)}"
-    except OSError:
-        summit_fp = "none"
-    fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}:s{summit_fp}"
+    # and the old mapping loaded forever. Missing file contributes a
+    # constant, so its absence is stable rather than re-triggering a
+    # load every startup.
+    summit_hash = _sha256_file(_SUMMIT_CELLS_PATH)
+    fingerprint = f"sha256:{seed_hash}:v{_RECONCILE_VERSION}:s{summit_hash}"
+
+    # Explicit operator override (PLACES_FORCE_RESEED=1 / true / yes /
+    # on -- see .env.example): forces the full reload regardless of the
+    # fingerprint, without requiring anyone to hand-edit the `cursor`
+    # table. Checked here rather than short-circuiting earlier so the
+    # normal fingerprint-mismatch code path below still fires -- forcing
+    # a reseed is "pretend the fingerprint didn't match", not a separate
+    # mechanism.
+    force_reseed = settings.places_force_reseed
+
     row = conn.execute("SELECT v FROM cursor WHERE k = 'places_seed_csv_fingerprint'").fetchone()
-    if row is not None and row[0] == fingerprint:
-        log.info("places_seed: CSV unchanged since last load (%s), skipping", fingerprint)
+    place_count = conn.execute("SELECT COUNT(*) FROM place").fetchone()[0]
+    if force_reseed:
+        log.info("places_seed: PLACES_FORCE_RESEED set, forcing full reload regardless of fingerprint")
+    elif row is not None and row[0] == fingerprint and place_count > 0:
+        # place_count > 0 is a belt-and-suspenders check alongside the
+        # fingerprint match: a `cursor` row recording a completed load
+        # should never coexist with an empty `place` table (the fingerprint
+        # is written in the SAME transaction as the rows it describes, see
+        # the COMMIT below), but trusting that invariant blindly would
+        # turn any future violation of it into a silent, permanent "no
+        # places data" state that nothing would ever self-heal.
         counts = conn.execute(
             "SELECT ref_type, COUNT(*) FROM place WHERE active = 1 GROUP BY ref_type"
         ).fetchall()
         stats["kept"] = {r[0]: r[1] for r in counts}
+        log.info(
+            "places_seed: seed unchanged since last load (%s), skipping full reload -- "
+            "place rows active: summit=%d park=%d landmark=%d (%d total, %d active)",
+            fingerprint,
+            stats["kept"].get("summit", 0), stats["kept"].get("park", 0), stats["kept"].get("landmark", 0),
+            place_count, sum(stats["kept"].values()),
+        )
         return stats
 
     now = int(time.time())

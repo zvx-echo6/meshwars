@@ -344,6 +344,84 @@ def test_upgrading_to_the_reconcile_fix_forces_one_full_reload(conn, tmp_path, m
     ).fetchone()[0] == 0
 
 
+def test_unchanged_seed_skips_the_reload(conn, tmp_path, monkeypatch):
+    """A second call against a byte-identical seed must not re-run the
+    reconcile pass at all -- proven the same way the codebase already
+    proves a full pass ran (test_upgrading_to_the_reconcile_fix_forces_
+    one_full_reload above): a manually-inserted stale row would be
+    deactivated by a real reconcile pass, so if it survives untouched,
+    the pass was skipped, not just cheap.
+    """
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+    _write_seed_csv(csv_path, [_seed_row("landmark", "n1", lat=44.0, lon=-117.0)])
+
+    first = load_places_seed(conn)
+    assert first["kept"]["landmark"] == 1
+
+    # A row a real reconcile pass would deactivate (not in the CSV).
+    conn.execute(
+        "INSERT INTO place(ref_type, ref_code, name, lat, lon, points, source, "
+        "rotates, active, created_at) VALUES ('summit', 'sneaky', 'sneaky', 43.0, -116.0, "
+        "100, 'TEST', 0, 1, ?)",
+        (int(time.time()),),
+    )
+
+    second = load_places_seed(conn)
+    assert second["deactivated"] == 0, "unchanged seed must skip the reconcile pass entirely"
+    assert conn.execute(
+        "SELECT active FROM place WHERE ref_code = 'sneaky'"
+    ).fetchone()[0] == 1, "a skipped pass must not touch rows a real pass would deactivate"
+
+
+def test_places_force_reseed_forces_reload_despite_matching_fingerprint(conn, tmp_path, monkeypatch):
+    """PLACES_FORCE_RESEED (app/config.py's places_force_reseed) is the
+    operator escape hatch -- it must force the full reconcile pass even
+    when the fingerprint matches, without anyone hand-editing `cursor`.
+    """
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+    _write_seed_csv(csv_path, [_seed_row("landmark", "n1", lat=44.0, lon=-117.0)])
+    load_places_seed(conn)
+
+    conn.execute(
+        "INSERT INTO place(ref_type, ref_code, name, lat, lon, points, source, "
+        "rotates, active, created_at) VALUES ('summit', 'sneaky', 'sneaky', 43.0, -116.0, "
+        "100, 'TEST', 0, 1, ?)",
+        (int(time.time()),),
+    )
+
+    monkeypatch.setattr(places_seed_module.settings, "places_force_reseed", True)
+    stats = load_places_seed(conn)
+    assert stats["deactivated"] == 1, "PLACES_FORCE_RESEED must force a real pass, not skip"
+    assert conn.execute(
+        "SELECT active FROM place WHERE ref_code = 'sneaky'"
+    ).fetchone()[0] == 0
+
+
+def test_emptied_place_table_forces_reload_despite_matching_fingerprint(conn, tmp_path, monkeypatch):
+    """Belt-and-suspenders guard: a `cursor` fingerprint row recording a
+    completed load should never coexist with an empty `place` table
+    (they are written/populated in the same transaction), but if that
+    invariant is ever violated from outside this module -- a manual
+    wipe, a bad migration -- the loader must notice and reload rather
+    than trusting the fingerprint into a permanent, silent "no places
+    data" state.
+    """
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+    _write_seed_csv(csv_path, [_seed_row("landmark", "n1", lat=44.0, lon=-117.0)])
+    load_places_seed(conn)
+    assert conn.execute("SELECT COUNT(*) FROM place").fetchone()[0] == 1
+
+    conn.execute("DELETE FROM place")  # fingerprint row in `cursor` is left untouched
+    assert conn.execute("SELECT COUNT(*) FROM place").fetchone()[0] == 0
+
+    stats = load_places_seed(conn)
+    assert stats["kept"]["landmark"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM place").fetchone()[0] == 1
+
+
 # --- summits are a terrain-qualified set of squares, not one square -----
 
 
