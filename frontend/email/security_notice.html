@@ -1,0 +1,39 @@
+<!--
+  Body fragment for PURPOSE_SECURITY_NOTICE -- see sign_in.html's own
+  comment for how app/email_login.py splits and composes a fragment
+  file like this one into _shell.html. Unlike sign_in.html/
+  verify_contact.html, this ONE file serves all nine account-security
+  events send_security_notice() sends (a password change, a role
+  grant, an admin-initiated recovery action, ...) -- each with its own
+  subject/heading/body wording, never literal copy baked into this
+  file. So every section below is itself a placeholder --
+  {heading}/{line1}/{line2}/{line3}/{cta_label}/{cta_url}/{footer} --
+  filled in by _render_html()'s own placeholder substitution AFTER
+  this fragment is already sitting inside the shell, the same "replace
+  last, against the fully-assembled page" reasoning {link_url} already
+  gets in sign_in.html/verify_contact.html (see that file's own
+  comment): {cta_url} appears twice below (the button href and the
+  plaintext fallback under it), and one substitution has to cover both.
+-->
+<!--heading-->
+{heading}
+<!--body-->
+{line1}
+<br><br>
+{line2}
+<br><br>
+{line3}
+<!--cta-->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px auto 0 auto;">
+  <tr>
+    <td align="center" bgcolor="#A9885B" style="border-radius:4px;">
+      <a href="{cta_url}" target="_blank" style="display:inline-block; padding:14px 32px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:bold; color:#17130C; text-decoration:none; border-radius:4px;">{cta_label}</a>
+    </td>
+  </tr>
+</table>
+<p style="margin:20px 0 0 0; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:18px; color:#888888; text-align:center;">
+  Or paste this into your browser<br>
+  <a href="{cta_url}" style="color:#A9885B; word-break:break-all;">{cta_url}</a>
+</p>
+<!--footer-->
+{footer}

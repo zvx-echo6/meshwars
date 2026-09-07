@@ -86,12 +86,15 @@ from .account_api import (
     _PLAYER_SCOPED_TABLES,
     _door_counts,
     _has_password,
+    _notify_security,
     _tombstone_display_name,
+    _verified_contact_email,
 )
 from .auth import new_rate_limit_bucket
 from .client_ip import get_client_ip
 from .config import settings
 from .db import WriteSession, connect
+from .email_login import format_notice_timestamp
 from .mc_ingest import hash_secret
 from .node_ref import normalize_node_ref, normalize_public_key
 from .sessions import SessionPrincipal, optional_session
@@ -875,11 +878,12 @@ async def _set_player_disabled(request: Request, disable: bool):
         return JSONResponse({"error": "player_id is required"}, status_code=400)
 
     now = int(time.time()) if disable else None
+    notice_now = now if now is not None else int(time.time())
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT player_id FROM player WHERE player_id = ?", (player_id,)
+            "SELECT player_id, account_id FROM player WHERE player_id = ?", (player_id,)
         ).fetchone()
         if row is None:
             conn.execute("ROLLBACK")
@@ -891,6 +895,11 @@ async def _set_player_disabled(request: Request, disable: bool):
             conn, actor_account_id=session.account_id,
             action="player_disable" if disable else "player_enable",
             detail=f"player_id={player_id}",
+        )
+        target_account_id = row["account_id"]
+        contact_email = (
+            _verified_contact_email(conn, target_account_id)
+            if target_account_id is not None else None
         )
         conn.execute("COMMIT")
     except Exception:
@@ -906,6 +915,25 @@ async def _set_player_disabled(request: Request, disable: bool):
     ingestor.invalidate_player(player_id)
 
     log.info("admin: player %d %s", player_id, "disabled" if disable else "enabled")
+
+    # Security notice (Stage 2, event 9) -- only when this player has a
+    # linked account at all; see _notify_security()'s own docstring
+    # (app/account_api.py) for why a send failure here can never
+    # surface to this response or undo the disable/enable just
+    # committed above.
+    if target_account_id is not None:
+        action_description = "disabled your player" if disable else "enabled your player"
+        await _notify_security(
+            target_account_id, contact_email,
+            subject="An operator changed your MeshWars account",
+            heading="An operator changed your account",
+            lines=(
+                f"A MeshWars operator {action_description} on {format_notice_timestamp(notice_now)}.",
+                "This was done by a MeshWars operator, not by you.",
+                "If you weren't expecting it, reply to this message.",
+            ),
+        )
+
     return {"player_id": player_id, "disabled": disable, "disabled_at": now}
 
 
@@ -1168,7 +1196,13 @@ async def admin_player_delete(request: Request):
             (_tombstone_display_name(player_id), now, player_id),
         )
 
+        contact_email = None
         if target_account_id is not None:
+            # Captured BEFORE the DELETE two lines below removes the
+            # `account` row this would otherwise read -- same "capture
+            # first" reasoning DELETE /api/account's own docstring gives
+            # (app/account_api.py).
+            contact_email = _verified_contact_email(conn, target_account_id)
             for table in _ACCOUNT_SCOPED_TABLES:
                 c = conn.execute(
                     f"DELETE FROM {table} WHERE account_id = ?", (target_account_id,)
@@ -1197,6 +1231,27 @@ async def admin_player_delete(request: Request):
         f", also deleted account {target_account_id}" if target_account_id is not None else "",
         counts,
     )
+
+    # Security notice (Stage 2, event 9) -- only when this player had a
+    # linked account (also deleted above); an unclaimed, key-only
+    # player has no account to notify. See _notify_security()'s own
+    # docstring (app/account_api.py) for why a send failure here can
+    # never surface to this response or undo the deletion just
+    # committed above -- using `contact_email` captured BEFORE that
+    # deletion ran, since the account row it comes from is gone by now.
+    if target_account_id is not None:
+        await _notify_security(
+            target_account_id, contact_email,
+            subject="An operator changed your MeshWars account",
+            heading="An operator changed your account",
+            lines=(
+                f"A MeshWars operator deleted your player and account on "
+                f"{format_notice_timestamp(now)}.",
+                "This was done by a MeshWars operator, not by you.",
+                "If you weren't expecting it, reply to this message.",
+            ),
+        )
+
     return {
         "deleted": True,
         "player_id": player_id,
@@ -1253,7 +1308,7 @@ async def admin_player_issue_key(request: Request):
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT display_name FROM player WHERE player_id = ?", (player_id,)
+            "SELECT display_name, account_id FROM player WHERE player_id = ?", (player_id,)
         ).fetchone()
         if row is None:
             conn.execute("ROLLBACK")
@@ -1272,8 +1327,13 @@ async def admin_player_issue_key(request: Request):
             conn, actor_account_id=session.account_id, action="issue_key",
             detail=f"player_id={player_id}", now=now,
         )
-        conn.execute("COMMIT")
         display_name = row["display_name"]
+        target_account_id = row["account_id"]
+        contact_email = (
+            _verified_contact_email(conn, target_account_id)
+            if target_account_id is not None else None
+        )
+        conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
@@ -1291,6 +1351,27 @@ async def admin_player_issue_key(request: Request):
     # invalidate call to "match" the other routes below -- it would be
     # a no-op dressed up as symmetry, and its absence is intentional.
     log.info("admin: issued additional key for player %d (%s)", player_id, display_name)
+
+    # Security notice (Stage 2, event 8) -- only when this player has a
+    # linked account at all (an unclaimed, key-only player has no
+    # account to notify); see _notify_security()'s own docstring
+    # (app/account_api.py) for why a send failure here can never
+    # surface to this response or undo the key mint just committed
+    # above. Never includes the key itself -- see this route's own
+    # docstring on why the audit row doesn't either.
+    if target_account_id is not None:
+        await _notify_security(
+            target_account_id, contact_email,
+            subject="A new API key was issued for your MeshWars player",
+            heading="A new API key was issued",
+            lines=(
+                f"A new API key was issued for the player {display_name} on "
+                f"{format_notice_timestamp(now)}. Any previous key stopped working.",
+                "This was done by a MeshWars operator, not by you.",
+                "If you weren't expecting it, reply to this message.",
+            ),
+        )
+
     return {
         "issued": True,
         "player_id": player_id,
@@ -1348,7 +1429,7 @@ async def admin_player_reissue(request: Request):
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT display_name FROM player WHERE player_id = ?", (player_id,)
+            "SELECT display_name, account_id FROM player WHERE player_id = ?", (player_id,)
         ).fetchone()
         if row is None:
             conn.execute("ROLLBACK")
@@ -1381,6 +1462,12 @@ async def admin_player_reissue(request: Request):
             detail=f"player_id={player_id} ({display_name}) revoked={revoked_count}", now=now,
         )
 
+        target_account_id = row["account_id"]
+        contact_email = (
+            _verified_contact_email(conn, target_account_id)
+            if target_account_id is not None else None
+        )
+
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -1403,6 +1490,26 @@ async def admin_player_reissue(request: Request):
         "admin: reissued key for player %d (%s), revoked %d prior key(s)",
         player_id, display_name, revoked_count,
     )
+
+    # Security notice (Stage 2, event 8) -- only when this player has a
+    # linked account at all (an unclaimed, key-only player has no
+    # account to notify); see _notify_security()'s own docstring
+    # (app/account_api.py) for why a send failure here can never
+    # surface to this response or undo the reissue just committed
+    # above. Never includes the key itself.
+    if target_account_id is not None:
+        await _notify_security(
+            target_account_id, contact_email,
+            subject="A new API key was issued for your MeshWars player",
+            heading="A new API key was issued",
+            lines=(
+                f"A new API key was issued for the player {display_name} on "
+                f"{format_notice_timestamp(now)}. Any previous key stopped working.",
+                "This was done by a MeshWars operator, not by you.",
+                "If you weren't expecting it, reply to this message.",
+            ),
+        )
+
     return {
         "reissued": True,
         "player_id": player_id,
@@ -2045,11 +2152,29 @@ async def admin_account_disable_totp(request: Request):
             detail=f"account_id={account_id} recovery_codes_cleared={recovery_codes_cleared}",
             now=now,
         )
+        contact_email = _verified_contact_email(conn, account_id)
 
     log.info(
         "admin: disabled two-factor authentication on account %d (%d recovery code(s) cleared)",
         account_id, recovery_codes_cleared,
     )
+
+    # Security notice (Stage 2, event 9) -- see _notify_security()'s own
+    # docstring (app/account_api.py) for why a send failure here can
+    # never surface to this response or undo the recovery action just
+    # committed above.
+    await _notify_security(
+        account_id, contact_email,
+        subject="An operator changed your MeshWars account",
+        heading="An operator changed your account",
+        lines=(
+            f"A MeshWars operator disabled two-factor authentication on your account on "
+            f"{format_notice_timestamp(now)}.",
+            "This was done by a MeshWars operator, not by you.",
+            "If you weren't expecting it, reply to this message.",
+        ),
+    )
+
     return {"ok": True, "account_id": account_id, "recovery_codes_cleared": recovery_codes_cleared}
 
 
@@ -2138,8 +2263,26 @@ async def admin_account_clear_password(request: Request):
             conn, actor_account_id=session.account_id, action="account_clear_password",
             detail=f"account_id={account_id} remaining_doors={remaining}", now=now,
         )
+        contact_email = _verified_contact_email(conn, account_id)
 
     log.info("admin: cleared password on account %d (%d door(s) remain)", account_id, remaining)
+
+    # Security notice (Stage 2, event 9) -- see _notify_security()'s own
+    # docstring (app/account_api.py) for why a send failure here can
+    # never surface to this response or undo the recovery action just
+    # committed above.
+    await _notify_security(
+        account_id, contact_email,
+        subject="An operator changed your MeshWars account",
+        heading="An operator changed your account",
+        lines=(
+            f"A MeshWars operator cleared the password on your account on "
+            f"{format_notice_timestamp(now)}.",
+            "This was done by a MeshWars operator, not by you.",
+            "If you weren't expecting it, reply to this message.",
+        ),
+    )
+
     return {"ok": True, "account_id": account_id, "remaining_doors": remaining}
 
 
@@ -2231,11 +2374,29 @@ async def admin_account_remove_identity(request: Request):
             detail=f"account_id={account_id} provider={provider} remaining_doors={remaining}",
             now=now,
         )
+        contact_email = _verified_contact_email(conn, account_id)
 
     log.info(
         "admin: removed %s identity from account %d (%d door(s) remain)",
         provider, account_id, remaining,
     )
+
+    # Security notice (Stage 2, event 9) -- see _notify_security()'s own
+    # docstring (app/account_api.py) for why a send failure here can
+    # never surface to this response or undo the recovery action just
+    # committed above.
+    await _notify_security(
+        account_id, contact_email,
+        subject="An operator changed your MeshWars account",
+        heading="An operator changed your account",
+        lines=(
+            f"A MeshWars operator removed the {provider} sign-in method from your "
+            f"account on {format_notice_timestamp(now)}.",
+            "This was done by a MeshWars operator, not by you.",
+            "If you weren't expecting it, reply to this message.",
+        ),
+    )
+
     return {"ok": True, "account_id": account_id, "provider": provider, "remaining_doors": remaining}
 
 
@@ -2794,10 +2955,27 @@ async def admin_roles_grant(request: Request) -> JSONResponse:
             conn, actor_account_id=session.account_id, action="role_granted",
             detail=f"account_id={target_account_id} role=admin", now=now,
         )
+        contact_email = _verified_contact_email(conn, target_account_id)
 
     log.info(
         "admin: account %d granted admin to account %d", session.account_id, target_account_id
     )
+
+    # Security notice (Stage 2, event 7) -- see _notify_security()'s own
+    # docstring (app/account_api.py) for why a send failure here can
+    # never surface to this response or undo the grant just committed
+    # above.
+    await _notify_security(
+        target_account_id, contact_email,
+        subject="Your MeshWars role changed",
+        heading="Your role changed",
+        lines=(
+            f"Your MeshWars account was granted the admin role on {format_notice_timestamp(now)}.",
+            "This was done by a MeshWars operator, not by you.",
+            "If you weren't expecting it, reply to this message.",
+        ),
+    )
+
     return JSONResponse(
         {"account_id": target_account_id, "role": "admin", "changed": True}, status_code=200
     )
@@ -2851,11 +3029,29 @@ async def admin_roles_revoke(request: Request) -> JSONResponse:
             conn, actor_account_id=session.account_id, action="role_revoked",
             detail=f"account_id={target_account_id} role={previous_role}", now=now,
         )
+        contact_email = _verified_contact_email(conn, target_account_id)
 
     log.info(
         "admin: account %d revoked %s from account %d",
         session.account_id, previous_role, target_account_id,
     )
+
+    # Security notice (Stage 2, event 7) -- see _notify_security()'s own
+    # docstring (app/account_api.py) for why a send failure here can
+    # never surface to this response or undo the revoke just committed
+    # above.
+    await _notify_security(
+        target_account_id, contact_email,
+        subject="Your MeshWars role changed",
+        heading="Your role changed",
+        lines=(
+            f"Your MeshWars account had the {previous_role} role removed on "
+            f"{format_notice_timestamp(now)}.",
+            "This was done by a MeshWars operator, not by you.",
+            "If you weren't expecting it, reply to this message.",
+        ),
+    )
+
     return JSONResponse(
         {"account_id": target_account_id, "role": None, "revoked": True}, status_code=200
     )

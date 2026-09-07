@@ -115,6 +115,7 @@ from .client_ip import get_client_ip
 from .config import settings
 from .db import WriteSession, connect
 from .device_label import device_label_from_user_agent
+from .email_login import format_notice_timestamp, send_security_notice
 from .mc_ingest import hash_secret
 from .sessions import SessionPrincipal, create_session, require_session, set_session_cookie
 from .totp import (
@@ -134,6 +135,70 @@ from .totp import (
 log = logging.getLogger("totp_api")
 
 router = APIRouter()
+
+# ---- security notices (Stage 2) ------------------------------------------
+#
+# Duplicated from app/account_api.py's own _verified_contact_email()/
+# _notify_security() (same reasoning, same three-line query) rather than
+# imported: account_api.py already imports FROM this module (see its own
+# top-of-file import of verify_and_consume_recovery_code/
+# verify_and_consume_totp_code), so importing back would be a cycle --
+# the same "duplicated here rather than imported" call app/admin_api.py's
+# own docstring already makes for _validate_team and friends.
+
+_SECURITY_NOTICE_FOOTER = (
+    "You're getting this because this address is confirmed on a MeshWars "
+    "account. Security notices can't be turned off."
+)
+
+
+def _verified_contact_email(conn, account_id: int) -> str | None:
+    """See app/account_api.py's own _verified_contact_email() -- the
+    identical query, kept in lockstep with that copy's own docstring:
+    the one address a security notice may ever be sent to for this
+    account (account.contact_email, only when
+    account.contact_email_verified_at is NOT NULL).
+    """
+    row = conn.execute(
+        "SELECT contact_email FROM account "
+        "WHERE account_id = ? AND contact_email_verified_at IS NOT NULL",
+        (account_id,),
+    ).fetchone()
+    return row["contact_email"] if row else None
+
+
+async def _notify_security(
+    account_id: int,
+    contact_email: str | None,
+    *,
+    subject: str,
+    heading: str,
+    lines: tuple[str, str, str],
+    cta_label: str = "Review your account",
+    footer: str = _SECURITY_NOTICE_FOOTER,
+) -> None:
+    """See app/account_api.py's own _notify_security() -- identical
+    behavior: skips silently (INFO) with no confirmed contact address,
+    and never lets a mail failure surface to the caller or undo the
+    TOTP toggle that already committed.
+    """
+    if contact_email is None:
+        log.info(
+            "security notice skipped for account %d: no verified contact email", account_id
+        )
+        return
+    try:
+        await send_security_notice(
+            contact_email,
+            subject=subject,
+            heading=heading,
+            lines=lines,
+            cta_label=cta_label,
+            cta_url=f"{settings.oauth_public_base_url.rstrip('/')}/account",
+            footer=footer,
+        )
+    except Exception:
+        log.exception("failed to send security notice to account %d", account_id)
 
 # HttpOnly, short-lived, single-use -- carries the account_totp_challenge
 # token from a successful password/magic-link sign-in to POST
@@ -601,6 +666,23 @@ async def totp_activate(request: Request, session: SessionPrincipal = Depends(re
             "VALUES (?, 'totp_enabled', NULL, 'user', ?)",
             (session.account_id, now),
         )
+        contact_email = _verified_contact_email(conn, session.account_id)
+
+    # Security notice (Stage 2, event 2) -- see _notify_security()'s own
+    # docstring for why a send failure here can never surface to this
+    # response or undo the activation just committed above.
+    await _notify_security(
+        session.account_id, contact_email,
+        subject="Two-factor authentication was enabled on your MeshWars account",
+        heading="Two-factor authentication was enabled",
+        lines=(
+            f"Two-factor authentication was enabled on your MeshWars account on "
+            f"{format_notice_timestamp(now)}.",
+            "If that was you, there is nothing to do.",
+            "If it wasn't, someone else has access. Sign in, rotate your API key, and "
+            "check which sign-in methods are attached to the account.",
+        ),
+    )
 
     return JSONResponse({"ok": True, "recovery_codes": plain_codes}, status_code=200)
 
@@ -663,6 +745,23 @@ async def totp_disable(request: Request, session: SessionPrincipal = Depends(req
             "VALUES (?, 'totp_disabled', NULL, 'user', ?)",
             (session.account_id, now),
         )
+        contact_email = _verified_contact_email(conn, session.account_id)
+
+    # Security notice (Stage 2, event 2) -- see _notify_security()'s own
+    # docstring for why a send failure here can never surface to this
+    # response or undo the deactivation just committed above.
+    await _notify_security(
+        session.account_id, contact_email,
+        subject="Two-factor authentication was disabled on your MeshWars account",
+        heading="Two-factor authentication was disabled",
+        lines=(
+            f"Two-factor authentication was disabled on your MeshWars account on "
+            f"{format_notice_timestamp(now)}.",
+            "If that was you, there is nothing to do.",
+            "If it wasn't, someone else has access. Sign in, rotate your API key, and "
+            "check which sign-in methods are attached to the account.",
+        ),
+    )
 
     return JSONResponse({"ok": True}, status_code=200)
 
