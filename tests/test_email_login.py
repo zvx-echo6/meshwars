@@ -145,6 +145,48 @@ def test_send_magic_link_email_runs_off_the_event_loop(monkeypatch):
     assert sent_msg["Message-ID"].endswith("@example.test>")
     assert sent_msg["X-Mailer"] == "MeshWars"
 
+    # HTML email: multipart/alternative(text/plain, multipart/related(
+    # text/html, image/png)) -- see app/email_login.py's own _send_sync()
+    # comment for why the image is nested under the html alternative
+    # rather than sibling to the plain-text one. Walked rather than
+    # indexed so this doesn't depend on exactly how many parts deep the
+    # image sits.
+    assert sent_msg.is_multipart()
+    text_part = html_part = image_part = None
+    for part in sent_msg.walk():
+        ctype = part.get_content_type()
+        if ctype == "text/plain" and text_part is None:
+            text_part = part
+        elif ctype == "text/html" and html_part is None:
+            html_part = part
+        elif ctype == "image/png" and image_part is None:
+            image_part = part
+
+    assert text_part is not None, "no text/plain part"
+    assert html_part is not None, "no text/html part"
+    assert image_part is not None, "no image/png part"
+
+    # The plain-text part is untouched by the HTML addition -- it still
+    # carries the exact link a client with no HTML rendering has to work
+    # with.
+    assert "https://mw.test/auth/email/callback?token=x" in text_part.get_content()
+
+    html_body = html_part.get_content()
+    image_content_id = image_part["Content-ID"]
+    assert image_content_id is not None
+
+    # RFC 2392: a cid: URL is the bare content-id with NO angle
+    # brackets, while the Content-ID header itself keeps them -- see
+    # _send_sync()'s own comment on why leaving the brackets in the
+    # HTML is a common bug that silently breaks the image. Asserted
+    # both ways: the header keeps its brackets, and the exact same
+    # unique id (brackets stripped) is what the HTML actually
+    # references.
+    assert image_content_id.startswith("<") and image_content_id.endswith(">")
+    bare_cid = image_content_id.strip("<>")
+    assert f"cid:{bare_cid}" in html_body
+    assert f"cid:{image_content_id}" not in html_body
+
 
 def test_send_magic_link_email_wraps_smtp_failure_in_email_send_error(monkeypatch):
     def _boom(*a, **k):

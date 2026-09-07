@@ -54,6 +54,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
+from pathlib import Path
 
 from .config import settings
 
@@ -159,6 +160,78 @@ _MAIL_COPY = {
     ),
 }
 
+# Which frontend/email/ fragment supplies the HTML heading/body/cta/footer
+# for each purpose -- see _render_html()'s own comment for how that
+# fragment is combined with _shell.html.
+_MAIL_TEMPLATES = {
+    PURPOSE_SIGN_IN: "sign_in.html",
+    PURPOSE_VERIFY_CONTACT: "verify_contact.html",
+}
+
+# Same directory-derivation shape app/api.py's own top-level page routes
+# use for frontend_dir (Path(__file__).resolve().parent.parent / "frontend")
+# -- this module lives at app/email_login.py, so parent.parent is the repo
+# root and frontend/email/ sits next to every other frontend/ page.
+_EMAIL_TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "frontend" / "email"
+
+# Splits a fragment file (frontend/email/sign_in.html,
+# frontend/email/verify_contact.html) into its named sections. Each
+# section starts with a bare `<!--name-->` marker on its own line --
+# deliberately NOT the same {placeholder} syntax _shell.html's own
+# tokens use, so a fragment's OWN markers can never collide with a
+# {placeholder} still waiting to be replaced (in particular {link_url},
+# which lives inside the cta section's own text and must survive this
+# split untouched). Requires \w+ with no spaces, so the free-text
+# comment at the top of each fragment file (explaining what the file
+# is) never accidentally parses as a section.
+_FRAGMENT_MARKER_RE = re.compile(r"<!--(\w+)-->")
+
+
+def _read_email_template(filename: str) -> str:
+    """Reads one frontend/email/ file from disk. Called at send time,
+    not cached at import -- the same per-call read app/api.py's own
+    _templated_html_page() does for every other top-level page, and for
+    the same reason: this is public AGPL software, and an operator who
+    edits their own copy of these files should see the change on the
+    next mail sent, not only after a process restart.
+    """
+    return (_EMAIL_TEMPLATE_DIR / filename).read_text(encoding="utf-8")
+
+
+def _parse_fragments(text: str) -> dict[str, str]:
+    """Splits a fragment file on its `<!--name-->` markers into
+    {name: content} (see _FRAGMENT_MARKER_RE's own comment). re.split()
+    with one capturing group returns [text-before-first-marker, name,
+    content, name, content, ...] -- the leading element is the fragment
+    file's own descriptive comment (never a section body) and is
+    dropped here rather than exposed as a fragment.
+    """
+    parts = _FRAGMENT_MARKER_RE.split(text)
+    return {name: content.strip() for name, content in zip(parts[1::2], parts[2::2])}
+
+
+def _render_html(purpose: str, link_url: str, logo_cid: str) -> str:
+    """Builds the HTML part by combining frontend/email/_shell.html (the
+    table-based page frame: logo, gold heading, rule, meshwars.com line
+    -- shared by every purpose) with the purpose's own fragment file
+    (heading/body/cta/footer wording -- see _MAIL_TEMPLATES). Follows
+    this codebase's one templating convention end to end (see this
+    module's own docstring and app/api.py's _templated_html_page): plain
+    HTML files on disk, substituted with str.replace, no templating
+    dependency anywhere.
+
+    {link_url} is replaced last, against the fully-assembled page,
+    rather than against the fragment alone -- it appears twice inside
+    the fragment's own cta section (the button's href and the plaintext
+    fallback below it) and one replace after assembly covers both.
+    """
+    shell = _read_email_template("_shell.html")
+    fragments = _parse_fragments(_read_email_template(_MAIL_TEMPLATES[purpose]))
+    html = shell.replace("{logo_cid}", logo_cid)
+    for name in ("heading", "body", "cta", "footer"):
+        html = html.replace("{" + name + "}", fragments[name])
+    return html.replace("{link_url}", link_url)
+
 
 def _send_sync(to_address: str, link_url: str, purpose: str = PURPOSE_SIGN_IN) -> None:
     """The actual blocking SMTP conversation -- stdlib smtplib only, no
@@ -169,6 +242,17 @@ def _send_sync(to_address: str, link_url: str, purpose: str = PURPOSE_SIGN_IN) -
     that was this function's only behaviour before contact-address
     confirmation reused it, and a caller that forgets to say what it is
     sending should get the older, narrower wording rather than silence.
+
+    Sends multipart/alternative( text/plain, multipart/related( text/html,
+    image/png ) ) -- the standard nesting for an HTML mail with an inline
+    image (the image belongs only under the html branch, never as a
+    sibling of the plain-text one). The plain-text part is unchanged from
+    before this HTML body existed (some mail clients and every spam
+    filter still weigh it), the html part is the styled MeshWars page
+    built by _render_html(), and the image/png next to it is the logo
+    the html part's <img> references by Content-ID rather than a remote
+    URL -- inlined so the mail renders with no network fetch and nothing
+    for an image-blocking client to strip.
     """
     subject, lead = _MAIL_COPY[purpose]
     from_address = settings.smtp_from_address
@@ -198,6 +282,38 @@ def _send_sync(to_address: str, link_url: str, purpose: str = PURPOSE_SIGN_IN) -
         f"{link_url}\n\n"
         "This link expires in a few minutes and can only be used once. "
         "If you didn't request it, you can safely ignore this message."
+    )
+
+    # make_msgid() already returns the angle-bracketed form
+    # ("<unique@domain>") a Content-ID header is supposed to carry --
+    # EmailMessage.add_related()'s own cid= kwarg sets the header
+    # verbatim, with no bracket handling of its own (see
+    # email.contentmanager._finalize_set), so that raw value is exactly
+    # right for the header below. The HTML <img> tag's own `cid:` URL is
+    # the opposite: RFC 2392 says a cid: URL is the bare content-id with
+    # NO angle brackets, so logo_cid strips them before it ever reaches
+    # _render_html() -- leaving them in is a common bug that silently
+    # breaks the image in most mail clients.
+    logo_content_id = make_msgid(domain=from_domain)
+    logo_cid = logo_content_id.strip("<>")
+
+    html_body = _render_html(purpose, link_url, logo_cid)
+    # add_alternative() promotes this message to multipart/alternative
+    # and appends the html part after the existing text/plain one --
+    # order matters here, RFC 2046 says the LAST alternative is the
+    # richest and mail clients render the last part they understand, so
+    # plain text must be set_content()'d first and html added second.
+    msg.add_alternative(html_body, subtype="html")
+    logo_path = Path(__file__).resolve().parent.parent / "frontend" / "assets" / "logo" / "meshwars-email.png"
+    # get_payload()[1] is the html part add_alternative() just appended
+    # (index 0 is the plain-text part set_content() created) -- adding
+    # the logo image AS related to that specific part, rather than to
+    # the top-level message, is what nests it inside
+    # multipart/alternative/<html part> as multipart/related instead of
+    # sitting alongside text/plain as a top-level attachment (which is
+    # what add_related() on `msg` itself would produce).
+    msg.get_payload()[1].add_related(
+        logo_path.read_bytes(), maintype="image", subtype="png", cid=logo_content_id
     )
 
     timeout = 10.0
