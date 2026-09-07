@@ -858,12 +858,17 @@ def _match_passes_sanity_check(area_m2: float, name_score: float) -> bool:
 #      Area and Jedediah Smith Wilderness Area sharing one 2,366.3 km^2
 #      polygon -- both are a "Wilderness Area", so neither outranks the
 #      other) -- there is no name evidence here strong enough to award
-#      the boundary to any one of them, so the whole group is stripped.
-#      That is a deliberate fail-safe, not a guess: a false rejection
-#      leaves a real park as a point (still on the board, still
-#      capturable, just not crediting a boundary it cannot prove), while
-#      a wrong guess would leave a bogus multi-thousand-km^2 credit zone
-#      standing under the reachable-ring credit model.
+#      the boundary to any one of them, so EVERY member of the group
+#      keeps the boundary. That is a deliberate fail-safe, not a guess:
+#      point-in-polygon cannot break these ties either (a matched
+#      park's point IS its boundary's centroid, so it is trivially
+#      inside its own polygon no matter which member truly owns the
+#      ground), and the two failure costs are not symmetric. Keeping
+#      every tied member leaves co-located real places sharing one
+#      credit zone -- minor, and reversible later with a PAD-US-backed
+#      pass. Stripping every tied member would delete real, named
+#      wilderness (or a real national forest, or both units of a real
+#      national monument) from the board outright.
 #
 #   2. DESIGNATION-VS-SCALE (_is_point_scale_designation): reinforces
 #      (1) and also catches a point-scale name that happens to be the
@@ -982,14 +987,23 @@ def _resolve_duplicate_boundary_group(names: list) -> list:
     _duplicate_boundary_tier() in the group, but ONLY if it is alone
     there -- a tie at any tier (including two point-scale names tied at
     the bottom) means no member's own name gives enough evidence to
-    award the boundary to any one of them, so the whole group loses it.
-    This is what keeps a legitimate ambiguous-tier match (a real,
-    correctly-sized "Ruby Lake National Wildlife Refuge") from being
-    dragged down just because ITS duplicate partner is a clearly bogus
-    point-scale name ("Fort Ruby National Historic Site") that isn't
-    itself tier 1 -- the refuge is the only tier-1 name in that group, so
-    it wins outright even though "National Wildlife Refuge" alone is
-    never treated as automatically big-scale."""
+    award the boundary to any one of them, so EVERY member keeps it.
+    Ties cannot be resolved without ground truth this seed does not
+    carry (point-in-polygon can't help either -- a matched park's point
+    IS its boundary's centroid, so it is trivially inside its own
+    polygon regardless of which member actually owns the ground), and
+    the two failure costs here are not symmetric: keeping every member
+    leaves co-located real places sharing one credit zone, which is
+    minor and reversible later with a PAD-US-backed pass, while
+    stripping every member deletes real, named wilderness (or a real
+    national forest, or both units of a real national monument) from
+    the board outright. This is what keeps a legitimate ambiguous-tier
+    match (a real, correctly-sized "Ruby Lake National Wildlife Refuge")
+    from being dragged down just because ITS duplicate partner is a
+    clearly bogus point-scale name ("Fort Ruby National Historic Site")
+    that isn't itself tier 1 -- the refuge is the only tier-1 name in
+    that group, so it wins outright even though "National Wildlife
+    Refuge" alone is never treated as automatically big-scale."""
     if len(names) < 2:
         return [True] * len(names)
     tiers = [_duplicate_boundary_tier(n) for n in names]
@@ -997,7 +1011,7 @@ def _resolve_duplicate_boundary_group(names: list) -> list:
     winners = [t == top for t in tiers]
     if sum(winners) == 1:
         return winners
-    return [False] * len(names)
+    return [True] * len(names)
 
 
 # Known-bad matches that neither generic check above can catch: no

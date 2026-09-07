@@ -324,14 +324,21 @@ def test_match_sanity_check_keeps_huge_area_right_at_the_score_boundary():
 # ---------------------------------------------------------------------
 
 
-def test_duplicate_geometry_rejects_the_inherited_copy():
+def test_duplicate_geometry_keeps_both_on_a_tie_with_no_top_tier_winner():
     """The confirmed shipped-seed case: "Tonto State Fish Hatchery" and
     "Tonto Natural Bridge State Park" both matched Tonto National
     Forest's own polygon. Neither carries a big-scale designation, so
-    the group has no single top-tier winner -- both lose the boundary."""
+    the group has no single top-tier winner -- the tie-break fails open
+    by keeping the boundary on every member rather than guessing which
+    one truly owns it (see _resolve_duplicate_boundary_group()'s own
+    docstring for why). This pair still ends up stripped by the
+    downstream point-scale-ceiling check in
+    _clean_matched_park_boundaries() (see
+    test_clean_matched_park_boundaries_full_pipeline_on_the_confirmed_examples)
+    -- that is a separate mechanism from this one."""
     keep = bps._resolve_duplicate_boundary_group(
         ["Tonto State Fish Hatchery", "Tonto Natural Bridge State Park"])
-    assert keep == [False, False]
+    assert keep == [True, True]
 
 
 def test_duplicate_geometry_keeps_the_legitimate_owner_of_a_shared_boundary():
@@ -357,15 +364,18 @@ def test_duplicate_geometry_does_not_punish_an_ambiguous_name_for_its_partner():
     assert keep == [True, False]
 
 
-def test_duplicate_geometry_rejects_both_on_a_tie_between_two_legitimate_designations():
+def test_duplicate_geometry_keeps_both_on_a_tie_between_two_legitimate_designations():
     """Teton Wilderness Area and Jedediah Smith Wilderness Area share one
     2,366.3 km^2 polygon in the shipped seed -- both are a "Wilderness
     Area", so neither outranks the other, and there is no name evidence
-    left to award the boundary to either one. Fails open to stripping
-    both rather than guessing."""
+    left to award the boundary to either one. Fails open to KEEPING the
+    boundary on both rather than guessing which one owns it, and rather
+    than stripping real, named wilderness from the board outright --
+    see _resolve_duplicate_boundary_group()'s own docstring for the
+    asymmetric-cost reasoning."""
     keep = bps._resolve_duplicate_boundary_group(
         ["Teton Wilderness Area", "Jedediah Smith Wilderness Area"])
-    assert keep == [False, False]
+    assert keep == [True, True]
 
 
 def test_point_scale_designation_flags_the_documented_keywords():
