@@ -15,36 +15,45 @@ place_cell), so it loads into SQLite instead -- same CSV-shipped-with-
 the-code precedent (app/reference/, not the gitignored data/ volume),
 different destination.
 
-COUNTRY FILTER -- the CSV is not pre-filtered to the US. It is built
-from a single bounding box (see scripts/build_places_seed.py's module
-docstring) that, being a rectangle, also sweeps in northern Mexico and
-southern Canada. MeshWars is a US game, so this loader excludes:
+COUNTRY FILTER -- REMOVED 2026-09-07 (Matt approved, "Places Worth
+Going" going worldwide alongside the rest of the world-open map).
+Until this change, the CSV was built from a single bounding box (see
+scripts/build_places_seed.py's module docstring) that, being a
+rectangle, also swept in northern Mexico and southern Canada, and
+MeshWars being a US-only game at the time, this loader excluded:
 
   - SOTA summits: association code (the part of ref_code before the
-    first "/") not in US_SOTA_ASSOCIATIONS below. Confirmed against
-    SOTA's own /api/associations/ endpoint on 2026-08-24: every code in
-    the CSV maps to dxcc "291" (USA) except XE2 (Mexico - North) and
-    VE5/VE6/VE7 (Saskatchewan/Alberta/British Columbia). K0M looks like
-    an odd one out next to the W-prefixed codes but is genuinely
-    USA - Minnesota, confirmed the same way, not a typo.
+    first "/") not in US_SOTA_ASSOCIATIONS. Confirmed against SOTA's own
+    /api/associations/ endpoint on 2026-08-24: every code in the old
+    bbox-limited CSV mapped to dxcc "291" (USA) except XE2 (Mexico -
+    North) and VE5/VE6/VE7 (Saskatchewan/Alberta/British Columbia). K0M
+    looked like an odd one out next to the W-prefixed codes but was
+    genuinely USA - Minnesota, confirmed the same way, not a typo.
   - POTA parks: reference prefix (the part of ref_code before the
     first "-") not "US". POTA's own reference scheme puts the country
-    right there -- "US-1234" / "CA-1234" / "MX-0001" -- no lookup
-    needed. ADDED 2026-08-24: parks with source "PAD-US" (ref_code
-    "PADUS-<fid>", from build_places_seed.py's fetch_padus_parks() --
-    local/city/county parks POTA never lists at all, since POTA only
-    covers what hams activate) skip this prefix check and are kept
-    unconditionally instead -- they are pulled from a single US-
-    territory PAD-US layer already scoped to the play area's bbox, so
-    there is no CA-/MX- equivalent to filter, and their ref_code does
-    not start with "US-" for the prefix check to even parse correctly.
-  - OSM landmarks: NOT filtered. Verified rather than assumed: every
-    landmark row's lat/lon falls inside 31.33-49.01N, -124.72 to
-    -102.04W -- exactly the western US states extract
-    (western-us-11states.osm.pbf) build_places_seed.py's
-    extract_landmarks() reads from, bounded by the real AZ/CA-Mexico
-    border (~31.33N) and the real US-Canada border (49.00N) rather than
-    the bbox. There is nothing non-US in this file to filter.
+    right there -- "US-1234" / "CA-1234" / "MX-0001".
+
+  Now that scripts/build_places_seed.py pulls SOTA and POTA worldwide
+  (no bbox at all -- see that module's "WORLDWIDE EXPANSION" note),
+  both checks above would have rejected the whole rest of the world, so
+  they are gone: every SOTA summit and POTA park in the CSV that
+  clears its own quality bar (SUMMIT_MIN_SOTA_POINTS, POTA's active
+  flag) is now kept regardless of country. US_SOTA_ASSOCIATIONS is
+  unused dead weight now removed too.
+
+  - Parks with source "PAD-US" (ref_code "PADUS-<fid>", from
+    build_places_seed.py's fetch_padus_parks()) were, and still are,
+    kept unconditionally -- UNCHANGED by this: PAD-US is a US
+    government dataset with no global equivalent and stays US-only on
+    purpose (see that script's "PARK SOURCES"/"WORLDWIDE EXPANSION"
+    notes), it just is no longer the only non-POTA park source outside
+    the US.
+  - OSM landmarks: NOT filtered before, NOT filtered now -- there was
+    never a country check on this ref_type; extract_landmarks() now
+    reads the full planet PBF (see that script) instead of a
+    western-US-only extract, so this row simply carries worldwide
+    coordinates now, same as it always trusted its source file's own
+    extent.
 
 PARK BOUNDARY COVERAGE IS PARTIAL -- of the parks kept after the country
 filter, POTA-to-PAD-US matching (scripts/build_places_seed.py's
@@ -74,22 +83,66 @@ import math
 import os
 import re
 import sqlite3
+import gzip
+import hashlib
 import time
 
 from shapely import wkt as shapely_wkt
 from shapely.geometry import MultiPolygon, Polygon, box as shapely_box
 
+from .config import settings
 from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, cell_indices, distance_m
 
 log = logging.getLogger("places_seed")
 
-_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv")
+# True for the duration of a real (non-skip) load -- see app/db.py's
+# init_db(), which now runs that load on a background thread rather
+# than blocking app startup. app/places_api.py's read routes check
+# this to log a clear "still loading" line instead of a silent empty
+# result while the very first (multi-second-to-low-tens-of-seconds,
+# see load_places_seed()'s own batching) load is still in flight. Not
+# a threading.Event/Lock -- a plain module attribute is enough here:
+# CPython's GIL makes a single bool assignment atomic, and the only
+# consumers are read-only status checks from other threads, never a
+# blocking wait on it.
+LOADING = False
+
+_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv.gz")
 # Summit -> squares, built by scripts/build_summit_cells.py against the
 # planet DEM on navi. A summit's squares cannot be derived here the way a
 # park's are from its boundary: the test is terrain (within 1.5km AND
 # within 200m of the summit's own elevation, plus the peak's own square), and the app host has no
 # elevation data. So it ships precomputed, same as the seed itself.
 _SUMMIT_CELLS_PATH = os.path.join(os.path.dirname(__file__), "reference", "summit_cells.csv")
+
+
+def _open_csv(path: str, **kwargs):
+    """Opens path for text reading, transparently gunzipping when the
+    name ends in .gz (the shipped places_worth_going.csv.gz) and falling
+    back to a plain open() otherwise (test fixtures, summit_cells.csv).
+    Everything downstream (csv.DictReader) is unaffected either way."""
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", **kwargs)
+    return open(path, **kwargs)
+
+
+def _sha256_file(path: str) -> str:
+    """Content hash of path's raw bytes (the .gz's compressed bytes for
+    the seed -- decompressing first would cost the very thing this
+    fingerprint exists to avoid paying on every boot). Read in 1MB
+    chunks so this never holds the whole file in memory at once, though
+    at ~47MB and ~0.5MB for the two files that fingerprint this seed it
+    would hardly matter. Missing file -> a stable constant, same as the
+    old size+mtime fingerprint's OSError fallback, so an absent
+    summit_cells.csv does not re-trigger a load every startup."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return "none"
+    return h.hexdigest()
 
 
 def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
@@ -139,23 +192,11 @@ def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
 
 _METERS_PER_DEG_LAT = 111_320.0
 
-# Pulled from https://api-db2.sota.org.uk/api/associations/ on
-# 2026-08-24 and filtered to dxcc "291" (USA) -- the full US SOTA
-# association list, not just the ones this CSV happens to contain,
-# so a future re-pull with a wider bbox (e.g. reaching Alaska or the
-# Atlantic seaboard) is still classified correctly without touching
-# this file again.
-US_SOTA_ASSOCIATIONS = frozenset({
-    "K0M", "KH6",
-    "W0C", "W0D", "W0I", "W0M", "W0N",
-    "W1", "W2", "W3",
-    "W4A", "W4C", "W4G", "W4K", "W4T", "W4V",
-    "W5A", "W5M", "W5N", "W5O", "W5T",
-    "W6",
-    "W7A", "W7I", "W7M", "W7N", "W7O", "W7U", "W7W", "W7Y",
-    "W8M", "W8O", "W8V",
-    "W9",
-})
+# US_SOTA_ASSOCIATIONS (the full US SOTA association allowlist, pulled
+# from https://api-db2.sota.org.uk/api/associations/ on 2026-08-24) was
+# REMOVED 2026-09-07 along with the country filter it backed -- see the
+# module docstring's "COUNTRY FILTER" note. Every SOTA association is
+# now kept, not just the US ones.
 
 # REACHABLE-RING CREDIT (changed 2026-09-07, "reward the trip, not the
 # trespass") -- credit zones used to be pure geometry: a point place
@@ -215,16 +256,17 @@ _SUMMIT_COLOCATION_RADIUS_M = 100.0
 
 def _kept_summit_buckets(path: str) -> dict[str, list[tuple[float, float]]]:
     """First pass over the CSV: (lat, lon) of every summit that will
-    actually be KEPT (passes the same US/named-summit test
-    _classify_row applies in the real load), bucketed by grid cell id
-    for a cheap proximity lookup in the main load loop below. A summit
-    that _classify_row would exclude (non-US, or an unnamed placeholder
-    peak) never got the game's 100 points in the first place, so a
+    actually be KEPT (passes the same named-summit test _classify_row
+    applies in the real load), bucketed by grid cell id for a cheap
+    proximity lookup in the main load loop below. A summit that
+    _classify_row would exclude (an unnamed placeholder peak -- the
+    country filter this used to also apply is gone, see module
+    docstring) never got the game's points in the first place, so a
     landmark near IT must not be excluded either -- there would be
     nothing left at that spot to double-dip against.
     """
     buckets: dict[str, list[tuple[float, float]]] = {}
-    with open(path, encoding="utf-8", newline="") as fh:
+    with _open_csv(path, encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             if row["ref_type"] != "summit":
@@ -396,29 +438,26 @@ def _classify_row(row: dict) -> tuple[bool, bool]:
     """(keep, rotates) for one CSV row, before any geometry work."""
     ref_type = row["ref_type"]
     if ref_type == "summit":
-        assoc = row["ref_code"].split("/")[0]
-        if assoc not in US_SOTA_ASSOCIATIONS:
-            return (False, False)
-        # Country filter passed -- now require an actual name (see
-        # _summit_has_real_name's docstring for what this catches and
-        # what it deliberately lets through).
+        # Country filter (an association-code allowlist) REMOVED
+        # 2026-09-07 -- see module docstring's "COUNTRY FILTER". Every
+        # summit that cleared build_places_seed.py's own quality bar
+        # (SUMMIT_MIN_SOTA_POINTS) is kept regardless of country; only
+        # the named-summit check below still excludes anything.
         return (_summit_has_real_name(row.get("name", "")), False)
     if ref_type == "park":
-        # ADDED 2026-08-24: PAD-US-sourced parks (ref_code "PADUS-<fid>")
-        # are pulled directly from a single US-territory PAD-US layer
-        # (scripts/build_places_seed.py's fetch_padus_parks(), run
-        # against the play area's own bbox) -- there is no CA-/MX-
-        # equivalent to filter the way POTA's own reference prefix
-        # requires below, so these are kept unconditionally rather than
-        # run through the POTA-shaped prefix check, which would reject
-        # every one of them (their ref_code does not start with "US-").
+        # PAD-US-sourced parks (ref_code "PADUS-<fid>") are kept
+        # unconditionally, unchanged by the 2026-09-07 worldwide change
+        # -- PAD-US is deliberately US-only (see build_places_seed.py's
+        # "PARK SOURCES"/"WORLDWIDE EXPANSION" notes), so this branch
+        # stays exactly as it was.
         if row.get("source") == "PAD-US":
             return (True, None)  # rotates decided later, once area is known
-        prefix = row["ref_code"].split("-")[0]
-        if prefix != "US":
-            return (False, False)
+        # POTA prefix filter ("must start with US-") REMOVED 2026-09-07
+        # -- see module docstring's "COUNTRY FILTER". Every active POTA
+        # park is kept regardless of country now.
         return (True, None)  # rotates decided later, once area is known
-    # landmark: verified US-only at CSV build time, see module docstring
+    # landmark: never filtered by country, before or after this change
+    # -- see module docstring.
     return (True, True)
 
 
@@ -482,69 +521,104 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         log.warning("places_seed: %s not found -- places feature will have no data", _DATA_PATH)
         return stats
 
-    # Cheap fingerprint (size + mtime, not a content hash -- this file
-    # is 9+MB and hashing it is not what makes a re-run slow; the park
-    # boundary geometry work below is, at roughly a minute for ~3,500
-    # matched parks) so an unchanged CSV across a routine restart skips
-    # the whole pass rather than repeating a minute of shapely work on
-    # every boot. `cursor` is app/db.py's existing generic key/value
-    # table (get_cursor/set_cursor) -- read/written directly here rather
-    # than imported, since importing app.db from a module app.db itself
+    # Fingerprint is a sha256 CONTENT hash (2026-09-07), not size+mtime.
+    # size+mtime looked cheap when this file was 9MB and seemed like the
+    # obviously right choice at the time, but it silently broke the one
+    # thing it exists for: CT 113 (and every other host) deploys by
+    # `git reset --hard`, which stamps a FRESH mtime on every tracked
+    # file on every deploy regardless of whether its bytes moved. That
+    # made "unchanged since last load" false on every single deploy, not
+    # just ones that touched the seed, forcing the full multi-minute
+    # reconcile pass on every boot after every deploy -- observed 205s
+    # for the worldwide 1.4M-row seed, over mw-deploy's 180s health-check
+    # timeout, so a routine unrelated-file deploy could outright fail to
+    # come healthy. A content hash only changes when the bytes actually
+    # do. Hashing the shipped 47MB places_worth_going.csv.gz (compressed,
+    # not the ~136MB decompressed) and the 0.5MB summit_cells.csv is
+    # sub-second either way -- nowhere close to what makes a real reload
+    # slow (the shapely park-boundary work below, ~minutes for the full
+    # worldwide set) -- so trading size+mtime for a hash costs nothing
+    # and fixes the every-deploy-reloads bug outright.
+    #
+    # `cursor` is app/db.py's existing generic key/value table (get_
+    # cursor/set_cursor) -- read/written directly here rather than
+    # imported, since importing app.db from a module app.db itself
     # imports would be circular.
     #
     # _RECONCILE_VERSION rides along in the fingerprint string so a code
-    # upgrade alone -- CSV byte-for-byte unchanged -- still forces one
-    # full pass. Without it, a DB that already recorded this exact CSV's
-    # fingerprint under the OLD insert-only loader (no reconcile at all)
-    # would skip forever after upgrading to this fix: the file never
-    # changes again, so "unchanged since last load" would stay true
-    # indefinitely and the stale rows this fix exists to clean up would
-    # never actually get cleaned up. Bump this whenever the reconcile
-    # mechanics OR the per-row _classify_row rules change in a way that
-    # requires re-running against an already-fingerprinted CSV -- the
-    # named-summits-only filter (2026-08-24) is exactly that case: the
-    # CSV's bytes are unchanged, only which rows get kept changed, so a
-    # DB fingerprinted before this filter landed needs the version bump
-    # to actually deactivate the newly-excluded summits rather than
-    # trusting a fingerprint recorded under the old, looser rule.
+    # upgrade alone -- seed bytes unchanged -- still forces one full
+    # pass. Without it, a DB that already recorded this exact seed's
+    # fingerprint under an older loader would skip forever after
+    # upgrading, and whatever the new version changed (which rows get
+    # kept, how their cells are computed) would never actually apply.
+    # Bump this whenever the reconcile mechanics OR the per-row
+    # _classify_row rules change in a way that requires re-running
+    # against an already-fingerprinted seed -- the named-summits-only
+    # filter (2026-08-24, v2) and the summit/landmark double-dip filter
+    # (2026-08-25, v3) are exactly that case: the seed's bytes were
+    # unchanged, only which rows get kept changed, so a DB fingerprinted
+    # under the previous version needed the bump to actually deactivate
+    # the newly-excluded rows rather than trusting a looser rule's
+    # fingerprint. v4 (2026-08-31) is the same story for summit_cells.csv:
+    # summits stopped being a single square and became their terrain-
+    # qualified set, so a DB fingerprinted under v3 would keep the old
+    # one-square-per-summit mapping forever without the bump.
     #
-    # v3 (2026-08-25): the summit/landmark double-dip filter
-    # (_SUMMIT_COLOCATION_RADIUS_M) is new -- same "CSV bytes unchanged,
-    # which rows get kept changed" situation, so a DB fingerprinted
-    # under v2 needs this bump to actually deactivate the newly-excluded
-    # co-located landmarks.
-    #
-    # v4 (2026-08-31): summits stopped being a single square and became
-    # their terrain-qualified set (reference/summit_cells.csv, see
-    # _load_summit_cells). The seed CSV's own bytes did not move, but
-    # every summit's place_cell rows did, so a DB fingerprinted under v3
-    # would keep the old one-square-per-summit mapping forever without
-    # this bump.
-    _RECONCILE_VERSION = 4
-    st = os.stat(_DATA_PATH)
+    # v5 (2026-09-07): fingerprint algorithm itself changed (size+mtime
+    # -> sha256), per the note above. A v4 fingerprint is a different
+    # STRING SHAPE from a v5 one even where the underlying file is
+    # unchanged, so it can never accidentally compare equal -- this
+    # version bump is really just documentation here, not what forces
+    # the reload (the algorithm change already does that on its own),
+    # but every previous entry in this list bumps the version for a
+    # fingerprint-invalidating change, so this one does too.
+    _RECONCILE_VERSION = 5
+    seed_hash = _sha256_file(_DATA_PATH)
     # summit_cells.csv rides along in the fingerprint too. It decides
     # every summit's place_cell rows but is a SEPARATE file from the seed
     # CSV, so a change to it alone would leave the fingerprint untouched
-    # and the old mapping loaded forever. (Tightening the radius from 5km
-    # to 1.5km only reloaded because the deploy happened to rewrite the
-    # seed CSV and move its mtime -- luck, not design.) Missing file
-    # contributes a constant, so its absence is stable rather than
-    # re-triggering a load every startup.
-    try:
-        sc = os.stat(_SUMMIT_CELLS_PATH)
-        summit_fp = f"{sc.st_size}:{int(sc.st_mtime)}"
-    except OSError:
-        summit_fp = "none"
-    fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}:s{summit_fp}"
+    # and the old mapping loaded forever. Missing file contributes a
+    # constant, so its absence is stable rather than re-triggering a
+    # load every startup.
+    summit_hash = _sha256_file(_SUMMIT_CELLS_PATH)
+    fingerprint = f"sha256:{seed_hash}:v{_RECONCILE_VERSION}:s{summit_hash}"
+
+    # Explicit operator override (PLACES_FORCE_RESEED=1 / true / yes /
+    # on -- see .env.example): forces the full reload regardless of the
+    # fingerprint, without requiring anyone to hand-edit the `cursor`
+    # table. Checked here rather than short-circuiting earlier so the
+    # normal fingerprint-mismatch code path below still fires -- forcing
+    # a reseed is "pretend the fingerprint didn't match", not a separate
+    # mechanism.
+    force_reseed = settings.places_force_reseed
+
     row = conn.execute("SELECT v FROM cursor WHERE k = 'places_seed_csv_fingerprint'").fetchone()
-    if row is not None and row[0] == fingerprint:
-        log.info("places_seed: CSV unchanged since last load (%s), skipping", fingerprint)
+    place_count = conn.execute("SELECT COUNT(*) FROM place").fetchone()[0]
+    if force_reseed:
+        log.info("places_seed: PLACES_FORCE_RESEED set, forcing full reload regardless of fingerprint")
+    elif row is not None and row[0] == fingerprint and place_count > 0:
+        # place_count > 0 is a belt-and-suspenders check alongside the
+        # fingerprint match: a `cursor` row recording a completed load
+        # should never coexist with an empty `place` table (the fingerprint
+        # is written in the SAME transaction as the rows it describes, see
+        # the COMMIT below), but trusting that invariant blindly would
+        # turn any future violation of it into a silent, permanent "no
+        # places data" state that nothing would ever self-heal.
         counts = conn.execute(
             "SELECT ref_type, COUNT(*) FROM place WHERE active = 1 GROUP BY ref_type"
         ).fetchall()
         stats["kept"] = {r[0]: r[1] for r in counts}
+        log.info(
+            "places_seed: seed unchanged since last load (%s), skipping full reload -- "
+            "place rows active: summit=%d park=%d landmark=%d (%d total, %d active)",
+            fingerprint,
+            stats["kept"].get("summit", 0), stats["kept"].get("park", 0), stats["kept"].get("landmark", 0),
+            place_count, sum(stats["kept"].values()),
+        )
         return stats
 
+    global LOADING
+    LOADING = True
     now = int(time.time())
     t0 = time.monotonic()
     # Built up front, once, from its own pass over the file -- see
@@ -555,9 +629,55 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # not sorted by proximity to each other).
     summit_buckets = _kept_summit_buckets(_DATA_PATH)
     seen_ids: set[int] = set()
+
+    # place_cell writes are BATCHED (2026-09-07), not one DELETE plus
+    # one executemany INSERT per place row. Measured cause of the
+    # worldwide seed's ~200s first load: ~1.39M individual DELETEs (most
+    # of them no-ops on a fresh table -- a place just freshly INSERTed
+    # cannot yet have any place_cell rows to delete) plus ~1.39M tiny
+    # executemany calls (2.17M total place_cell rows) each paying a full
+    # Python/sqlite3-module round trip. Buffered here instead and
+    # flushed every _CELL_BATCH_ROWS place rows via _flush_cell_buffers,
+    # collapsing that into a couple hundred large statements. The two
+    # buffers are flushed TOGETHER, delete-buffer first, every time
+    # either would otherwise be considered -- never independently on
+    # their own fill rate -- because they fill at different rates (one
+    # entry per place row vs. one per cell, and a park can carry many
+    # cells) and a place's DELETE must always execute before that same
+    # place's INSERT reaches the database, or a delete flushed late
+    # would erase cells an earlier-flushed insert had already written.
+    _CELL_BATCH_ROWS = 20_000
+    cell_delete_buffer: list[tuple[int]] = []
+    cell_insert_buffer: list[tuple[int, str]] = []
+    rows_since_flush = 0
+
+    def _flush_cell_buffers() -> None:
+        if cell_delete_buffer:
+            conn.executemany("DELETE FROM place_cell WHERE place_id = ?", cell_delete_buffer)
+            cell_delete_buffer.clear()
+        if cell_insert_buffer:
+            conn.executemany(
+                "INSERT OR IGNORE INTO place_cell(place_id, cell_id) VALUES (?, ?)",
+                cell_insert_buffer,
+            )
+            cell_insert_buffer.clear()
+
     conn.execute("BEGIN IMMEDIATE")
     try:
-        with open(_DATA_PATH, encoding="utf-8", newline="") as fh:
+        # idx_place_cell_cell is place_cell's one SECONDARY index (its
+        # PRIMARY KEY (place_id, cell_id) can't be dropped, and is cheap
+        # to maintain anyway since these inserts already arrive grouped
+        # by place_id). Dropping the secondary index for the run and
+        # rebuilding it once at the end -- standard bulk-load practice --
+        # means SQLite is not maintaining a cell_id-ordered B-tree across
+        # ~2.17M essentially-random-order inserts one row at a time; it
+        # pays that cost once, as a single sorted build, at the end
+        # instead. Safe inside this transaction: nothing outside it can
+        # see the index missing, since nothing outside it can see this
+        # transaction's writes at all until COMMIT.
+        conn.execute("DROP INDEX IF EXISTS idx_place_cell_cell")
+
+        with _open_csv(_DATA_PATH, encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
                 ref_type = row["ref_type"]
@@ -670,11 +790,20 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                 place_id = cur.fetchone()[0]
                 seen_ids.add(place_id)
 
-                conn.execute("DELETE FROM place_cell WHERE place_id = ?", (place_id,))
-                conn.executemany(
-                    "INSERT OR IGNORE INTO place_cell(place_id, cell_id) VALUES (?, ?)",
-                    [(place_id, c) for c in cells],
-                )
+                cell_delete_buffer.append((place_id,))
+                cell_insert_buffer.extend((place_id, c) for c in cells)
+                rows_since_flush += 1
+                if rows_since_flush >= _CELL_BATCH_ROWS:
+                    _flush_cell_buffers()
+                    rows_since_flush = 0
+
+        _flush_cell_buffers()  # remainder: fewer than _CELL_BATCH_ROWS rows since the last flush
+
+        # Rebuild the secondary index dropped above, now that every
+        # place_cell row for this load is in place -- one sorted build
+        # over the final ~2.17M rows instead of maintaining it across
+        # every individual insert above.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_place_cell_cell ON place_cell(cell_id)")
 
         # Reconcile: any place that is currently active but was not
         # touched by this pass has left the seed. Deactivate rather
@@ -704,6 +833,11 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    finally:
+        # Always cleared, success or failure -- a failed load must not
+        # leave app/places_api.py's read routes logging "still loading"
+        # forever over a load that has actually stopped trying.
+        LOADING = False
 
     elapsed = time.monotonic() - t0
     log.info(

@@ -41,9 +41,12 @@ threshold change below re-pulled the same day):
                    POTA has itself designated a reference for) -- see
                    "PARK SOURCES" below for why this is not the only
                    park source any more.
-  OSM landmarks -- /mnt/nas/nav/western-us-11states.osm.pbf on pi-nas
+  OSM landmarks -- /mnt/nas/nav/planet-latest.osm.pbf on pi-nas
                    (read-only source storage -- never write there),
-                   reachable from navi.
+                   reachable from navi. CHANGED 2026-09-07: was
+                   western-us-11states.osm.pbf until the worldwide
+                   expansion below switched the source to the full
+                   planet extract.
   PAD-US        -- /data/nav/padus/PADUS4_0_Geodatabase.gdb on navi,
                    layer PADUS4_0Combined_Proclamation_Marine_Fee_
                    Designation_Easement (all protected-area types in one
@@ -87,6 +90,27 @@ ref_code would fail.
 PLAY AREA (from the running service's /config, NOT app/config.py's
 narrower Idaho-only defaults -- production overrides those via .env):
   north 49.29  south 25.8  west -125.0  east -93.5
+  NORTH/SOUTH/WEST/EAST below are this rectangle -- still used to scope
+  the PAD-US stages (match_parks, fetch_padus_parks), which stay
+  US-only on purpose (see WORLDWIDE EXPANSION just below). No longer
+  used to gate SOTA, POTA, or OSM landmarks.
+
+WORLDWIDE EXPANSION (2026-09-07, Matt approved): fetch_sota(),
+fetch_pota(), and extract_landmarks() no longer bbox-filter to the play
+area above -- each source's own quality filter (SUMMIT_MIN_SOTA_POINTS,
+POTA's active flag, LANDMARK_TAGS + the name requirement) is
+unchanged and is the only gate left. app/places_seed.py's loader lost
+its matching country filters (the US_SOTA_ASSOCIATIONS allowlist for
+summits, the "ref_code prefix must be US-" check for POTA parks) in the
+same change -- see that module's docstring. PAD-US (match_parks,
+fetch_padus_parks) is deliberately UNCHANGED and stays US-only: it is a
+US government dataset with no global equivalent, so it keeps
+contributing US parks exactly as before, just alongside POTA/OSM
+sources that are worldwide now rather than being the only park source
+outside the US. "City limits" scoring (score_points() below) needed its
+own worldwide fix on the anchors side -- see app/reference/places.csv
+and the GeoNames-derived global anchors file assembled alongside it,
+not part of this script.
 
 OSM TAG LIST -- the approved narrowed list (docs/features/places.md),
 BROADENED 2026-08-24 with outdoor/natural destinations. fire_station
@@ -204,6 +228,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import gzip
 import io
 import math
 import os
@@ -380,8 +405,15 @@ def fetch_sota(out_path: str) -> None:
             if sota_points < SUMMIT_MIN_SOTA_POINTS:
                 skipped_low_points += 1
                 continue
-            if not in_bbox(lat, lon):
-                continue
+            # WORLDWIDE (2026-09-07): the bbox check that used to sit here
+            # (in_bbox(lat, lon)) restricted this pull to the play area's
+            # old North-America-only rectangle. Matt approved expanding
+            # "Places Worth Going" worldwide -- SUMMIT_MIN_SOTA_POINTS
+            # (the quality bar) stays exactly as-is; only the geography
+            # gate is gone. app/places_seed.py's loader dropped the
+            # matching US_SOTA_ASSOCIATIONS allowlist in the same change,
+            # so a summit kept here is no longer re-filtered by country
+            # at load time either.
             code = row["SummitCode"].strip()
             name = row["SummitName"].strip()
             if not code or not name:
@@ -430,15 +462,18 @@ def fetch_pota(out_path: str) -> None:
                 lon = float(row["longitude"])
             except (KeyError, ValueError):
                 continue
-            if not in_bbox(lat, lon):
-                continue
+            # WORLDWIDE (2026-09-07): bbox gate removed, same reasoning as
+            # fetch_sota() above -- the active-parks filter (the check
+            # just above) is the quality bar and is unchanged; only
+            # geography opened up. app/places_seed.py's loader dropped
+            # its POTA "prefix must be US-" check in the same change.
             ref = row["reference"].strip()
             name = row["name"].strip()
             if not ref or not name:
                 continue
             w.writerow([ref, name, f"{lat:.6f}", f"{lon:.6f}"])
             kept += 1
-    print(f"pota: wrote {kept} active in-bbox parks -> {out_path}", file=sys.stderr)
+    print(f"pota: wrote {kept} active parks worldwide -> {out_path}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------
@@ -511,7 +546,7 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
     """Run on navi against the tags-filter output, e.g.:
 
         osmium tags-filter -o filtered.pbf --overwrite \\
-            /mnt/nas/nav/western-us-11states.osm.pbf \\
+            /mnt/nas/nav/planet-latest.osm.pbf \\
             amenity=townhall,courthouse,library \\
             tourism=museum,viewpoint,attraction,information,alpine_hut,wilderness_hut \\
             historic=memorial,monument,marker,mine,ruins,fort,battlefield,wreck \\
@@ -557,8 +592,12 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
                 self.seen_names_skipped += 1
                 return
             lat, lon = n.location.lat, n.location.lon
-            if not in_bbox(lat, lon):
-                return
+            # WORLDWIDE (2026-09-07): in_bbox(lat, lon) removed here --
+            # this handler now runs against the planet PBF, not the
+            # western-US extract, and every named match is kept
+            # regardless of where on Earth it falls. See the module
+            # docstring's fetch_sota/fetch_pota notes for the same
+            # change on the other two sources.
             self.rows.append(("n", n.id, name, lat, lon))
             self.tag_counts[matched] += 1
 
@@ -584,8 +623,7 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
                     return
             lat = sum(lats) / len(lats)
             lon = sum(lons) / len(lons)
-            if not in_bbox(lat, lon):
-                return
+            # WORLDWIDE (2026-09-07): same in_bbox removal as node() above.
             self.rows.append(("w", w.id, name, lat, lon))
             self.tag_counts[matched] += 1
 
@@ -1680,6 +1718,11 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
 
             centroid = geom.centroid
             lat, lon = centroid.y, centroid.x
+            # NOT removed by the 2026-09-07 worldwide change -- PAD-US is
+            # a US-government dataset with no global equivalent (see
+            # module docstring "PARK SOURCES"/task notes), so this bbox
+            # check stays: it is what keeps this stage US-only on
+            # purpose, not a leftover of the old play-area restriction.
             if not in_bbox(lat, lon):
                 counts["out_of_bbox"] += 1
                 continue
@@ -1884,13 +1927,25 @@ def score_points(row: dict, buckets: dict) -> tuple[int, str]:
     return REMOTE_POINTS[row["ref_type"]], "remote"
 
 
+def _open_out_csv(path: str, **kwargs):
+    """Opens path for text writing, gzip-compressing when the name
+    ends in .gz -- so a rebuild that passes --out ...places_worth_going.csv.gz
+    (the shipped default) writes compressed directly instead of
+    silently recreating the 136MB plain CSV that broke GitHub's push
+    limit (2026-09-07). Plain open() otherwise.
+    """
+    if path.endswith(".gz"):
+        return gzip.open(path, "wt", **kwargs)
+    return open(path, "w", **kwargs)
+
+
 def merge(inputs: list, out_path: str, places_csv: str = _DEFAULT_PLACES_CSV) -> None:
     buckets = _load_city_anchors(places_csv)
     seen = set()
     total = 0
     counts = {}
     dist = {}  # (ref_type, points, reason) -> count, for the distribution report
-    with open(out_path, "w", newline="", encoding="utf-8") as out:
+    with _open_out_csv(out_path, newline="", encoding="utf-8") as out:
         w = csv.writer(out)
         w.writerow(FINAL_SEED_FIELDS)
         for path in inputs:

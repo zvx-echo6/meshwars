@@ -11,6 +11,16 @@ class Settings(BaseSettings):
     # Storage
     db_path: str = "/data/game.db"
 
+    # Places Worth Going seed (app/places_seed.py): the loader normally
+    # skips its own reconcile pass when the seed's sha256 content hash
+    # matches what the last successful load recorded (see that module's
+    # _RECONCILE_VERSION comment) -- that is what keeps every boot after
+    # the first cheap. Setting this forces a full reload on the next
+    # boot regardless of the fingerprint, without requiring anyone to
+    # hand-edit the `cursor` table. An operator-facing escape hatch, not
+    # something a normal deploy needs to touch.
+    places_force_reseed: bool = False
+
     # Terrain/overlay PMTiles archives (USFS roads+trails, public lands)
     # served under /tiles -- see mount() in app/api.py. A bind mount
     # rather than the meshwars-data volume: these are large, static, and
