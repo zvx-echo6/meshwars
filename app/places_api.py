@@ -55,8 +55,11 @@ DEFAULT_NEAR_RESULTS = 20
 # order -- every SOTA summit is worth the same 100 points (docs/features/
 # places.md), so SQLite falls back to breaking the tie by insertion
 # order, which follows app/reference/places_worth_going.csv, which is
-# sorted by SOTA association code (W0C Colorado ... W7Y Wyoming -- see
-# app/places_seed.py's US_SOTA_ASSOCIATIONS). A zoomed-out viewport
+# sorted by SOTA association code (W0C Colorado ... W7Y Wyoming --
+# app/places_seed.py's country allowlist that produced that ordering
+# was removed 2026-09-07 in the worldwide expansion, but the CSV's
+# insertion order it left behind is the same kind of clustering this
+# tiebreak exists to defeat). A zoomed-out viewport
 # capped at MAX_VIEWPORT_RESULTS then silently kept everything up to
 # about Oregon and dropped the alphabetic tail -- Utah, Washington,
 # Wyoming, most of Nevada -- not because they are less deserving, but

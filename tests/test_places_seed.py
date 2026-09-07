@@ -1,12 +1,20 @@
-"""Tests for app/places_seed.py's classification logic: the non-US
-filter (2026-08-24 correction -- see that module's docstring) and the
-larger/smaller-than-a-cell park split. Does not load the real 65k-row
-CSV (a full load takes on the order of a minute, mostly park boundary
-geometry work) -- these exercise the pure functions directly.
+"""Tests for app/places_seed.py's classification logic: the
+named-summit filter and the larger/smaller-than-a-cell park split.
+Does not load the real seed CSV (a full load takes on the order of a
+minute, mostly park boundary geometry work) -- these exercise the pure
+functions directly.
+
+The country filter these tests used to cover (a SOTA association
+allowlist, a POTA ref_code prefix check) was REMOVED 2026-09-07 --
+"Places Worth Going" went worldwide, Matt approved -- see
+app/places_seed.py's module docstring "COUNTRY FILTER". The tests below
+that used to assert non-US rows were EXCLUDED now assert the opposite:
+worldwide, everything that clears its own quality bar (a real name,
+POTA's active flag upstream) is kept regardless of country.
 """
 from __future__ import annotations
 
-from app.places_seed import US_SOTA_ASSOCIATIONS, _cell_area_m2, _classify_row, _park_cells
+from app.places_seed import _cell_area_m2, _classify_row, _park_cells
 from shapely.geometry import box
 
 
@@ -18,18 +26,27 @@ def test_us_sota_association_kept():
     assert rotates is False
 
 
-def test_mexico_sota_association_excluded():
-    keep, _ = _classify_row({"ref_type": "summit", "ref_code": "XE2/BC-001"})
-    assert keep is False
+def test_mexico_sota_association_kept_worldwide():
+    keep, _ = _classify_row(
+        {"ref_type": "summit", "ref_code": "XE2/BC-001", "name": "Cerro Grande"}
+    )
+    assert keep is True
 
 
-def test_canada_sota_association_excluded():
+def test_canada_sota_association_kept_worldwide():
     for assoc in ("VE5", "VE6", "VE7"):
-        keep, _ = _classify_row({"ref_type": "summit", "ref_code": f"{assoc}/AB-001"})
-        assert keep is False, assoc
+        keep, _ = _classify_row(
+            {"ref_type": "summit", "ref_code": f"{assoc}/AB-001", "name": "Test Peak"}
+        )
+        assert keep is True, assoc
 
 
-def test_minnesota_k0m_is_us_not_a_typo():
+def test_minnesota_k0m_still_kept():
+    """K0M (USA - Minnesota) was the one association code that looked
+    like an odd one out next to the W-prefixed codes back when this was
+    an allowlist -- no longer a distinction that matters now that every
+    association is kept, but a real named summit under it should still
+    pass the (now country-blind) classifier."""
     keep, _ = _classify_row(
         {"ref_type": "summit", "ref_code": "K0M/MN-001", "name": "Eagle Mountain"}
     )
@@ -38,9 +55,8 @@ def test_minnesota_k0m_is_us_not_a_typo():
 
 def test_numeric_named_summit_below_thirteener_threshold_excluded():
     """SOTA records a summit's elevation as its name when it has none --
-    a US-association summit named "9740" (below the 13,000ft
-    thirteener-exception threshold) must still be excluded even though
-    it clears the country filter."""
+    a summit named "9740" (below the 13,000ft thirteener-exception
+    threshold) must still be excluded regardless of country."""
     keep, _ = _classify_row(
         {"ref_type": "summit", "ref_code": "W7M/SW-001", "name": "9740"}
     )
@@ -82,10 +98,11 @@ def test_us_pota_park_kept():
     assert rotates is None  # decided later once area is known
 
 
-def test_non_us_pota_park_excluded():
-    for prefix in ("CA", "MX"):
-        keep, _ = _classify_row({"ref_type": "park", "ref_code": f"{prefix}-1234"})
-        assert keep is False, prefix
+def test_non_us_pota_park_kept_worldwide():
+    for prefix in ("CA", "MX", "DL", "G", "VK"):
+        keep, rotates = _classify_row({"ref_type": "park", "ref_code": f"{prefix}-1234"})
+        assert keep is True, prefix
+        assert rotates is None  # decided later once area is known
 
 
 def test_landmark_always_kept_and_rotates():

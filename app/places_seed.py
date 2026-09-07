@@ -15,36 +15,45 @@ place_cell), so it loads into SQLite instead -- same CSV-shipped-with-
 the-code precedent (app/reference/, not the gitignored data/ volume),
 different destination.
 
-COUNTRY FILTER -- the CSV is not pre-filtered to the US. It is built
-from a single bounding box (see scripts/build_places_seed.py's module
-docstring) that, being a rectangle, also sweeps in northern Mexico and
-southern Canada. MeshWars is a US game, so this loader excludes:
+COUNTRY FILTER -- REMOVED 2026-09-07 (Matt approved, "Places Worth
+Going" going worldwide alongside the rest of the world-open map).
+Until this change, the CSV was built from a single bounding box (see
+scripts/build_places_seed.py's module docstring) that, being a
+rectangle, also swept in northern Mexico and southern Canada, and
+MeshWars being a US-only game at the time, this loader excluded:
 
   - SOTA summits: association code (the part of ref_code before the
-    first "/") not in US_SOTA_ASSOCIATIONS below. Confirmed against
-    SOTA's own /api/associations/ endpoint on 2026-08-24: every code in
-    the CSV maps to dxcc "291" (USA) except XE2 (Mexico - North) and
-    VE5/VE6/VE7 (Saskatchewan/Alberta/British Columbia). K0M looks like
-    an odd one out next to the W-prefixed codes but is genuinely
-    USA - Minnesota, confirmed the same way, not a typo.
+    first "/") not in US_SOTA_ASSOCIATIONS. Confirmed against SOTA's own
+    /api/associations/ endpoint on 2026-08-24: every code in the old
+    bbox-limited CSV mapped to dxcc "291" (USA) except XE2 (Mexico -
+    North) and VE5/VE6/VE7 (Saskatchewan/Alberta/British Columbia). K0M
+    looked like an odd one out next to the W-prefixed codes but was
+    genuinely USA - Minnesota, confirmed the same way, not a typo.
   - POTA parks: reference prefix (the part of ref_code before the
     first "-") not "US". POTA's own reference scheme puts the country
-    right there -- "US-1234" / "CA-1234" / "MX-0001" -- no lookup
-    needed. ADDED 2026-08-24: parks with source "PAD-US" (ref_code
-    "PADUS-<fid>", from build_places_seed.py's fetch_padus_parks() --
-    local/city/county parks POTA never lists at all, since POTA only
-    covers what hams activate) skip this prefix check and are kept
-    unconditionally instead -- they are pulled from a single US-
-    territory PAD-US layer already scoped to the play area's bbox, so
-    there is no CA-/MX- equivalent to filter, and their ref_code does
-    not start with "US-" for the prefix check to even parse correctly.
-  - OSM landmarks: NOT filtered. Verified rather than assumed: every
-    landmark row's lat/lon falls inside 31.33-49.01N, -124.72 to
-    -102.04W -- exactly the western US states extract
-    (western-us-11states.osm.pbf) build_places_seed.py's
-    extract_landmarks() reads from, bounded by the real AZ/CA-Mexico
-    border (~31.33N) and the real US-Canada border (49.00N) rather than
-    the bbox. There is nothing non-US in this file to filter.
+    right there -- "US-1234" / "CA-1234" / "MX-0001".
+
+  Now that scripts/build_places_seed.py pulls SOTA and POTA worldwide
+  (no bbox at all -- see that module's "WORLDWIDE EXPANSION" note),
+  both checks above would have rejected the whole rest of the world, so
+  they are gone: every SOTA summit and POTA park in the CSV that
+  clears its own quality bar (SUMMIT_MIN_SOTA_POINTS, POTA's active
+  flag) is now kept regardless of country. US_SOTA_ASSOCIATIONS is
+  unused dead weight now removed too.
+
+  - Parks with source "PAD-US" (ref_code "PADUS-<fid>", from
+    build_places_seed.py's fetch_padus_parks()) were, and still are,
+    kept unconditionally -- UNCHANGED by this: PAD-US is a US
+    government dataset with no global equivalent and stays US-only on
+    purpose (see that script's "PARK SOURCES"/"WORLDWIDE EXPANSION"
+    notes), it just is no longer the only non-POTA park source outside
+    the US.
+  - OSM landmarks: NOT filtered before, NOT filtered now -- there was
+    never a country check on this ref_type; extract_landmarks() now
+    reads the full planet PBF (see that script) instead of a
+    western-US-only extract, so this row simply carries worldwide
+    coordinates now, same as it always trusted its source file's own
+    extent.
 
 PARK BOUNDARY COVERAGE IS PARTIAL -- of the parks kept after the country
 filter, POTA-to-PAD-US matching (scripts/build_places_seed.py's
@@ -73,6 +82,7 @@ import math
 import os
 import re
 import sqlite3
+import gzip
 import time
 
 from shapely import wkt as shapely_wkt
@@ -82,13 +92,23 @@ from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
 
 log = logging.getLogger("places_seed")
 
-_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv")
+_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv.gz")
 # Summit -> squares, built by scripts/build_summit_cells.py against the
 # planet DEM on navi. A summit's squares cannot be derived here the way a
 # park's are from its boundary: the test is terrain (within 1.5km AND
 # within 200m of the summit's own elevation, plus the peak's own square), and the app host has no
 # elevation data. So it ships precomputed, same as the seed itself.
 _SUMMIT_CELLS_PATH = os.path.join(os.path.dirname(__file__), "reference", "summit_cells.csv")
+
+
+def _open_csv(path: str, **kwargs):
+    """Opens path for text reading, transparently gunzipping when the
+    name ends in .gz (the shipped places_worth_going.csv.gz) and falling
+    back to a plain open() otherwise (test fixtures, summit_cells.csv).
+    Everything downstream (csv.DictReader) is unaffected either way."""
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", **kwargs)
+    return open(path, **kwargs)
 
 
 def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
@@ -138,23 +158,11 @@ def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
 
 _METERS_PER_DEG_LAT = 111_320.0
 
-# Pulled from https://api-db2.sota.org.uk/api/associations/ on
-# 2026-08-24 and filtered to dxcc "291" (USA) -- the full US SOTA
-# association list, not just the ones this CSV happens to contain,
-# so a future re-pull with a wider bbox (e.g. reaching Alaska or the
-# Atlantic seaboard) is still classified correctly without touching
-# this file again.
-US_SOTA_ASSOCIATIONS = frozenset({
-    "K0M", "KH6",
-    "W0C", "W0D", "W0I", "W0M", "W0N",
-    "W1", "W2", "W3",
-    "W4A", "W4C", "W4G", "W4K", "W4T", "W4V",
-    "W5A", "W5M", "W5N", "W5O", "W5T",
-    "W6",
-    "W7A", "W7I", "W7M", "W7N", "W7O", "W7U", "W7W", "W7Y",
-    "W8M", "W8O", "W8V",
-    "W9",
-})
+# US_SOTA_ASSOCIATIONS (the full US SOTA association allowlist, pulled
+# from https://api-db2.sota.org.uk/api/associations/ on 2026-08-24) was
+# REMOVED 2026-09-07 along with the country filter it backed -- see the
+# module docstring's "COUNTRY FILTER" note. Every SOTA association is
+# now kept, not just the US ones.
 
 _MIN_OVERLAP_FRACTION = 0.5  # ">50% inside the boundary"
 
@@ -182,16 +190,17 @@ _SUMMIT_COLOCATION_RADIUS_M = 100.0
 
 def _kept_summit_buckets(path: str) -> dict[str, list[tuple[float, float]]]:
     """First pass over the CSV: (lat, lon) of every summit that will
-    actually be KEPT (passes the same US/named-summit test
-    _classify_row applies in the real load), bucketed by grid cell id
-    for a cheap proximity lookup in the main load loop below. A summit
-    that _classify_row would exclude (non-US, or an unnamed placeholder
-    peak) never got the game's 100 points in the first place, so a
+    actually be KEPT (passes the same named-summit test _classify_row
+    applies in the real load), bucketed by grid cell id for a cheap
+    proximity lookup in the main load loop below. A summit that
+    _classify_row would exclude (an unnamed placeholder peak -- the
+    country filter this used to also apply is gone, see module
+    docstring) never got the game's points in the first place, so a
     landmark near IT must not be excluded either -- there would be
     nothing left at that spot to double-dip against.
     """
     buckets: dict[str, list[tuple[float, float]]] = {}
-    with open(path, encoding="utf-8", newline="") as fh:
+    with _open_csv(path, encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             if row["ref_type"] != "summit":
@@ -361,29 +370,26 @@ def _classify_row(row: dict) -> tuple[bool, bool]:
     """(keep, rotates) for one CSV row, before any geometry work."""
     ref_type = row["ref_type"]
     if ref_type == "summit":
-        assoc = row["ref_code"].split("/")[0]
-        if assoc not in US_SOTA_ASSOCIATIONS:
-            return (False, False)
-        # Country filter passed -- now require an actual name (see
-        # _summit_has_real_name's docstring for what this catches and
-        # what it deliberately lets through).
+        # Country filter (an association-code allowlist) REMOVED
+        # 2026-09-07 -- see module docstring's "COUNTRY FILTER". Every
+        # summit that cleared build_places_seed.py's own quality bar
+        # (SUMMIT_MIN_SOTA_POINTS) is kept regardless of country; only
+        # the named-summit check below still excludes anything.
         return (_summit_has_real_name(row.get("name", "")), False)
     if ref_type == "park":
-        # ADDED 2026-08-24: PAD-US-sourced parks (ref_code "PADUS-<fid>")
-        # are pulled directly from a single US-territory PAD-US layer
-        # (scripts/build_places_seed.py's fetch_padus_parks(), run
-        # against the play area's own bbox) -- there is no CA-/MX-
-        # equivalent to filter the way POTA's own reference prefix
-        # requires below, so these are kept unconditionally rather than
-        # run through the POTA-shaped prefix check, which would reject
-        # every one of them (their ref_code does not start with "US-").
+        # PAD-US-sourced parks (ref_code "PADUS-<fid>") are kept
+        # unconditionally, unchanged by the 2026-09-07 worldwide change
+        # -- PAD-US is deliberately US-only (see build_places_seed.py's
+        # "PARK SOURCES"/"WORLDWIDE EXPANSION" notes), so this branch
+        # stays exactly as it was.
         if row.get("source") == "PAD-US":
             return (True, None)  # rotates decided later, once area is known
-        prefix = row["ref_code"].split("-")[0]
-        if prefix != "US":
-            return (False, False)
+        # POTA prefix filter ("must start with US-") REMOVED 2026-09-07
+        # -- see module docstring's "COUNTRY FILTER". Every active POTA
+        # park is kept regardless of country now.
         return (True, None)  # rotates decided later, once area is known
-    # landmark: verified US-only at CSV build time, see module docstring
+    # landmark: never filtered by country, before or after this change
+    # -- see module docstring.
     return (True, True)
 
 
@@ -521,7 +527,7 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     seen_ids: set[int] = set()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        with open(_DATA_PATH, encoding="utf-8", newline="") as fh:
+        with _open_csv(_DATA_PATH, encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
                 ref_type = row["ref_type"]
