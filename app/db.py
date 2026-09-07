@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -2415,15 +2416,41 @@ def init_db() -> None:
         # at module level to avoid a circular import (places_seed does
         # not import this module back, but keeping the import local
         # keeps db.py's own import graph exactly what it was before this
-        # landed). A failure here must not take the whole app down --
+        # landed).
+        #
+        # BACKGROUNDED (2026-09-07), not awaited here: a first load of
+        # the worldwide seed measured ~200s, and this function runs
+        # inside FastAPI's lifespan startup (app/main.py), which blocks
+        # uvicorn from accepting ANY connection -- including /health --
+        # until it returns. A slow load here meant a slow or, past
+        # mw-deploy's 180s health-check timeout, outright FAILED deploy,
+        # for a feature that degrades fine without its data for a few
+        # minutes (app/places_api.py's routes just return no markers
+        # until the load finishes -- nothing crashes on an empty
+        # `place` table). Runs against its own fresh connection, not the
+        # `conn` this function is using: sqlite3 connections are not
+        # safe to hand to another thread while this one keeps using
+        # them, and `connect()` is already how every other request-
+        # serving codepath gets its own (see that function's docstring,
+        # "each coroutine should grab its own"). A failure here must
+        # not take the whole app down --
         # the place tables just stay empty (or stale) and the places
         # feature quietly has no data, logged loudly, rather than the
-        # server failing to boot over a reference-data problem.
-        try:
+        # server failing to boot (or, now, failing to ever finish this
+        # background load) over a reference-data problem.
+        def _load_places_seed_background() -> None:
             from .places_seed import load_places_seed
-            load_places_seed(conn)
-        except Exception:
-            log.exception("places_seed: load failed -- places feature will have no/stale data")
+            seed_conn = connect()
+            try:
+                load_places_seed(seed_conn)
+            except Exception:
+                log.exception("places_seed: background load failed -- places feature will have no/stale data")
+            finally:
+                seed_conn.close()
+
+        threading.Thread(
+            target=_load_places_seed_background, name="places-seed-load", daemon=True
+        ).start()
 
         # Net check-ins (app/checkin.py): one-time bootstrap of
         # checkin_net/checkin_config from settings.py, so a database that

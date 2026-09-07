@@ -25,6 +25,7 @@ scoring rule these parks use is computed once at seed time
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 from fastapi import APIRouter, Query
@@ -32,12 +33,27 @@ from fastapi.responses import JSONResponse
 from shapely import wkt as shapely_wkt
 from shapely.geometry import mapping as shapely_mapping
 
+from . import places_seed
 from .db import connect
 from .grid import distance_m
 from .place_rotation import current_week_start, resolve_week
 from .place_scoring import _stable_tiebreak
 
+log = logging.getLogger("places_api")
 router = APIRouter()
+
+
+def _log_if_still_loading(row_count: int) -> None:
+    """Zero rows back from a live/rotating-places query is completely
+    normal on its own (an empty viewport, week rotation still
+    resolving) -- but if it lines up with places_seed.LOADING (see that
+    module: True only for the duration of app/db.py's now-backgrounded
+    startup seed load), it is worth a clear log line instead of a
+    silent empty response, so "the map has no markers" and "the seed is
+    still loading" are never confused from the logs alone.
+    """
+    if row_count == 0 and places_seed.LOADING:
+        log.info("places_api: seed still loading in the background, returning no places for now")
 
 # A viewport at low zoom over the whole play area could otherwise ask
 # for tens of thousands of markers; MapLibre has no server-side
@@ -255,6 +271,7 @@ async def places_in_viewport(
             f" ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT ?",
             (protocol, south, north, west, east, week_start, MAX_VIEWPORT_RESULTS),
         ).fetchall()
+        _log_if_still_loading(len(rows))
         boundary_features = (
             _park_boundaries_in_viewport(conn, north, south, west, east)
             if zoom is not None and zoom >= MIN_BOUNDARY_ZOOM
@@ -296,6 +313,7 @@ async def places_near(
             f" WHERE {_live_where(week_start)}",
             (week_start,),
         ).fetchall()
+        _log_if_still_loading(len(rows))
     finally:
         conn.close()
 

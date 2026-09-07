@@ -94,6 +94,18 @@ from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
 
 log = logging.getLogger("places_seed")
 
+# True for the duration of a real (non-skip) load -- see app/db.py's
+# init_db(), which now runs that load on a background thread rather
+# than blocking app startup. app/places_api.py's read routes check
+# this to log a clear "still loading" line instead of a silent empty
+# result while the very first (multi-second-to-low-tens-of-seconds,
+# see load_places_seed()'s own batching) load is still in flight. Not
+# a threading.Event/Lock -- a plain module attribute is enough here:
+# CPython's GIL makes a single bool assignment atomic, and the only
+# consumers are read-only status checks from other threads, never a
+# blocking wait on it.
+LOADING = False
+
 _DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv.gz")
 # Summit -> squares, built by scripts/build_summit_cells.py against the
 # planet DEM on navi. A summit's squares cannot be derived here the way a
@@ -569,6 +581,8 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         )
         return stats
 
+    global LOADING
+    LOADING = True
     now = int(time.time())
     t0 = time.monotonic()
     # Built up front, once, from its own pass over the file -- see
@@ -579,8 +593,54 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # not sorted by proximity to each other).
     summit_buckets = _kept_summit_buckets(_DATA_PATH)
     seen_ids: set[int] = set()
+
+    # place_cell writes are BATCHED (2026-09-07), not one DELETE plus
+    # one executemany INSERT per place row. Measured cause of the
+    # worldwide seed's ~200s first load: ~1.39M individual DELETEs (most
+    # of them no-ops on a fresh table -- a place just freshly INSERTed
+    # cannot yet have any place_cell rows to delete) plus ~1.39M tiny
+    # executemany calls (2.17M total place_cell rows) each paying a full
+    # Python/sqlite3-module round trip. Buffered here instead and
+    # flushed every _CELL_BATCH_ROWS place rows via _flush_cell_buffers,
+    # collapsing that into a couple hundred large statements. The two
+    # buffers are flushed TOGETHER, delete-buffer first, every time
+    # either would otherwise be considered -- never independently on
+    # their own fill rate -- because they fill at different rates (one
+    # entry per place row vs. one per cell, and a park can carry many
+    # cells) and a place's DELETE must always execute before that same
+    # place's INSERT reaches the database, or a delete flushed late
+    # would erase cells an earlier-flushed insert had already written.
+    _CELL_BATCH_ROWS = 20_000
+    cell_delete_buffer: list[tuple[int]] = []
+    cell_insert_buffer: list[tuple[int, str]] = []
+    rows_since_flush = 0
+
+    def _flush_cell_buffers() -> None:
+        if cell_delete_buffer:
+            conn.executemany("DELETE FROM place_cell WHERE place_id = ?", cell_delete_buffer)
+            cell_delete_buffer.clear()
+        if cell_insert_buffer:
+            conn.executemany(
+                "INSERT OR IGNORE INTO place_cell(place_id, cell_id) VALUES (?, ?)",
+                cell_insert_buffer,
+            )
+            cell_insert_buffer.clear()
+
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # idx_place_cell_cell is place_cell's one SECONDARY index (its
+        # PRIMARY KEY (place_id, cell_id) can't be dropped, and is cheap
+        # to maintain anyway since these inserts already arrive grouped
+        # by place_id). Dropping the secondary index for the run and
+        # rebuilding it once at the end -- standard bulk-load practice --
+        # means SQLite is not maintaining a cell_id-ordered B-tree across
+        # ~2.17M essentially-random-order inserts one row at a time; it
+        # pays that cost once, as a single sorted build, at the end
+        # instead. Safe inside this transaction: nothing outside it can
+        # see the index missing, since nothing outside it can see this
+        # transaction's writes at all until COMMIT.
+        conn.execute("DROP INDEX IF EXISTS idx_place_cell_cell")
+
         with _open_csv(_DATA_PATH, encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
@@ -676,11 +736,20 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                 place_id = cur.fetchone()[0]
                 seen_ids.add(place_id)
 
-                conn.execute("DELETE FROM place_cell WHERE place_id = ?", (place_id,))
-                conn.executemany(
-                    "INSERT OR IGNORE INTO place_cell(place_id, cell_id) VALUES (?, ?)",
-                    [(place_id, c) for c in cells],
-                )
+                cell_delete_buffer.append((place_id,))
+                cell_insert_buffer.extend((place_id, c) for c in cells)
+                rows_since_flush += 1
+                if rows_since_flush >= _CELL_BATCH_ROWS:
+                    _flush_cell_buffers()
+                    rows_since_flush = 0
+
+        _flush_cell_buffers()  # remainder: fewer than _CELL_BATCH_ROWS rows since the last flush
+
+        # Rebuild the secondary index dropped above, now that every
+        # place_cell row for this load is in place -- one sorted build
+        # over the final ~2.17M rows instead of maintaining it across
+        # every individual insert above.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_place_cell_cell ON place_cell(cell_id)")
 
         # Reconcile: any place that is currently active but was not
         # touched by this pass has left the seed. Deactivate rather
@@ -710,6 +779,11 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    finally:
+        # Always cleared, success or failure -- a failed load must not
+        # leave app/places_api.py's read routes logging "still loading"
+        # forever over a load that has actually stopped trying.
+        LOADING = False
 
     elapsed = time.monotonic() - t0
     log.info(
