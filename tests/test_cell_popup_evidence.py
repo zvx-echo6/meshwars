@@ -102,6 +102,104 @@ def test_capture_from_verified_tx_paint_reports_its_evidence(conn, monkeypatch):
     assert cap["watcher_count"] == 2
 
 
+# ---------------------------------------------------------------------
+# Wording-rule regression: watcher_corroborated is a tri-state (true /
+# false / null) and the frontend (frontend/mc.js, frontend/map2.js's
+# buildCaptureEvidenceNote) must branch on all three distinctly --
+# collapsing null into false would assert "not corroborated" about a
+# reception whose corroboration was simply never recorded, which is a
+# claim we don't have grounds for. These tests verify the API layer
+# hands the frontend a value it can actually tell apart; the frontend's
+# own three-way branch (RX corroborated with N / RX, not corroborated /
+# bare RX) is verified separately, by running buildCaptureEvidenceNote
+# in Node against the same three cases plus the verified_tx null-count
+# case -- see this task's report for those exact outputs, since this
+# repo has no JS test harness to commit an automated frontend test into.
+# ---------------------------------------------------------------------
+
+def test_watcher_corroborated_true_with_count_is_distinguishable_from_the_other_two_states(conn, monkeypatch):
+    monkeypatch.setattr(mc_api_module, "connect", lambda: conn)
+    season_id = _season(conn)
+    _tile(conn, season_id, CELL)
+    _player(conn, 1, "corroborated-tester")
+    _capture(conn, season_id, CELL, NOW, 1, "RED")
+    _ping(
+        conn, "mc", CELL, NOW, 1,
+        evidence_type="passive_rx", watcher_count=34, watcher_corroborated=1,
+    )
+
+    detail = cell_detail_for("mc", CELL)
+    [cap] = detail["recent_captures"]
+    assert cap["watcher_corroborated"] is True
+    assert cap["watcher_count"] == 34
+
+
+def test_watcher_corroborated_explicitly_false_is_not_the_same_as_null(conn, monkeypatch):
+    """A recorded 0 (explicitly-not-corroborated) must come back as the
+    Python bool False, not None -- the frontend renders these two states
+    with different wording ("RX, not corroborated" vs bare "RX"), so
+    collapsing them here would silently reintroduce the bug."""
+    monkeypatch.setattr(mc_api_module, "connect", lambda: conn)
+    season_id = _season(conn)
+    _tile(conn, season_id, CELL)
+    _player(conn, 1, "not-corroborated-tester")
+    _capture(conn, season_id, CELL, NOW, 1, "RED")
+    _ping(
+        conn, "mc", CELL, NOW, 1,
+        evidence_type="passive_rx", watcher_count=0, watcher_corroborated=0,
+    )
+
+    detail = cell_detail_for("mc", CELL)
+    [cap] = detail["recent_captures"]
+    assert cap["watcher_corroborated"] is False
+    assert cap["watcher_corroborated"] is not None
+
+
+def test_watcher_corroborated_and_count_null_when_evidence_predates_those_columns(conn, monkeypatch):
+    """The exact scenario from the live-preview defect: evidence_type
+    was populated (passive_rx), but watcher_corroborated/watcher_count/
+    quality were added in a later migration and are NULL on this row
+    because that evidence was never recorded -- not because it was
+    recorded as absent. NULL must stay NULL, distinguishable from both
+    True and False, all the way to the wire."""
+    monkeypatch.setattr(mc_api_module, "connect", lambda: conn)
+    season_id = _season(conn)
+    _tile(conn, season_id, CELL)
+    _player(conn, 1, "predates-columns-tester")
+    _capture(conn, season_id, CELL, NOW, 1, "RED")
+    _ping(
+        conn, "mc", CELL, NOW, 1,
+        evidence_type="passive_rx", watcher_count=None, watcher_corroborated=None, quality=None,
+    )
+
+    detail = cell_detail_for("mc", CELL)
+    [cap] = detail["recent_captures"]
+    assert cap["evidence_type"] == "passive_rx"
+    assert cap["watcher_corroborated"] is None
+    assert cap["watcher_count"] is None
+
+
+def test_verified_tx_with_null_watcher_count_stays_null_not_zero(conn, monkeypatch):
+    """Mirrors the passive_rx null case for the verified_tx line: the
+    frontend must render bare "Verified TX", never "Verified TX, 0
+    watchers" -- so a real recorded 0 and an unrecorded NULL have to
+    stay distinguishable here too."""
+    monkeypatch.setattr(mc_api_module, "connect", lambda: conn)
+    season_id = _season(conn)
+    _tile(conn, season_id, CELL)
+    _player(conn, 1, "tx-null-count-tester")
+    _capture(conn, season_id, CELL, NOW, 1, "RED")
+    _ping(
+        conn, "mc", CELL, NOW, 1,
+        evidence_type="verified_tx", watcher_count=None, watcher_corroborated=None,
+    )
+
+    detail = cell_detail_for("mc", CELL)
+    [cap] = detail["recent_captures"]
+    assert cap["evidence_type"] == "verified_tx"
+    assert cap["watcher_count"] is None
+
+
 def test_capture_with_no_matching_ping_row_returns_nulls_and_stays_present(conn, monkeypatch):
     """Older data, a pruned ping, or a meshview paint -- none of these
     write a player_cell_ping row, but the capture itself is real and

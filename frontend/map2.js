@@ -2506,17 +2506,40 @@ function buildRepeaterSectionHtml(detail, c) {
 // popup box?". Kept in sync with frontend/mc.js's copy of the same
 // function -- see that file's buildCellPopupHtml for why this whole
 // popup builder is duplicated rather than shared.
+//
+// watcher_corroborated is a tri-state (true / false / null), and null
+// means UNKNOWN, not false -- a paint made before the capture-signal
+// columns existed has evidence_type set but watcher_corroborated and
+// watcher_count both NULL, because that evidence was simply never
+// recorded, not because it was recorded as absent. Treating that NULL
+// as false would assert "not corroborated" about a reception that may
+// in fact have had thirty watchers -- a fact we don't have, stated as
+// though we did. So this is a strict three-way branch, never a truthy
+// check on watcher_corroborated:
+//   - true AND a positive watcher_count  -> the actual count
+//   - false, explicitly recorded         -> "not corroborated"
+//   - anything else (null/absent, or true with no count on record)
+//                                         -> bare "RX", no claim either way
+// Same principle for verified_tx: a null watcher_count renders "Verified
+// TX" alone, never "Verified TX, 0 watchers" -- 0 is a real recorded
+// count and would be shown as itself; null is not 0.
 function buildCaptureEvidenceNote(cap) {
   if (cap.evidence_type === 'passive_rx') {
-    if (cap.watcher_corroborated && cap.watcher_count) {
+    if (cap.watcher_corroborated === true && typeof cap.watcher_count === 'number' && cap.watcher_count > 0) {
       const n = cap.watcher_count;
       return ` &mdash; RX corroborated with ${n} watcher${n === 1 ? '' : 's'}`;
     }
-    return ' &mdash; RX, uncorroborated';
+    if (cap.watcher_corroborated === false) {
+      return ' &mdash; RX, not corroborated';
+    }
+    return ' &mdash; RX';
   }
   if (cap.evidence_type === 'verified_tx') {
-    const n = cap.watcher_count || 0;
-    return ` &mdash; Verified TX, ${n} watcher${n === 1 ? '' : 's'}`;
+    if (typeof cap.watcher_count === 'number') {
+      const n = cap.watcher_count;
+      return ` &mdash; Verified TX, ${n} watcher${n === 1 ? '' : 's'}`;
+    }
+    return ' &mdash; Verified TX';
   }
   return '';
 }
