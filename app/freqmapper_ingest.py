@@ -151,18 +151,61 @@ now-removed _verified_tx_points() scaling function gated by
 freqmapper_config.watcher_weight_enabled; both are gone, not merely
 defaulted off.
 
-occurred_at vs. published_at: every event carries both. occurred_at is
-the RF event's own timestamp (a mapping-test send, or a radio
-reception) -- this is what this module uses as the paint timestamp and
-what feeds the paint_from date gate below. published_at is the feed's
-own server-side ordering time, which the opaque cursor is built around;
-FreqMapper's docs are explicit that it must never be read as when the
-RF event itself happened, and this module never does -- see _event_time()
-below, which does not even look at published_at. The old feed's
-verified_at/mapping_test_sent_at field names remain a fallback for an
-event that somehow still carries only those (never expected against the
-live combined feed today, but cheap insurance against a schema
-regression), tried strictly after occurred_at.
+occurred_at vs. published_at: every event carries both, and they answer
+two different questions that this module must never let blur together.
+occurred_at is the RF event's own timestamp (a mapping-test send, or a
+radio reception) -- this is what this module uses as the paint
+timestamp and what feeds the paint_from date gate below, and the ONLY
+field either of those may ever use; see _event_time() below, which does
+not even look at published_at, and stays that way. published_at is the
+feed's own server-side ordering time, the field the opaque `next_cursor`
+is built around -- FreqMapper's docs are explicit that it must never be
+read as when the RF event itself happened, so it is never used as a
+paint timestamp or a date-gate boundary anywhere in this module. The old
+feed's verified_at/mapping_test_sent_at field names remain a fallback
+for an event that somehow still carries only those (never expected
+against the live combined feed today, but cheap insurance against a
+schema regression), tried strictly after occurred_at, inside
+_event_time() -- still nothing to do with published_at.
+
+There is exactly ONE place in this module that reads published_at at
+all: the high-water-mark backfill guard (_backfill_guard_time, used
+inside _process_one_event -- see HIGH_WATER_MARK_KEY's own comment and
+"THE ACTUAL FIX" below). That guard used to compare an event's
+occurred_at against the stored mark, and that was a bug, found live in
+production: FreqMapper publishes every passive_rx event at least
+rx_publication_delay_seconds (60s minimum) after the radio actually
+heard the packet, and its docs explicitly describe a phone recording a
+reception while offline and uploading it hours or days later -- in both
+cases the event's occurred_at is genuinely old while its published_at
+is genuinely new, published at the back of the feed's ordering exactly
+where a not-yet-processed event belongs. verified_tx events don't have
+this gap -- their verification and publication times track closely --
+so an occurred_at-keyed mark kept advancing to "now" every cycle purely
+off TX traffic, while a current, legitimate passive_rx reception then
+arrived looking older than that already-advanced mark and was refused
+as backfill, forever: measured on production, a cycle with the feed
+fully caught up (has_more=False) painted 2 verified_tx events and
+backfill-skipped all 5 passive_rx events in the same page. Passive RX
+painting had stopped going forward entirely.
+
+The fix is not "read published_at everywhere instead of occurred_at" --
+that would break the paint timestamp and the paint_from gate, which
+must keep describing when the RF event itself happened, not when the
+feed got around to publishing it. It is narrower: the backfill guard's
+one job is "has this deployment already advanced past this event in
+the FEED's OWN ordering," and published_at -- the field that ordering
+is actually built on -- is the correct answer to that question, not
+occurred_at. This also does not weaken what the guard protects against:
+a cursor reset or feed switch still replays events with OLD
+published_at values (that is, definitionally, what "already processed
+per the feed's ordering" means), so they are still correctly caught as
+backfill; only a genuinely new-to-the-feed event -- current reception
+or a late-arriving offline one -- carries a new published_at and is now
+correctly let through. See _backfill_guard_time's own docstring for the
+fallback this module uses when an event has no published_at at all
+(occurred_at, the guard's old comparison field, applied per-event
+rather than dropped).
 
 Dedupe keys: each event type carries its OWN identity field, and this
 module reads that field directly rather than constructing or parsing
@@ -215,10 +258,16 @@ never "is this event old." A cursor that legitimately starts fresh (a
 brand new feed, a cleared cursor, a first-ever backfill after days of
 downtime) will always hand back genuinely-unseen historical events, and
 no amount of dedupe-key correctness changes that. So this module now
-separately tracks the newest event time (occurred_at) it has ever
-processed -- a persistent high-water mark, app/db.py's generic `cursor`
-table again, key HIGH_WATER_MARK_KEY below -- and any event older than
-that mark, even one that passes dedup cleanly as brand new, is recorded
+separately tracks the newest event time it has ever processed --
+published_at, the feed's own ordering field, falling back to occurred_at
+only when an event carries no published_at at all (see "occurred_at vs.
+published_at" above and _backfill_guard_time's own docstring for why
+published_at, not occurred_at, is the correct field for this specific
+guard even though every other event-time use in this module stays on
+occurred_at) -- a persistent high-water mark, app/db.py's generic
+`cursor` table again, key HIGH_WATER_MARK_KEY below -- and any event
+older than that mark, even one that passes dedup cleanly as brand new,
+is recorded
 (so it is never re-evaluated) but never painted, unless an operator has
 explicitly opted into a deliberate backfill (freqmapper_config.
 allow_backfill, default off). See _process_one_event's own comment on
@@ -354,16 +403,22 @@ CURSOR_KEY = "freqmapper_next_cursor"
 COMBINED_CURSOR_KEY = "freqmapper_combined_next_cursor"
 
 # The backfill guard's high-water mark -- see this module's docstring
-# ("THE ACTUAL FIX") for the incident it protects against. A THIRD,
-# independent key/value row in the same generic `cursor` table
-# (app/db.py's get_cursor/set_cursor): not the combined feed's own
-# pagination cursor (COMBINED_CURSOR_KEY), which is opaque to this app
-# and says nothing about event TIME, only feed position. This one holds
-# a plain epoch-seconds string -- the newest verified_tx occurred_at
-# this deployment has ever processed -- read and (monotonically)
-# advanced by _process_one_event on every verified_tx event that passes
-# ordinary dedup, and BOOTSTRAPPED once, before this deployment ever
-# looks at an event under this guard, by _maybe_seed_high_water_mark
+# ("THE ACTUAL FIX") for the incident it protects against, and
+# "occurred_at vs. published_at" for why this mark is compared and
+# advanced using published_at (falling back to occurred_at only when an
+# event has no published_at at all), not occurred_at, even though every
+# other use of event time in this module -- the paint timestamp, the
+# paint_from gate -- stays on occurred_at. A THIRD, independent
+# key/value row in the same generic `cursor` table (app/db.py's
+# get_cursor/set_cursor): not the combined feed's own pagination cursor
+# (COMBINED_CURSOR_KEY), which is opaque to this app and says nothing
+# about event TIME, only feed position. This one holds a plain
+# epoch-seconds string -- the newest guard time (see
+# _backfill_guard_time) of any verified_tx or passive_rx event this
+# deployment has ever processed -- read and (monotonically) advanced by
+# _process_one_event on every such event that passes ordinary dedup,
+# and BOOTSTRAPPED once, before this deployment ever looks at an event
+# under this guard, by _maybe_seed_high_water_mark
 # (see that function's own docstring for why an absent mark is not
 # always "nothing to protect": an upgrading deployment already has
 # FreqMapper history and needs the mark seeded from it, not from
@@ -379,18 +434,30 @@ HIGH_WATER_MARK_KEY = "freqmapper_backfill_high_water_mark"
 
 # Grace window for _maybe_seed_high_water_mark's history-based seed
 # (see that function's own docstring): freqmapper_verification.seen_at
-# is this deployment's own PROCESSING time, not the event's occurred_at
-# -- an event that genuinely occurred shortly before this guard's
-# rollout could still be published, fetched, and processed just after
-# it, landing in freqmapper_verification with a seen_at at or after the
-# rollout moment despite being a perfectly legitimate, non-backfill
-# event. Backing the seeded mark off by this many seconds means that
-# near-boundary case is not silently misclassified as backfill and
-# dropped, while still blocking the weeks of genuinely old history the
-# guard exists to catch. Not configurable -- an operator with a real
-# reason to want more history painted already has
-# freqmapper_config.allow_backfill for that, a coarser but simpler lever
-# than tuning this window.
+# is this deployment's own PROCESSING time -- when this module actually
+# fetched and wrote the event -- not the guard time (published_at,
+# falling back to occurred_at) later events get compared against. The
+# gap this window has to cover is "how far behind published_at can
+# seen_at legitimately lag," which is a narrower question than it was
+# before this guard moved off occurred_at: seen_at tracks published_at
+# tightly (this module polls the feed continuously and processes a page
+# shortly after fetching it -- there is no equivalent of an RX
+# publication delay or an offline-upload gap sitting between them the
+# way there can be between published_at and occurred_at). An event
+# whose seen_at landed at or after this guard's rollout moment, but
+# whose actual PUBLICATION was shortly before it, must still not be
+# misclassified as backfill and dropped -- backing the seeded mark off
+# by this many seconds covers that near-boundary case with a wide
+# margin, while still blocking the weeks of genuinely old history the
+# guard exists to catch. Re-checked against the published_at move: a
+# full hour is generous for a gap that is normally sub-minute
+# (poll-cycle latency, not RF-reception or offline-upload latency), so
+# the existing constant is, if anything, safer than it needs to be
+# under the new comparison -- left unchanged rather than tightened,
+# since there is no correctness cost to the extra margin. Not
+# configurable -- an operator with a real reason to want more history
+# painted already has freqmapper_config.allow_backfill for that, a
+# coarser but simpler lever than tuning this window.
 _BACKFILL_SEED_GRACE_SECONDS = 3600
 
 _MIN_LIMIT = 1
@@ -491,6 +558,66 @@ def _event_time(event: dict) -> int | None:
         if ts is not None:
             return ts
     return None
+
+
+def _backfill_guard_time(event: dict, occurred_ts: int | None) -> int | None:
+    """The time value the high-water-mark backfill guard compares
+    against the stored mark -- published_at, the feed's own
+    server-ordering time (the same field its opaque `next_cursor` is
+    built around), deliberately NOT occurred_at. This is the one place
+    in this module that reads published_at at all: _event_time above
+    still never does, and its answer -- occurred_ts, passed in here
+    unchanged -- remains the only time value used for the paint
+    timestamp and the paint_from date gate. See this module's docstring
+    ("occurred_at vs. published_at") for the full reasoning; this
+    function's own docstring covers only the guard.
+
+    Why the guard needs a DIFFERENT field than the paint timestamp:
+    "when did the RF event happen" (occurred_at) and "have I already
+    advanced past this event in the feed's own ordering" (what this
+    guard exists to answer) are different questions, and FreqMapper's
+    docs describe a real, supported case where occurred_at and the
+    feed's ordering diverge in exactly the direction that breaks a
+    guard keyed on occurred_at: a phone can record a passive_rx
+    reception while offline and upload it hours or days later, and the
+    combined feed publishes that event with a brand new published_at,
+    correctly placed at the back of the cursor's ordering, even though
+    its occurred_at -- the moment the radio actually heard the packet
+    -- is old. (Even the ordinary case is not instant: FreqMapper
+    publishes every passive_rx event at least rx_publication_delay_
+    seconds, 60s minimum, after reception, per the envelope.) A
+    verified_tx event's verification and publication times track
+    closely, so an occurred_at-keyed mark kept advancing to "now" on
+    every cycle; a late-published or offline-uploaded passive_rx event
+    then arrived with an occurred_at older than that already-advanced
+    mark, looked like history, and was silently refused forever --
+    measured live in production as passive RX painting stopping going
+    forward entirely, in a cycle where the feed was fully caught up
+    (has_more=False): 5 current receptions, all backfill_skipped, 0
+    painted. Keying the guard on published_at instead fixes this
+    without weakening what the guard protects against: a cursor reset
+    or feed switch still replays events with OLD published_at values
+    -- that is precisely what "already processed, per the feed's own
+    ordering" means -- so they are still correctly caught as backfill;
+    only a genuinely new-to-the-feed event, current reception or not,
+    carries a new published_at and is correctly let through.
+
+    published_at is not guaranteed on every event -- older type-
+    specific feeds (see _event_time above, and this module's docstring,
+    on the verified_at/mapping_test_sent_at fallback) do not carry it
+    at all. When it is missing or unparseable, this function falls back
+    to occurred_ts -- the caller's already-parsed _event_time result --
+    rather than skipping the guard outright: a missing field is not a
+    reason to leave an event completely unprotected, and occurred_at is
+    exactly what this guard compared against before this fix, so the
+    fallback reproduces the guard's previous (safe, if occasionally
+    over-eager against a late-published or offline-uploaded reception)
+    behavior instead of inventing a new one.
+    """
+    guard_ts = _parse_iso_ts(event.get("published_at"))
+    if guard_ts is not None:
+        return guard_ts
+    return occurred_ts
 
 
 def _clamped_limit(page_limit: int) -> int:
@@ -1431,6 +1558,10 @@ class FreqMapperIngestor:
         # None" malformed check further below already exists for that
         # case, so this guard simply does nothing when ts is None and
         # lets that check catch it exactly as before this guard existed.
+        # (A None occurred_at also makes _backfill_guard_time's own
+        # fallback moot -- it would have nothing to fall back to either
+        # -- so gating the whole guard on `ts is not None` here is still
+        # correct, not merely convenient.)
         #
         # allow_backfill (freqmapper_config, default False -- see that
         # column's own comment in app/db.py) is the operator's explicit
@@ -1445,11 +1576,31 @@ class FreqMapperIngestor:
         # turn this event away, and whether to advance the mark
         # afterwards) -- there is no correctness reason to re-read it
         # between them within the same already-open write transaction.
+        #
+        # guard_ts -- published_at, falling back to occurred_at (ts) if
+        # published_at is missing -- is what is actually compared and
+        # stored here, NOT ts itself. See _backfill_guard_time's own
+        # docstring for why: occurred_at is the RF event's own time, but
+        # this guard's job is "has this deployment already advanced
+        # past this event in the FEED's ordering," which is what
+        # published_at (the field the feed's own cursor is built
+        # around) answers. A late-published or offline-uploaded
+        # passive_rx reception can carry an old occurred_at with a
+        # brand new published_at -- keying this guard on occurred_at
+        # made every such reception look like history against a mark
+        # that verified_tx's closely-tracking timestamps kept pushing
+        # to "now," and silently stopped passive RX painting in
+        # production. ts (occurred_at) itself is untouched below this
+        # point and is still what the paint timestamp and the
+        # paint_from gate above use -- this guard is the ONLY consumer
+        # of guard_ts.
         if ts is not None:
+            guard_ts = _backfill_guard_time(event, ts)
+
             hwm_raw = get_cursor(conn, HIGH_WATER_MARK_KEY, "")
             high_water_mark = int(hwm_raw) if hwm_raw else None
 
-            if high_water_mark is not None and ts < high_water_mark and not allow_backfill:
+            if high_water_mark is not None and guard_ts < high_water_mark and not allow_backfill:
                 return "backfill_skipped_rx" if is_rx else "backfill_skipped"
 
             # The mark only ever moves FORWARD (or is seeded, from
@@ -1460,15 +1611,16 @@ class FreqMapperIngestor:
             # event -- including when allow_backfill bypassed it for an
             # event actually older than the mark, which must never drag
             # the mark backwards -- so the mark always reflects the
-            # newest occurred_at (either event type) this deployment has
-            # ever processed, independent of whether this particular
-            # event goes on to paint (unregistered/out-of-area/etc.
-            # below can still turn it away) -- "processed," not
-            # "scored," is what a high-water mark needs to track to keep
-            # protecting the next genuinely historical event that
-            # arrives after this one.
-            if high_water_mark is None or ts > high_water_mark:
-                set_cursor(conn, HIGH_WATER_MARK_KEY, str(ts))
+            # newest published_at (falling back to occurred_at per
+            # event, either event type) this deployment has ever
+            # processed, independent of whether this particular event
+            # goes on to paint (unregistered/out-of-area/etc. below can
+            # still turn it away) -- "processed," not "scored," is what
+            # a high-water mark needs to track to keep protecting the
+            # next genuinely historical event that arrives after this
+            # one.
+            if high_water_mark is None or guard_ts > high_water_mark:
+                set_cursor(conn, HIGH_WATER_MARK_KEY, str(guard_ts))
 
         # Normalize via the shared helper (app/node_ref.py), not a
         # hand-rolled strip -- it accepts both "!43211234" and bare form,
