@@ -27,6 +27,18 @@ and .gitignore already excludes. See docs/features/places.md and
 README.md for the operator-facing consequence: a fresh clone no longer
 ships with any places data until this file is placed there by hand.
 
+_resolve_seed_path() below falls back to the old app/reference/ copy
+when the configured path has nothing at it AND that legacy file still
+happens to be sitting on disk (an image or checkout built before this
+move, e.g. via `docker build` from a working tree that still carries
+it -- the Dockerfile's `COPY app/ ./app/` bakes in whatever files are
+actually present, tracked or not). That keeps such an image or
+checkout from silently booting to a completely empty board. It is a
+compatibility path, not a second supported home for the seed: every
+load logs at INFO which file it actually used, and the fallback branch
+says plainly that it's a fallback and that the seed belongs at the
+configured path instead.
+
 COUNTRY FILTER -- REMOVED 2026-09-07 (Matt approved, "Places Worth
 Going" going worldwide alongside the rest of the world-open map).
 Until this change, the CSV was built from a single bounding box (see
@@ -120,6 +132,10 @@ log = logging.getLogger("places_seed")
 LOADING = False
 
 _DATA_PATH = settings.places_seed_path
+# Legacy pre-2026-09-08 in-repo location -- see _resolve_seed_path()
+# below and the module docstring's "SEED LOCATION" section. Only ever
+# consulted when nothing exists at _DATA_PATH.
+_LEGACY_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv.gz")
 # Summit -> squares, built by scripts/build_summit_cells.py against the
 # planet DEM on navi. A summit's squares cannot be derived here the way a
 # park's are from its boundary: the test is terrain (within 1.5km AND
@@ -156,6 +172,53 @@ def _resolve_data_path(path: str) -> str:
     if os.path.exists(alt):
         return alt
     return path
+
+
+def _resolve_seed_path(configured_path: str) -> str:
+    """Where load_places_seed() actually reads the seed CSV from, in
+    priority order:
+
+    1. `configured_path` (PLACES_SEED_PATH, normally the ./data bind
+       mount) -- including its .gz/.csv counterpart via
+       _resolve_data_path.
+    2. Failing that, the legacy in-repo location (_LEGACY_DATA_PATH,
+       app/reference/places_worth_going.csv.gz) -- also with its own
+       .gz/.csv flexibility -- for an image or checkout built before
+       the seed moved out of the repo that still happens to carry the
+       file there. A compatibility fallback, not a second supported
+       home for the seed.
+    3. Failing both, `configured_path` unchanged, so
+       load_places_seed()'s own missing-file warning still names the
+       path that was actually configured.
+
+    Order matters: an operator who has placed a fresh seed at the
+    configured path must never be silently served a stale legacy copy
+    instead, so the configured path (with its own .gz/.csv resolution)
+    is checked in full before the legacy path is even looked at.
+
+    Logs at INFO which path is actually live, so an operator reading
+    startup logs can always tell -- and when the legacy fallback is the
+    one taken, says so explicitly and names the move that should
+    happen.
+    """
+    primary = _resolve_data_path(configured_path)
+    if os.path.exists(primary):
+        log.info("places_seed: using seed file at %s", primary)
+        return primary
+
+    legacy = _resolve_data_path(_LEGACY_DATA_PATH)
+    if os.path.exists(legacy):
+        log.info(
+            "places_seed: FALLBACK -- no seed found at configured path %s; "
+            "using legacy in-repo copy at %s instead. This is a "
+            "compatibility fallback for images/checkouts that still carry "
+            "the old file -- move the seed to %s (PLACES_SEED_PATH) so this "
+            "fallback is no longer needed.",
+            configured_path, legacy, configured_path,
+        )
+        return legacy
+
+    return primary
 
 
 def _sha256_file(path: str) -> str:
@@ -550,9 +613,10 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     }
 
     # Accepts either the .gz the build pipeline produces or an
-    # already-decompressed .csv at the same configured location -- see
-    # _resolve_data_path's own docstring.
-    seed_path = _resolve_data_path(_DATA_PATH)
+    # already-decompressed .csv, at the configured location or (as a
+    # compatibility fallback) the legacy in-repo one -- see
+    # _resolve_seed_path's own docstring.
+    seed_path = _resolve_seed_path(_DATA_PATH)
     if not os.path.exists(seed_path):
         # LOUD on purpose: this file is no longer shipped in the repo
         # (moved out 2026-09-08, see module docstring), so its absence
