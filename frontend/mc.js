@@ -971,6 +971,46 @@ function buildRepeaterSectionHtml(detail, c) {
   `;
 }
 
+// Reception/verification evidence behind one capture (app/mc_api.py's
+// cell_detail_for(): recent_captures[].evidence_type/watcher_count/
+// watcher_corroborated, joined from player_cell_ping). '' when
+// evidence_type is null -- an older capture, a pruned ping, or a
+// meshview/MeshCore paint, none of which write these fields -- so the
+// capture line renders exactly as it always has, no placeholder text
+// standing in for data that was never collected. See Matt's original
+// ask: "how do i know its an rx square or rx cap by the lines in the
+// popup box?".
+function buildCaptureEvidenceNote(cap) {
+  if (cap.evidence_type === 'passive_rx') {
+    if (cap.watcher_corroborated && cap.watcher_count) {
+      const n = cap.watcher_count;
+      return ` &mdash; RX corroborated with ${n} watcher${n === 1 ? '' : 's'}`;
+    }
+    return ' &mdash; RX, uncorroborated';
+  }
+  if (cap.evidence_type === 'verified_tx') {
+    const n = cap.watcher_count || 0;
+    return ` &mdash; Verified TX, ${n} watcher${n === 1 ? '' : 's'}`;
+  }
+  return '';
+}
+
+// One plain-English line summarizing this cell's paint evidence (app/
+// mc_api.py's _cell_evidence_summary()). '' when there's nothing to
+// summarize -- a MeshCore cell (every paint's evidence_type is NULL)
+// or a cell with no player_cell_ping rows at all -- so the line simply
+// does not appear rather than reporting "0 receptions and 0 verified
+// transmissions".
+function buildEvidenceSummaryHtml(detail) {
+  const s = detail.evidence_summary;
+  if (!s) return '';
+  const parts = [];
+  if (s.passive_rx_count) parts.push(`${s.passive_rx_count} reception${s.passive_rx_count === 1 ? '' : 's'}`);
+  if (s.verified_tx_count) parts.push(`${s.verified_tx_count} verified transmission${s.verified_tx_count === 1 ? '' : 's'}`);
+  if (parts.length === 0) return '';
+  return `<div class="mc-popup-row mc-popup-empty">Painted by ${parts.join(' and ')}</div>`;
+}
+
 function buildCellPopupHtml(cellId, detail, c) {
   const scoreRows = TEAM_ORDER.map((team) => {
     const score = detail.scores && detail.scores[team] !== undefined ? detail.scores[team] : 0;
@@ -992,7 +1032,7 @@ function buildCellPopupHtml(cellId, detail, c) {
         : escapeHtml(c.by_team);
       const fromNote = c.from_team ? ` (from ${escapeHtml(c.from_team)})` : '';
       return `<div class="mc-popup-capture-row">
-          ${escapeHtml(formatTs(c.ts))} &mdash; ${attribution}${fromNote}
+          ${escapeHtml(formatTs(c.ts))} &mdash; ${attribution}${fromNote}${buildCaptureEvidenceNote(c)}
         </div>`;
     }).join('')
     : '<div class="mc-popup-capture-row mc-popup-empty">No capture history.</div>';
@@ -1009,6 +1049,7 @@ function buildCellPopupHtml(cellId, detail, c) {
       ${scoreRows}
       <div class="mc-popup-section-title">Recent captures</div>
       ${captureRows}
+      ${buildEvidenceSummaryHtml(detail)}
       ${buildRepeaterSectionHtml(detail, c)}
     </div>
   `;
