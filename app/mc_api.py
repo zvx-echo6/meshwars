@@ -1395,6 +1395,45 @@ def _containing_park(conn: sqlite3.Connection, cell_id: str) -> dict | None:
     return {"id": row["id"], "name": row["name"], "points": row["points"]}
 
 
+def _cell_evidence_summary(conn: sqlite3.Connection, protocol: str, cell_id: str) -> dict:
+    """Cell-level rollup of player_cell_ping.evidence_type for every
+    paint ever recorded against (protocol, cell_id) -- see that
+    column's own comment in app/db.py for the three values it can hold
+    (verified_tx / passive_rx / NULL). NULL, plus anything that isn't
+    one of the two known values, folds into other_count rather than
+    being dropped -- meshview and MeshCore paints never populate this
+    column at all, and that's a fact worth counting, not an error to
+    hide.
+
+    Not season-scoped: player_cell_ping carries no season_id (see its
+    CREATE TABLE), so this is a per-cell, all-time count the same way
+    _repeater_observations() above is -- audibility/evidence rows
+    outlive a season rollover even though ownership doesn't.
+
+    max_watcher_count is the highest watcher_count seen on any
+    passive_rx paint here, for the "how strong was the best reception"
+    line in the popup summary; None when there are no passive_rx rows
+    at all (SQL MAX over an empty/all-NULL set), which the frontend
+    already knows is the "no receptions" case from passive_rx_count
+    being 0.
+    """
+    row = conn.execute(
+        "SELECT "
+        "  COALESCE(SUM(CASE WHEN evidence_type = 'verified_tx' THEN 1 ELSE 0 END), 0) AS verified_tx_count, "
+        "  COALESCE(SUM(CASE WHEN evidence_type = 'passive_rx' THEN 1 ELSE 0 END), 0) AS passive_rx_count, "
+        "  COALESCE(SUM(CASE WHEN evidence_type IS NULL OR evidence_type NOT IN ('verified_tx', 'passive_rx') THEN 1 ELSE 0 END), 0) AS other_count, "
+        "  MAX(CASE WHEN evidence_type = 'passive_rx' THEN watcher_count END) AS max_watcher_count "
+        "  FROM player_cell_ping WHERE protocol = ? AND cell_id = ?",
+        (protocol, cell_id),
+    ).fetchone()
+    return {
+        "verified_tx_count": row["verified_tx_count"],
+        "passive_rx_count": row["passive_rx_count"],
+        "other_count": row["other_count"],
+        "max_watcher_count": row["max_watcher_count"],
+    }
+
+
 def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
     """Detail for one cell in `protocol`'s active season: owner, capture
     time, per-team current scores, and a few recent capture-log entries
@@ -1433,14 +1472,28 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
         ).fetchall()
         scores = {r["team"]: r["score"] for r in score_rows}
 
+        # Evidence behind each capture -- a capture is caused by a paint,
+        # and that paint has a player_cell_ping row at the same
+        # (player, cell, second), so join on exactly that. LEFT JOIN
+        # because plenty of captures have no matching ping row: older
+        # data from before evidence_type existed, a pruned ping (see
+        # player_cell_ping's retention comment), or a meshview/MeshCore
+        # paint, which never writes evidence fields at all. Those must
+        # still come back as a capture line, just with NULL evidence --
+        # never dropped for lacking a join match.
         log_rows = conn.execute(
-            "SELECT l.ts, l.by_team, l.from_team, p.display_name "
+            "SELECT l.ts, l.by_team, l.from_team, p.display_name, "
+            "       pcp.evidence_type, pcp.watcher_count, "
+            "       pcp.watcher_corroborated, pcp.quality "
             "  FROM mc_tile_capture_log l "
             "  LEFT JOIN player p "
             "    ON p.player_id = l.by_player_id "
+            "  LEFT JOIN player_cell_ping pcp "
+            "    ON pcp.player_id = l.by_player_id AND pcp.protocol = ? "
+            "   AND pcp.cell_id = l.cell_id AND pcp.ts = l.ts "
             " WHERE l.season_id = ? AND l.cell_id = ? "
             " ORDER BY l.ts DESC LIMIT 5",
-            (season["id"], cell_id),
+            (protocol, season["id"], cell_id),
         ).fetchall()
 
         south, west, north, east = cell_bounds(cell_id)
@@ -1462,6 +1515,14 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
                     "by_team": r["by_team"],
                     "from_team": r["from_team"],
                     "by_display_name": r["display_name"],
+                    # Additive -- see the log_rows query's own comment.
+                    # NULL/None on every field here for a capture with
+                    # no matching ping row, rendered gracefully by the
+                    # frontend rather than dropped.
+                    "evidence_type": r["evidence_type"],
+                    "watcher_count": r["watcher_count"],
+                    "watcher_corroborated": bool(r["watcher_corroborated"]) if r["watcher_corroborated"] is not None else None,
+                    "quality": r["quality"],
                 }
                 for r in log_rows
             ],
@@ -1472,6 +1533,8 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
             # Additive -- see _containing_park()'s docstring. None when
             # this cell isn't majority-inside any boundary-backed park.
             "park": _containing_park(conn, cell_id),
+            # Additive -- see _cell_evidence_summary()'s docstring.
+            "evidence_summary": _cell_evidence_summary(conn, protocol, cell_id),
         }
 
     return _safe_query(run)
