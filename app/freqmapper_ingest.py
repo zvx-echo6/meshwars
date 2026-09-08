@@ -1,7 +1,11 @@
 """Polling loop: fetch Meshtastic coverage events from FreqMapper and
-paint the sender's grid cell through the shared MeshCore-model scoring
-path (app/mc_scoring.py) -- for REGISTERED Meshtastic players only, same
-registration gate app/ingest.py enforces for meshview.
+paint a grid cell through the shared MeshCore-model scoring path
+(app/mc_scoring.py) -- for REGISTERED Meshtastic players only, same
+registration gate app/ingest.py enforces for meshview. Painted cell:
+for a verified_tx event, the SENDER's own transmit position; for a
+passive_rx event, the RECEIVING wardriver's own position (see "Passive
+RX painting" below -- the two are not the same kind of location, and
+conflating them would credit the wrong player's movement).
 
 FreqMapper is a third-party, independently-operated Meshtastic
 coverage-mapping service, entirely separate from meshview. As of the
@@ -24,16 +28,69 @@ either "verified_tx" (an independently-watcher-verified transmission --
 exactly what the old TX-only feed reported, one event per verification)
 or "passive_rx" (a wardriving radio hearing a packet a Watcher also
 reported nearby in time, with no live equivalent on the old feed). This
-module scores verified_tx exactly as it always has. passive_rx is
-counted in the poll-cycle stats (skipped_passive_rx) and its reception_id
-is recorded in freqmapper_verification for future-proofing, but nothing
-about it is ever painted -- passive RX scoring is a separate, not-yet-
-made decision (see _process_one_event below). Any event_type this module
-does not recognize (a future addition to the feed) is likewise counted
+module scores verified_tx exactly as it always has. Any event_type this
+module does not recognize (a future addition to the feed) is counted
 (skipped_unknown_event_type) and deduped, never painted, and never
 allowed to crash the poll loop -- FreqMapper's own migration guidance
 for this feed explicitly anticipates new evidence types arriving over
 time.
+
+Passive RX painting: passive_rx events now paint too, through the
+exact same shared scoring path verified_tx uses (mc_scoring.apply_paint,
+flat-points mode) and the exact same gate order (paint_from date gate,
+dedupe on the event's own id field, the high-water-mark backfill guard,
+registration, coordinate validation, play-area, mt_paint_source) --
+see _process_one_event below, which now runs one shared pipeline for
+both event types rather than turning passive_rx away before any of
+those gates ever run.
+
+THE SEMANTICS THAT MATTER HERE -- get this wrong and the board lies:
+a passive_rx event's latitude/longitude are where the WARDRIVING RADIO
+HEARD someone else's packet, not where the original sender was, and
+not where any Watcher who corroborated it was. `radio_node_id` is that
+RECEIVING wardriver, so the player credited is the listener, and the
+cell painted is where the listener was standing when their radio heard
+the packet -- not the transmitter's cell, which this module never even
+learns. `verified_coverage` is always false on a passive_rx event, and
+FreqMapper's own documentation is explicit that passive RX must never
+be presented or treated as verified TX proof -- this module honours
+that by keeping the two DISTINGUISHABLE everywhere a paint is recorded
+(player_cell_ping.evidence_type, see that column's own comment in
+app/db.py) even though, by Matt's explicit decision, they currently
+earn identical points: "coverage is coverage" for what a cell is worth,
+but the two evidence types must still be separable later if either one
+needs to be re-weighted or unwound on its own.
+
+Scoring config: freqmapper_config.passive_rx_enabled (default ON),
+passive_rx_points_per_event and passive_rx_unique_painter_bonus
+(default 0.5 each, matching verified_tx's own defaults -- see that
+column group's own comment in app/db.py for why equal, not lower).
+These are read fresh every poll cycle exactly like every other
+DB-backed FreqMapper setting (load_freqmapper_config below).
+passive_rx_enabled=0 makes a passive_rx event count (deduped, backfill
+-guard-advanced) but never paint -- the exact same "processed and
+deduped, but nothing scored" shape mt_paint_source=="meshview" already
+gives verified_tx below, not a different mechanism.
+
+Quality/watcher_count weighting is deliberately DEFERRED for
+passive_rx, same open-question status app/freqmapper_ingest.py's
+watcher-weighting has for verified_tx, but earlier in its lifecycle:
+`quality`, `rssi_dbm`, `snr_db`, `hop_count`, and `path_classification`
+are all real fields on a passive_rx event, and are all open questions
+still being discussed with FreqMapper, not decisions this deployment
+makes on its own. See _passive_rx_points() below: `quality` and
+`watcher_count` are already threaded through from the event to that
+function so a future weighting decision needs no re-plumbing of
+_process_one_event's event parsing, only a change to that one
+function's body -- exactly the shape _verified_tx_points() already
+proved out for watcher_count weighting on the TX side.
+
+Poll-cycle log granularity: passive_rx now gets the SAME per-reason
+breakdown verified_tx already had (painted vs. each skip reason), not
+the single collapsed skipped_passive_rx counter this module shipped
+with before RX could paint at all -- see _poll_once's log line and the
+rx_-prefixed counters it reports, so an operator can tell WHY an RX
+event did or did not paint, the same way they already could for TX.
 
 watcher_count: a verified_tx event now reports how many independent
 Watchers verified it (same_region_watcher_count / cross_region_watcher_count
@@ -193,17 +250,17 @@ uses for checkin_config.enabled. The loop has to always be running for
 startup would never notice an admin flipping it back on later.
 
 paint_from is checkin_net.start_date's exact contract, one level up:
-a local YYYY-MM-DD lower bound on a verified_tx event's occurred_at,
-blank meaning BLOCK EVERY EVENT rather than "no lower bound" -- see that
-column's comment in app/db.py and _process_one_event's date-gate below
-for the full reasoning. Unlike every other skip reason this loop tracks,
-a date-skipped event is deliberately left OUT of freqmapper_verification,
+a local YYYY-MM-DD lower bound on an event's occurred_at, blank meaning
+BLOCK EVERY EVENT rather than "no lower bound" -- see that column's
+comment in app/db.py and _process_one_event's date-gate below for the
+full reasoning. Unlike every other skip reason this loop tracks, a
+date-skipped event is deliberately left OUT of freqmapper_verification,
 so moving the date earlier and clearing the cursor can still recover
 it; the cursor itself still advances past it regardless, or the poller
-would never get past its own too-early backlog. This gate only ever
-applies to verified_tx events -- passive_rx and unknown event types
-never score regardless of date, so there is nothing for the gate to
-protect there.
+would never get past its own too-early backlog. This gate applies to
+verified_tx AND passive_rx alike now that both can paint -- an
+unrecognized event type still never scores regardless of date, so
+there is nothing for the gate to protect there.
 """
 from __future__ import annotations
 
@@ -468,6 +525,36 @@ def _verified_tx_points(
     return points
 
 
+def _passive_rx_points(quality: object, watcher_count: object, points_per_event: float) -> float:
+    """How many points one passive_rx event is worth.
+
+    Always returns points_per_event UNCHANGED right now -- `quality` and
+    `watcher_count` are accepted purely so the call site
+    (_process_one_event below) already threads a passive_rx event's own
+    `quality` and `watcher_count` fields through to this one function,
+    not because either currently affects the answer. Weighting a
+    reception by quality/rssi_dbm/snr_db/hop_count/path_classification
+    is a real, live question -- a fair-quality, two-hop-relayed
+    reception plainly is not the same strength of coverage evidence as
+    a clean one-hop direct copy -- but it is still an OPEN question
+    being discussed with FreqMapper, not one this deployment decides on
+    its own by picking a formula today. Deferring it here, in this one
+    function, means that decision -- whenever it is made -- needs no
+    re-plumbing of _process_one_event's event parsing or its call site:
+    only this function's body changes, exactly the shape
+    _verified_tx_points() above already proved out for watcher_count
+    weighting on the TX side (that one shipped disabled-by-default and
+    was turned on later without touching anything upstream of it).
+
+    watcher_count is independently meaningful here too (a
+    Watcher-corroborated reception vs. an uncorroborated one), separate
+    from `quality` -- both are threaded through rather than only one,
+    so whichever combination this deployment eventually settles on with
+    FreqMapper is already available without another plumbing pass.
+    """
+    return points_per_event
+
+
 def load_freqmapper_config(conn) -> dict:
     """Fresh, uncached read of the freqmapper_config singleton --
     connector settings, scoring knobs, mt_paint_source, and the poller's
@@ -498,7 +585,9 @@ def load_freqmapper_config(conn) -> dict:
         "       page_limit, points_per_event, unique_painter_bonus, paint_from, "
         "       last_poll_at, last_poll_error, updated_at, "
         "       watcher_weight_enabled, watcher_weight_base, "
-        "       watcher_weight_increment, watcher_weight_cap, allow_backfill "
+        "       watcher_weight_increment, watcher_weight_cap, allow_backfill, "
+        "       passive_rx_enabled, passive_rx_points_per_event, "
+        "       passive_rx_unique_painter_bonus "
         "  FROM freqmapper_config WHERE id = 1"
     ).fetchone()
     if row is None:
@@ -520,11 +609,21 @@ def load_freqmapper_config(conn) -> dict:
             "watcher_weight_increment": 0.1,
             "watcher_weight_cap": 1.0,
             "allow_backfill": False,
+            # No settings.py counterpart to fall back to -- same reason
+            # watcher_weight_*/allow_backfill above hardcode their
+            # neutral values here rather than reading settings. These
+            # mirror freqmapper_config's own column defaults exactly
+            # (see that table's comment in app/db.py): RX painting ON,
+            # scored at the same flat value verified_tx ships with.
+            "passive_rx_enabled": True,
+            "passive_rx_points_per_event": 0.5,
+            "passive_rx_unique_painter_bonus": 0.5,
         }
     d = dict(row)
     d["enabled"] = bool(d["enabled"])
     d["watcher_weight_enabled"] = bool(d["watcher_weight_enabled"])
     d["allow_backfill"] = bool(d["allow_backfill"])
+    d["passive_rx_enabled"] = bool(d["passive_rx_enabled"])
     return d
 
 
@@ -549,11 +648,15 @@ def seed_freqmapper_config_from_env(conn) -> None:
     changes NO behavior: same source, same connector, same scoring, just
     moved from env-var-and-restart to database-and-admin-API.
 
-    Does not touch watcher_weight_* or allow_backfill -- neither has a
-    settings.py counterpart to seed from (see those columns' own
-    comments in app/db.py), and each one's schema/MIGRATIONS default
-    (disabled / guard active) is already exactly the neutral value this
-    bootstrap would otherwise be trying to reproduce.
+    Does not touch watcher_weight_*, allow_backfill, or passive_rx_* --
+    none of the three has a settings.py counterpart to seed from (see
+    those columns' own comments in app/db.py), and each one's
+    schema/MIGRATIONS default is already exactly the value this
+    bootstrap would otherwise be trying to reproduce: disabled/guard
+    active for the first two, and RX painting ON at TX's own flat point
+    value for passive_rx_* -- see freqmapper_config's own comment in
+    app/db.py for why passive_rx_enabled's default is the one exception
+    to this module's usual "deploying this changes nothing" rule.
     """
     row = conn.execute("SELECT updated_at FROM freqmapper_config WHERE id = 1").fetchone()
     if row is None or row["updated_at"] != 0:
@@ -909,13 +1012,28 @@ class FreqMapperIngestor:
             return cfg["poll_interval_seconds"]
 
         now_ts = int(time.time())
+        # TX counters: unchanged names, unchanged meaning, from before
+        # passive_rx could paint at all. RX counters mirror them 1:1
+        # (rx_ prefix, or a _rx suffix for the two whose TX name does not
+        # start with "skipped_") -- see _process_one_event's own comment
+        # on why RX now gets the SAME per-reason granularity TX always
+        # had, replacing the single collapsed skipped_passive_rx bucket
+        # this module shipped with before RX could score. Pre-populated
+        # (rather than left to counts.get(outcome, 0) default) purely so
+        # the log line below can always reference every key by name
+        # without a KeyError on a cycle where a given reason never fired.
         counts = {
             "painted": 0, "skipped_duplicate": 0, "skipped_unregistered": 0,
             "skipped_bad_coord": 0, "skipped_out_of_area": 0,
             "skipped_malformed": 0, "skipped_inactive_source": 0,
-            "skipped_before_paint_from": 0, "skipped_passive_rx": 0,
+            "skipped_before_paint_from": 0,
             "skipped_unknown_event_type": 0, "error": 0,
             "backfill_skipped": 0,
+            "painted_rx": 0, "skipped_rx_duplicate": 0, "skipped_rx_unregistered": 0,
+            "skipped_rx_bad_coord": 0, "skipped_rx_out_of_area": 0,
+            "skipped_rx_malformed": 0, "skipped_rx_inactive_source": 0,
+            "skipped_rx_before_paint_from": 0, "skipped_rx_disabled": 0,
+            "backfill_skipped_rx": 0, "error_rx": 0,
         }
 
         async with WriteSession() as wconn:
@@ -940,6 +1058,9 @@ class FreqMapperIngestor:
                     watcher_weight_increment=cfg["watcher_weight_increment"],
                     watcher_weight_cap=cfg["watcher_weight_cap"],
                     allow_backfill=cfg["allow_backfill"],
+                    passive_rx_enabled=cfg["passive_rx_enabled"],
+                    passive_rx_points_per_event=cfg["passive_rx_points_per_event"],
+                    passive_rx_unique_painter_bonus=cfg["passive_rx_unique_painter_bonus"],
                 )
                 counts[outcome] = counts.get(outcome, 0) + 1
 
@@ -966,16 +1087,25 @@ class FreqMapperIngestor:
                 set_cursor(wconn, COMBINED_CURSOR_KEY, next_cursor)
 
         log.info(
-            "freqmapper poll: events=%d painted=%d duplicate=%d unregistered=%d "
-            "bad_coord=%d out_of_area=%d malformed=%d inactive_source=%d "
-            "before_paint_from=%d passive_rx=%d unknown_event_type=%d "
-            "backfill_skipped=%d error=%d has_more=%s",
-            len(events), counts["painted"], counts["skipped_duplicate"],
-            counts["skipped_unregistered"], counts["skipped_bad_coord"],
-            counts["skipped_out_of_area"], counts["skipped_malformed"],
-            counts["skipped_inactive_source"], counts["skipped_before_paint_from"],
-            counts["skipped_passive_rx"], counts["skipped_unknown_event_type"],
-            counts["backfill_skipped"], counts["error"], has_more,
+            "freqmapper poll: events=%d "
+            "tx[painted=%d duplicate=%d unregistered=%d bad_coord=%d out_of_area=%d "
+            "malformed=%d inactive_source=%d before_paint_from=%d backfill_skipped=%d "
+            "error=%d] "
+            "rx[painted=%d duplicate=%d unregistered=%d bad_coord=%d out_of_area=%d "
+            "malformed=%d inactive_source=%d before_paint_from=%d backfill_skipped=%d "
+            "disabled=%d error=%d] "
+            "unknown_event_type=%d has_more=%s",
+            len(events),
+            counts["painted"], counts["skipped_duplicate"], counts["skipped_unregistered"],
+            counts["skipped_bad_coord"], counts["skipped_out_of_area"],
+            counts["skipped_malformed"], counts["skipped_inactive_source"],
+            counts["skipped_before_paint_from"], counts["backfill_skipped"], counts["error"],
+            counts["painted_rx"], counts["skipped_rx_duplicate"], counts["skipped_rx_unregistered"],
+            counts["skipped_rx_bad_coord"], counts["skipped_rx_out_of_area"],
+            counts["skipped_rx_malformed"], counts["skipped_rx_inactive_source"],
+            counts["skipped_rx_before_paint_from"], counts["backfill_skipped_rx"],
+            counts["skipped_rx_disabled"], counts["error_rx"],
+            counts["skipped_unknown_event_type"], has_more,
         )
 
         await self._maybe_housekeeping()
@@ -993,6 +1123,9 @@ class FreqMapperIngestor:
         watcher_weight_increment: float = 0.1,
         watcher_weight_cap: float = 1.0,
         allow_backfill: bool = False,
+        passive_rx_enabled: bool = True,
+        passive_rx_points_per_event: float = 0.5,
+        passive_rx_unique_painter_bonus: float = 0.5,
     ) -> str:
         """Process one combined-feed event inside the caller's already-
         open write transaction. Returns an outcome key matching one of
@@ -1007,6 +1140,33 @@ class FreqMapperIngestor:
         matching freqmapper_config's own default) -- see the backfill
         guard's own comment below, and this module's docstring ("THE
         ACTUAL FIX"), for what it protects against.
+
+        The three passive_rx_* parameters are keyword-only too, but
+        their defaults deliberately do NOT follow the "neutral, changes
+        nothing" rule the parameters above do -- they default to
+        freqmapper_config's own shipped defaults instead (RX painting
+        ON, at the same flat point value verified_tx ships with), since
+        passive RX painting a cell at all is brand new behavior with no
+        prior state to stay neutral against. See freqmapper_config's own
+        comment in app/db.py for why.
+
+        verified_tx and passive_rx now run through ONE shared pipeline
+        below (paint_from gate, dedupe on the event's own id field, the
+        high-water-mark backfill guard, registration, coordinate
+        validation, play-area, mt_paint_source, the player_cell_ping
+        insert, mc_scoring.apply_paint in flat-points mode, and
+        credit_places) -- the two branches only ever differ in which id
+        field dedupes them, which points/bonus values and
+        watcher_weight_*-vs-quality/watcher_count scoring function
+        apply, and the outcome-string prefix used to report a
+        skip/paint back to `_poll_once`'s per-source counters (see that
+        method's own comment on why RX now gets the same granularity TX
+        always had). This keeps the two evidence types provably
+        behaving the same way at every gate -- there is only one copy of
+        each gate's logic to read, not two copies that could quietly
+        drift apart -- while still keeping their SCORING and PROVENANCE
+        independently configurable and distinguishable (see
+        player_cell_ping.evidence_type's own comment in app/db.py).
         """
         if not isinstance(event, dict):
             return "skipped_malformed"
@@ -1019,42 +1179,22 @@ class FreqMapperIngestor:
         # coherent identity regardless of type, and is the fallback
         # dedup key for a type this code does not recognize (just
         # below), so it is worth rejecting up front rather than letting
-        # a malformed envelope reach either branch.
+        # a malformed envelope reach any branch.
         event_id = event.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             return "skipped_malformed"
 
         event_type = event.get("event_type")
 
-        if event_type == EVENT_TYPE_PASSIVE_RX:
-            # Passive RX scoring is Phase 3 -- a separate, not-yet-made
-            # decision (see this module's docstring). Deduped now (on
-            # its OWN `reception_id` field -- a UUID space FreqMapper
-            # assigns independently of verification_id, never compared
-            # against it) purely so a future RX-scoring rollout does not
-            # have to treat this deployment's entire RX history as
-            # unseen; nothing about it is painted, scored, or otherwise
-            # acted on here.
-            reception_id = event.get("reception_id")
-            if not isinstance(reception_id, str) or not reception_id:
-                return "skipped_malformed"
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO freqmapper_verification(verification_id, seen_at) VALUES (?, ?)",
-                (reception_id, now_ts),
-            )
-            if cur.rowcount == 0:
-                return "skipped_duplicate"
-            return "skipped_passive_rx"
-
-        if event_type != EVENT_TYPE_VERIFIED_TX:
+        if event_type not in (EVENT_TYPE_VERIFIED_TX, EVENT_TYPE_PASSIVE_RX):
             # Any event_type this module does not recognize -- a future
             # addition to the feed FreqMapper's own migration guidance
-            # explicitly anticipates. Counted and deduped exactly like
-            # passive_rx, never painted, and never allowed to crash the
-            # poll loop over an event shape this code predates. Keyed on
-            # the feed's generic `event_id` (already validated above) --
-            # unlike verified_tx/passive_rx, an unrecognized type has no
-            # more specific field name this code can know in advance.
+            # explicitly anticipates. Counted and deduped, never
+            # painted, and never allowed to crash the poll loop over an
+            # event shape this code predates. Keyed on the feed's
+            # generic `event_id` (already validated above) -- unlike
+            # verified_tx/passive_rx, an unrecognized type has no more
+            # specific field name this code can know in advance.
             cur = conn.execute(
                 "INSERT OR IGNORE INTO freqmapper_verification(verification_id, seen_at) VALUES (?, ?)",
                 (event_id, now_ts),
@@ -1063,7 +1203,29 @@ class FreqMapperIngestor:
                 return "skipped_duplicate"
             return "skipped_unknown_event_type"
 
-        # ----- event_type == "verified_tx": the scoring pipeline -----
+        # ----- event_type is verified_tx or passive_rx: the shared
+        # scoring pipeline below runs for both. `is_rx` picks the id
+        # field to dedupe on, the outcome-string prefix every return
+        # below uses (empty for TX -- every TX outcome name below is
+        # UNCHANGED from before this event type shared this function,
+        # see tests/test_freqmapper_combined_feed.py, which pins them --
+        # "skipped_rx_*" for RX, inserting "rx_" right after "skipped_"
+        # so RX gets the exact same per-reason granularity TX already
+        # had (see _poll_once's own comment on the counters this feeds),
+        # and which config values feed scoring further down. The two
+        # outcomes with a TX name that does not start with "skipped_"
+        # (backfill_skipped, error) are handled by their own return
+        # statements below instead of through this helper, since
+        # inserting "rx_" after a "skipped_" prefix that is not there
+        # makes no sense for either of them.
+        is_rx = event_type == EVENT_TYPE_PASSIVE_RX
+        id_field = "reception_id" if is_rx else "verification_id"
+
+        def _outcome(tx_name: str) -> str:
+            if not is_rx:
+                return tx_name
+            assert tx_name.startswith("skipped_"), tx_name
+            return "skipped_rx_" + tx_name[len("skipped_"):]
 
         # ----- Paint-from date gate -----
         # Deliberately runs BEFORE the freqmapper_verification dedup
@@ -1090,7 +1252,9 @@ class FreqMapperIngestor:
         # enforces for checkin_net.start_date (see that function's own
         # comment): a freshly enabled connector must never silently
         # backfill an entire feed just because nobody has set a date
-        # yet. This is the safe default, and deliberate.
+        # yet. This is the safe default, and deliberate. Applies to
+        # passive_rx exactly like verified_tx now that both can paint --
+        # see this module's docstring.
         #
         # An unparseable event time does NOT trigger this gate -- it
         # falls through unchanged to the ordinary malformed handling
@@ -1101,30 +1265,29 @@ class FreqMapperIngestor:
         # a genuine date-skip does.
         ts = _event_time(event)
         if ts is not None and (not paint_from or _local_date(ts) < paint_from):
-            return "skipped_before_paint_from"
+            return _outcome("skipped_before_paint_from")
 
-        # Dedup on the event's OWN verification_id field FIRST, before
-        # anything else touches this event -- see
-        # freqmapper_verification's comment in app/db.py. NOT event_id:
-        # see this module's docstring for why d114a5a's prefixed-event_id
-        # dedupe key was an unnecessary migration this deployment has
-        # since reverted (app/db.py's
+        # Dedup on the event's OWN id field FIRST, before anything else
+        # touches this event -- see freqmapper_verification's comment in
+        # app/db.py. NOT event_id: see this module's docstring for why
+        # d114a5a's prefixed-event_id dedupe key was an unnecessary
+        # migration this deployment has since reverted (app/db.py's
         # _migrate_freqmapper_verification_verification_id) --
-        # verification_id already holds the exact same UUID FreqMapper's
-        # docs describe, with no compound string to construct or parse.
-        # Recorded regardless of registration, coordinate validity, or
-        # which source is currently painting, so a later retry (a
-        # restart, a switch of mt_paint_source) never reprocesses the
-        # same verified observation twice.
-        verification_id = event.get("verification_id")
-        if not isinstance(verification_id, str) or not verification_id:
-            return "skipped_malformed"
+        # verification_id/reception_id already hold the exact UUIDs
+        # FreqMapper's docs describe, with no compound string to
+        # construct or parse. Recorded regardless of registration,
+        # coordinate validity, or which source is currently painting, so
+        # a later retry (a restart, a switch of mt_paint_source) never
+        # reprocesses the same event twice.
+        dedupe_id = event.get(id_field)
+        if not isinstance(dedupe_id, str) or not dedupe_id:
+            return _outcome("skipped_malformed")
         cur = conn.execute(
             "INSERT OR IGNORE INTO freqmapper_verification(verification_id, seen_at) VALUES (?, ?)",
-            (verification_id, now_ts),
+            (dedupe_id, now_ts),
         )
         if cur.rowcount == 0:
-            return "skipped_duplicate"
+            return _outcome("skipped_duplicate")
 
         # ----- Backfill guard (the high-water mark) -----
         # THE ACTUAL FIX for the 2026-09-08 incident -- see this
@@ -1136,15 +1299,25 @@ class FreqMapperIngestor:
         # deployment historical event (a cleared cursor, a brand new
         # feed, days of downtime) always passes it cleanly.
         #
+        # ONE mark protects BOTH event types -- there is deliberately no
+        # separate RX high-water mark. This is "the existing" guard
+        # reused, not a new one stood up alongside it: the mark's job is
+        # "how far has this deployment genuinely gotten through
+        # FreqMapper's history," and that question does not have a
+        # separate answer per evidence type -- a cursor cutover or a
+        # cleared cursor hands back old history of BOTH kinds together,
+        # on the same combined feed, in the same pages.
+        #
         # Runs here -- AFTER the dedup insert above, which is what
         # satisfies "record its id in the dedupe table" for an event
         # this check turns away: an event flagged as backfill here is
         # never re-evaluated on a later poll just because the mark
         # hasn't caught up to it yet -- but BEFORE every gate below
-        # (registration, coordinates, play area, mt_paint_source). A
-        # backfilled event is backfill regardless of whether the radio
-        # it names happens to be registered; there is no reason to run
-        # those checks just to throw the answer away.
+        # (registration, coordinates, play area, mt_paint_source,
+        # passive_rx_enabled). A backfilled event is backfill regardless
+        # of whether the radio it names happens to be registered; there
+        # is no reason to run those checks just to throw the answer
+        # away.
         #
         # ts is only ever None here if occurred_at (and every fallback
         # _event_time tries) was unparseable -- the existing "ts is
@@ -1170,7 +1343,7 @@ class FreqMapperIngestor:
             high_water_mark = int(hwm_raw) if hwm_raw else None
 
             if high_water_mark is not None and ts < high_water_mark and not allow_backfill:
-                return "backfill_skipped"
+                return "backfill_skipped_rx" if is_rx else "backfill_skipped"
 
             # The mark only ever moves FORWARD (or is seeded, from
             # nothing, on a fresh deployment with no prior mark at all
@@ -1180,57 +1353,78 @@ class FreqMapperIngestor:
             # event -- including when allow_backfill bypassed it for an
             # event actually older than the mark, which must never drag
             # the mark backwards -- so the mark always reflects the
-            # newest verified_tx occurred_at this deployment has ever
-            # processed, independent of whether this particular event
-            # goes on to paint (unregistered/out-of-area/etc. below can
-            # still turn it away) -- "processed," not "scored," is what
-            # a high-water mark needs to track to keep protecting the
-            # next genuinely historical event that arrives after this
-            # one.
+            # newest occurred_at (either event type) this deployment has
+            # ever processed, independent of whether this particular
+            # event goes on to paint (unregistered/out-of-area/etc.
+            # below can still turn it away) -- "processed," not
+            # "scored," is what a high-water mark needs to track to keep
+            # protecting the next genuinely historical event that
+            # arrives after this one.
             if high_water_mark is None or ts > high_water_mark:
                 set_cursor(conn, HIGH_WATER_MARK_KEY, str(ts))
 
         # Normalize via the shared helper (app/node_ref.py), not a
         # hand-rolled strip -- it accepts both "!43211234" and bare form,
         # in any case, and is the single definition of "valid node
-        # reference" the whole app already agrees on.
+        # reference" the whole app already agrees on. For a passive_rx
+        # event this is the RECEIVING wardriver's own radio -- see this
+        # module's docstring's "THE SEMANTICS THAT MATTER HERE" -- never
+        # the original transmitter, which this event carries no
+        # identifier for at all.
         node_ref = normalize_node_ref(event.get("radio_node_id"))
         if node_ref is None:
-            return "skipped_malformed"
+            return _outcome("skipped_malformed")
 
         # ----- Registration gate -----
         # REGISTERED PLAYERS ONLY -- see this module's docstring for why
         # this deliberately does NOT auto-bind the way app/mc_ingest.py's
         # MeshCore path does: FreqMapper reports on any radio it
         # observes, not just ones this deployment's own players carry.
+        # Applies identically to passive_rx: the credited player is
+        # whoever's radio_node_id did the LISTENING, and that radio has
+        # to already be registered through the ordinary join flow the
+        # same as a transmitting one does.
         entry = registered.get(node_ref)
         if entry is None:
-            return "skipped_unregistered"
+            return _outcome("skipped_unregistered")
         player_id, team = entry
 
         lat = event.get("latitude")
         lon = event.get("longitude")
         if not valid_coord(lat, lon):
-            return "skipped_bad_coord"
+            return _outcome("skipped_bad_coord")
 
         if not in_play_area(
             lat, lon,
             settings.play_area_north, settings.play_area_south,
             settings.play_area_west, settings.play_area_east,
         ):
-            return "skipped_out_of_area"
+            return _outcome("skipped_out_of_area")
 
         # ts was already parsed above (for the paint_from gate) -- a
         # None here means it was unparseable and the gate above
         # deliberately let it fall through to here instead of skipping
         # it for-date.
         if ts is None:
-            return "skipped_malformed"
+            return _outcome("skipped_malformed")
 
         # Cell. Raw lat/lon are never written to the database anywhere;
         # they are discarded right here, after being reduced to a cell
         # id -- same rule every other ingest path in this app follows.
+        # For a passive_rx event this is the cell the RECEIVING radio
+        # was standing in when it heard the packet, not any cell tied to
+        # the original transmitter -- see this module's docstring.
         cell = cell_id(lat, lon)
+
+        if is_rx and not passive_rx_enabled:
+            # Fully processed and deduped above (this exact event will
+            # never be reprocessed, even after passive_rx_enabled is
+            # later flipped on), but nothing is scored or written to the
+            # board while RX painting is disabled -- the exact same
+            # "processed, deduped, but not scored" shape
+            # mt_paint_source == "meshview" gives verified_tx just
+            # below, applied to RX's own independent toggle.
+            return "skipped_rx_disabled"
 
         if mt_paint_source == "meshview":
             # Fully processed and deduped above (this exact event will
@@ -1241,51 +1435,78 @@ class FreqMapperIngestor:
             # comment in app/db.py. The transition itself is logged once
             # per change in _poll_once above, not here -- this runs once
             # per event, and would otherwise spam the log on a page full
-            # of events while gated off.
-            return "skipped_inactive_source"
+            # of events while gated off. Applies to passive_rx too: this
+            # switch is about which source paints the Meshtastic board
+            # at all, not TX specifically.
+            return _outcome("skipped_inactive_source")
 
+        # evidence_type: the smallest honest addition that keeps an
+        # RX-sourced paint DISTINGUISHABLE from a verified-TX-sourced
+        # one after the fact -- see player_cell_ping.evidence_type's own
+        # comment in app/db.py, and this module's docstring's "THE
+        # SEMANTICS THAT MATTER HERE". Set to the feed's own event_type
+        # string, so a future third evidence type needs no new constant
+        # here either.
         seen_at = int(time.time())
         cur = conn.execute(
             "INSERT OR IGNORE INTO player_cell_ping"
-            "(player_id, protocol, cell_id, ts, seen_at, precision_bits) "
-            "VALUES (?, ?, ?, ?, ?, NULL)",
-            (player_id, PROTOCOL, cell, ts, seen_at),
+            "(player_id, protocol, cell_id, ts, seen_at, precision_bits, evidence_type) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            (player_id, PROTOCOL, cell, ts, seen_at, event_type),
         )
         if cur.rowcount == 0:
             # Same player/cell/second already recorded -- two distinct
-            # verified events landing in the same cell within the same
-            # second is possible even though event_id itself never
-            # repeats. Treated as a duplicate ping, same as every other
-            # ingest path here (app/ingest.py, app/mc_ingest.py both
-            # reject rather than double-score a coincidental collision).
-            return "skipped_duplicate"
+            # events landing in the same cell within the same second is
+            # possible even though the dedupe id itself never repeats
+            # (a verified_tx and a passive_rx event for the same
+            # player/cell/second would collide here too, same as two
+            # events of the same type would -- this table has never
+            # distinguished evidence source for the exact-duplicate
+            # check, only for audit via evidence_type above). Treated as
+            # a duplicate ping, same as every other ingest path here
+            # (app/ingest.py, app/mc_ingest.py both reject rather than
+            # double-score a coincidental collision).
+            return _outcome("skipped_duplicate")
 
-        tx_points = _verified_tx_points(
-            event.get("watcher_count"), points_per_event,
-            watcher_weight_enabled, watcher_weight_base,
-            watcher_weight_increment, watcher_weight_cap,
-        )
+        if is_rx:
+            # Quality/watcher_count weighting deliberately DEFERRED --
+            # see _passive_rx_points()'s own docstring and this module's
+            # docstring. Both fields are threaded through regardless, so
+            # a future weighting decision needs no re-plumbing here.
+            flat_points = _passive_rx_points(
+                event.get("quality"), event.get("watcher_count"),
+                passive_rx_points_per_event,
+            )
+            unique_bonus = passive_rx_unique_painter_bonus
+        else:
+            flat_points = _verified_tx_points(
+                event.get("watcher_count"), points_per_event,
+                watcher_weight_enabled, watcher_weight_base,
+                watcher_weight_increment, watcher_weight_cap,
+            )
+            unique_bonus = unique_painter_bonus
 
         try:
             paint_result = mc_scoring.apply_paint(
                 conn, season_id, player_id, team, cell, ts,
                 [], 0.0, 0.0, PROTOCOL, seen_at,
-                flat_points=tx_points,
-                unique_player_bonus=unique_painter_bonus,
+                flat_points=flat_points,
+                unique_player_bonus=unique_bonus,
             )
         except Exception:
             log.exception(
-                "freqmapper scoring: apply_paint failed for player %d cell %s",
-                player_id, cell,
+                "freqmapper scoring: apply_paint failed for player %d cell %s (event_type=%s)",
+                player_id, cell, event_type,
             )
-            return "error"
+            return "error_rx" if is_rx else "error"
 
         # Places Worth Going (app/place_scoring.py). A FreqMapper event
         # carries no repeater/feeder list at all -- the API deliberately
         # does not report how many stations heard a transmission, only
         # (as of the combined feed) how many independently verified it
         # -- but every event reaching this point is independently-
-        # verified coverage, never a ping that reached nobody.
+        # verified coverage (verified_tx) or a genuinely-heard reception
+        # (passive_rx), never a ping that reached nobody.
         # credit_places() used to gate on a non-empty repeater list as a
         # stand-in for "did this ping reach anyone", which read
         # FreqMapper's always-empty list as exactly that and silently
@@ -1305,7 +1526,7 @@ class FreqMapperIngestor:
                 player_id, cell,
             )
 
-        return "painted"
+        return "painted_rx" if is_rx else "painted"
 
     # ---- poll status (app/admin_ops.py's GET /api/admin/paint) ----------
     #

@@ -284,6 +284,26 @@ CREATE TABLE IF NOT EXISTS player_last_fix (
 -- already happened (or didn't) in app/ingest.py before this row was
 -- written. NULL for every MeshCore row (no such concept) and for any
 -- Meshtastic row from before this column existed.
+-- evidence_type: added for app/freqmapper_ingest.py's passive_rx
+-- painting (see that module's module docstring, "Passive RX scoring").
+-- The smallest honest addition that makes an RX-sourced paint
+-- DISTINGUISHABLE from a verified-TX-sourced one after the fact --
+-- FreqMapper's own documentation is explicit that passive RX must never
+-- be presented or treated as verified TX proof, and this deployment
+-- needs to be able to tell the two apart later even though, per Matt's
+-- explicit decision, they currently earn identical points (see
+-- freqmapper_config.passive_rx_points_per_event's own comment below for
+-- why equal credit and distinguishable provenance are two separate
+-- questions, not one). Set to the feed's own event_type string
+-- ("verified_tx" / "passive_rx") by app/freqmapper_ingest.py's
+-- _process_one_event for every FreqMapper-sourced row; NULL for every
+-- row written by app/ingest.py (meshview) or app/mc_ingest.py
+-- (MeshCore) -- neither of those paths has more than one evidence
+-- source to distinguish, so there is nothing for this column to record
+-- there, same reasoning precision_bits above stays NULL for a MeshCore
+-- row. Purely an audit/provenance column, same as precision_bits:
+-- nothing reads it back for scoring, and it plays no part in the
+-- exact-duplicate PRIMARY KEY.
 CREATE TABLE IF NOT EXISTS player_cell_ping (
     player_id       INTEGER NOT NULL,
     protocol        TEXT NOT NULL,
@@ -291,6 +311,7 @@ CREATE TABLE IF NOT EXISTS player_cell_ping (
     ts              INTEGER NOT NULL,
     seen_at         INTEGER NOT NULL,
     precision_bits  INTEGER,
+    evidence_type   TEXT,
     PRIMARY KEY (player_id, protocol, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_ping_seen ON player_cell_ping(seen_at);
@@ -473,6 +494,40 @@ CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verifi
 -- current, for an operator who has a real, deliberate reason to want
 -- history painted (e.g. onboarding this deployment against a
 -- FreqMapper account with pre-existing coverage history).
+-- passive_rx_* (added in MIGRATIONS below, after this table already
+-- shipped): scoring config for FreqMapper's passive_rx event type --
+-- see app/freqmapper_ingest.py's module docstring ("Passive RX
+-- painting") for the semantics of what a passive_rx event actually
+-- proves (the RECEIVING wardriving radio's own position, not the
+-- sender's) and _process_one_event for exactly where these are read.
+-- passive_rx_enabled defaults to 1 (ON): this is the feature the
+-- deployment was built to ship, not an opt-in an operator has to
+-- discover -- unlike allow_backfill and watcher_weight_enabled above,
+-- there is no "deploying this must change nothing" constraint here to
+-- protect, since passive RX never painted anything before this feature
+-- existed at all; ON-by-default is what makes it actually work the
+-- moment this migration runs, with no database edit required.
+-- passive_rx_points_per_event and passive_rx_unique_painter_bonus
+-- default to 0.5 each -- IDENTICAL to points_per_event/
+-- unique_painter_bonus's own defaults above, by Matt's explicit
+-- decision ("coverage is coverage"): a passive_rx event proves the
+-- wardriving radio genuinely heard traffic at that location, which is
+-- coverage at that location exactly as much as an independently-
+-- Watcher-verified transmission is. These are kept as their OWN
+-- columns, never a read of points_per_event/unique_painter_bonus
+-- themselves, purely so the two evidence types stay independently
+-- tunable later -- the equal starting value is a deliberate choice
+-- about what this deployment currently believes RX and TX are worth,
+-- not a structural inability to tell them apart; see player_cell_ping.
+-- evidence_type's own comment above for the mechanism that keeps the
+-- two DISTINGUISHABLE after the fact regardless of what either is
+-- currently worth: equal points, distinct labels. Points/bonus are
+-- never weighted by quality/rssi/snr/hop_count/path_classification
+-- here -- deliberately deferred, an open question still being
+-- discussed with FreqMapper, not a decision this deployment makes on
+-- its own -- see app/freqmapper_ingest.py's _passive_rx_points() for
+-- where that plumbing already exists, unused, ready for that decision
+-- once it is made.
 CREATE TABLE IF NOT EXISTS freqmapper_config (
     id                     INTEGER PRIMARY KEY CHECK (id = 1),
     mt_paint_source        TEXT NOT NULL DEFAULT 'both',
@@ -491,7 +546,10 @@ CREATE TABLE IF NOT EXISTS freqmapper_config (
     watcher_weight_enabled   INTEGER NOT NULL DEFAULT 0,
     watcher_weight_base      REAL NOT NULL DEFAULT 0.5,
     watcher_weight_increment REAL NOT NULL DEFAULT 0.1,
-    watcher_weight_cap       REAL NOT NULL DEFAULT 1.0
+    watcher_weight_cap       REAL NOT NULL DEFAULT 1.0,
+    passive_rx_enabled              INTEGER NOT NULL DEFAULT 1,
+    passive_rx_points_per_event     REAL NOT NULL DEFAULT 0.5,
+    passive_rx_unique_painter_bonus REAL NOT NULL DEFAULT 0.5
 );
 
 -- ---------------------------------------------------------------------
@@ -2208,6 +2266,14 @@ MIGRATIONS = [
     # 0, correct for every day already tallied since neither gate was
     # checking anything yet.
     "ALTER TABLE player_cell_ping ADD COLUMN precision_bits INTEGER",
+    # evidence_type added after player_cell_ping already shipped -- see
+    # that column's own comment on the CREATE TABLE above. NULL for
+    # every existing row: correct for 100% of them, since FreqMapper's
+    # passive_rx event type did not paint anything before this column
+    # existed, and this column's whole job is distinguishing FreqMapper's
+    # two evidence types from each other, not meshview/MeshCore rows from
+    # FreqMapper ones.
+    "ALTER TABLE player_cell_ping ADD COLUMN evidence_type TEXT",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_low_precision INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_implausible_speed INTEGER NOT NULL DEFAULT 0",
     # Net check-ins move to checkin_seen_message (connector, packet_id),
@@ -2333,6 +2399,27 @@ MIGRATIONS = [
     # upgrading into this migration keeps the backfill guard on and
     # changes NO painting behavior until an operator explicitly opts in.
     "ALTER TABLE freqmapper_config ADD COLUMN allow_backfill INTEGER NOT NULL DEFAULT 0",
+    # passive_rx_* added after freqmapper_config already shipped -- see
+    # that column group's own comment on the CREATE TABLE above.
+    # passive_rx_enabled defaults to 1 (ON) rather than the safe-off
+    # default every other feature toggle above uses: passive RX never
+    # painted anything before this migration exists to enable it, so
+    # there is no "an existing deployment's scores must not change"
+    # invariant to protect here the way allow_backfill/
+    # watcher_weight_enabled's off-by-default choices protect one --
+    # this IS the feature this deployment was built to ship, and it has
+    # to work immediately after the migration runs, with no follow-up
+    # database edit, for an operator who never touches
+    # freqmapper_config by hand to actually get RX-sourced painting.
+    # points_per_event/unique_painter_bonus default to 0.5 each,
+    # matching verified_tx's own defaults -- Matt's explicit decision:
+    # coverage is coverage, an RX reception is not weaker evidence for
+    # scoring purposes even though it is provenance-distinct (see
+    # player_cell_ping.evidence_type's own comment) and never presented
+    # to FreqMapper as verified-TX proof.
+    "ALTER TABLE freqmapper_config ADD COLUMN passive_rx_enabled INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE freqmapper_config ADD COLUMN passive_rx_points_per_event REAL NOT NULL DEFAULT 0.5",
+    "ALTER TABLE freqmapper_config ADD COLUMN passive_rx_unique_painter_bonus REAL NOT NULL DEFAULT 0.5",
     # The account layer's link to the existing player model (see the
     # "Account layer" section in SCHEMA above for the full story) --
     # `player` is a pre-existing table with rows already in it on every
@@ -2575,10 +2662,12 @@ def _migrate_freqmapper_verification_verification_id(conn: sqlite3.Connection) -
     history would risk re-painting that event the next time the
     combined feed's cursor happens to revisit it, exactly the failure
     this whole table exists to prevent. Every "passive_rx:" row is
-    DELETED outright rather than unprefixed and kept -- passive RX has
-    never painted anything (see app/freqmapper_ingest.py's "passive_rx
-    counted, never painted" contract), so there is nothing for its
-    dedup history to protect, and keeping it would put a value from
+    DELETED outright rather than unprefixed and kept -- at the time
+    d114a5a ran (and at the time this migration was written), passive
+    RX had never painted anything yet (RX painting is a later addition
+    -- see app/freqmapper_ingest.py's module docstring, "Passive RX
+    painting"), so there was nothing for its dedup history to protect,
+    and keeping it would put a value from
     `reception_id`'s own separate UUID space into a column that is once
     again named, and reasoned about everywhere else in this codebase, as
     pure verification_id space -- a latent, silent way for an old RX

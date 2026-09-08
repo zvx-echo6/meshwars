@@ -120,8 +120,9 @@ def db_path(tmp_path, monkeypatch):
 def _configure(db_path: str, **overrides) -> None:
     """Set freqmapper_config's singleton row for a db_path-backed test.
     Defaults describe an enabled, fully-configured connector with
-    watcher weighting OFF (the shipped default) -- override only what a
-    given test actually needs to differ.
+    watcher weighting OFF (the shipped default) and passive RX painting
+    ON at its own shipped defaults -- override only what a given test
+    actually needs to differ.
     """
     cols = {
         "mt_paint_source": "both",
@@ -137,6 +138,9 @@ def _configure(db_path: str, **overrides) -> None:
         "watcher_weight_base": 0.5,
         "watcher_weight_increment": 0.1,
         "watcher_weight_cap": 1.0,
+        "passive_rx_enabled": 1,
+        "passive_rx_points_per_event": 0.5,
+        "passive_rx_unique_painter_bonus": 0.5,
         "updated_at": int(time.time()),
     }
     cols.update(overrides)
@@ -254,7 +258,16 @@ def test_process_one_event_verified_tx_paints_exactly_as_before(conn):
     assert rows == 1
 
 
-def test_process_one_event_passive_rx_counted_never_painted(conn):
+def test_process_one_event_passive_rx_paints_by_default(conn):
+    """AS OF the passive-RX-painting feature (see
+    tests/test_freqmapper_passive_rx.py for the full behavior this
+    module now has): passive_rx_enabled defaults to True (matching
+    freqmapper_config's own shipped default -- see app/db.py), so a
+    passive_rx event now paints when the caller does not explicitly
+    pass passive_rx_enabled=False. This supersedes this test's own
+    former assertion (skipped_passive_rx, never painted) from before RX
+    could score at all.
+    """
     node_ref = "0a0a0a0a"
     _seed_player_and_node(conn, node_ref=node_ref)
     season_id = _season_id(conn)
@@ -265,18 +278,39 @@ def test_process_one_event_passive_rx_counted_never_painted(conn):
         conn, _rx_event("rx-1", node_ref), season_id, registered, NOW,
         "both", 1.0, 0.5, "2020-01-01",
     )
-    assert outcome == "skipped_passive_rx"
+    assert outcome == "painted_rx"
     rows = conn.execute("SELECT count(*) FROM player_cell_ping").fetchone()[0]
-    assert rows == 0
+    assert rows == 1
 
     # Deduped -- a second look at the exact same passive_rx event_id is
-    # a duplicate, not scored twice, so a future RX-scoring rollout
-    # never has to treat this deployment's RX history as unseen.
+    # a duplicate, not scored twice.
     outcome2 = ingestor._process_one_event(
         conn, _rx_event("rx-1", node_ref), season_id, registered, NOW,
         "both", 1.0, 0.5, "2020-01-01",
     )
-    assert outcome2 == "skipped_duplicate"
+    assert outcome2 == "skipped_rx_duplicate"
+
+
+def test_process_one_event_passive_rx_disabled_counts_never_paints(conn):
+    """passive_rx_enabled=False (an operator opt-out, not the shipped
+    default) still counts/dedupes the event exactly like an active
+    verified_tx would, but never paints -- see full coverage of this in
+    tests/test_freqmapper_passive_rx.py.
+    """
+    node_ref = "0a0a0a0a"
+    _seed_player_and_node(conn, node_ref=node_ref)
+    season_id = _season_id(conn)
+    registered = {node_ref: (1, "RED")}
+    ingestor = FreqMapperIngestor()
+
+    outcome = ingestor._process_one_event(
+        conn, _rx_event("rx-disabled-1", node_ref), season_id, registered, NOW,
+        "both", 1.0, 0.5, "2020-01-01",
+        passive_rx_enabled=False,
+    )
+    assert outcome == "skipped_rx_disabled"
+    rows = conn.execute("SELECT count(*) FROM player_cell_ping").fetchone()[0]
+    assert rows == 0
 
 
 def test_process_one_event_unknown_event_type_counted_never_crashes(conn):
@@ -643,7 +677,13 @@ def test_poll_once_processes_combined_page_and_branches_by_event_type(db_path, m
     conn.row_factory = sqlite3.Row
     assert get_cursor(conn, COMBINED_CURSOR_KEY, "") == "combined-cursor-1"
     painted = conn.execute("SELECT count(*) FROM player_cell_ping").fetchone()[0]
-    assert painted == 1  # only the verified_tx event painted
+    # BOTH the verified_tx and the passive_rx event painted --
+    # passive_rx_enabled defaults to 1 (ON), see app/db.py's
+    # freqmapper_config comment -- the unrecognized "future_thing" type
+    # is the only one of the three that never scores.
+    assert painted == 2
+    rows = conn.execute("SELECT evidence_type FROM player_cell_ping ORDER BY evidence_type").fetchall()
+    assert [r["evidence_type"] for r in rows] == ["passive_rx", "verified_tx"]
     # Each event type deduped on its own bare id field -- verification_id
     # for verified_tx, reception_id for passive_rx, the feed's generic
     # event_id only as the fallback for the unrecognized type -- no
