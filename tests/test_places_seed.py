@@ -473,6 +473,47 @@ def test_emptied_place_table_forces_reload_despite_matching_fingerprint(conn, tm
     assert conn.execute("SELECT COUNT(*) FROM place").fetchone()[0] == 1
 
 
+# ---------------------------------------------------------------------
+# Missing seed file: since the seed moved out of the repo (2026-09-08,
+# see app/places_seed.py's "SEED LOCATION" module docstring section),
+# absence is a real, easy-to-hit deployment gap, not a hypothetical --
+# a fresh clone plus `docker compose up` hits this by default. Must NOT
+# raise (a board with no places data yet is a supported, non-fatal
+# state -- see load_places_seed()'s own `if not os.path.exists(...)`
+# handling), but the log line must be unmistakable: name the exact
+# configured path and say how to obtain the file, not a generic "no
+# data" line easy to miss in a startup log.
+# ---------------------------------------------------------------------
+
+
+def test_missing_seed_logs_a_loud_findable_error(conn, tmp_path, monkeypatch, caplog):
+    missing_path = tmp_path / "places_worth_going.csv.gz"
+    assert not missing_path.exists()
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(missing_path))
+
+    with caplog.at_level("WARNING", logger="places_seed"):
+        stats = load_places_seed(conn)
+
+    # Non-fatal: no exception, and the caller's stats/DB state stay in
+    # the same "no data yet" shape a missing file always produced.
+    assert stats["kept"] == {"summit": 0, "park": 0, "landmark": 0}
+    assert conn.execute("SELECT COUNT(*) FROM place").fetchone()[0] == 0
+
+    messages = [r.message for r in caplog.records if r.name == "places_seed"]
+    assert len(messages) == 1, messages
+    message = messages[0]
+    # The exact path it looked for -- an operator must be able to find
+    # this without reading source, especially when PLACES_SEED_PATH was
+    # customized away from the default.
+    assert str(missing_path) in message
+    # How to obtain the file -- the build pipeline's merge stage, not a
+    # bare "not found".
+    assert "build_places_seed.py" in message
+    assert "merge" in message
+    # Unmistakable that this means an empty board, not a partial one.
+    assert "ZERO" in message.upper()
+
+
 # --- summits are a terrain-qualified set of squares, not one square -----
 
 

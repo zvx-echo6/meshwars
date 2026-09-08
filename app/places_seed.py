@@ -1,8 +1,8 @@
-"""Loads app/reference/places_worth_going.csv into the `place` and
-`place_cell` tables. Companion to scripts/build_places_seed.py, which
-builds the CSV from SOTA/POTA/OSM+PAD-US -- this module never touches
-the network or the CSV's own contents, only what gets written to the
-database from it.
+"""Loads the places_worth_going seed CSV (see SEED LOCATION below for
+where that file actually lives) into the `place` and `place_cell`
+tables. Companion to scripts/build_places_seed.py, which builds the CSV
+from SOTA/POTA/OSM+PAD-US -- this module never touches the network or
+the CSV's own contents, only what gets written to the database from it.
 
 Called from app/db.init_db() on every startup, same as SCHEMA/MIGRATIONS
 -- idempotent, so a re-run (a restart, a redeploy with an unchanged CSV)
@@ -11,9 +11,21 @@ app/places.py's in-memory-bucket pattern: that module answers "how far
 is the nearest town" from a flat file with no database involved at all,
 because nothing else needs a `town` row to exist. This feature needs
 `place` rows other tables can foreign-key against (place_activation,
-place_cell), so it loads into SQLite instead -- same CSV-shipped-with-
-the-code precedent (app/reference/, not the gitignored data/ volume),
-different destination.
+place_cell), so it loads into SQLite instead.
+
+SEED LOCATION -- moved OUT of the repo 2026-09-08 (Matt's decision). The
+CSV used to ship at app/reference/places_worth_going.csv.gz, committed
+to git; being compressed data, git could never diff it, so every
+rebuild stored a complete new copy forever (109MB of dead prior copies
+in history before this change, on a file that was itself headed from
+45MB to ~100MB with the worldwide rebuild). It now lives in the
+docker-compose ./data bind mount instead -- see app/config.py's
+places_seed_path (default /data/places_worth_going.csv.gz, i.e.
+./data/data/places_worth_going.csv.gz on the host, same directory
+game.db already lives in) -- which docker-compose.yml already mounts
+and .gitignore already excludes. See docs/features/places.md and
+README.md for the operator-facing consequence: a fresh clone no longer
+ships with any places data until this file is placed there by hand.
 
 COUNTRY FILTER -- REMOVED 2026-09-07 (Matt approved, "Places Worth
 Going" going worldwide alongside the rest of the world-open map).
@@ -107,7 +119,7 @@ log = logging.getLogger("places_seed")
 # blocking wait on it.
 LOADING = False
 
-_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv.gz")
+_DATA_PATH = settings.places_seed_path
 # Summit -> squares, built by scripts/build_summit_cells.py against the
 # planet DEM on navi. A summit's squares cannot be derived here the way a
 # park's are from its boundary: the test is terrain (within 1.5km AND
@@ -118,12 +130,32 @@ _SUMMIT_CELLS_PATH = os.path.join(os.path.dirname(__file__), "reference", "summi
 
 def _open_csv(path: str, **kwargs):
     """Opens path for text reading, transparently gunzipping when the
-    name ends in .gz (the shipped places_worth_going.csv.gz) and falling
-    back to a plain open() otherwise (test fixtures, summit_cells.csv).
-    Everything downstream (csv.DictReader) is unaffected either way."""
+    name ends in .gz (the operator-supplied places_worth_going.csv.gz --
+    see app/config.py's places_seed_path) and falling back to a plain
+    open() otherwise (test fixtures, summit_cells.csv, or a decompressed
+    places_worth_going.csv). Everything downstream (csv.DictReader) is
+    unaffected either way."""
     if path.endswith(".gz"):
         return gzip.open(path, "rt", **kwargs)
     return open(path, **kwargs)
+
+
+def _resolve_data_path(path: str) -> str:
+    """`path` itself if it exists, otherwise its .gz/plain-.csv
+    counterpart if THAT exists instead -- so an operator who places
+    either places_worth_going.csv.gz (the normal, compressed form the
+    build pipeline produces) or an already-decompressed
+    places_worth_going.csv at the configured location is found either
+    way, without also having to flip PLACES_SEED_PATH to match whichever
+    one they happened to drop in. Falls back to returning `path`
+    unchanged when neither exists, so the caller's own missing-file
+    handling still reports the path that was actually configured."""
+    if os.path.exists(path):
+        return path
+    alt = path[: -len(".gz")] if path.endswith(".gz") else path + ".gz"
+    if os.path.exists(alt):
+        return alt
+    return path
 
 
 def _sha256_file(path: str) -> str:
@@ -131,8 +163,8 @@ def _sha256_file(path: str) -> str:
     the seed -- decompressing first would cost the very thing this
     fingerprint exists to avoid paying on every boot). Read in 1MB
     chunks so this never holds the whole file in memory at once, though
-    at ~47MB and ~0.5MB for the two files that fingerprint this seed it
-    would hardly matter. Missing file -> a stable constant, same as the
+    at up to ~100MB and ~0.5MB for the two files that fingerprint this
+    seed it would hardly matter. Missing file -> a stable constant, same as the
     old size+mtime fingerprint's OSError fallback, so an absent
     summit_cells.csv does not re-trigger a load every startup."""
     h = hashlib.sha256()
@@ -517,8 +549,31 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         "landmark_colocated_with_summit": 0,
     }
 
-    if not os.path.exists(_DATA_PATH):
-        log.warning("places_seed: %s not found -- places feature will have no data", _DATA_PATH)
+    # Accepts either the .gz the build pipeline produces or an
+    # already-decompressed .csv at the same configured location -- see
+    # _resolve_data_path's own docstring.
+    seed_path = _resolve_data_path(_DATA_PATH)
+    if not os.path.exists(seed_path):
+        # LOUD on purpose: this file is no longer shipped in the repo
+        # (moved out 2026-09-08, see module docstring), so its absence
+        # is a real, easy-to-hit deployment gap -- a fresh clone plus
+        # `docker compose up` now boots a completely empty board rather
+        # than failing to start, which looks exactly like a working
+        # game with nothing in it unless this is impossible to miss in
+        # the logs.
+        log.warning(
+            "places_seed: SEED FILE NOT FOUND at %s -- "
+            "the Places Worth Going feature will start with ZERO places "
+            "(no summits, parks, or landmarks; not a partial/degraded "
+            "state, a completely empty board). This file is no longer "
+            "shipped in the repository -- obtain it by running "
+            "`python3 scripts/build_places_seed.py merge <inputs...> "
+            "--out %s` (its `merge` stage; see docs/features/places.md "
+            "and README.md's \"Where the data and tiles live\") and "
+            "place it at that exact path, or point PLACES_SEED_PATH at "
+            "wherever you already keep it.",
+            _DATA_PATH, _DATA_PATH,
+        )
         return stats
 
     # Fingerprint is a sha256 CONTENT hash (2026-09-07), not size+mtime.
@@ -573,7 +628,7 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # but every previous entry in this list bumps the version for a
     # fingerprint-invalidating change, so this one does too.
     _RECONCILE_VERSION = 5
-    seed_hash = _sha256_file(_DATA_PATH)
+    seed_hash = _sha256_file(seed_path)
     # summit_cells.csv rides along in the fingerprint too. It decides
     # every summit's place_cell rows but is a SEPARATE file from the seed
     # CSV, so a change to it alone would leave the fingerprint untouched
@@ -627,7 +682,7 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # below reads landmark rows (a landmark can appear before the
     # summit it double-dips with in file order; SOTA/PADUS/OSM rows are
     # not sorted by proximity to each other).
-    summit_buckets = _kept_summit_buckets(_DATA_PATH)
+    summit_buckets = _kept_summit_buckets(seed_path)
     seen_ids: set[int] = set()
 
     # place_cell writes are BATCHED (2026-09-07), not one DELETE plus
@@ -677,7 +732,7 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         # transaction's writes at all until COMMIT.
         conn.execute("DROP INDEX IF EXISTS idx_place_cell_cell")
 
-        with _open_csv(_DATA_PATH, encoding="utf-8", newline="") as fh:
+        with _open_csv(seed_path, encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
                 ref_type = row["ref_type"]
