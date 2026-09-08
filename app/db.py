@@ -304,14 +304,88 @@ CREATE TABLE IF NOT EXISTS player_last_fix (
 -- row. Purely an audit/provenance column, same as precision_bits:
 -- nothing reads it back for scoring, and it plays no part in the
 -- exact-duplicate PRIMARY KEY.
+-- watcher_count / same_region_watcher_count / cross_region_watcher_count
+-- / watcher_corroborated / quality / rssi_dbm / snr_db / hop_count /
+-- path_classification / last_relay_node / packet_type / portnum /
+-- location_accuracy_meters: added for FreqMapper's combined-feed
+-- "capture signal" fields -- see app/freqmapper_ingest.py's module
+-- docstring for the full coverage-mapper reasoning. Matt's own words on
+-- what this whole column group is for -- first on watcher_count/
+-- quality, then widened to every measurement the feed reports: "we can
+-- use the watcher count and the quality. in fact we should enter it in
+-- the capture, but what we should NOT do is change the scoring weight.
+-- at its core, meshwars is a coverage mapper, so we should honor that."
+-- and then, extending the same principle to the rest of the feed's
+-- fields: "lets store it all, its not that heavy." So: RECORD, never
+-- SCORE, for EVERY measurement FreqMapper hands this deployment, not
+-- just the two Matt named first.
+--
+-- Two of these (watcher_count, and its breakdown
+-- same_region_watcher_count/cross_region_watcher_count, plus
+-- watcher_corroborated) are reported on BOTH verified_tx and passive_rx
+-- events -- how many independent Watchers verified or corroborated the
+-- event, split by whether they were in the same FreqMapper region as
+-- the reporting radio or a different one, and whether at least one
+-- corroborating Watcher observation exists at all. The rest
+-- (quality, rssi_dbm, snr_db, hop_count, path_classification,
+-- last_relay_node, packet_type, portnum, location_accuracy_meters) are
+-- passive_rx-ONLY fields -- the verified_tx feed carries none of them
+-- at all, so every verified_tx row's copies of these nine columns are
+-- unconditionally NULL, never a guess at what they might have been.
+-- quality is "strong"/"fair"/"weak"; rssi_dbm and snr_db are the
+-- receiving radio's own signal-strength/noise readings for this
+-- specific reception (snr_db can legitimately be null even ON a
+-- passive_rx event, per FreqMapper's own API docs -- some hardware
+-- cannot report it); hop_count is FreqMapper's own estimate of how many
+-- relays the packet crossed before this radio heard it, null when the
+-- packet's header gives no basis for an estimate; path_classification
+-- is FreqMapper's own "direct"/"relayed"/"unknown" summary of that;
+-- last_relay_node is a ONE-BYTE HINT of the last relay's node id
+-- fragment (Meshtastic's own on-air packet format only ever carries the
+-- low byte of a relaying node's id, not its full identity) -- this is
+-- NOT a usable node identity on its own and must never be treated as
+-- one; packet_type/portnum describe what kind of Meshtastic packet was
+-- overheard (app/config.py's position_app_portnum is the same concept,
+-- unrelated numbering space); location_accuracy_meters is FreqMapper's
+-- own confidence radius for the receiving radio's own reported
+-- position, not the transmitter's.
+--
+-- All thirteen are nullable and populated verbatim by
+-- app/freqmapper_ingest.py's _process_one_event -- a field the payload
+-- omits, or sends null, is recorded as NULL here, never 0, never
+-- False, and never a placeholder string like "unknown": these are raw
+-- measurements being kept for later reference, not scoring inputs that
+-- need a safe fallback. NULL for every row written by app/ingest.py
+-- (meshview) or app/mc_ingest.py (MeshCore), same reasoning
+-- evidence_type stays NULL for those paths above -- neither carries any
+-- of these fields at all. Nothing in this codebase reads any of these
+-- thirteen columns back for scoring, ever -- see freqmapper_config's
+-- own comment below (watcher_weight_*) for the operator-flippable
+-- scoring switch that USED to exist for watcher_count and was
+-- deliberately removed, not merely left unused, so that "record the
+-- measurement" could never quietly become "score the measurement"
+-- again by an admin flipping one setting.
 CREATE TABLE IF NOT EXISTS player_cell_ping (
-    player_id       INTEGER NOT NULL,
-    protocol        TEXT NOT NULL,
-    cell_id         TEXT NOT NULL,
-    ts              INTEGER NOT NULL,
-    seen_at         INTEGER NOT NULL,
-    precision_bits  INTEGER,
-    evidence_type   TEXT,
+    player_id                   INTEGER NOT NULL,
+    protocol                    TEXT NOT NULL,
+    cell_id                     TEXT NOT NULL,
+    ts                          INTEGER NOT NULL,
+    seen_at                     INTEGER NOT NULL,
+    precision_bits              INTEGER,
+    evidence_type               TEXT,
+    watcher_count               INTEGER,
+    same_region_watcher_count   INTEGER,
+    cross_region_watcher_count  INTEGER,
+    watcher_corroborated        INTEGER,
+    quality                     TEXT,
+    rssi_dbm                    REAL,
+    snr_db                      REAL,
+    hop_count                   INTEGER,
+    path_classification         TEXT,
+    last_relay_node             INTEGER,
+    packet_type                 TEXT,
+    portnum                     INTEGER,
+    location_accuracy_meters    REAL,
     PRIMARY KEY (player_id, protocol, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_ping_seen ON player_cell_ping(seen_at);
@@ -466,19 +540,28 @@ CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verifi
 -- other skip reason, which IS recorded there) so that moving this date
 -- earlier and clearing the cursor can still pick the event back up.
 -- watcher_weight_* (added in MIGRATIONS below, after this table already
--- shipped): optional scaling of a verified_tx event's points by the
--- combined feed's new watcher_count field, entirely OFF by default --
--- see app/freqmapper_ingest.py's _tx_points() for the scoring formula
--- and its own comment on why watcher_weight_enabled=0 is load-bearing,
--- not just a convenient starting value: deploying this column must
--- change NO existing player's score until an operator explicitly flips
--- it on through the admin config. When enabled, a verified_tx event is
--- worth watcher_weight_base points for its first watcher plus
--- watcher_weight_increment for each additional one, capped at
--- watcher_weight_cap so one very-watched transmission cannot dominate a
--- season. When disabled (or when an event's watcher_count is missing or
--- null -- see _tx_points), points_per_event above is used unchanged,
--- exactly as before this feature existed.
+-- shipped): RETAINED, DELIBERATELY UNREAD. These four columns used to
+-- back an optional, operator-flippable scaling of a verified_tx event's
+-- points by the combined feed's watcher_count field -- OFF by default,
+-- but a live switch nonetheless. That scaling path
+-- (app/freqmapper_ingest.py's old _verified_tx_points()) has been
+-- removed entirely, not just left disabled: Matt's explicit decision is
+-- "we can use the watcher count and the quality... but what we should
+-- NOT do is change the scoring weight. at its core, meshwars is a
+-- coverage mapper, so we should honor that." A neutral-by-default
+-- switch that contradicts a stated design principle is a landmine, not
+-- a safety net -- leaving it reachable through the admin config only
+-- means someone flips it on months from now, with no code review of
+-- the decision it re-opens, and MeshWars quietly stops scoring coverage
+-- as coverage. Every verified_tx paint is worth points_per_event above,
+-- always, with no code path left anywhere that reads watcher_count back
+-- for scoring purposes (see player_cell_ping.watcher_count's own
+-- comment above for where that field is now actually recorded --
+-- capture, not credit). These four columns are kept, unread, purely
+-- because dropping a column is a disruptive SQLite migration
+-- (CREATE TABLE ... AS SELECT, swap, DROP) for zero benefit once
+-- nothing references them -- see this table's own MIGRATIONS entry for
+-- the same note at the point they were added.
 -- allow_backfill (added in MIGRATIONS below, after this table already
 -- shipped, in response to the incident this whole migration file
 -- exists to fix -- see app/freqmapper_ingest.py's module docstring):
@@ -2274,6 +2357,30 @@ MIGRATIONS = [
     # two evidence types from each other, not meshview/MeshCore rows from
     # FreqMapper ones.
     "ALTER TABLE player_cell_ping ADD COLUMN evidence_type TEXT",
+    # The full FreqMapper "capture signal" column group added after
+    # player_cell_ping already shipped -- see that column group's own
+    # comment on the CREATE TABLE above. NULL for every existing row:
+    # correct for 100% of them, since every one of these thirteen
+    # columns is a FreqMapper feed field (how many Watchers verified/
+    # corroborated an event, and -- for passive_rx -- how strong the
+    # reception was) that no ingest path recorded before this migration
+    # -- there is nothing to backfill any of them from. Recorded for
+    # reference only; see freqmapper_config's own comment below
+    # (watcher_weight_*) for the scoring switch these fields explicitly
+    # do NOT drive.
+    "ALTER TABLE player_cell_ping ADD COLUMN watcher_count INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN same_region_watcher_count INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN cross_region_watcher_count INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN watcher_corroborated INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN quality TEXT",
+    "ALTER TABLE player_cell_ping ADD COLUMN rssi_dbm REAL",
+    "ALTER TABLE player_cell_ping ADD COLUMN snr_db REAL",
+    "ALTER TABLE player_cell_ping ADD COLUMN hop_count INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN path_classification TEXT",
+    "ALTER TABLE player_cell_ping ADD COLUMN last_relay_node INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN packet_type TEXT",
+    "ALTER TABLE player_cell_ping ADD COLUMN portnum INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN location_accuracy_meters REAL",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_low_precision INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_implausible_speed INTEGER NOT NULL DEFAULT 0",
     # Net check-ins move to checkin_seen_message (connector, packet_id),
@@ -2378,16 +2485,17 @@ MIGRATIONS = [
     # nothing extra until an operator explicitly sets a date.
     "ALTER TABLE freqmapper_config ADD COLUMN paint_from TEXT NOT NULL DEFAULT ''",
     # watcher_weight_* added after freqmapper_config already shipped --
-    # see that column group's own comment on the CREATE TABLE above.
-    # watcher_weight_enabled defaults to 0 (off), the same safe-by-
-    # default value a fresh install's CREATE TABLE already gives it, so
-    # an existing deployment upgrading into this migration keeps scoring
-    # every verified_tx event at the existing flat points_per_event,
-    # completely unaffected by watcher_count, until an operator
-    # explicitly turns weighting on. base/increment/cap only take effect
-    # once that happens, so their defaults only need to be sensible
-    # starting points for whoever configures them, not neutral in their
-    # own right the way watcher_weight_enabled's default has to be.
+    # see that column group's own comment on the CREATE TABLE above,
+    # which is now the operative one: the scoring path these columns
+    # once fed (app/freqmapper_ingest.py's old _verified_tx_points())
+    # has since been removed outright, by Matt's explicit decision that
+    # MeshWars scores coverage as coverage and must not be re-weighted
+    # by watcher_count or quality. These four ALTERs stay exactly as
+    # they always were -- still safe, still a no-op on every existing
+    # row's score, now simply the last place in this codebase these
+    # columns are ever written at all, kept only so a database that
+    # already ran this migration does not need a destructive column
+    # drop.
     "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_base REAL NOT NULL DEFAULT 0.5",
     "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_increment REAL NOT NULL DEFAULT 0.1",

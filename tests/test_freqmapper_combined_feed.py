@@ -33,11 +33,14 @@ specific correctness properties Matt's brief called out:
      timestamp and the paint_from date gate; published_at must never be
      read as an event time even when it would produce a very different
      answer (test_event_time_*, test_process_one_event_paint_from_gate_*).
-  D. watcher_count weighting -- OFF by default (neutral: identical score
-     to before this feature existed, regardless of watcher_count),
-     correct scaling when explicitly enabled, and null/missing
-     watcher_count always falls back to flat, never zero
-     (test_verified_tx_points_*, test_process_one_event_watcher_*).
+  D. Coverage-mapper scoring is FLAT AND STRUCTURAL, not merely
+     defaulted that way -- verified_tx and passive_rx paints are worth
+     the same points regardless of watcher_count or quality, and there
+     is no longer a code path (a function, a config flag) that could
+     make it otherwise. watcher_count/quality RECORDING (never scoring)
+     is covered by tests/test_freqmapper_capture_signal.py, not here --
+     this file only asserts that scoring itself does not move
+     (test_process_one_event_scoring_flat_regardless_of_watcher_count).
   E. Rate-limit and error hygiene -- 429 honours Retry-After and never
      advances the cursor, 5xx/network failures retry the same
      request+cursor with increasing backoff, 401 does not retry in a
@@ -78,7 +81,6 @@ from app.freqmapper_ingest import (
     COMBINED_EVENTS_PATH,
     FreqMapperIngestor,
     _event_time,
-    _verified_tx_points,
 )
 from app.grid import cell_id as grid_cell_id
 from app.db import get_cursor
@@ -120,9 +122,14 @@ def db_path(tmp_path, monkeypatch):
 def _configure(db_path: str, **overrides) -> None:
     """Set freqmapper_config's singleton row for a db_path-backed test.
     Defaults describe an enabled, fully-configured connector with
-    watcher weighting OFF (the shipped default) and passive RX painting
-    ON at its own shipped defaults -- override only what a given test
-    actually needs to differ.
+    passive RX painting ON at its own shipped defaults -- override only
+    what a given test actually needs to differ.
+
+    Deliberately does not set watcher_weight_enabled/base/increment/cap
+    -- those columns still exist (app/db.py), but nothing in
+    app/freqmapper_ingest.py reads them any more (see this module's
+    docstring, section D), so there is nothing here for a test to
+    meaningfully configure through them.
     """
     cols = {
         "mt_paint_source": "both",
@@ -134,10 +141,6 @@ def _configure(db_path: str, **overrides) -> None:
         "points_per_event": 1.0,
         "unique_painter_bonus": 0.5,
         "paint_from": "2020-01-01",
-        "watcher_weight_enabled": 0,
-        "watcher_weight_base": 0.5,
-        "watcher_weight_increment": 0.1,
-        "watcher_weight_cap": 1.0,
         "passive_rx_enabled": 1,
         "passive_rx_points_per_event": 0.5,
         "passive_rx_unique_painter_bonus": 0.5,
@@ -530,47 +533,37 @@ def test_process_one_event_paint_from_gate_uses_occurred_at_not_published_at(con
 
 
 # ---------------------------------------------------------------------
-# D. watcher_count weighting
+# D. Coverage-mapper scoring is flat and structural
 # ---------------------------------------------------------------------
+#
+# This section used to be "D. watcher_count weighting": OFF-by-default
+# scaling of a verified_tx event's points by its watcher_count, plus a
+# proof that turning the feature on actually scaled the score. That
+# whole scaling path (freqmapper_config.watcher_weight_*,
+# app/freqmapper_ingest.py's old _verified_tx_points()) has since been
+# removed outright -- see this module's docstring's amended section D,
+# and app/freqmapper_ingest.py's module docstring ("THE COVERAGE-MAPPER
+# PRINCIPLE") for Matt's decision and the reasoning. There is no longer
+# a watcher_weight_enabled kwarg to pass, on or off, so the old
+# "neutral when disabled" / "scales when enabled" pair of tests no
+# longer has two states to distinguish -- only one test remains, proving
+# scoring never moves at all. Recording watcher_count/quality to
+# player_cell_ping (the replacement for what this feature used to score
+# with) is covered by tests/test_freqmapper_capture_signal.py, not
+# here.
 
-def test_verified_tx_points_neutral_when_disabled_regardless_of_watcher_count():
-    for watcher_count in (None, 1, 5, 500, 0, "not-a-number", True):
-        assert _verified_tx_points(watcher_count, 1.0, False, 0.5, 0.1, 1.0) == 1.0
-
-
-def test_verified_tx_points_flat_when_enabled_but_watcher_count_missing_or_null():
-    # Missing/null must fall back to the exact flat value, never to
-    # zero and never to watcher_weight_base as if there were exactly
-    # one confirmed watcher.
-    assert _verified_tx_points(None, 1.0, True, 0.5, 0.1, 5.0) == 1.0
-
-
-def test_verified_tx_points_scales_with_watcher_count_when_enabled():
-    # base=0.5, +0.1 per watcher beyond the first, 5 watchers -> 0.9
-    assert _verified_tx_points(5, 1.0, True, 0.5, 0.1, 5.0) == pytest.approx(0.9)
-    # 1 watcher -> exactly base
-    assert _verified_tx_points(1, 1.0, True, 0.5, 0.1, 5.0) == pytest.approx(0.5)
-
-
-def test_verified_tx_points_respects_the_cap():
-    assert _verified_tx_points(500, 1.0, True, 0.5, 0.1, 2.0) == pytest.approx(2.0)
-
-
-def test_verified_tx_points_zero_cap_disables_capping():
-    assert _verified_tx_points(500, 1.0, True, 0.5, 0.1, 0.0) == pytest.approx(0.5 + 499 * 0.1)
-
-
-def test_verified_tx_points_non_positive_watcher_count_falls_back_to_flat():
-    assert _verified_tx_points(0, 1.0, True, 0.5, 0.1, 5.0) == 1.0
-    assert _verified_tx_points(-3, 1.0, True, 0.5, 0.1, 5.0) == 1.0
-
-
-def test_process_one_event_watcher_weighting_neutral_by_default():
-    """Two independent databases, identical except watcher_count -- with
-    weighting disabled (the default, no watcher_weight_* kwargs passed),
-    the resulting team score must be IDENTICAL regardless of
-    watcher_count. This is the deploy-changes-nothing proof at the
-    _process_one_event level.
+def test_process_one_event_scoring_flat_regardless_of_watcher_count():
+    """Two independent, otherwise-identical databases -- one paints a
+    verified_tx event with watcher_count=1, the other watcher_count=500
+    -- must produce the IDENTICAL team score. Two independent databases
+    (mirroring the removed test_process_one_event_watcher_weighting_
+    neutral_by_default's own fixture, _fresh_conn) rather than two
+    sequential paints in one database: a second sequential paint would
+    pick up mc_scoring.apply_paint's own score decay over the elapsed
+    time between paints, which has nothing to do with watcher_count and
+    would only make this comparison noisier, not more meaningful. There
+    is no watcher_weight_* kwarg left to pass here at all -- flat scoring
+    is now the only code path there is.
     """
     def _fresh_conn():
         c = sqlite3.connect(":memory:", isolation_level=None)
@@ -594,7 +587,7 @@ def test_process_one_event_watcher_weighting_neutral_by_default():
         season_id = _season_id(c)
         registered = {node_ref: (1, "RED")}
         ingestor = FreqMapperIngestor()
-        event = _tx_event(f"neutral-{watcher_count}", node_ref, watcher_count=watcher_count)
+        event = _tx_event(f"flat-{watcher_count}", node_ref, watcher_count=watcher_count)
         outcome = ingestor._process_one_event(
             c, event, season_id, registered, NOW, "both", 1.0, 0.5, "2020-01-01",
         )
@@ -607,29 +600,6 @@ def test_process_one_event_watcher_weighting_neutral_by_default():
         c.close()
 
     assert scores[1] == scores[500] == pytest.approx(1.0 + 0.5)  # flat points + unique-painter bonus
-
-
-def test_process_one_event_watcher_weighting_enabled_scales_score(conn):
-    node_ref = "0a0a0a0a"
-    cell = grid_cell_id(LAT, LON)
-    _seed_player_and_node(conn, node_ref=node_ref)
-    season_id = _season_id(conn)
-    registered = {node_ref: (1, "RED")}
-    ingestor = FreqMapperIngestor()
-
-    event = _tx_event("weighted-1", node_ref, watcher_count=5)
-    outcome = ingestor._process_one_event(
-        conn, event, season_id, registered, NOW, "both", 1.0, 0.5, "2020-01-01",
-        watcher_weight_enabled=True, watcher_weight_base=0.5,
-        watcher_weight_increment=0.1, watcher_weight_cap=5.0,
-    )
-    assert outcome == "painted"
-    row = conn.execute(
-        "SELECT score FROM mc_tile_score WHERE season_id = ? AND cell_id = ? AND team = 'RED'",
-        (season_id, cell),
-    ).fetchone()
-    # tx_points = 0.5 + 4*0.1 = 0.9, plus the first-paint unique bonus (0.5) = 1.4
-    assert row["score"] == pytest.approx(1.4)
 
 
 # ---------------------------------------------------------------------

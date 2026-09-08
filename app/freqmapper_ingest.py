@@ -7,6 +7,43 @@ passive_rx event, the RECEIVING wardriver's own position (see "Passive
 RX painting" below -- the two are not the same kind of location, and
 conflating them would credit the wrong player's movement).
 
+THE COVERAGE-MAPPER PRINCIPLE, stated plainly, because it governs every
+scoring decision below: MeshWars is, at its core, a coverage mapper. A
+verified_tx or passive_rx event scores because it proves a player's own
+radio reached (or heard) a cell -- that is the thing being measured, and
+the only thing that is worth. Every other field a FreqMapper event
+carries -- how many independent Watchers verified or corroborated it
+(watcher_count, same_region_watcher_count, cross_region_watcher_count,
+watcher_corroborated -- on both event types), and, for passive_rx only,
+how strong the reception was and how it got there (quality, rssi_dbm,
+snr_db, hop_count, path_classification, last_relay_node, packet_type,
+portnum, location_accuracy_meters) -- is a real, useful measurement this
+module RECORDS on every paint, verbatim, in player_cell_ping's own
+matching column (see that column group's own comment in app/db.py).
+Matt's own words, first on the two fields this started with, then
+widened to the whole set: "we can use the watcher count and the
+quality. in fact we should enter it in the capture, but what we should
+NOT do is change the scoring weight. at its core, meshwars is a
+coverage mapper, so we should honor that." -- and then, once the full
+shape of what FreqMapper reports was in view: "lets store it all, its
+not that heavy." So: every verified_tx paint is worth points_per_event
+and every passive_rx paint is worth passive_rx_points_per_event,
+always, full stop -- never scaled by watcher_count, never scaled by
+quality, never scaled by any of the other eleven fields this module
+records alongside them. This is not a neutral default
+an operator could later flip on: an earlier revision of this module
+carried exactly such a switch for verified_tx
+(freqmapper_config.watcher_weight_enabled/base/increment/cap, wired
+through a now-removed _verified_tx_points() scaling function) and it has
+been deleted outright, not merely left off, because a working,
+admin-reachable lever that contradicts a stated design principle is a
+landmine: someone flips it on months from now, with no code review of
+the decision it re-opens, and MeshWars quietly stops scoring coverage as
+coverage. Those four columns still physically exist in freqmapper_config
+(dropping a column is a disruptive SQLite migration for zero benefit)
+but nothing anywhere reads them any more -- see that column group's own
+comment in app/db.py.
+
 FreqMapper is a third-party, independently-operated Meshtastic
 coverage-mapping service, entirely separate from meshview. As of the
 2026-09-08 API revision it exposes three read-only endpoints, all under
@@ -56,10 +93,11 @@ FreqMapper's own documentation is explicit that passive RX must never
 be presented or treated as verified TX proof -- this module honours
 that by keeping the two DISTINGUISHABLE everywhere a paint is recorded
 (player_cell_ping.evidence_type, see that column's own comment in
-app/db.py) even though, by Matt's explicit decision, they currently
-earn identical points: "coverage is coverage" for what a cell is worth,
-but the two evidence types must still be separable later if either one
-needs to be re-weighted or unwound on its own.
+app/db.py) even though, by Matt's explicit decision, they earn
+identical points structurally, not just today: "coverage is coverage"
+for what a cell is worth (see THE COVERAGE-MAPPER PRINCIPLE above), but
+the two evidence types must still be separable later for audit, or if
+this deployment ever needs to unwind one of them on its own.
 
 Scoring config: freqmapper_config.passive_rx_enabled (default ON),
 passive_rx_points_per_event and passive_rx_unique_painter_bonus
@@ -72,18 +110,24 @@ passive_rx_enabled=0 makes a passive_rx event count (deduped, backfill
 deduped, but nothing scored" shape mt_paint_source=="meshview" already
 gives verified_tx below, not a different mechanism.
 
-Quality/watcher_count weighting is deliberately DEFERRED for
-passive_rx, same open-question status app/freqmapper_ingest.py's
-watcher-weighting has for verified_tx, but earlier in its lifecycle:
-`quality`, `rssi_dbm`, `snr_db`, `hop_count`, and `path_classification`
-are all real fields on a passive_rx event, and are all open questions
-still being discussed with FreqMapper, not decisions this deployment
-makes on its own. See _passive_rx_points() below: `quality` and
-`watcher_count` are already threaded through from the event to that
-function so a future weighting decision needs no re-plumbing of
-_process_one_event's event parsing, only a change to that one
-function's body -- exactly the shape _verified_tx_points() already
-proved out for watcher_count weighting on the TX side.
+Quality/watcher_count/rssi/snr/hop_count/etc. weighting for passive_rx
+is DECLINED, not deferred -- an earlier revision of this docstring
+described it as an open question still being discussed with FreqMapper.
+It no longer is: see THE COVERAGE-MAPPER PRINCIPLE above for Matt's
+explicit decision, which settles this for passive_rx exactly as it
+settles it for verified_tx. `quality`, `rssi_dbm`, `snr_db`,
+`hop_count`, `path_classification`, `last_relay_node`, `packet_type`,
+`portnum`, and `location_accuracy_meters` are all real fields on a
+passive_rx event, and EVERY ONE of them is now recorded, verbatim, to
+its own matching player_cell_ping column (see that column group's own
+comment in app/db.py) -- not just the two (quality, watcher_count) this
+feature started with; Matt's own follow-up decision widened the set to
+everything the feed reports ("lets store it all, its not that heavy").
+Recording a measurement and using it to weight a score are two
+different questions: _passive_rx_points() below answers only the second
+one, flatly, and does not receive any of these fields as arguments at
+all -- _process_one_event records every one of them directly,
+independent of scoring.
 
 Poll-cycle log granularity: passive_rx now gets the SAME per-reason
 breakdown verified_tx already had (painted vs. each skip reason), not
@@ -92,16 +136,20 @@ with before RX could paint at all -- see _poll_once's log line and the
 rx_-prefixed counters it reports, so an operator can tell WHY an RX
 event did or did not paint, the same way they already could for TX.
 
-watcher_count: a verified_tx event now reports how many independent
+watcher_count: a verified_tx event reports how many independent
 Watchers verified it (same_region_watcher_count / cross_region_watcher_count
-break it down further). The old TX-only feed never reported this at all
-("coverage_rule": "independent_watcher_verified" was as specific as it
-got) -- that used to be true, and is the reason every verified event was
-worth a flat points_per_event with no way to weight it. It is no longer
-true. See _verified_tx_points() below for how this module now optionally
-scales points by watcher_count -- OFF by default, see that function's
-own docstring for why the default has to be exactly flat, unchanged
-scoring.
+break it down further, and watcher_corroborated says whether at least
+one exists at all). The old TX-only feed never reported any of this at
+all ("coverage_rule": "independent_watcher_verified" was as specific as
+it got). This deployment records all four -- watcher_count,
+same_region_watcher_count, cross_region_watcher_count,
+watcher_corroborated -- on every verified_tx (and passive_rx) paint
+(see player_cell_ping's own comment in app/db.py) but never reads any of
+them back for scoring -- see THE COVERAGE-MAPPER PRINCIPLE above. An
+earlier revision of this module DID read watcher_count back, through a
+now-removed _verified_tx_points() scaling function gated by
+freqmapper_config.watcher_weight_enabled; both are gone, not merely
+defaulted off.
 
 occurred_at vs. published_at: every event carries both. occurred_at is
 the RF event's own timestamp (a mapping-test send, or a radio
@@ -479,78 +527,132 @@ def _parse_retry_after(raw: object) -> int:
     return max(seconds, 0)
 
 
-def _verified_tx_points(
-    watcher_count: object,
-    points_per_event: float,
-    watcher_weight_enabled: bool,
-    watcher_weight_base: float,
-    watcher_weight_increment: float,
-    watcher_weight_cap: float,
-) -> float:
-    """How many points one verified_tx event is worth.
+# NOTE ON WHAT USED TO BE HERE: this module once had a
+# _verified_tx_points(watcher_count, points_per_event, watcher_weight_*)
+# function that optionally scaled a verified_tx event's points by its
+# watcher_count, gated by freqmapper_config.watcher_weight_enabled
+# (default off). It has been removed outright, not just left disabled
+# -- see this module's docstring ("THE COVERAGE-MAPPER PRINCIPLE") for
+# Matt's explicit decision and the reasoning: a neutral-by-default
+# switch that contradicts a stated design principle is a landmine, not
+# a safety net. Every verified_tx paint below is worth points_per_event,
+# always -- see the call site in _process_one_event, which no longer
+# calls through any function to get there. watcher_count is still
+# recorded (never scored) -- see the capture-signal extraction helpers
+# below.
+#
+# freqmapper_config.watcher_weight_enabled/base/increment/cap still
+# exist as columns (app/db.py) purely because dropping a column is a
+# disruptive SQLite migration for zero benefit; nothing in this file, or
+# anywhere else, reads them any more.
 
-    NEUTRAL BY DEFAULT -- this is the load-bearing property of this
-    function, not an incidental one: when watcher_weight_enabled is
-    false (freqmapper_config's default, set by both its CREATE TABLE and
-    its MIGRATIONS ADD COLUMN entry in app/db.py -- see that column
-    group's own comment), this ALWAYS returns points_per_event
-    unchanged, regardless of what watcher_count says, so deploying this
-    feature changes NO player's score until an operator explicitly turns
-    it on. The exact same flat points_per_event is returned when
-    weighting IS enabled but watcher_count is missing, null, or not a
-    usable positive integer -- "we don't know how many watchers verified
-    this" must fall back to the same flat value every event got before
-    this feature existed, never to zero points (a missing count is not
-    evidence of zero watchers) and never to watcher_weight_base either
-    (that would silently assume exactly one watcher we can't actually
-    confirm).
 
-    When enabled and watcher_count is a usable positive integer: the
-    first watcher is worth watcher_weight_base, each additional watcher
-    adds watcher_weight_increment, and the total is capped at
-    watcher_weight_cap (a cap of 0 or less disables the cap) so one
-    very-watched transmission cannot dominate a whole season's scoring
-    the way an uncapped linear scale could.
+# ---------------------------------------------------------------------
+# Capture-signal field extraction -- RECORDING, never scoring.
+# ---------------------------------------------------------------------
+#
+# Four small, generically-typed helpers, one per SQLite storage type
+# player_cell_ping's thirteen "capture signal" columns use (see that
+# column group's own comment in app/db.py). Every one of them shares the
+# exact same contract: a missing field, an explicit JSON null, or a
+# value of the wrong type all return None -- never 0, never False, never
+# "unknown" -- because these are raw measurements being kept for later
+# analysis, not scoring inputs that need a safe fallback to protect (see
+# this module's docstring, "THE COVERAGE-MAPPER PRINCIPLE"). "We don't
+# know" and "we observed zero" are different, and only the field's own
+# actual value -- or the absence of one -- may decide which is recorded.
+# _event_int / _event_bool_as_int reject a bool where a number is
+# expected, and vice versa, on purpose: Python's `isinstance(True, int)`
+# is true, but a JSON `true` is not a count, and a JSON `1` is not a
+# yes/no answer -- collapsing the two would misrecord either one.
+#
+# One function per type rather than one per field: with thirteen fields
+# now recorded (see the module docstring for the full list and Matt's
+# "lets store it all" decision that grew it from two), a dedicated
+# function per field would be thirteen near-identical bodies to keep in
+# sync; a dedicated function per SQLite type is four, and the call site
+# in _process_one_event names each field exactly once, as a dict
+# literal, where a reader can see the whole capture in one place.
+
+def _event_int(event: dict, key: str) -> int | None:
+    """An integer-valued field (watcher_count, same_region_watcher_count,
+    cross_region_watcher_count, hop_count, last_relay_node, portnum).
+    See this section's own comment above for the None contract.
     """
-    if not watcher_weight_enabled:
-        return points_per_event
-    if isinstance(watcher_count, bool) or not isinstance(watcher_count, (int, float)):
-        return points_per_event
-    watchers = int(watcher_count)
-    if watchers < 1:
-        return points_per_event
-    points = watcher_weight_base + (watchers - 1) * watcher_weight_increment
-    if watcher_weight_cap > 0:
-        points = min(points, watcher_weight_cap)
-    return points
+    value = event.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
 
 
-def _passive_rx_points(quality: object, watcher_count: object, points_per_event: float) -> float:
-    """How many points one passive_rx event is worth.
+def _event_float(event: dict, key: str) -> float | None:
+    """A real-valued field (rssi_dbm, snr_db, location_accuracy_meters).
+    See this section's own comment above for the None contract. A plain
+    int value is still accepted and widened to float -- a whole-number
+    RSSI reading is still a valid measurement, not a type mismatch.
+    """
+    value = event.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
-    Always returns points_per_event UNCHANGED right now -- `quality` and
-    `watcher_count` are accepted purely so the call site
-    (_process_one_event below) already threads a passive_rx event's own
-    `quality` and `watcher_count` fields through to this one function,
-    not because either currently affects the answer. Weighting a
-    reception by quality/rssi_dbm/snr_db/hop_count/path_classification
-    is a real, live question -- a fair-quality, two-hop-relayed
-    reception plainly is not the same strength of coverage evidence as
-    a clean one-hop direct copy -- but it is still an OPEN question
-    being discussed with FreqMapper, not one this deployment decides on
-    its own by picking a formula today. Deferring it here, in this one
-    function, means that decision -- whenever it is made -- needs no
-    re-plumbing of _process_one_event's event parsing or its call site:
-    only this function's body changes, exactly the shape
-    _verified_tx_points() above already proved out for watcher_count
-    weighting on the TX side (that one shipped disabled-by-default and
-    was turned on later without touching anything upstream of it).
 
-    watcher_count is independently meaningful here too (a
-    Watcher-corroborated reception vs. an uncorroborated one), separate
-    from `quality` -- both are threaded through rather than only one,
-    so whichever combination this deployment eventually settles on with
-    FreqMapper is already available without another plumbing pass.
+def _event_str(event: dict, key: str) -> str | None:
+    """A text field (quality, path_classification, packet_type). See
+    this section's own comment above for the None contract; an empty
+    string is treated the same as a missing field.
+    """
+    value = event.get(key)
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _event_bool_as_int(event: dict, key: str) -> int | None:
+    """A boolean field (watcher_corroborated), stored as a plain SQLite
+    INTEGER (0/1) since there is no native boolean column type. See this
+    section's own comment above for the None contract -- notably, this
+    does NOT fall back to Python's ordinary truthy/falsy coercion:
+    `bool(None)` is False, but a missing or null watcher_corroborated
+    must stay NULL, never be recorded as the (false) claim "confirmed
+    not corroborated."
+    """
+    value = event.get(key)
+    if not isinstance(value, bool):
+        return None
+    return int(value)
+
+
+def _passive_rx_points(points_per_event: float) -> float:
+    """How many points one passive_rx event is worth: points_per_event,
+    always.
+
+    Quality/watcher_count/rssi/snr/hop_count/etc. weighting here is
+    DECLINED, not deferred -- an earlier revision of this function's
+    docstring described it as an open question still being discussed
+    with FreqMapper, with `quality` and `watcher_count` threaded through
+    as arguments so a future weighting formula could be dropped in
+    without re-plumbing _process_one_event. That framing is gone: see
+    this module's docstring ("THE COVERAGE-MAPPER PRINCIPLE") for Matt's
+    explicit decision -- MeshWars scores coverage as coverage, and
+    signal strength or corroboration count does not change how much
+    territory an observation is worth, no matter how many more of the
+    feed's fields this deployment goes on to record. This function no
+    longer receives any of those fields as arguments at all;
+    _process_one_event records the full capture-signal field set
+    directly to player_cell_ping (see the _event_int/_event_float/
+    _event_str/_event_bool_as_int helpers above), entirely independent
+    of this function, which only ever answers "how many points," never
+    "how strong."
+
+    Kept as its own named function rather than inlined at its one call
+    site (unlike verified_tx, whose analogous _verified_tx_points() was
+    deleted entirely -- see the note above) only because verified_tx's
+    old scaling path was a live, reachable, operator-flippable switch
+    that had to be removed outright; this one was never wired to
+    anything an operator could flip, so there is no equivalent urgency
+    to erase the seam, and keeping it here costs nothing while matching
+    the shape of the branch it sits next to in _process_one_event.
     """
     return points_per_event
 
@@ -573,19 +675,24 @@ def load_freqmapper_config(conn) -> dict:
     unconditionally and it should always be there in practice, but a
     poll cycle failing outright over a missing config row would be a
     worse failure mode than briefly falling back to the settings this
-    row was itself seeded from. watcher_weight_* and allow_backfill both
-    have no settings.py counterpart (both are brand new, with no prior
-    env-var configuration to fall back to -- see those columns' own
-    comments in app/db.py), so this fallback hardcodes the same neutral
-    values the real column defaults already give a fresh or freshly
-    migrated database.
+    row was itself seeded from. allow_backfill has no settings.py
+    counterpart (brand new, with no prior env-var configuration to fall
+    back to -- see that column's own comment in app/db.py), so this
+    fallback hardcodes the same neutral value the real column default
+    already gives a fresh or freshly migrated database.
+
+    Does NOT select watcher_weight_enabled/base/increment/cap -- those
+    columns still exist on freqmapper_config (app/db.py), but nothing in
+    this module reads them any more; see this module's docstring ("THE
+    COVERAGE-MAPPER PRINCIPLE") for why. Selecting them here just to
+    never look at the values would be exactly the kind of dead plumbing
+    that made the old watcher-weighting switch a landmine in the first
+    place.
     """
     row = conn.execute(
         "SELECT mt_paint_source, enabled, base_url, api_key, poll_interval_seconds, "
         "       page_limit, points_per_event, unique_painter_bonus, paint_from, "
-        "       last_poll_at, last_poll_error, updated_at, "
-        "       watcher_weight_enabled, watcher_weight_base, "
-        "       watcher_weight_increment, watcher_weight_cap, allow_backfill, "
+        "       last_poll_at, last_poll_error, updated_at, allow_backfill, "
         "       passive_rx_enabled, passive_rx_points_per_event, "
         "       passive_rx_unique_painter_bonus "
         "  FROM freqmapper_config WHERE id = 1"
@@ -604,24 +711,19 @@ def load_freqmapper_config(conn) -> dict:
             "last_poll_at": None,
             "last_poll_error": None,
             "updated_at": 0,
-            "watcher_weight_enabled": False,
-            "watcher_weight_base": 0.5,
-            "watcher_weight_increment": 0.1,
-            "watcher_weight_cap": 1.0,
             "allow_backfill": False,
             # No settings.py counterpart to fall back to -- same reason
-            # watcher_weight_*/allow_backfill above hardcode their
-            # neutral values here rather than reading settings. These
-            # mirror freqmapper_config's own column defaults exactly
-            # (see that table's comment in app/db.py): RX painting ON,
-            # scored at the same flat value verified_tx ships with.
+            # allow_backfill above hardcodes its neutral value here
+            # rather than reading settings. These mirror
+            # freqmapper_config's own column defaults exactly (see that
+            # table's comment in app/db.py): RX painting ON, scored at
+            # the same flat value verified_tx ships with.
             "passive_rx_enabled": True,
             "passive_rx_points_per_event": 0.5,
             "passive_rx_unique_painter_bonus": 0.5,
         }
     d = dict(row)
     d["enabled"] = bool(d["enabled"])
-    d["watcher_weight_enabled"] = bool(d["watcher_weight_enabled"])
     d["allow_backfill"] = bool(d["allow_backfill"])
     d["passive_rx_enabled"] = bool(d["passive_rx_enabled"])
     return d
@@ -652,11 +754,15 @@ def seed_freqmapper_config_from_env(conn) -> None:
     none of the three has a settings.py counterpart to seed from (see
     those columns' own comments in app/db.py), and each one's
     schema/MIGRATIONS default is already exactly the value this
-    bootstrap would otherwise be trying to reproduce: disabled/guard
-    active for the first two, and RX painting ON at TX's own flat point
-    value for passive_rx_* -- see freqmapper_config's own comment in
-    app/db.py for why passive_rx_enabled's default is the one exception
-    to this module's usual "deploying this changes nothing" rule.
+    bootstrap would otherwise be trying to reproduce: guard active for
+    allow_backfill, RX painting ON at TX's own flat point value for
+    passive_rx_* -- see freqmapper_config's own comment in app/db.py for
+    why passive_rx_enabled's default is the one exception to this
+    module's usual "deploying this changes nothing" rule.
+    watcher_weight_* is a different case from the other two now:
+    load_freqmapper_config no longer even reads those columns back (see
+    that function's own comment), so there is nothing here for this
+    bootstrap to meaningfully seed regardless of what it would write.
     """
     row = conn.execute("SELECT updated_at FROM freqmapper_config WHERE id = 1").fetchone()
     if row is None or row["updated_at"] != 0:
@@ -1053,10 +1159,6 @@ class FreqMapperIngestor:
                     wconn, event, season_id, registered, now_ts,
                     cfg["mt_paint_source"], cfg["points_per_event"], cfg["unique_painter_bonus"],
                     cfg["paint_from"],
-                    watcher_weight_enabled=cfg["watcher_weight_enabled"],
-                    watcher_weight_base=cfg["watcher_weight_base"],
-                    watcher_weight_increment=cfg["watcher_weight_increment"],
-                    watcher_weight_cap=cfg["watcher_weight_cap"],
                     allow_backfill=cfg["allow_backfill"],
                     passive_rx_enabled=cfg["passive_rx_enabled"],
                     passive_rx_points_per_event=cfg["passive_rx_points_per_event"],
@@ -1118,10 +1220,6 @@ class FreqMapperIngestor:
         mt_paint_source: str, points_per_event: float, unique_painter_bonus: float,
         paint_from: str,
         *,
-        watcher_weight_enabled: bool = False,
-        watcher_weight_base: float = 0.5,
-        watcher_weight_increment: float = 0.1,
-        watcher_weight_cap: float = 1.0,
         allow_backfill: bool = False,
         passive_rx_enabled: bool = True,
         passive_rx_points_per_event: float = 0.5,
@@ -1131,24 +1229,30 @@ class FreqMapperIngestor:
         open write transaction. Returns an outcome key matching one of
         the counters `_poll_once` tallies.
 
-        The four watcher_weight_* parameters are keyword-only with
-        neutral defaults (weighting OFF, matching freqmapper_config's
-        own default) so every existing call site that predates
-        watcher-count weighting keeps behaving exactly as before without
-        having to be updated just to pass them. allow_backfill is the
-        same shape for the same reason, default False (guard active,
-        matching freqmapper_config's own default) -- see the backfill
-        guard's own comment below, and this module's docstring ("THE
-        ACTUAL FIX"), for what it protects against.
+        allow_backfill is keyword-only with a neutral default, False
+        (guard active, matching freqmapper_config's own default) --
+        see the backfill guard's own comment below, and this module's
+        docstring ("THE ACTUAL FIX"), for what it protects against.
 
         The three passive_rx_* parameters are keyword-only too, but
         their defaults deliberately do NOT follow the "neutral, changes
-        nothing" rule the parameters above do -- they default to
+        nothing" rule allow_backfill's does -- they default to
         freqmapper_config's own shipped defaults instead (RX painting
         ON, at the same flat point value verified_tx ships with), since
         passive RX painting a cell at all is brand new behavior with no
         prior state to stay neutral against. See freqmapper_config's own
         comment in app/db.py for why.
+
+        This signature USED to also carry four keyword-only
+        watcher_weight_* parameters (mirroring freqmapper_config's own
+        now-unread columns of the same name), threaded through to a
+        verified_tx points-scaling function. Both the parameters and
+        that function are gone -- see this module's docstring ("THE
+        COVERAGE-MAPPER PRINCIPLE") -- not because nothing ever called
+        them with a non-default value, but because Matt's decision means
+        there is no longer a decision for a caller to make: every
+        verified_tx paint is worth points_per_event, and there is
+        nothing left to configure.
 
         verified_tx and passive_rx now run through ONE shared pipeline
         below (paint_from gate, dedupe on the event's own id field, the
@@ -1156,17 +1260,20 @@ class FreqMapperIngestor:
         validation, play-area, mt_paint_source, the player_cell_ping
         insert, mc_scoring.apply_paint in flat-points mode, and
         credit_places) -- the two branches only ever differ in which id
-        field dedupes them, which points/bonus values and
-        watcher_weight_*-vs-quality/watcher_count scoring function
-        apply, and the outcome-string prefix used to report a
-        skip/paint back to `_poll_once`'s per-source counters (see that
-        method's own comment on why RX now gets the same granularity TX
-        always had). This keeps the two evidence types provably
-        behaving the same way at every gate -- there is only one copy of
-        each gate's logic to read, not two copies that could quietly
-        drift apart -- while still keeping their SCORING and PROVENANCE
-        independently configurable and distinguishable (see
-        player_cell_ping.evidence_type's own comment in app/db.py).
+        field dedupes them, which points/bonus values apply (both flat,
+        see _passive_rx_points and the module docstring), whether
+        `quality` is recorded alongside `watcher_count` (passive_rx
+        only -- verified_tx has no quality field), and the
+        outcome-string prefix used to report a skip/paint back to
+        `_poll_once`'s per-source counters (see that method's own
+        comment on why RX now gets the same granularity TX always had).
+        This keeps the two evidence types provably behaving the same way
+        at every gate -- there is only one copy of each gate's logic to
+        read, not two copies that could quietly drift apart -- while
+        still keeping their RECORDED PROVENANCE distinguishable (see
+        player_cell_ping.evidence_type's own comment in app/db.py) even
+        though their scoring is now identical and structural, not merely
+        configured to match.
         """
         if not isinstance(event, dict):
             return "skipped_malformed"
@@ -1447,12 +1554,58 @@ class FreqMapperIngestor:
         # SEMANTICS THAT MATTER HERE". Set to the feed's own event_type
         # string, so a future third evidence type needs no new constant
         # here either.
+        #
+        # The full capture-signal field set: RECORDED here, verbatim off
+        # the raw event, for BOTH evidence types -- see player_cell_ping's
+        # own comment in app/db.py and this module's docstring ("THE
+        # COVERAGE-MAPPER PRINCIPLE") for why this is capture, not
+        # credit: none of these thirteen fields is read again anywhere
+        # below this point, or anywhere else in this codebase.
+        # watcher_count/same_region_watcher_count/cross_region_watcher_
+        # count/watcher_corroborated are real fields on BOTH event types
+        # (see this module's docstring's "watcher_count" paragraph), so
+        # they are extracted unconditionally. The other nine
+        # (quality/rssi_dbm/snr_db/hop_count/path_classification/
+        # last_relay_node/packet_type/portnum/location_accuracy_meters)
+        # are passive_rx-ONLY fields on the live feed -- a verified_tx
+        # event never carries any of them -- so they are extracted only
+        # `if is_rx`, and left unconditionally None for a verified_tx
+        # row rather than calling an extractor against a field that
+        # cannot exist for it.
         seen_at = int(time.time())
+        watcher_count = _event_int(event, "watcher_count")
+        same_region_watcher_count = _event_int(event, "same_region_watcher_count")
+        cross_region_watcher_count = _event_int(event, "cross_region_watcher_count")
+        watcher_corroborated = _event_bool_as_int(event, "watcher_corroborated")
+        if is_rx:
+            quality = _event_str(event, "quality")
+            rssi_dbm = _event_float(event, "rssi_dbm")
+            snr_db = _event_float(event, "snr_db")
+            hop_count = _event_int(event, "hop_count")
+            path_classification = _event_str(event, "path_classification")
+            last_relay_node = _event_int(event, "last_relay_node")
+            packet_type = _event_str(event, "packet_type")
+            portnum = _event_int(event, "portnum")
+            location_accuracy_meters = _event_float(event, "location_accuracy_meters")
+        else:
+            quality = rssi_dbm = snr_db = hop_count = None
+            path_classification = last_relay_node = None
+            packet_type = portnum = location_accuracy_meters = None
         cur = conn.execute(
             "INSERT OR IGNORE INTO player_cell_ping"
-            "(player_id, protocol, cell_id, ts, seen_at, precision_bits, evidence_type) "
-            "VALUES (?, ?, ?, ?, ?, NULL, ?)",
-            (player_id, PROTOCOL, cell, ts, seen_at, event_type),
+            "(player_id, protocol, cell_id, ts, seen_at, precision_bits, "
+            " evidence_type, watcher_count, same_region_watcher_count, "
+            " cross_region_watcher_count, watcher_corroborated, quality, "
+            " rssi_dbm, snr_db, hop_count, path_classification, "
+            " last_relay_node, packet_type, portnum, location_accuracy_meters) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                player_id, PROTOCOL, cell, ts, seen_at, event_type,
+                watcher_count, same_region_watcher_count, cross_region_watcher_count,
+                watcher_corroborated, quality, rssi_dbm, snr_db, hop_count,
+                path_classification, last_relay_node, packet_type, portnum,
+                location_accuracy_meters,
+            ),
         )
         if cur.rowcount == 0:
             # Same player/cell/second already recorded -- two distinct
@@ -1468,22 +1621,16 @@ class FreqMapperIngestor:
             # double-score a coincidental collision).
             return _outcome("skipped_duplicate")
 
+        # Flat, always -- see this module's docstring ("THE
+        # COVERAGE-MAPPER PRINCIPLE") and _passive_rx_points()'s own
+        # docstring. verified_tx no longer goes through any scoring
+        # function at all: points_per_event IS the answer, full stop --
+        # there is nothing left here to call.
         if is_rx:
-            # Quality/watcher_count weighting deliberately DEFERRED --
-            # see _passive_rx_points()'s own docstring and this module's
-            # docstring. Both fields are threaded through regardless, so
-            # a future weighting decision needs no re-plumbing here.
-            flat_points = _passive_rx_points(
-                event.get("quality"), event.get("watcher_count"),
-                passive_rx_points_per_event,
-            )
+            flat_points = _passive_rx_points(passive_rx_points_per_event)
             unique_bonus = passive_rx_unique_painter_bonus
         else:
-            flat_points = _verified_tx_points(
-                event.get("watcher_count"), points_per_event,
-                watcher_weight_enabled, watcher_weight_base,
-                watcher_weight_increment, watcher_weight_cap,
-            )
+            flat_points = points_per_event
             unique_bonus = unique_painter_bonus
 
         try:
