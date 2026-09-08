@@ -185,11 +185,12 @@ def _season_id(conn) -> int:
 def _event(verification_id: str, node_ref: str = "0a0a0a0a") -> dict:
     from datetime import datetime, timezone
     return {
-        "verification_id": verification_id,
+        "event_id": f"verified_tx:{verification_id}",
+        "event_type": "verified_tx",
         "radio_node_id": "!" + node_ref,
         "latitude": LAT,
         "longitude": LON,
-        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -230,8 +231,8 @@ def test_process_one_event_gate_by_source(conn, source, expect_painted):
     # Regardless of outcome, the event is always deduped -- see this
     # gate's own comment in app/freqmapper_ingest.py.
     seen = conn.execute(
-        "SELECT count(*) FROM freqmapper_verification WHERE verification_id = ?",
-        (f"verif-{source}",),
+        "SELECT count(*) FROM freqmapper_verification WHERE event_id = ?",
+        (f"verified_tx:verif-{source}",),
     ).fetchone()[0]
     assert seen == 1
 

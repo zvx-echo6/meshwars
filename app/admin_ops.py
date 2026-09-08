@@ -45,7 +45,10 @@ from .checkin import (
 )
 from .config import settings
 from .db import connect, get_cursor
-from .freqmapper_ingest import CURSOR_KEY as FREQMAPPER_CURSOR_KEY, load_freqmapper_config
+from .freqmapper_ingest import (
+    COMBINED_CURSOR_KEY as FREQMAPPER_CURSOR_KEY,
+    load_freqmapper_config,
+)
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .node_ref import normalize_sender_name
 from .place_rotation import preview_week, week_start_for_date, week_start_for_ts
@@ -1196,13 +1199,17 @@ async def admin_paint(request: Request):
     route returns is exactly what the next poll cycle will act on.
     last_poll_at/last_poll_error inside it are written by
     FreqMapperIngestor after every completed cycle (see that module's
-    _record_ok/_record_error). cursor is the raw stored FreqMapper
+    _record_ok/_record_error). cursor is the raw stored combined-feed
     cursor value (app/db.py's cursor table, keyed
-    freqmapper_ingest.CURSOR_KEY) -- opaque to this app, shown as-is so
-    an operator can tell whether it has ever advanced at all.
-    verification_count is how many distinct FreqMapper events this
-    deployment has ever recorded (app/db.py's freqmapper_verification),
-    the plainest "is anything actually arriving" number available.
+    freqmapper_ingest.COMBINED_CURSOR_KEY) -- opaque to this app, shown
+    as-is so an operator can tell whether it has ever advanced at all.
+    This is the combined /coverage-events feed's own cursor, not the
+    old TX-only feed's (freqmapper_ingest.CURSOR_KEY) -- the two are
+    stored separately and are not interchangeable; see that module's
+    docstring. verification_count is how many distinct FreqMapper
+    events (both verified_tx and passive_rx) this deployment has ever
+    recorded (app/db.py's freqmapper_verification), the plainest "is
+    anything actually arriving" number available.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -1358,21 +1365,28 @@ async def admin_paint_update(request: Request):
 
 @router.post("/api/admin/paint/clear-cursor")
 async def admin_paint_clear_cursor(request: Request):
-    """Clear the stored FreqMapper cursor (app/db.py's cursor table,
-    key freqmapper_ingest.CURSOR_KEY) so the next poll re-walks the
-    verified-coverage feed from the very beginning. A real operational
-    need, not just a reset button: when the upstream moves from its
+    """Clear the stored combined-feed cursor (app/db.py's cursor table,
+    key freqmapper_ingest.COMBINED_CURSOR_KEY) so the next poll re-walks
+    /coverage-events from the very beginning. A real operational need,
+    not just a reset button: when the upstream moves from its
     development host to production, a cursor issued by the old backend
     may not resolve against the new one at all -- polling would then
-    either error or silently never advance.
+    either error or silently never advance. Only the combined feed's own
+    cursor is cleared -- the old TX-only feed's cursor
+    (freqmapper_ingest.CURSOR_KEY) is left untouched, since this module
+    no longer reads it (see that module's docstring for why it is kept
+    at all: a rollback safety net).
 
     Re-walking from the beginning is safe because dedup is keyed on
-    verification_id and runs BEFORE anything else touches an event (see
+    event_id and runs BEFORE anything else touches an event (see
     app/freqmapper_ingest.py's _process_one_event and
     freqmapper_verification's own comment in app/db.py) -- every event
     this loop has ever looked at, painted or not, is already recorded
-    there, so an already-seen event coming back around after a clear is
-    a no-op, not a replay or a double-score.
+    there under its prefixed event_id (including history migrated from
+    the old feed's bare verification_id -- see
+    app/db.py's _migrate_freqmapper_verification_event_id), so an
+    already-seen event coming back around after a clear is a no-op, not
+    a replay or a double-score.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):

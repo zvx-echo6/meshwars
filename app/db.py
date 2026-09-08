@@ -363,24 +363,36 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     PRIMARY KEY (player_id, protocol, day)
 );
 
--- One row per FreqMapper verified-coverage event ever processed
--- (app/freqmapper_ingest.py). verification_id is that event's whole
--- identity -- a stable UUID FreqMapper itself assigns, one per event,
--- never reused -- so this is a pure dedup table: INSERT OR IGNORE on the
--- primary key means an event already seen (a page re-fetched after a
--- restart before the cursor was persisted, a retry, an overlapping
--- page) is a no-op rather than a re-processed, re-scored event. Recorded
--- for EVERY event that reaches this check, regardless of whether the
--- radio turns out to be registered or in bounds, or which source is
--- currently painting the Meshtastic board (settings.mt_paint_source) --
--- this table's only job is "have we ever looked at this specific event
--- before," not "did it score." Pruned well past FreqMapper's own paging
--- window by app/freqmapper_ingest.py's own housekeeping, the same
--- reasoning app/mc_ingest.py's retention windows use, so this cannot
--- grow without bound on a long-running deployment.
+-- One row per FreqMapper coverage event ever processed
+-- (app/freqmapper_ingest.py). event_id is that event's whole identity --
+-- FreqMapper's own combined-feed dedup key, prefixed by event type
+-- ("verified_tx:<uuid>" or "passive_rx:<uuid>") so the two evidence
+-- types can never collide on the same primary key -- so this is a pure
+-- dedup table: INSERT OR IGNORE on the primary key means an event
+-- already seen (a page re-fetched after a restart before the cursor was
+-- persisted, a retry, an overlapping page) is a no-op rather than a
+-- re-processed, re-scored event. Recorded for EVERY event that reaches
+-- this check, regardless of whether the radio turns out to be
+-- registered or in bounds, or which source is currently painting the
+-- Meshtastic board (settings.mt_paint_source) -- this table's only job
+-- is "have we ever looked at this specific event before," not "did it
+-- score." Pruned well past FreqMapper's own paging window by
+-- app/freqmapper_ingest.py's own housekeeping, the same reasoning
+-- app/mc_ingest.py's retention windows use, so this cannot grow without
+-- bound on a long-running deployment.
+--
+-- Column was named verification_id (a bare UUID, no prefix) before this
+-- deployment migrated from the old TX-only /verified-coverage feed to
+-- the combined /coverage-events feed -- see
+-- _migrate_freqmapper_verification_event_id below for the one-time,
+-- idempotent rewrite that prefixes every existing row's value with
+-- "verified_tx:" (the only event type the old feed ever reported) and
+-- renames the column, so the combined feed re-reading this deployment's
+-- entire history recognizes every one of them as already seen and never
+-- re-scores it.
 CREATE TABLE IF NOT EXISTS freqmapper_verification (
-    verification_id TEXT PRIMARY KEY,
-    seen_at          INTEGER NOT NULL
+    event_id TEXT PRIMARY KEY,
+    seen_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verification(seen_at);
 
@@ -423,6 +435,20 @@ CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verifi
 -- deliberately left OUT of freqmapper_verification below (unlike every
 -- other skip reason, which IS recorded there) so that moving this date
 -- earlier and clearing the cursor can still pick the event back up.
+-- watcher_weight_* (added in MIGRATIONS below, after this table already
+-- shipped): optional scaling of a verified_tx event's points by the
+-- combined feed's new watcher_count field, entirely OFF by default --
+-- see app/freqmapper_ingest.py's _tx_points() for the scoring formula
+-- and its own comment on why watcher_weight_enabled=0 is load-bearing,
+-- not just a convenient starting value: deploying this column must
+-- change NO existing player's score until an operator explicitly flips
+-- it on through the admin config. When enabled, a verified_tx event is
+-- worth watcher_weight_base points for its first watcher plus
+-- watcher_weight_increment for each additional one, capped at
+-- watcher_weight_cap so one very-watched transmission cannot dominate a
+-- season. When disabled (or when an event's watcher_count is missing or
+-- null -- see _tx_points), points_per_event above is used unchanged,
+-- exactly as before this feature existed.
 CREATE TABLE IF NOT EXISTS freqmapper_config (
     id                     INTEGER PRIMARY KEY CHECK (id = 1),
     mt_paint_source        TEXT NOT NULL DEFAULT 'both',
@@ -436,7 +462,11 @@ CREATE TABLE IF NOT EXISTS freqmapper_config (
     paint_from             TEXT NOT NULL DEFAULT '',
     last_poll_at           INTEGER,
     last_poll_error        TEXT,
-    updated_at             INTEGER NOT NULL DEFAULT 0
+    updated_at             INTEGER NOT NULL DEFAULT 0,
+    watcher_weight_enabled   INTEGER NOT NULL DEFAULT 0,
+    watcher_weight_base      REAL NOT NULL DEFAULT 0.5,
+    watcher_weight_increment REAL NOT NULL DEFAULT 0.1,
+    watcher_weight_cap       REAL NOT NULL DEFAULT 1.0
 );
 
 -- ---------------------------------------------------------------------
@@ -2256,6 +2286,21 @@ MIGRATIONS = [
     # deployment upgrading into this migration keeps painting exactly
     # nothing extra until an operator explicitly sets a date.
     "ALTER TABLE freqmapper_config ADD COLUMN paint_from TEXT NOT NULL DEFAULT ''",
+    # watcher_weight_* added after freqmapper_config already shipped --
+    # see that column group's own comment on the CREATE TABLE above.
+    # watcher_weight_enabled defaults to 0 (off), the same safe-by-
+    # default value a fresh install's CREATE TABLE already gives it, so
+    # an existing deployment upgrading into this migration keeps scoring
+    # every verified_tx event at the existing flat points_per_event,
+    # completely unaffected by watcher_count, until an operator
+    # explicitly turns weighting on. base/increment/cap only take effect
+    # once that happens, so their defaults only need to be sensible
+    # starting points for whoever configures them, not neutral in their
+    # own right the way watcher_weight_enabled's default has to be.
+    "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_base REAL NOT NULL DEFAULT 0.5",
+    "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_increment REAL NOT NULL DEFAULT 0.1",
+    "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_cap REAL NOT NULL DEFAULT 1.0",
     # The account layer's link to the existing player model (see the
     # "Account layer" section in SCHEMA above for the full story) --
     # `player` is a pre-existing table with rows already in it on every
@@ -2455,6 +2500,67 @@ def _migrate_session_privacy(conn: sqlite3.Connection) -> None:
     log.info("account_session privacy migration: complete (%d row(s) reduced, ip column dropped)", len(rows))
 
 
+def _migrate_freqmapper_verification_event_id(conn: sqlite3.Connection) -> None:
+    """One-time, idempotent migration: freqmapper_verification.verification_id
+    (a bare UUID -- all this table ever held, back when the only feed it
+    deduped was the old TX-only /verified-coverage endpoint) becomes
+    .event_id, the combined /coverage-events feed's own dedup key, which
+    is prefixed by event type ("verified_tx:<uuid>" or
+    "passive_rx:<uuid>") -- see freqmapper_verification's own comment on
+    the CREATE TABLE above and app/freqmapper_ingest.py's module
+    docstring for the full story of this migration.
+
+    This is THE correctness-critical part of the combined-feed cutover.
+    Every row already in this table was written by the old feed, which
+    only ever reported verified_tx events and deduped on the bare
+    verification_id FreqMapper assigned -- and per FreqMapper's own docs,
+    "for verified_tx the UUID is the same value as verification_id." So
+    for every existing row, the combined feed's equivalent event_id is
+    exactly "verified_tx:" + the value already stored. Prefixing every
+    row in place BEFORE the rename below means that when
+    FreqMapperIngestor starts reading the combined feed -- which, on a
+    cleared or stale cursor, can hand back events this deployment already
+    processed years of history ago -- the INSERT OR IGNORE dedup check in
+    _process_one_event sees each of those events' event_id as already
+    present and skips it, exactly as if nothing had changed. Without this
+    migration, every one of those historical events would look brand new
+    under its prefixed key and get re-painted and re-scored the first
+    time the combined feed's cursor ever revisits them.
+
+    Gate: PRAGMA table_info tells us directly whether this database still
+    carries the old `verification_id` column -- the same shape-based gate
+    _migrate_session_privacy above uses, for the same reason: a plain
+    ALTER TABLE ... RENAME COLUMN is not safe to blindly re-run every
+    boot the way the plain-SQL MIGRATIONS list below is (a second run
+    would fail with "no such column: verification_id", which is not one
+    of the "already applied" errors that loop knows how to swallow -- see
+    init_db's own comment on that loop). A fresh install's SCHEMA above
+    already creates the table with `event_id` directly, so PRAGMA
+    table_info never finds `verification_id` there and this is a true
+    no-op for it too, same as for a database this has already run
+    against once.
+    """
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(freqmapper_verification)")}
+    if "verification_id" not in cols:
+        return  # fresh install (SCHEMA already has event_id), or already migrated
+
+    log.info("freqmapper_verification migration: starting (prefixing verification_id -> event_id)")
+
+    # WHERE guard makes the UPDATE itself idempotent too (belt and
+    # braces alongside the column-shape gate above): once a row carries
+    # a "verified_tx:" or "passive_rx:" prefix it is left alone, so a
+    # hypothetical second pass over the same still-unrenamed table (there
+    # is no code path that produces one today, but this costs nothing)
+    # would not double-prefix anything.
+    conn.execute(
+        "UPDATE freqmapper_verification SET verification_id = 'verified_tx:' || verification_id"
+        " WHERE verification_id NOT LIKE 'verified_tx:%' AND verification_id NOT LIKE 'passive_rx:%'"
+    )
+    conn.execute("ALTER TABLE freqmapper_verification RENAME COLUMN verification_id TO event_id")
+
+    log.info("freqmapper_verification migration: complete")
+
+
 def init_db() -> None:
     """Create schema and apply pragmas. Idempotent."""
     _ensure_parent_dir(settings.db_path)
@@ -2502,6 +2608,15 @@ def init_db() -> None:
         # must stop boot loudly rather than let the app start up
         # against a schema app/sessions.py does not expect.
         _migrate_session_privacy(conn)
+
+        # freqmapper_verification's verification_id -> event_id rewrite
+        # (see that function's own docstring for the full story) --
+        # unguarded by try/except for the same reason
+        # _migrate_session_privacy is just above: this changes the
+        # table's actual columns and its dedup keys, and a failure here
+        # must stop boot loudly rather than let the app start up and
+        # potentially re-score history against a half-migrated table.
+        _migrate_freqmapper_verification_event_id(conn)
 
         # Places Worth Going seed (app/places_seed.py): reference data
         # shipped with the code, same as app/reference/places.csv, but
