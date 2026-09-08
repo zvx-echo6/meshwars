@@ -1,6 +1,14 @@
 """Tests for the 2026-09-08 FreqMapper combined-feed cutover
 (app/freqmapper_ingest.py, app/db.py's freqmapper_verification/
-freqmapper_config schema changes).
+freqmapper_config schema changes), AS AMENDED by the same-day incident
+fix (see app/freqmapper_ingest.py's module docstring for the full
+story): the schema migration this file originally tested
+(_migrate_freqmapper_verification_event_id, prefixing verification_id
+into a combined event_id) turned out to be unnecessary and has been
+reverted (app/db.py's _migrate_freqmapper_verification_verification_id);
+what actually protects the live board is the separate high-water-mark
+backfill guard, tested in tests/test_freqmapper_backfill_guard.py, not
+this file.
 
 FreqMapper replaced the old TX-only /verified-coverage feed this module
 used to poll with a combined /coverage-events feed carrying both
@@ -11,13 +19,16 @@ specific correctness properties Matt's brief called out:
   A. event_type branching -- verified_tx scores exactly as before,
      passive_rx and any unrecognized event_type are counted but never
      painted, and neither can crash the poll loop (test_event_type_*).
-  B. The dedupe-key migration -- app/db.py's
-     _migrate_freqmapper_verification_event_id, the correctness-critical
-     part of this whole change: an event already processed under the
-     old bare verification_id must be recognised as a duplicate when it
-     comes back from the combined feed under its prefixed event_id, so
-     switching feeds never re-scores history (test_migrate_*,
-     test_old_verification_id_recognised_*).
+  B. The dedupe-key REVERT -- app/db.py's
+     _migrate_freqmapper_verification_verification_id, which converges
+     every deployment (including preview, and any operator who ran
+     d114a5a even briefly) back onto a single `verification_id` column:
+     a database already migrated to the prefixed `event_id` shape is
+     converted back (verified_tx: rows unprefixed and kept, passive_rx:
+     rows dropped), idempotently, and dedup itself now reads each
+     event's own verification_id/reception_id field directly -- no
+     prefixed string is ever constructed or parsed (test_migrate_*,
+     test_already_stored_verification_id_is_duplicate_no_prefix).
   C. occurred_at vs. published_at -- occurred_at drives the paint
      timestamp and the paint_from date gate; published_at must never be
      read as an event time even when it would produce a very different
@@ -175,6 +186,11 @@ def _tx_event(raw_id: str, node_ref: str = "0a0a0a0a", occurred_at: str | None =
     event = {
         "event_id": f"verified_tx:{raw_id}",
         "event_type": "verified_tx",
+        # verification_id is its OWN field on the live feed, not derived
+        # from event_id -- see app/freqmapper_ingest.py's module
+        # docstring ("Dedupe keys") and _process_one_event, which reads
+        # this field directly and never parses event_id's prefix.
+        "verification_id": raw_id,
         "radio_node_id": "!" + node_ref,
         "latitude": LAT,
         "longitude": LON,
@@ -190,6 +206,9 @@ def _tx_event(raw_id: str, node_ref: str = "0a0a0a0a", occurred_at: str | None =
 def _rx_event(raw_id: str, node_ref: str = "0a0a0a0a") -> dict:
     return {
         "event_id": f"passive_rx:{raw_id}",
+        # reception_id is passive_rx's own dedupe field, its own UUID
+        # space, independent of verification_id -- see _tx_event above.
+        "reception_id": raw_id,
         "event_type": "passive_rx",
         "radio_node_id": "!" + node_ref,
         "latitude": LAT,
@@ -282,7 +301,7 @@ def test_process_one_event_unknown_event_type_counted_never_crashes(conn):
     rows = conn.execute("SELECT count(*) FROM player_cell_ping").fetchone()[0]
     assert rows == 0
     seen = conn.execute(
-        "SELECT count(*) FROM freqmapper_verification WHERE event_id = ?", ("mystery:evt-1",)
+        "SELECT count(*) FROM freqmapper_verification WHERE verification_id = ?", ("mystery:evt-1",)
     ).fetchone()[0]
     assert seen == 1
 
@@ -302,96 +321,115 @@ def test_process_one_event_ordinary_dedupe(conn):
 
 
 # ---------------------------------------------------------------------
-# B. the dedupe-key migration (app/db.py)
+# B. the dedupe-key revert (app/db.py) -- undoing d114a5a's unnecessary
+#    verification_id -> event_id migration, converging every deployment
+#    (including one that ran d114a5a briefly) back onto one shape.
 # ---------------------------------------------------------------------
 
-def _old_shape_freqmapper_db(tmp_path) -> str:
-    """A standalone sqlite file with freqmapper_verification in its
-    PRE-migration shape (verification_id, no event_id), populated the
-    way a real already-deployed database would have it before the
-    combined-feed cutover.
+def _d114a5a_shape_freqmapper_db(tmp_path) -> str:
+    """A standalone sqlite file with freqmapper_verification in the
+    shape d114a5a's now-removed migration left it in -- `event_id`
+    holding a mix of prefixed verified_tx: and passive_rx: rows, plus
+    one row matching neither prefix (an unrecognized-event-type row,
+    dedup'd on the feed's own generic event_id -- see
+    _process_one_event's own fallback) -- exactly what preview, or any
+    operator who deployed d114a5a even briefly, actually has on disk.
     """
-    path = str(tmp_path / "pre_migration_fm.db")
+    path = str(tmp_path / "d114a5a_shape_fm.db")
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE freqmapper_verification ("
-        "  verification_id TEXT PRIMARY KEY,"
+        "  event_id TEXT PRIMARY KEY,"
         "  seen_at INTEGER NOT NULL"
         ")"
     )
     now = int(time.time())
     conn.executemany(
-        "INSERT INTO freqmapper_verification(verification_id, seen_at) VALUES (?, ?)",
-        [("old-uuid-1", now), ("old-uuid-2", now)],
+        "INSERT INTO freqmapper_verification(event_id, seen_at) VALUES (?, ?)",
+        [
+            ("verified_tx:old-uuid-1", now),
+            ("verified_tx:old-uuid-2", now),
+            ("passive_rx:old-rx-uuid-1", now),
+            ("mystery:untouched-1", now),
+        ],
     )
     conn.commit()
     return path
 
 
-def test_migrate_freqmapper_verification_prefixes_existing_rows_and_renames_column(tmp_path):
-    path = _old_shape_freqmapper_db(tmp_path)
+def test_migrate_reverts_event_id_strips_prefixes_drops_passive_rx(tmp_path):
+    path = _d114a5a_shape_freqmapper_db(tmp_path)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
 
-    db._migrate_freqmapper_verification_event_id(conn)
+    db._migrate_freqmapper_verification_verification_id(conn)
     conn.commit()
 
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(freqmapper_verification)")}
-    assert "verification_id" not in cols
-    assert "event_id" in cols
+    assert "event_id" not in cols
+    assert "verification_id" in cols
 
-    ids = {row["event_id"] for row in conn.execute("SELECT event_id FROM freqmapper_verification")}
+    ids = {row["verification_id"] for row in conn.execute("SELECT verification_id FROM freqmapper_verification")}
     conn.close()
-    assert ids == {"verified_tx:old-uuid-1", "verified_tx:old-uuid-2"}
+    # verified_tx: rows -> unprefixed and kept; passive_rx: row -> DELETED
+    # (see the migration's own docstring for why: passive RX never
+    # painted anything, so there is no dedup history worth protecting,
+    # and keeping it would mix reception_id's UUID space into a column
+    # now reasoned about as pure verification_id space); an unrecognized
+    # row matching neither prefix is left untouched.
+    assert ids == {"old-uuid-1", "old-uuid-2", "mystery:untouched-1"}
 
 
-def test_migrate_freqmapper_verification_is_a_no_op_on_an_already_migrated_db(conn):
+def test_migrate_reverts_is_a_no_op_on_a_never_migrated_or_already_reverted_db(conn):
     # The shared `conn` fixture already runs the current SCHEMA, which
-    # defines freqmapper_verification with event_id from the start --
-    # calling the migration against it must do nothing and must not
-    # raise, since app/db.py's init_db() calls this unconditionally on
-    # every boot.
-    db._migrate_freqmapper_verification_event_id(conn)  # must not raise
+    # defines freqmapper_verification with verification_id from the
+    # start -- calling the migration against it must do nothing and
+    # must not raise, since app/db.py's init_db() calls this
+    # unconditionally on every boot.
+    db._migrate_freqmapper_verification_verification_id(conn)  # must not raise
 
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(freqmapper_verification)")}
-    assert "event_id" in cols
-    assert "verification_id" not in cols
+    assert "verification_id" in cols
+    assert "event_id" not in cols
 
 
-def test_migrate_freqmapper_verification_is_idempotent_across_two_runs(tmp_path):
-    path = _old_shape_freqmapper_db(tmp_path)
+def test_migrate_reverts_is_idempotent_across_two_runs(tmp_path):
+    path = _d114a5a_shape_freqmapper_db(tmp_path)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
 
-    db._migrate_freqmapper_verification_event_id(conn)
+    db._migrate_freqmapper_verification_verification_id(conn)
     conn.commit()
-    db._migrate_freqmapper_verification_event_id(conn)  # must not raise or double-prefix
+    db._migrate_freqmapper_verification_verification_id(conn)  # must not raise or re-touch rows
     conn.commit()
 
-    ids = {row["event_id"] for row in conn.execute("SELECT event_id FROM freqmapper_verification")}
+    ids = {row["verification_id"] for row in conn.execute("SELECT verification_id FROM freqmapper_verification")}
     conn.close()
-    assert ids == {"verified_tx:old-uuid-1", "verified_tx:old-uuid-2"}
+    assert ids == {"old-uuid-1", "old-uuid-2", "mystery:untouched-1"}
 
 
-def test_old_verification_id_recognised_as_duplicate_under_new_prefixed_key(tmp_path):
-    """THE correctness-critical proof for this whole migration: an event
-    already processed under the old bare verification_id must be
-    recognised as already-seen when the combined feed hands it back
-    under its prefixed event_id (per FreqMapper's own docs, the UUID
-    half is identical for a verified_tx event), so re-reading history
-    through the new feed never re-scores it.
+def test_already_stored_verification_id_is_duplicate_no_prefix(tmp_path):
+    """THE correctness-critical proof for the revert: a verification_id
+    already on disk (from before d114a5a, or converged back by the
+    revert migration above) must be recognised as a duplicate when the
+    combined feed hands the SAME bare verification_id back again --
+    with no event_id, no prefix, and no string construction/parsing
+    anywhere in the comparison. This is what makes the now-removed
+    forward migration provably unnecessary: dedup never needed the
+    prefixed form to begin with.
     """
-    path = _old_shape_freqmapper_db(tmp_path)
+    path = _d114a5a_shape_freqmapper_db(tmp_path)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    db._migrate_freqmapper_verification_event_id(conn)
+    db._migrate_freqmapper_verification_verification_id(conn)
     conn.commit()
 
-    # The combined feed hands back the exact same historical event, now
-    # shaped with its prefixed event_id.
+    # The combined feed hands back the exact same historical event,
+    # keyed on its own bare verification_id field -- exactly what
+    # _process_one_event's dedup INSERT does.
     cur = conn.execute(
-        "INSERT OR IGNORE INTO freqmapper_verification(event_id, seen_at) VALUES (?, ?)",
-        ("verified_tx:old-uuid-1", int(time.time())),
+        "INSERT OR IGNORE INTO freqmapper_verification(verification_id, seen_at) VALUES (?, ?)",
+        ("old-uuid-1", int(time.time())),
     )
     conn.commit()
     conn.close()
@@ -444,8 +482,8 @@ def test_process_one_event_paint_from_gate_uses_occurred_at_not_published_at(con
     # Date-skipped events are deliberately left OUT of the dedup table
     # -- see this function's own comment -- so it stays recoverable.
     seen = conn.execute(
-        "SELECT count(*) FROM freqmapper_verification WHERE event_id = ?",
-        ("verified_tx:gate-early",),
+        "SELECT count(*) FROM freqmapper_verification WHERE verification_id = ?",
+        ("gate-early",),
     ).fetchone()[0]
     assert seen == 0
 
@@ -606,8 +644,12 @@ def test_poll_once_processes_combined_page_and_branches_by_event_type(db_path, m
     assert get_cursor(conn, COMBINED_CURSOR_KEY, "") == "combined-cursor-1"
     painted = conn.execute("SELECT count(*) FROM player_cell_ping").fetchone()[0]
     assert painted == 1  # only the verified_tx event painted
-    seen_ids = {r["event_id"] for r in conn.execute("SELECT event_id FROM freqmapper_verification")}
-    assert seen_ids == {"verified_tx:ev-1", "passive_rx:rx-1", "mystery:xyz-1"}
+    # Each event type deduped on its own bare id field -- verification_id
+    # for verified_tx, reception_id for passive_rx, the feed's generic
+    # event_id only as the fallback for the unrecognized type -- no
+    # prefixed compound key anywhere (see this module's docstring).
+    seen_ids = {r["verification_id"] for r in conn.execute("SELECT verification_id FROM freqmapper_verification")}
+    assert seen_ids == {"ev-1", "rx-1", "mystery:xyz-1"}
 
 
 def test_poll_once_429_honours_retry_after_and_does_not_advance_cursor(db_path, monkeypatch):

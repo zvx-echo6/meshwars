@@ -300,8 +300,9 @@ def apply_paint(
     transmission), so there is nothing to gate a per-repeater cooldown
     on -- the event-level dedup that cooldown exists to provide is
     instead handled once, before this function is ever called, by
-    FreqMapper's own event_id table (app/db.py's
-    freqmapper_verification): each event is globally unique and
+    app/db.py's freqmapper_verification dedup table (keyed on each
+    event's own verification_id/reception_id field): each event is
+    globally unique and
     processed at most once, so every call made in this mode is a fresh,
     intentional award, never a repeat that needs throttling. `repeater_ids`
     is unused in this mode -- the caller passes an empty list -- so the
@@ -391,7 +392,7 @@ def apply_paint(
     else:
         # Flat-award mode (see this function's docstring) -- no repeater
         # cooldown, no per-visit cap, no repeater-credit bookkeeping.
-        # FreqMapper's own event_id dedup is what makes this safe:
+        # freqmapper_verification's dedup is what makes this safe:
         # this function is never called twice for the same event.
         points = flat_points
 

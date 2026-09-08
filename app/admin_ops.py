@@ -1377,16 +1377,25 @@ async def admin_paint_clear_cursor(request: Request):
     no longer reads it (see that module's docstring for why it is kept
     at all: a rollback safety net).
 
-    Re-walking from the beginning is safe because dedup is keyed on
-    event_id and runs BEFORE anything else touches an event (see
+    An event this loop has genuinely already looked at, painted or not,
+    is safe to see again after a clear -- dedup (keyed on each event's
+    own verification_id/reception_id field, see
     app/freqmapper_ingest.py's _process_one_event and
-    freqmapper_verification's own comment in app/db.py) -- every event
-    this loop has ever looked at, painted or not, is already recorded
-    there under its prefixed event_id (including history migrated from
-    the old feed's bare verification_id -- see
-    app/db.py's _migrate_freqmapper_verification_event_id), so an
-    already-seen event coming back around after a clear is a no-op, not
-    a replay or a double-score.
+    freqmapper_verification's own comment in app/db.py) runs before
+    anything else touches an event, so an already-seen one coming back
+    around is a no-op, not a replay or a double-score. That is NOT the
+    whole safety story, though -- see the 2026-09-08 incident this
+    documents (app/freqmapper_ingest.py's module docstring, "THE ACTUAL
+    FIX"): re-walking from the beginning also legitimately hands back
+    events this deployment has genuinely never looked at before, which
+    dedup cannot and must not treat as duplicates. The high-water-mark
+    backfill guard (same module) is what actually keeps THOSE from
+    re-painting the live board: an event whose occurred_at falls before
+    freqmapper_ingest.HIGH_WATER_MARK_KEY's stored value is recorded
+    (so it is never re-evaluated) but never painted, unless an operator
+    has separately opted into freqmapper_config.allow_backfill. In other
+    words, clearing this cursor is safe by default specifically because
+    that guard exists, not because dedup alone was ever enough.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):

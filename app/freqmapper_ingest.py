@@ -25,8 +25,8 @@ exactly what the old TX-only feed reported, one event per verification)
 or "passive_rx" (a wardriving radio hearing a packet a Watcher also
 reported nearby in time, with no live equivalent on the old feed). This
 module scores verified_tx exactly as it always has. passive_rx is
-counted in the poll-cycle stats (skipped_passive_rx) and its event_id is
-recorded in freqmapper_verification for future-proofing, but nothing
+counted in the poll-cycle stats (skipped_passive_rx) and its reception_id
+is recorded in freqmapper_verification for future-proofing, but nothing
 about it is ever painted -- passive RX scoring is a separate, not-yet-
 made decision (see _process_one_event below). Any event_type this module
 does not recognize (a future addition to the feed) is likewise counted
@@ -59,22 +59,68 @@ event that somehow still carries only those (never expected against the
 live combined feed today, but cheap insurance against a schema
 regression), tried strictly after occurred_at.
 
-event_id and the dedupe migration: the combined feed's dedupe key is
-`event_id`, itself prefixed by event type -- "verified_tx:<uuid>" or
-"passive_rx:<uuid>" -- and FreqMapper's docs confirm that for a
-verified_tx event the UUID half is the exact same value the old feed
-called `verification_id`. This module used to dedupe on that bare
-verification_id; freqmapper_verification's primary key is now `event_id`
-and holds the prefixed form for every event type. app/db.py's
-_migrate_freqmapper_verification_event_id() is the one-time migration
-that rewrites every row already on disk from the old bare form to
-"verified_tx:" + itself (the only event type the old feed could ever
-have written) before renaming the column -- see that function's own
-docstring in app/db.py for the full reasoning. Without it, the combined
-feed replaying this deployment's entire history (which a cleared cursor
-does deliberately -- see clear-cursor's own docstring below) would see
-every historical event as brand new under its newly-prefixed key and
-re-paint/re-score all of it.
+Dedupe keys: each event type carries its OWN identity field, and this
+module reads that field directly rather than constructing or parsing
+any prefixed compound key. A verified_tx event's dedupe key is its own
+`verification_id` field; a passive_rx event's is its own `reception_id`
+field -- two independent UUID spaces FreqMapper assigns separately, never
+compared against each other. Both are recorded in freqmapper_verification
+(same table, same `verification_id` column -- see that table's own
+comment in app/db.py for why an unrecognized future event_type falls
+back to the feed's generic `event_id` field instead, having no more
+specific field name this code can know in advance). The feed's own
+`event_id` (still present on every event, still prefixed the same way
+-- "verified_tx:<uuid>" / "passive_rx:<uuid>") is otherwise unused here:
+see the incident story below for why.
+
+THE 2026-09-08 INCIDENT, AND WHAT ACTUALLY CAUSED IT: this module's
+first cutover to the combined feed (commit d114a5a) shipped believing
+`event_id`'s prefixed form had to become the new dedupe key, and
+migrated freqmapper_verification's schema to match (app/db.py's
+now-removed _migrate_freqmapper_verification_event_id). That migration
+was deployed to production and had to be rolled back -- the live board
+got re-painted with weeks of historical coverage. But the schema
+migration was never the bug, and reverting it (see app/db.py's
+_migrate_freqmapper_verification_verification_id, which now undoes it
+on any deployment that ran it even briefly) does not fix the incident
+either -- it was correct all along, verified against the live API:
+for a verified_tx event, `verification_id` already holds the exact
+same UUID as the bare half of `event_id`, so switching feeds could
+never have made a previously-seen event look unseen.
+
+What actually happened: this deployment's OLD ingest, against the old
+TX-only feed, never read FreqMapper history from the beginning -- it
+started from wherever its cursor happened to be first pointed and
+walked forward from there, so an unknown stretch of FreqMapper's early
+history was simply never ingested by this deployment at all. Cutting
+over to the combined feed introduced a brand new cursor key
+(COMBINED_CURSOR_KEY below, deliberately independent of the old feed's
+CURSOR_KEY -- see that constant's own comment), which necessarily
+started at the true beginning of FreqMapper's history. That is not a
+dedupe-key mismatch replaying already-seen events -- it is a cursor
+correctly, for the first time, handing this deployment weeks of
+GENUINELY new-to-it history, which the dedup table (correctly) had
+never seen before under any key, prefixed or not, and which therefore
+painted, correctly by the dedup table's own logic and incorrectly by
+what the live board actually needed.
+
+THE ACTUAL FIX -- the high-water-mark backfill guard below: dedup
+alone can only ever answer "have I processed this exact event before,"
+never "is this event old." A cursor that legitimately starts fresh (a
+brand new feed, a cleared cursor, a first-ever backfill after days of
+downtime) will always hand back genuinely-unseen historical events, and
+no amount of dedupe-key correctness changes that. So this module now
+separately tracks the newest event time (occurred_at) it has ever
+processed -- a persistent high-water mark, app/db.py's generic `cursor`
+table again, key HIGH_WATER_MARK_KEY below -- and any event older than
+that mark, even one that passes dedup cleanly as brand new, is recorded
+(so it is never re-evaluated) but never painted, unless an operator has
+explicitly opted into a deliberate backfill (freqmapper_config.
+allow_backfill, default off). See _process_one_event's own comment on
+the guard for exactly where it sits in the pipeline, and
+seed_freqmapper_config_from_env's lack of a counterpart for why this
+flag, like watcher_weight_*, has no settings.py origin -- it is a brand
+new protection with nothing to seed from.
 
 Why no auto-bind: app/mc_ingest.py auto-registers a MeshCore radio's
 first wardriving ping, because that ping was pushed BY the radio's owner
@@ -127,8 +173,8 @@ score, each exactly as if it were the sole selected source -- this is
 the default; see that column's comment in app/config.py for why two
 sources touching the same cell needs no arbitration here, since
 app/mc_scoring.py's cooldown/capture-window machinery already absorbs
-it). This module's poll loop keeps running (and keeps deduping on
-event_id) whenever freqmapper_config.enabled is true REGARDLESS
+it). This module's poll loop keeps running (and keeps deduping) whenever
+freqmapper_config.enabled is true REGARDLESS
 of mt_paint_source -- only the final score/write (mc_scoring.apply_paint
 + the player_cell_ping insert) is gated on it being "freqmapper" or
 "both". That means an operator can watch FreqMapper's own poll-cycle
@@ -201,6 +247,46 @@ CURSOR_KEY = "freqmapper_next_cursor"
 # The combined feed's own cursor -- a distinct key/value row in
 # app/db.py's generic `cursor` table, independent of CURSOR_KEY above.
 COMBINED_CURSOR_KEY = "freqmapper_combined_next_cursor"
+
+# The backfill guard's high-water mark -- see this module's docstring
+# ("THE ACTUAL FIX") for the incident it protects against. A THIRD,
+# independent key/value row in the same generic `cursor` table
+# (app/db.py's get_cursor/set_cursor): not the combined feed's own
+# pagination cursor (COMBINED_CURSOR_KEY), which is opaque to this app
+# and says nothing about event TIME, only feed position. This one holds
+# a plain epoch-seconds string -- the newest verified_tx occurred_at
+# this deployment has ever processed -- read and (monotonically)
+# advanced by _process_one_event on every verified_tx event that passes
+# ordinary dedup, and BOOTSTRAPPED once, before this deployment ever
+# looks at an event under this guard, by _maybe_seed_high_water_mark
+# (see that function's own docstring for why an absent mark is not
+# always "nothing to protect": an upgrading deployment already has
+# FreqMapper history and needs the mark seeded from it, not from
+# whatever event happens to arrive first). Reusing the `cursor` table
+# rather than adding a dedicated column anywhere: it is exactly what
+# that table is for ("generic key/value cursor for poll bookmarks etc."
+# -- see its own comment in app/db.py), this is a single scalar with the
+# exact same lifecycle as the feed cursor next to it (read every cycle,
+# persisted in the same write transaction, never needed outside this
+# module), and a fresh install already gets the table for free from
+# SCHEMA, so this needs no schema change or migration of its own at all.
+HIGH_WATER_MARK_KEY = "freqmapper_backfill_high_water_mark"
+
+# Grace window for _maybe_seed_high_water_mark's history-based seed
+# (see that function's own docstring): freqmapper_verification.seen_at
+# is this deployment's own PROCESSING time, not the event's occurred_at
+# -- an event that genuinely occurred shortly before this guard's
+# rollout could still be published, fetched, and processed just after
+# it, landing in freqmapper_verification with a seen_at at or after the
+# rollout moment despite being a perfectly legitimate, non-backfill
+# event. Backing the seeded mark off by this many seconds means that
+# near-boundary case is not silently misclassified as backfill and
+# dropped, while still blocking the weeks of genuinely old history the
+# guard exists to catch. Not configurable -- an operator with a real
+# reason to want more history painted already has
+# freqmapper_config.allow_backfill for that, a coarser but simpler lever
+# than tuning this window.
+_BACKFILL_SEED_GRACE_SECONDS = 3600
 
 _MIN_LIMIT = 1
 _MAX_LIMIT = 1000
@@ -400,10 +486,10 @@ def load_freqmapper_config(conn) -> dict:
     unconditionally and it should always be there in practice, but a
     poll cycle failing outright over a missing config row would be a
     worse failure mode than briefly falling back to the settings this
-    row was itself seeded from. watcher_weight_* has no settings.py
-    counterpart (it is a brand new feature with no prior env-var
-    configuration to fall back to -- see that column group's own
-    comment in app/db.py), so this fallback hardcodes the same neutral
+    row was itself seeded from. watcher_weight_* and allow_backfill both
+    have no settings.py counterpart (both are brand new, with no prior
+    env-var configuration to fall back to -- see those columns' own
+    comments in app/db.py), so this fallback hardcodes the same neutral
     values the real column defaults already give a fresh or freshly
     migrated database.
     """
@@ -412,7 +498,7 @@ def load_freqmapper_config(conn) -> dict:
         "       page_limit, points_per_event, unique_painter_bonus, paint_from, "
         "       last_poll_at, last_poll_error, updated_at, "
         "       watcher_weight_enabled, watcher_weight_base, "
-        "       watcher_weight_increment, watcher_weight_cap "
+        "       watcher_weight_increment, watcher_weight_cap, allow_backfill "
         "  FROM freqmapper_config WHERE id = 1"
     ).fetchone()
     if row is None:
@@ -433,10 +519,12 @@ def load_freqmapper_config(conn) -> dict:
             "watcher_weight_base": 0.5,
             "watcher_weight_increment": 0.1,
             "watcher_weight_cap": 1.0,
+            "allow_backfill": False,
         }
     d = dict(row)
     d["enabled"] = bool(d["enabled"])
     d["watcher_weight_enabled"] = bool(d["watcher_weight_enabled"])
+    d["allow_backfill"] = bool(d["allow_backfill"])
     return d
 
 
@@ -461,11 +549,11 @@ def seed_freqmapper_config_from_env(conn) -> None:
     changes NO behavior: same source, same connector, same scoring, just
     moved from env-var-and-restart to database-and-admin-API.
 
-    Does not touch watcher_weight_* -- there is no settings.py
-    counterpart to seed from (see that column group's own comment in
-    app/db.py), and its schema/MIGRATIONS default (disabled) is already
-    exactly the neutral value this bootstrap would otherwise be trying
-    to reproduce.
+    Does not touch watcher_weight_* or allow_backfill -- neither has a
+    settings.py counterpart to seed from (see those columns' own
+    comments in app/db.py), and each one's schema/MIGRATIONS default
+    (disabled / guard active) is already exactly the neutral value this
+    bootstrap would otherwise be trying to reproduce.
     """
     row = conn.execute("SELECT updated_at FROM freqmapper_config WHERE id = 1").fetchone()
     if row is None or row["updated_at"] != 0:
@@ -788,6 +876,16 @@ class FreqMapperIngestor:
             # even attempted, so there is nothing new to log either.
             return cfg["poll_interval_seconds"]
 
+        # Bootstrap the backfill guard's high-water mark BEFORE this
+        # cycle's page is even fetched, let alone processed -- see
+        # _maybe_seed_high_water_mark's own docstring for why an
+        # upgrading deployment (existing freqmapper_verification
+        # history, no mark yet) must never let the guard seed itself
+        # from whatever event happens to arrive first. Idempotent and
+        # cheap on every cycle after the first -- see that function's
+        # own docstring.
+        await self._maybe_seed_high_water_mark()
+
         data = await self._fetch_page(cfg, cursor)
         if data is None:
             return cfg["poll_interval_seconds"]
@@ -817,6 +915,7 @@ class FreqMapperIngestor:
             "skipped_malformed": 0, "skipped_inactive_source": 0,
             "skipped_before_paint_from": 0, "skipped_passive_rx": 0,
             "skipped_unknown_event_type": 0, "error": 0,
+            "backfill_skipped": 0,
         }
 
         async with WriteSession() as wconn:
@@ -840,6 +939,7 @@ class FreqMapperIngestor:
                     watcher_weight_base=cfg["watcher_weight_base"],
                     watcher_weight_increment=cfg["watcher_weight_increment"],
                     watcher_weight_cap=cfg["watcher_weight_cap"],
+                    allow_backfill=cfg["allow_backfill"],
                 )
                 counts[outcome] = counts.get(outcome, 0) + 1
 
@@ -868,13 +968,14 @@ class FreqMapperIngestor:
         log.info(
             "freqmapper poll: events=%d painted=%d duplicate=%d unregistered=%d "
             "bad_coord=%d out_of_area=%d malformed=%d inactive_source=%d "
-            "before_paint_from=%d passive_rx=%d unknown_event_type=%d error=%d has_more=%s",
+            "before_paint_from=%d passive_rx=%d unknown_event_type=%d "
+            "backfill_skipped=%d error=%d has_more=%s",
             len(events), counts["painted"], counts["skipped_duplicate"],
             counts["skipped_unregistered"], counts["skipped_bad_coord"],
             counts["skipped_out_of_area"], counts["skipped_malformed"],
             counts["skipped_inactive_source"], counts["skipped_before_paint_from"],
             counts["skipped_passive_rx"], counts["skipped_unknown_event_type"],
-            counts["error"], has_more,
+            counts["backfill_skipped"], counts["error"], has_more,
         )
 
         await self._maybe_housekeeping()
@@ -891,6 +992,7 @@ class FreqMapperIngestor:
         watcher_weight_base: float = 0.5,
         watcher_weight_increment: float = 0.1,
         watcher_weight_cap: float = 1.0,
+        allow_backfill: bool = False,
     ) -> str:
         """Process one combined-feed event inside the caller's already-
         open write transaction. Returns an outcome key matching one of
@@ -900,11 +1002,24 @@ class FreqMapperIngestor:
         neutral defaults (weighting OFF, matching freqmapper_config's
         own default) so every existing call site that predates
         watcher-count weighting keeps behaving exactly as before without
-        having to be updated just to pass them.
+        having to be updated just to pass them. allow_backfill is the
+        same shape for the same reason, default False (guard active,
+        matching freqmapper_config's own default) -- see the backfill
+        guard's own comment below, and this module's docstring ("THE
+        ACTUAL FIX"), for what it protects against.
         """
         if not isinstance(event, dict):
             return "skipped_malformed"
 
+        # A bare presence/shape check on the feed's own generic identity
+        # field -- NOT this function's dedup key for a verified_tx or
+        # passive_rx event (see below, and this module's docstring on
+        # why dedup reads each type's own id field instead). Still
+        # meaningful here: an event with no event_id at all has no
+        # coherent identity regardless of type, and is the fallback
+        # dedup key for a type this code does not recognize (just
+        # below), so it is worth rejecting up front rather than letting
+        # a malformed envelope reach either branch.
         event_id = event.get("event_id")
         if not isinstance(event_id, str) or not event_id:
             return "skipped_malformed"
@@ -913,15 +1028,19 @@ class FreqMapperIngestor:
 
         if event_type == EVENT_TYPE_PASSIVE_RX:
             # Passive RX scoring is Phase 3 -- a separate, not-yet-made
-            # decision (see this module's docstring). Deduped now (its
-            # own prefixed event_id, never colliding with a verified_tx
-            # row) purely so a future RX-scoring rollout does not have
-            # to treat this deployment's entire RX history as unseen;
-            # nothing about it is painted, scored, or otherwise acted on
-            # here.
+            # decision (see this module's docstring). Deduped now (on
+            # its OWN `reception_id` field -- a UUID space FreqMapper
+            # assigns independently of verification_id, never compared
+            # against it) purely so a future RX-scoring rollout does not
+            # have to treat this deployment's entire RX history as
+            # unseen; nothing about it is painted, scored, or otherwise
+            # acted on here.
+            reception_id = event.get("reception_id")
+            if not isinstance(reception_id, str) or not reception_id:
+                return "skipped_malformed"
             cur = conn.execute(
-                "INSERT OR IGNORE INTO freqmapper_verification(event_id, seen_at) VALUES (?, ?)",
-                (event_id, now_ts),
+                "INSERT OR IGNORE INTO freqmapper_verification(verification_id, seen_at) VALUES (?, ?)",
+                (reception_id, now_ts),
             )
             if cur.rowcount == 0:
                 return "skipped_duplicate"
@@ -932,9 +1051,12 @@ class FreqMapperIngestor:
             # addition to the feed FreqMapper's own migration guidance
             # explicitly anticipates. Counted and deduped exactly like
             # passive_rx, never painted, and never allowed to crash the
-            # poll loop over an event shape this code predates.
+            # poll loop over an event shape this code predates. Keyed on
+            # the feed's generic `event_id` (already validated above) --
+            # unlike verified_tx/passive_rx, an unrecognized type has no
+            # more specific field name this code can know in advance.
             cur = conn.execute(
-                "INSERT OR IGNORE INTO freqmapper_verification(event_id, seen_at) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO freqmapper_verification(verification_id, seen_at) VALUES (?, ?)",
                 (event_id, now_ts),
             )
             if cur.rowcount == 0:
@@ -981,18 +1103,92 @@ class FreqMapperIngestor:
         if ts is not None and (not paint_from or _local_date(ts) < paint_from):
             return "skipped_before_paint_from"
 
-        # Dedup on event_id FIRST, before anything else touches this
-        # event -- see freqmapper_verification's comment in app/db.py.
+        # Dedup on the event's OWN verification_id field FIRST, before
+        # anything else touches this event -- see
+        # freqmapper_verification's comment in app/db.py. NOT event_id:
+        # see this module's docstring for why d114a5a's prefixed-event_id
+        # dedupe key was an unnecessary migration this deployment has
+        # since reverted (app/db.py's
+        # _migrate_freqmapper_verification_verification_id) --
+        # verification_id already holds the exact same UUID FreqMapper's
+        # docs describe, with no compound string to construct or parse.
         # Recorded regardless of registration, coordinate validity, or
         # which source is currently painting, so a later retry (a
         # restart, a switch of mt_paint_source) never reprocesses the
         # same verified observation twice.
+        verification_id = event.get("verification_id")
+        if not isinstance(verification_id, str) or not verification_id:
+            return "skipped_malformed"
         cur = conn.execute(
-            "INSERT OR IGNORE INTO freqmapper_verification(event_id, seen_at) VALUES (?, ?)",
-            (event_id, now_ts),
+            "INSERT OR IGNORE INTO freqmapper_verification(verification_id, seen_at) VALUES (?, ?)",
+            (verification_id, now_ts),
         )
         if cur.rowcount == 0:
             return "skipped_duplicate"
+
+        # ----- Backfill guard (the high-water mark) -----
+        # THE ACTUAL FIX for the 2026-09-08 incident -- see this
+        # module's docstring for the full story of what actually caused
+        # it (a legitimately-fresh cursor, not a dedupe-key mismatch)
+        # and why ordinary dedup above, however correct, could never
+        # have prevented it: dedup only ever answers "have I processed
+        # this exact event before," and a genuinely new-to-this-
+        # deployment historical event (a cleared cursor, a brand new
+        # feed, days of downtime) always passes it cleanly.
+        #
+        # Runs here -- AFTER the dedup insert above, which is what
+        # satisfies "record its id in the dedupe table" for an event
+        # this check turns away: an event flagged as backfill here is
+        # never re-evaluated on a later poll just because the mark
+        # hasn't caught up to it yet -- but BEFORE every gate below
+        # (registration, coordinates, play area, mt_paint_source). A
+        # backfilled event is backfill regardless of whether the radio
+        # it names happens to be registered; there is no reason to run
+        # those checks just to throw the answer away.
+        #
+        # ts is only ever None here if occurred_at (and every fallback
+        # _event_time tries) was unparseable -- the existing "ts is
+        # None" malformed check further below already exists for that
+        # case, so this guard simply does nothing when ts is None and
+        # lets that check catch it exactly as before this guard existed.
+        #
+        # allow_backfill (freqmapper_config, default False -- see that
+        # column's own comment in app/db.py) is the operator's explicit
+        # opt-in to bypass this guard entirely: when set, an event is
+        # never treated as backfill and always proceeds to paint
+        # normally, for a deployment that has a real, deliberate reason
+        # to want history painted -- but see the mark-advance comment
+        # just below for why this still must never move the mark
+        # backwards, even while bypassed.
+        #
+        # One read of the mark serves both halves below (whether to
+        # turn this event away, and whether to advance the mark
+        # afterwards) -- there is no correctness reason to re-read it
+        # between them within the same already-open write transaction.
+        if ts is not None:
+            hwm_raw = get_cursor(conn, HIGH_WATER_MARK_KEY, "")
+            high_water_mark = int(hwm_raw) if hwm_raw else None
+
+            if high_water_mark is not None and ts < high_water_mark and not allow_backfill:
+                return "backfill_skipped"
+
+            # The mark only ever moves FORWARD (or is seeded, from
+            # nothing, on a fresh deployment with no prior mark at all
+            # -- see this module's docstring on why a brand-new install
+            # must still be able to legitimately ingest). Runs
+            # unconditionally once the guard above has cleared this
+            # event -- including when allow_backfill bypassed it for an
+            # event actually older than the mark, which must never drag
+            # the mark backwards -- so the mark always reflects the
+            # newest verified_tx occurred_at this deployment has ever
+            # processed, independent of whether this particular event
+            # goes on to paint (unregistered/out-of-area/etc. below can
+            # still turn it away) -- "processed," not "scored," is what
+            # a high-water mark needs to track to keep protecting the
+            # next genuinely historical event that arrives after this
+            # one.
+            if high_water_mark is None or ts > high_water_mark:
+                set_cursor(conn, HIGH_WATER_MARK_KEY, str(ts))
 
         # Normalize via the shared helper (app/node_ref.py), not a
         # hand-rolled strip -- it accepts both "!43211234" and bare form,
@@ -1158,3 +1354,110 @@ class FreqMapperIngestor:
             removed = cur.rowcount
         if removed:
             log.info("freqmapper housekeeping: removed %d stale verification rows", removed)
+
+    # ---- backfill guard bootstrap ---------------------------------------
+
+    async def _maybe_seed_high_water_mark(self) -> None:
+        """Bootstrap the backfill guard's high-water mark exactly once,
+        the very first time this deployment ever reaches this guard with
+        no mark stored -- see this module's docstring ("THE ACTUAL FIX")
+        and HIGH_WATER_MARK_KEY's own comment for what the mark protects.
+        Called from _poll_once, unconditionally, BEFORE this cycle's
+        page is even fetched, so the very first event this deployment
+        ever evaluates against the guard sees an already-seeded mark,
+        never an absent one.
+
+        THE GAP THIS CLOSES: an absent mark is NOT the same as "there is
+        nothing to protect." That is only true for a genuinely fresh
+        install -- freqmapper_verification is empty, this deployment has
+        never processed a FreqMapper event at all. An UPGRADING
+        deployment -- every real one, including this one -- already has
+        freqmapper_verification rows from before this guard existed.
+        Left to seed itself from whatever event happens to arrive first
+        (_process_one_event's own fallback, still correct for a true
+        fresh install -- see below), an upgrading deployment would hit
+        exactly the incident this guard exists to prevent: a brand new
+        combined-feed cursor's first page is the OLDEST event in
+        FreqMapper's history (this module's docstring explains why), the
+        guard would stand aside for it since no mark exists yet, seed
+        the mark to that ancient timestamp, and then paint straight
+        through every event after it, since each one looks "newer" than
+        the one before it. The guard would be installed and would do
+        nothing.
+
+        THE FIX: on an upgrading deployment, seed the mark from history
+        BEFORE ever looking at an event, not from whatever event happens
+        to arrive first. max(seen_at) across freqmapper_verification --
+        this deployment's own record of the newest FreqMapper event it
+        has ever processed, from before this guard existed -- minus
+        _BACKFILL_SEED_GRACE_SECONDS (see that constant's own comment
+        for why the grace window exists) becomes the seeded mark. Every
+        event older than that is correctly recognized as backfill from
+        the very first cycle this guard ever runs against this
+        deployment, not after however many events it takes to "catch
+        up."
+
+        On a true fresh install (freqmapper_verification empty), this is
+        a deliberate no-op: there is genuinely no history to seed from,
+        so _process_one_event's own per-event logic seeds the mark from
+        whatever event it processes first, exactly as if this function
+        did not exist. Logged at INFO either way -- loudly, on purpose:
+        if this guard ever misfires, the cause should be obvious in the
+        logs (which branch fired, what value, how many rows it was
+        derived from) rather than inferred after the fact from painting
+        volume, which is exactly how the incident this guard exists to
+        prevent was first noticed.
+
+        allow_backfill is NOT consulted here -- seeding the mark and
+        deciding whether to obey it are separate concerns
+        (_process_one_event's own guard reads allow_backfill fresh every
+        event, same as every other DB-backed config value in this
+        module), so an operator who flips it on later still overrides
+        whatever mark this function seeded, exactly as it overrides a
+        mark seeded any other way.
+
+        Idempotent and safe to call every cycle (the ordinary case,
+        called unconditionally from _poll_once): the get_cursor check
+        below is a single indexed read on the tiny `cursor` table, and
+        is the ENTIRE cost of every call after the first one ever seeds
+        or confirms there is nothing to seed.
+        """
+        conn = connect()
+        try:
+            if get_cursor(conn, HIGH_WATER_MARK_KEY, ""):
+                return  # already seeded, by this function or an ordinary event
+            row = conn.execute(
+                "SELECT count(*) AS n, max(seen_at) AS newest FROM freqmapper_verification"
+            ).fetchone()
+            row_count = row["n"]
+            newest_seen_at = row["newest"]
+        finally:
+            conn.close()
+
+        if row_count == 0:
+            log.info(
+                "freqmapper backfill guard: no high-water mark and no existing "
+                "freqmapper_verification history -- fresh install, guard will "
+                "seed from the first event it processes"
+            )
+            return
+
+        seeded = newest_seen_at - _BACKFILL_SEED_GRACE_SECONDS
+        async with WriteSession() as wconn:
+            # Re-check inside the write transaction -- belt and braces
+            # against two overlapping calls both finding no mark and
+            # both trying to seed it (should not happen: _poll_once is
+            # only ever driven by one run_forever loop per process, but
+            # this costs nothing and keeps a hypothetical concurrent
+            # caller from clobbering a mark _process_one_event may have
+            # already seeded from a real event in the meantime).
+            if get_cursor(wconn, HIGH_WATER_MARK_KEY, ""):
+                return
+            set_cursor(wconn, HIGH_WATER_MARK_KEY, str(seeded))
+        log.info(
+            "freqmapper backfill guard: seeded high-water mark=%d from EXISTING "
+            "history (max(seen_at)=%d across %d freqmapper_verification "
+            "row(s), minus %ds grace) -- an UPGRADING deployment, not a "
+            "fresh install",
+            seeded, newest_seen_at, row_count, _BACKFILL_SEED_GRACE_SECONDS,
+        )

@@ -364,15 +364,19 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
 );
 
 -- One row per FreqMapper coverage event ever processed
--- (app/freqmapper_ingest.py). event_id is that event's whole identity --
--- FreqMapper's own combined-feed dedup key, prefixed by event type
--- ("verified_tx:<uuid>" or "passive_rx:<uuid>") so the two evidence
--- types can never collide on the same primary key -- so this is a pure
--- dedup table: INSERT OR IGNORE on the primary key means an event
--- already seen (a page re-fetched after a restart before the cursor was
--- persisted, a retry, an overlapping page) is a no-op rather than a
--- re-processed, re-scored event. Recorded for EVERY event that reaches
--- this check, regardless of whether the radio turns out to be
+-- (app/freqmapper_ingest.py). verification_id is that event's whole
+-- identity -- for a verified_tx event, the event's own `verification_id`
+-- field, a stable UUID FreqMapper itself assigns, one per event, never
+-- reused; for a passive_rx event, its own `reception_id` field instead
+-- (a separate, independently-assigned UUID space -- see below); for any
+-- event_type this code does not recognize, the feed's generic top-level
+-- `event_id` field, purely as a best-effort fallback since a future
+-- event type carries no field name this code can know in advance. So
+-- this is a pure dedup table: INSERT OR IGNORE on the primary key means
+-- an event already seen (a page re-fetched after a restart before the
+-- cursor was persisted, a retry, an overlapping page) is a no-op rather
+-- than a re-processed, re-scored event. Recorded for EVERY event that
+-- reaches this check, regardless of whether the radio turns out to be
 -- registered or in bounds, or which source is currently painting the
 -- Meshtastic board (settings.mt_paint_source) -- this table's only job
 -- is "have we ever looked at this specific event before," not "did it
@@ -381,18 +385,23 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
 -- app/mc_ingest.py's retention windows use, so this cannot grow without
 -- bound on a long-running deployment.
 --
--- Column was named verification_id (a bare UUID, no prefix) before this
--- deployment migrated from the old TX-only /verified-coverage feed to
--- the combined /coverage-events feed -- see
--- _migrate_freqmapper_verification_event_id below for the one-time,
--- idempotent rewrite that prefixes every existing row's value with
--- "verified_tx:" (the only event type the old feed ever reported) and
--- renames the column, so the combined feed re-reading this deployment's
--- entire history recognizes every one of them as already seen and never
--- re-scores it.
+-- History: briefly renamed to `event_id` and prefixed ("verified_tx:
+-- <uuid>" / "passive_rx:<uuid>") by commit d114a5a's combined-feed
+-- cutover, which believed the combined feed's own dedup key needed that
+-- prefixed form. It did not -- verified against the live API, a
+-- verified_tx event's `verification_id` field already carries the exact
+-- same UUID as the bare half of its `event_id`, so no schema change was
+-- ever required, and the actual production incident that migration was
+-- meant to guard against had a different cause entirely (see
+-- app/freqmapper_ingest.py's module docstring -- the incident was a
+-- cursor-cutover backfill, not a dedupe-key mismatch). See
+-- _migrate_freqmapper_verification_verification_id below for the
+-- one-time, idempotent migration that converges every deployment --
+-- including preview and any operator who ran d114a5a even briefly --
+-- back onto this original `verification_id` shape.
 CREATE TABLE IF NOT EXISTS freqmapper_verification (
-    event_id TEXT PRIMARY KEY,
-    seen_at  INTEGER NOT NULL
+    verification_id TEXT PRIMARY KEY,
+    seen_at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verification(seen_at);
 
@@ -449,6 +458,21 @@ CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verifi
 -- season. When disabled (or when an event's watcher_count is missing or
 -- null -- see _tx_points), points_per_event above is used unchanged,
 -- exactly as before this feature existed.
+-- allow_backfill (added in MIGRATIONS below, after this table already
+-- shipped, in response to the incident this whole migration file
+-- exists to fix -- see app/freqmapper_ingest.py's module docstring):
+-- the operator opt-in for the high-water-mark backfill guard in
+-- _process_one_event. OFF by default, the safe direction -- a fresh or
+-- freshly upgraded deployment keeps the guard active and never paints
+-- historical events just because they happen to be new to this
+-- deployment (a cleared cursor, a first-ever backfill, a switched
+-- feed) -- exactly the failure mode that produced the incident this
+-- column exists to let an operator deliberately re-enable, not repeat
+-- by accident. When set, the guard is bypassed entirely: an event
+-- older than the stored high-water mark paints exactly as if it were
+-- current, for an operator who has a real, deliberate reason to want
+-- history painted (e.g. onboarding this deployment against a
+-- FreqMapper account with pre-existing coverage history).
 CREATE TABLE IF NOT EXISTS freqmapper_config (
     id                     INTEGER PRIMARY KEY CHECK (id = 1),
     mt_paint_source        TEXT NOT NULL DEFAULT 'both',
@@ -463,6 +487,7 @@ CREATE TABLE IF NOT EXISTS freqmapper_config (
     last_poll_at           INTEGER,
     last_poll_error        TEXT,
     updated_at             INTEGER NOT NULL DEFAULT 0,
+    allow_backfill         INTEGER NOT NULL DEFAULT 0,
     watcher_weight_enabled   INTEGER NOT NULL DEFAULT 0,
     watcher_weight_base      REAL NOT NULL DEFAULT 0.5,
     watcher_weight_increment REAL NOT NULL DEFAULT 0.1,
@@ -2301,6 +2326,13 @@ MIGRATIONS = [
     "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_base REAL NOT NULL DEFAULT 0.5",
     "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_increment REAL NOT NULL DEFAULT 0.1",
     "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_cap REAL NOT NULL DEFAULT 1.0",
+    # allow_backfill added after freqmapper_config already shipped --
+    # see that column's own comment on the CREATE TABLE above. Defaults
+    # to 0 (guard active), the same safe-by-default value a fresh
+    # install's CREATE TABLE already gives it, so an existing deployment
+    # upgrading into this migration keeps the backfill guard on and
+    # changes NO painting behavior until an operator explicitly opts in.
+    "ALTER TABLE freqmapper_config ADD COLUMN allow_backfill INTEGER NOT NULL DEFAULT 0",
     # The account layer's link to the existing player model (see the
     # "Account layer" section in SCHEMA above for the full story) --
     # `player` is a pre-existing table with rows already in it on every
@@ -2500,65 +2532,104 @@ def _migrate_session_privacy(conn: sqlite3.Connection) -> None:
     log.info("account_session privacy migration: complete (%d row(s) reduced, ip column dropped)", len(rows))
 
 
-def _migrate_freqmapper_verification_event_id(conn: sqlite3.Connection) -> None:
-    """One-time, idempotent migration: freqmapper_verification.verification_id
-    (a bare UUID -- all this table ever held, back when the only feed it
-    deduped was the old TX-only /verified-coverage endpoint) becomes
-    .event_id, the combined /coverage-events feed's own dedup key, which
-    is prefixed by event type ("verified_tx:<uuid>" or
-    "passive_rx:<uuid>") -- see freqmapper_verification's own comment on
-    the CREATE TABLE above and app/freqmapper_ingest.py's module
-    docstring for the full story of this migration.
+def _migrate_freqmapper_verification_verification_id(conn: sqlite3.Connection) -> None:
+    """One-time, idempotent migration: freqmapper_verification.event_id
+    (the prefixed dedupe key -- "verified_tx:<uuid>" / "passive_rx:
+    <uuid>" -- commit d114a5a's combined-feed cutover briefly shipped)
+    reverts to .verification_id, the table's original shape, holding
+    each event's own type-appropriate id UNPREFIXED -- see
+    freqmapper_verification's own comment on the CREATE TABLE above and
+    app/freqmapper_ingest.py's module docstring for the full incident
+    story this undoes.
 
-    This is THE correctness-critical part of the combined-feed cutover.
-    Every row already in this table was written by the old feed, which
-    only ever reported verified_tx events and deduped on the bare
-    verification_id FreqMapper assigned -- and per FreqMapper's own docs,
-    "for verified_tx the UUID is the same value as verification_id." So
-    for every existing row, the combined feed's equivalent event_id is
-    exactly "verified_tx:" + the value already stored. Prefixing every
-    row in place BEFORE the rename below means that when
-    FreqMapperIngestor starts reading the combined feed -- which, on a
-    cleared or stale cursor, can hand back events this deployment already
-    processed years of history ago -- the INSERT OR IGNORE dedup check in
-    _process_one_event sees each of those events' event_id as already
-    present and skips it, exactly as if nothing had changed. Without this
-    migration, every one of those historical events would look brand new
-    under its prefixed key and get re-painted and re-scored the first
-    time the combined feed's cursor ever revisits them.
+    WHY THIS EXISTS: d114a5a believed the combined feed's dedup key had
+    to change shape, and migrated this table to match. It did not --
+    verified against the live API, a verified_tx event's own
+    `verification_id` field already holds the exact same UUID as the
+    bare half of its `event_id`, so this table never needed to change
+    at all, and the incident that migration was meant to prevent had an
+    entirely different, unrelated cause (a cursor cutover that
+    legitimately started reading FreqMapper history this deployment had
+    genuinely never ingested before -- see this module's docstring, not
+    a dedupe-key mismatch). d114a5a was rolled back in production
+    (eb15040) before ever running this migration there for real, but it
+    DID run against preview, and would have run against any operator's
+    database that deployed d114a5a even briefly -- so every deployment
+    is not guaranteed to be in the same shape, and this migration exists
+    purely to converge all of them back onto one, not to fix the
+    incident (see app/freqmapper_ingest.py's high-water-mark guard for
+    the actual fix).
 
-    Gate: PRAGMA table_info tells us directly whether this database still
-    carries the old `verification_id` column -- the same shape-based gate
-    _migrate_session_privacy above uses, for the same reason: a plain
-    ALTER TABLE ... RENAME COLUMN is not safe to blindly re-run every
-    boot the way the plain-SQL MIGRATIONS list below is (a second run
-    would fail with "no such column: verification_id", which is not one
-    of the "already applied" errors that loop knows how to swallow -- see
-    init_db's own comment on that loop). A fresh install's SCHEMA above
-    already creates the table with `event_id` directly, so PRAGMA
-    table_info never finds `verification_id` there and this is a true
-    no-op for it too, same as for a database this has already run
-    against once.
+    Two starting shapes this has to handle:
+
+      1. Never ran d114a5a's migration at all (never deployed that
+         commit, or deploys this revert first): already has
+         `verification_id`. Nothing to do.
+      2. DID run d114a5a's migration (preview right now; any operator
+         who deployed d114a5a even briefly): has `event_id`, holding a
+         mix of "verified_tx:<uuid>" and "passive_rx:<uuid>" rows.
+
+    For shape 2: every "verified_tx:" row is unprefixed back to its bare
+    UUID and KEPT -- per the reasoning above, that bare UUID is exactly
+    what `verification_id` would already hold, and losing this dedup
+    history would risk re-painting that event the next time the
+    combined feed's cursor happens to revisit it, exactly the failure
+    this whole table exists to prevent. Every "passive_rx:" row is
+    DELETED outright rather than unprefixed and kept -- passive RX has
+    never painted anything (see app/freqmapper_ingest.py's "passive_rx
+    counted, never painted" contract), so there is nothing for its
+    dedup history to protect, and keeping it would put a value from
+    `reception_id`'s own separate UUID space into a column that is once
+    again named, and reasoned about everywhere else in this codebase, as
+    pure verification_id space -- a latent, silent way for an old RX
+    observation to mask a genuinely new verified_tx event that happens
+    to land on the same value. Deleting is strictly safer than
+    converting here, unlike the verified_tx case just above. A row
+    matching neither prefix (an unrecognized-event-type row -- see
+    _process_one_event's own fallback dedup for that case) is left
+    exactly as it was; this migration has no more specific field name to
+    convert it to than the one it already holds.
+
+    Gate: PRAGMA table_info, the same shape-based gate
+    _migrate_session_privacy above and d114a5a's own (now-removed)
+    migration both used, for the same reason: a plain ALTER TABLE ...
+    RENAME COLUMN is not safe to blindly re-run every boot the way the
+    plain-SQL MIGRATIONS list below is (a second run would fail with
+    "no such column: event_id", which is not one of the "already
+    applied" errors that loop knows how to swallow -- see init_db's own
+    comment on that loop). A fresh install's SCHEMA above already
+    creates the table with `verification_id` directly, so PRAGMA
+    table_info never finds `event_id` there and this is a true no-op
+    for it too, same as for a database that has already run this
+    migration once.
     """
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(freqmapper_verification)")}
-    if "verification_id" not in cols:
-        return  # fresh install (SCHEMA already has event_id), or already migrated
+    if "event_id" not in cols:
+        return  # never ran d114a5a's migration, or already reverted
 
-    log.info("freqmapper_verification migration: starting (prefixing verification_id -> event_id)")
-
-    # WHERE guard makes the UPDATE itself idempotent too (belt and
-    # braces alongside the column-shape gate above): once a row carries
-    # a "verified_tx:" or "passive_rx:" prefix it is left alone, so a
-    # hypothetical second pass over the same still-unrenamed table (there
-    # is no code path that produces one today, but this costs nothing)
-    # would not double-prefix anything.
-    conn.execute(
-        "UPDATE freqmapper_verification SET verification_id = 'verified_tx:' || verification_id"
-        " WHERE verification_id NOT LIKE 'verified_tx:%' AND verification_id NOT LIKE 'passive_rx:%'"
+    log.info(
+        "freqmapper_verification migration: reverting event_id -> verification_id "
+        "(stripping verified_tx: prefixes, dropping passive_rx: rows)"
     )
-    conn.execute("ALTER TABLE freqmapper_verification RENAME COLUMN verification_id TO event_id")
 
-    log.info("freqmapper_verification migration: complete")
+    # Drop passive_rx rows BEFORE the unprefix/rename below -- see this
+    # function's own docstring for why these are deleted rather than
+    # converted. WHERE guard (LIKE, not a bare equality) makes this
+    # idempotent on its own, belt and braces alongside the column-shape
+    # gate above: a hypothetical second pass over a not-yet-renamed
+    # table would simply find nothing left to delete.
+    conn.execute("DELETE FROM freqmapper_verification WHERE event_id LIKE 'passive_rx:%'")
+    # substr(...) rather than a second LIKE-guarded UPDATE loop: every
+    # remaining "verified_tx:" row is stripped back to its bare UUID in
+    # one pass. WHERE guard makes this idempotent too, same reasoning as
+    # the DELETE just above.
+    conn.execute(
+        "UPDATE freqmapper_verification SET event_id = substr(event_id, length('verified_tx:') + 1)"
+        " WHERE event_id LIKE 'verified_tx:%'"
+    )
+    conn.execute("ALTER TABLE freqmapper_verification RENAME COLUMN event_id TO verification_id")
+
+    log.info("freqmapper_verification migration: revert complete")
 
 
 def init_db() -> None:
@@ -2609,14 +2680,14 @@ def init_db() -> None:
         # against a schema app/sessions.py does not expect.
         _migrate_session_privacy(conn)
 
-        # freqmapper_verification's verification_id -> event_id rewrite
-        # (see that function's own docstring for the full story) --
-        # unguarded by try/except for the same reason
-        # _migrate_session_privacy is just above: this changes the
-        # table's actual columns and its dedup keys, and a failure here
-        # must stop boot loudly rather than let the app start up and
-        # potentially re-score history against a half-migrated table.
-        _migrate_freqmapper_verification_event_id(conn)
+        # freqmapper_verification's event_id -> verification_id revert
+        # (see that function's own docstring for the full story of why
+        # d114a5a's migration is being undone here) -- unguarded by
+        # try/except for the same reason _migrate_session_privacy is
+        # just above: this changes the table's actual columns and its
+        # dedup keys, and a failure here must stop boot loudly rather
+        # than let the app start up against a half-migrated table.
+        _migrate_freqmapper_verification_verification_id(conn)
 
         # Places Worth Going seed (app/places_seed.py): reference data
         # shipped with the code, same as app/reference/places.csv, but
