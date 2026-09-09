@@ -503,7 +503,7 @@ const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
 // already-light raster that pushes the pale tones toward white, so the
 // ground bleached to cream and took the greens with it. Colour is the
 // thing that was missing, so raise colour and leave tone alone.
-const BASEMAP_LIGHT_SATURATION = 0.6;
+const BASEMAP_LIGHT_SATURATION = 0;
 const BASEMAP_LIGHT_CONTRAST = 0;
 
 const HILLSHADE_OPACITY_MODE_FACTOR = { dark: 1.0, light: 0.4 };
@@ -4178,10 +4178,26 @@ const CARTO_TILE_URLS = [
 // parks and forest, blue water, tan built-up), so the shaded relief sits
 // on top of colour instead of on top of more grey. Same provider, same
 // attribution, same {key} handling as the dark set above.
+// OpenStreetMap's own standard tiles, not a CARTO light style. Both of
+// CARTO's light styles (positron, voyager) are built as quiet backdrops
+// for someone else's data: their ground is near-white by design, and
+// raster-saturation cannot put colour into a pixel that is already
+// white -- tried, and it goes garish before it goes green. OSM standard
+// has the colour baked in, which is the look being asked for.
+//
+// No {ratio}: OSM does not serve @2x tiles, and no subdomains: a/b/c
+// are deprecated, the single host is what their policy now asks for.
+//
+// USAGE POLICY, read this before pointing anything else at it. These
+// tiles are donated infrastructure run for OSM's own use plus LIGHT use
+// by others. This deployment qualifies today -- the traffic counter put
+// the whole site at 16 unique visitors and 29 page views for a day --
+// and attribution is already displayed. If MeshWars ever grows a real
+// audience, this has to move to a provider we pay for or to tiles we
+// serve ourselves from the planet extract; it must not quietly become
+// a busy app's default basemap.
 const CARTO_LIGHT_TILE_URLS = [
-  'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{ratio}.png',
-  'https://b.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{ratio}.png',
-  'https://c.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{ratio}.png',
+  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
 ];
 
 // Takes the URL list (CARTO_TILE_URLS or CARTO_LIGHT_TILE_URLS -- both
@@ -4402,17 +4418,22 @@ async function main() {
           // Light basemap mode's own source (feature: map-light-mode --
           // see BASEMAP_LIGHT_ID's own comment above for why this is a
           // second source/layer pair on a different axis than the
-          // gold/neon skin). Declared exactly like BASEMAP_ID above --
-          // same tileSize/attribution/maxzoom -- just CARTO's light_all
-          // tiles instead of dark_all. Attribution is identical CARTO
-          // wording either way, so it stays correct regardless of which
-          // basemap ends up visible.
+          // gold/neon skin). Unlike BASEMAP_ID this is OSM's own tile
+          // service, not CARTO, so three things differ deliberately:
+          //   - attribution credits OSM alone. CARTO does not serve
+          //     these tiles and must not be credited for them.
+          //   - maxzoom 19, which is as deep as OSM standard renders.
+          //     CARTO goes to 20; asking OSM for z20 just 404s.
+          //   - the CARTO key is NOT appended. cartoTiles() exists to
+          //     add ?key= for CARTO's paid tier; putting that on an OSM
+          //     URL would send a third party's key to OSM and break the
+          //     request. The raw list is used as-is.
           [BASEMAP_LIGHT_ID]: {
             type: 'raster',
-            tiles: cartoTiles(CARTO_LIGHT_TILE_URLS, cartoKey),
+            tiles: CARTO_LIGHT_TILE_URLS.slice(),
             tileSize: 256,
-            attribution: '© OpenStreetMap contributors © CARTO',
-            maxzoom: 20,
+            attribution: '© OpenStreetMap contributors',
+            maxzoom: 19,
           },
           // meshwars-hillshade-alpha-v4.pmtiles is finished imagery (WEBP
           // tiles, z0-12, RGBA), not elevation data -- there is nothing
