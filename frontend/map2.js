@@ -494,7 +494,18 @@ const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
 // today; at 0.7 on the light basemap it holds back exactly as much as
 // it used to when gold's basemap itself was light. See
 // applyBasemapTheme below for where this is applied.
-const HILLSHADE_OPACITY_MODE_FACTOR = { dark: 1.0, light: 0.7 };
+const HILLSHADE_OPACITY_MODE_FACTOR = { dark: 1.0, light: 0.4 };
+
+// The hillshade archive is grayscale imagery whose HIGHLIGHTS are near
+// white. Over the dark basemap those highlights are what makes terrain
+// legible at all, so nothing is clamped there. Over a light basemap the
+// same highlights have nothing to contrast against and the whole basin
+// blows out to glare -- sun-facing slopes turn to white paper and the
+// coloured ground underneath disappears. Pulling raster-brightness-max
+// down keeps the shadowed side of every ridge (which is what actually
+// draws the relief) while stopping the lit side from washing the map
+// out. Paired with the much lower light-mode opacity above.
+const HILLSHADE_BRIGHTNESS_MAX = { dark: 1.0, light: 0.72 };
 
 // Each checkbox id -> the style layer id(s) it toggles, and the
 // minimum zoom its underlying data starts at (measured from the tile
@@ -3219,6 +3230,7 @@ function applyBasemapTheme(map) {
   map.setLayoutProperty(BASEMAP_ID, 'visibility', mode === 'light' ? 'none' : 'visible');
   map.setLayoutProperty(BASEMAP_LIGHT_ID, 'visibility', mode === 'light' ? 'visible' : 'none');
   map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme] * HILLSHADE_OPACITY_MODE_FACTOR[mode]);
+  map.setPaintProperty(HILLSHADE_ID, 'raster-brightness-max', HILLSHADE_BRIGHTNESS_MAX[mode]);
   // board-fill's opacity is now owned by the slider (see
   // BOARD_FILL_OPACITY_DEFAULT_PCT/applyBoardFillOpacity above/below) --
   // BOARD_FILL_OPACITY_ZOOM[theme] is only the SHAPE that helper scales,
