@@ -183,6 +183,56 @@
   }
 }
 
+/* Light/dark basemap switch (map2.js's setupBasemapModeToggle, feature:
+ * map-light-mode) -- the Layers panel's own row above the "LAYERS"
+ * list. Same surface/border/active-state language as the board switch
+ * (mc.css's .mc-switch-row/.mc-switch-btn, top-right panel) so the two
+ * read as the same kind of control, just narrower to fit this panel
+ * (min-width 150px here vs. the scoreboard card's own width) --
+ * deliberately not the mc.css classes themselves, since this row's
+ * bottom border also has to double as the panel's own quiet separator
+ * ahead of .mw-layers-title, a job .mc-switch-row never has to do. */
+.mw-basemap-switch-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--mw-line);
+}
+
+.mw-basemap-switch-btn {
+  flex: 1 1 0;
+  background: var(--mw-raised);
+  color: var(--mw-text-2);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.mw-basemap-switch-btn:hover {
+  background: var(--mw-line);
+}
+
+/* Keyboard focus -- the board switch this is styled after has no
+ * explicit :focus-visible rule of its own (it relies on the browser
+ * default outline), which is invisible against .mc-switch-btn's own
+ * near-black --mw-raised fill in the gold skin. Given a visible ring
+ * here rather than repeating that gap. */
+.mw-basemap-switch-btn:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 1px;
+}
+
+.mw-basemap-switch-btn.active {
+  background: var(--mw-accent-active);
+  color: var(--mw-accent);
+  border-color: var(--mw-accent);
+}
+
 .mw-layers-title {
   font-weight: 600;
   margin-bottom: 6px;
@@ -221,6 +271,57 @@
 
 .mw-layers-list li.unavailable label {
   cursor: default;
+}
+
+/* Claimed-squares opacity slider (map2.js's setupOpacitySlider). A
+ * little extra vertical breathing room top and bottom marks it as a
+ * different kind of control from the checkbox rows around it, without a
+ * divider line heavy enough to read as a separate section of the panel.
+ */
+.mw-layers-opacity-row {
+  padding: 6px 0 4px;
+}
+
+.mw-layers-opacity-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+/* Same caption token as the unavailable-row note above -- this is a
+ * live readout, not the control itself, so it stays one step quieter
+ * than the "Claimed squares" label beside it. Tabular numerals so the
+ * percentage does not shift the label's width as it counts. */
+.mw-layers-opacity-value {
+  color: var(--mw-text-6);
+  font-variant-numeric: tabular-nums;
+}
+
+/* accent-color is the one styling hook a plain <input type="range">
+ * exposes without a full cross-browser thumb/track rebuild, and it
+ * takes the same --mw-accent token every other selected/active control
+ * in this panel already uses (.mw-layers-toggle:hover, etc). */
+.mw-layers-opacity-slider {
+  width: 100%;
+  accent-color: var(--mw-accent);
+  cursor: pointer;
+}
+
+/* "My location" status line (map2.js's setupMyLocationControl) -- the
+ * cell id readout in the normal case, a failure message in the error
+ * one. Indented to roughly clear the checkbox above it rather than
+ * sitting flush left under the whole row. */
+.mw-mylocation-status {
+  margin: 2px 0 2px 22px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--mw-text-6);
+}
+
+.mw-mylocation-status-error {
+  color: var(--mw-hostile);
 }
 
 /* Places Worth Going (docs/features/places.md): NOT a floating panel of
