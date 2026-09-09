@@ -3218,6 +3218,15 @@ function currentBasemapMode() {
 const GRID_LINE_COLOR_LIGHT = '#3a3a3a';
 const MY_LOCATION_STROKE_LIGHT = 'rgba(15, 15, 15, 0.75)';
 
+// The team-coloured dot's own outline (feature: team-coloured
+// location, see applyMyLocationColors) -- fixed across both basemap
+// modes and every skin, unlike MY_LOCATION_STROKE_LIGHT above. It sits
+// on top of my-location-halo's white ring, never directly on the
+// basemap or a claimed square, so it does not need a mode-dependent
+// pair: a dark ring against a white ring reads the same regardless of
+// what is under both of them.
+const MY_LOCATION_TEAM_DOT_STROKE = 'rgba(10, 10, 10, 0.85)';
+
 // Flips which of the two basemap sources is visible (BASEMAP_ID dark /
 // BASEMAP_LIGHT_ID light -- see their own comment above for why this is
 // a second source/layer pair again, on a different axis than the old
@@ -3273,10 +3282,66 @@ function applyBasemapTheme(map) {
   // neither skin's token reads on a light ground, see their own comment.
   const light = mode === 'light';
   map.setPaintProperty('cell-grid-lines', 'line-color', light ? GRID_LINE_COLOR_LIGHT : themeColor('--mw-text-6'));
+  applyMyLocationColors(map);
+}
+
+// Paints my-location-accuracy/-dot/-halo from two independent inputs:
+// the basemap light/dark mode (currentBasemapMode, exactly the logic
+// applyBasemapTheme always ran) and the signed-in viewer's team, if
+// any (myLocationTeam -- see fetchViewerTeam's own comment on how/when
+// that gets set). Called from applyBasemapTheme on every theme/
+// basemap-mode flip AND from setupMyLocationControl the moment the
+// account fetch resolves, so whichever of the two changes first, the
+// marker is always repainted from BOTH current values together, never
+// a stale one left over from before a theme flip or before the fetch
+// resolved.
+function applyMyLocationColors(map) {
+  const light = currentBasemapMode() === 'light';
+
+  // Accuracy circle: unchanged by team, on purpose (the ask: "stay
+  // visually subordinate to the dot; adjust it if the team colour
+  // makes it fight" -- it never does, because --mw-accent is gold/neon,
+  // never one of the seven team hues, so it cannot visually merge with
+  // the team-coloured dot drawn on top of it or the team-coloured
+  // square it may be sitting on).
   map.setPaintProperty('my-location-accuracy', 'circle-color', themeColor('--mw-accent'));
   map.setPaintProperty('my-location-accuracy', 'circle-stroke-color', light ? MY_LOCATION_STROKE_LIGHT : themeColor('--mw-accent'));
-  map.setPaintProperty('my-location-dot', 'circle-color', themeColor('--mw-accent'));
-  map.setPaintProperty('my-location-dot', 'circle-stroke-color', light ? MY_LOCATION_STROKE_LIGHT : themeColor('--mw-gold-light'));
+
+  const teamColor = myLocationTeam ? themeColor(`--mw-team-${myLocationTeam.toLowerCase()}`) : '';
+  if (teamColor) {
+    // Signed in with a linked team: paint a "target" marker -- a fixed
+    // white ring with a dark outline (my-location-halo, added
+    // invisible alongside the dot at map load) sits behind a bigger,
+    // team-coloured dot. Fixed white/near-black rather than the
+    // light/dark-mode stroke pair below, deliberately: this ring has
+    // to hold against FOUR different grounds, not two -- the dark
+    // basemap, the light basemap, and a claimed square in any of the
+    // seven team colours, INCLUDING this viewer's own. That last one
+    // is the hard case the mode-based stroke was never built for: it
+    // was picked to hold against a basemap, not a same-hue solid fill,
+    // so a purple dot with a purple-mode stroke on purple territory
+    // would still wash out. White and near-black are the two colours
+    // guaranteed not to be one of the seven saturated team hues, and a
+    // real square is never near-white AND near-black at once, so at
+    // least one of the halo's two rings holds contrast against
+    // whatever the dot is sitting on.
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.9);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-opacity', 1);
+    map.setPaintProperty('my-location-dot', 'circle-radius', 7);
+    map.setPaintProperty('my-location-dot', 'circle-color', teamColor);
+    map.setPaintProperty('my-location-dot', 'circle-stroke-color', MY_LOCATION_TEAM_DOT_STROKE);
+    map.setPaintProperty('my-location-dot', 'circle-stroke-width', 2);
+  } else {
+    // Not signed in, no linked player, the fetch has not resolved yet,
+    // or it failed -- today's exact appearance: halo fully transparent
+    // so it paints nothing, dot back to the plain accent/mode styling.
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-opacity', 0);
+    map.setPaintProperty('my-location-dot', 'circle-radius', 6);
+    map.setPaintProperty('my-location-dot', 'circle-color', themeColor('--mw-accent'));
+    map.setPaintProperty('my-location-dot', 'circle-stroke-color', light ? MY_LOCATION_STROKE_LIGHT : themeColor('--mw-gold-light'));
+    map.setPaintProperty('my-location-dot', 'circle-stroke-width', 2);
+  }
 }
 
 // theme-toggle.js sets data-theme on <html> directly; observing the
@@ -3731,8 +3796,49 @@ function setupGridLines(map) {
 // comment calls fetch(), sendClientLog(), or localStorage with a
 // coordinate in it. A future reader tempted to "also log this for
 // debugging" or wire it into telemetry: don't. The position must never
-// leave this tab.
+// leave this tab. The account fetch added below (fetchViewerTeam) is
+// the one exception to "nothing calls fetch() here" -- it sends no
+// coordinate, only reads GET /api/account, which already exists for
+// nav-auth.js/account.js and carries nothing this feature writes to.
 let myLocationWatchId = null;
+
+// The signed-in viewer's team ('RED' | 'GREEN' | ... , see
+// app/account_api.py's _player_out -- player.team, upper case, the
+// same casing TEAM_COLORS above already keys on) once fetchViewerTeam
+// resolves, or null when the viewer is signed out, has no linked
+// player, or the fetch failed -- every one of those collapses to this
+// same null so the dot degrades identically for all of them. Read by
+// applyMyLocationColors, which is the only place this drives a paint
+// property.
+let myLocationTeam = null;
+
+// Cached across the whole page session (see the ask: "fetch once,
+// lazily, when My Location is first switched on, not on every page
+// load") -- the first call to fetchViewerTeam() starts the request and
+// stores the PROMISE here so a second call (checkbox switched off and
+// back on) gets the same settled promise instead of firing a second
+// request.
+let myLocationTeamPromise = null;
+
+// GET /api/account is the same endpoint nav-auth.js/account.js already
+// call for this signed-in-or-not read (see applySignedInState in
+// nav-auth.js for the identical !res.ok-means-signed-out pattern) --
+// carries no coordinate, so it stays inside the privacy comment above
+// without violating it. Every failure mode -- signed out (401), no
+// linked player (player: null), a network error, a malformed body --
+// resolves to null rather than rejecting, because the caller (My
+// Location's checkbox handler) must never let this feature's own dot
+// colour break the location fix or surface an error to a logged-out
+// viewer.
+function fetchViewerTeam() {
+  if (!myLocationTeamPromise) {
+    myLocationTeamPromise = fetch('/api/account')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => (data && data.player && data.player.team) || null)
+      .catch(() => null);
+  }
+  return myLocationTeamPromise;
+}
 
 // Converts a geolocation accuracy radius (metres, isotropic -- a real
 // ground distance in every direction) into a MapLibre circle-radius
@@ -3860,6 +3966,20 @@ function setupMyLocationControl(map) {
       (err) => onGeoError(map, checkbox, err),
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
     );
+
+    // Fired alongside the watch, never awaited before it -- a slow or
+    // stalled /api/account read must not delay the location fix itself.
+    // First activation starts the request; every later one (box
+    // unchecked and rechecked) gets the same cached, already-settled
+    // promise straight back and repaints immediately. If the box gets
+    // unchecked again before this resolves, myLocationTeam is still set
+    // and applyMyLocationColors still runs -- harmless, since
+    // clearMyLocationMarker already emptied the source and an empty
+    // source paints nothing regardless of colour.
+    fetchViewerTeam().then((team) => {
+      myLocationTeam = team;
+      applyMyLocationColors(map);
+    });
   });
 }
 
@@ -4938,6 +5058,27 @@ async function main() {
         'circle-stroke-color': themeColor('--mw-accent'),
         'circle-stroke-width': 1,
         'circle-stroke-opacity': 0.6,
+      },
+    });
+    // The team-colour "target" ring (feature: team-coloured location --
+    // see applyMyLocationColors' own comment on why a fixed white/dark
+    // halo, not a themed one). Added between accuracy and the dot so
+    // draw order puts it under the dot and over the accuracy fill, but
+    // fully transparent here: it paints nothing until a signed-in
+    // viewer with a linked team is confirmed (applyMyLocationColors
+    // raises the opacities then), so a logged-out viewer's first paint
+    // is pixel-identical to before this feature existed.
+    map.addLayer({
+      id: 'my-location-halo',
+      type: 'circle',
+      source: 'my-location',
+      paint: {
+        'circle-radius': 11,
+        'circle-color': '#ffffff',
+        'circle-opacity': 0,
+        'circle-stroke-color': MY_LOCATION_TEAM_DOT_STROKE,
+        'circle-stroke-width': 2,
+        'circle-stroke-opacity': 0,
       },
     });
     map.addLayer({
