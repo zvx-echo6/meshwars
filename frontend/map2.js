@@ -508,8 +508,12 @@ const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
 // fill is exactly the ground colour and the rings are doing all the
 // work. At the original radius 7/11 that read as a small target rather
 // than something that catches the eye, so both go up substantially.
-const MY_LOCATION_TEAM_DOT_RADIUS = 13;
-const MY_LOCATION_HALO_RADIUS = 22;
+// Sized between the two things that failed: radius 7/11 vanished on a
+// player's own territory, 13/22 read as a bulky blob. The rings do the
+// work through CRISPNESS, not bulk -- thin bright ring, thin dark
+// outline, tight against the fill -- so this stays small and sharp.
+const MY_LOCATION_TEAM_DOT_RADIUS = 8;
+const MY_LOCATION_HALO_RADIUS = 13;
 
 // ...and a slow pulse on the halo, which is what actually draws the eye
 // on a flat field of one colour -- size alone still has to be FOUND.
@@ -517,8 +521,8 @@ const MY_LOCATION_HALO_RADIUS = 22;
 // alert. Honours prefers-reduced-motion by simply never starting, in
 // which case the larger static rings above still carry the job.
 const MY_LOCATION_PULSE_PERIOD_MS = 2400;
-const MY_LOCATION_PULSE_MIN = 0.85;
-const MY_LOCATION_PULSE_MAX = 1.35;
+const MY_LOCATION_PULSE_MIN = 0.94;
+const MY_LOCATION_PULSE_MAX = 1.16;
 let myLocationPulseRaf = null;
 
 function stopMyLocationPulse() {
@@ -541,7 +545,7 @@ function startMyLocationPulse(map) {
     map.setPaintProperty('my-location-halo', 'circle-radius', MY_LOCATION_HALO_RADIUS * scale);
     // Fade the ring slightly as it grows so the pulse reads as a breath
     // rather than a hard ring changing size.
-    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.9 - (scale - MY_LOCATION_PULSE_MIN) * 0.5);
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.55 - (scale - MY_LOCATION_PULSE_MIN) * 0.35);
     myLocationPulseRaf = requestAnimationFrame(step);
   };
   myLocationPulseRaf = requestAnimationFrame(step);
@@ -3369,13 +3373,14 @@ function applyMyLocationColors(map) {
     // real square is never near-white AND near-black at once, so at
     // least one of the halo's two rings holds contrast against
     // whatever the dot is sitting on.
-    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.9);
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.55);
     map.setPaintProperty('my-location-halo', 'circle-stroke-opacity', 1);
     map.setPaintProperty('my-location-halo', 'circle-radius', MY_LOCATION_HALO_RADIUS);
     map.setPaintProperty('my-location-dot', 'circle-radius', MY_LOCATION_TEAM_DOT_RADIUS);
     map.setPaintProperty('my-location-dot', 'circle-color', teamColor);
     map.setPaintProperty('my-location-dot', 'circle-stroke-color', MY_LOCATION_TEAM_DOT_STROKE);
-    map.setPaintProperty('my-location-dot', 'circle-stroke-width', 3);
+    map.setPaintProperty('my-location-dot', 'circle-stroke-width', 1.5);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-width', 1);
     startMyLocationPulse(map);
   } else {
     // Not signed in, no linked player, the fetch has not resolved yet,
@@ -5124,7 +5129,7 @@ async function main() {
         'circle-color': '#ffffff',
         'circle-opacity': 0,
         'circle-stroke-color': MY_LOCATION_TEAM_DOT_STROKE,
-        'circle-stroke-width': 2,
+        'circle-stroke-width': 1,
         'circle-stroke-opacity': 0,
       },
     });
