@@ -6,11 +6,15 @@
  *
  * Also carries: the site's theme system (theme.css + theme-toggle.js,
  * same as every other page, but defaulting to the neon/dark theme here
- * specifically -- see the boot snippet in map2.html), a single dark
- * basemap shared by both themes (gold used to sit on a light OSM
+ * specifically -- see the boot snippet in map2.html), a dark basemap
+ * shared by both gold/neon SKINS (gold used to sit on a light OSM
  * raster, which washed the baked hillshade out under a dark interface
  * -- gold is now the colour of the chrome and the pins, not of the
- * ground; see BASEMAP_ID), three self-hosted
+ * ground; see BASEMAP_ID), plus a separate light/dark BASEMAP MODE
+ * toggle (feature: map-light-mode, see BASEMAP_LIGHT_ID) a viewer picks
+ * for themselves in the Layers panel -- that axis is independent of the
+ * gold/neon skin and exists purely so the baked hillshade can be judged
+ * against a light ground, three self-hosted
  * PMTiles overlays (public lands, USFS roads/trails), all behind a small
  * layer-switcher panel (also visibility-toggled, so flipping a checkbox
  * never refetches a source), Places Worth Going markers and a slide-out
@@ -369,15 +373,28 @@ const DEM_URL = `/tiles/na-hillshade-alpha2.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
-// Both themes now share ONE dark basemap (CARTO dark_all) -- gold used
-// to point at the stock light OSM raster, which put a bright white map
-// under a dark interface and washed the baked hillshade out. Gold is
-// now the colour of the chrome and the place pins (PLACE_COLORS), not
-// of the ground, so there is nothing left for a second basemap source
-// to differ on; the old basemap-gold/basemap-neon pair (two sources,
-// two layers, toggled by visibility in applyBasemapTheme) collapsed to
-// this single always-visible source/layer.
+// Both SKINS (gold/neon) now share ONE dark basemap (CARTO dark_all) --
+// gold used to point at the stock light OSM raster, which put a bright
+// white map under a dark interface and washed the baked hillshade out.
+// Gold is now the colour of the chrome and the place pins
+// (PLACE_COLORS), not of the ground, so there is nothing left for a
+// second basemap source to differ on BY SKIN; the old
+// basemap-gold/basemap-neon pair (two sources, two layers, toggled by
+// visibility in applyBasemapTheme, keyed to currentTheme()) collapsed
+// to this single source/layer.
+//
+// BASEMAP_LIGHT_ID below is a second basemap source/layer again, but on
+// a DIFFERENT axis: a viewer's own light/dark choice (feature:
+// map-light-mode, the "Light basemap" checkbox in the Layers panel),
+// not the gold/neon skin. It exists so the baked hillshade (DEM_URL
+// above) can actually be judged against a light ground -- that was the
+// entire point of the request this shipped for -- and is deliberately
+// NOT coupled to currentTheme(): a viewer can run neon skin with the
+// light basemap on, or gold with dark, any combination. See
+// currentBasemapMode()/applyBasemapTheme below for how the two axes
+// stay independent while both still repaint through one function.
 const BASEMAP_ID = 'basemap';
+const BASEMAP_LIGHT_ID = 'basemap-light';
 const HILLSHADE_ID = 'hillshade';
 
 // Team territory washes into the dark basemap/hillshade -- both themes
@@ -438,6 +455,20 @@ const BOARD_LINE_WIDTH_ZOOM = ['interpolate', ['linear'], ['zoom'], 11, 1.5, 13,
 // can never drift apart.
 const BOARD_FILL_OPACITY_DEFAULT_PCT = Math.round(BOARD_FILL_OPACITY.gold * 100);
 
+// The DEFAULT this slider opens at when the light basemap (feature:
+// map-light-mode, see BASEMAP_LIGHT_ID above) is on and the viewer has
+// never touched the slider. Not a new number invented for this feature
+// -- it is gold's own old BOARD_FILL_OPACITY value from before "Both
+// themes go dark" collapsed the two source basemaps into one (see that
+// commit): a light basemap already carries its own contrast against
+// the team colours, so DEFAULT_PCT's full weight above (tuned for the
+// dark basemap) is more than a light ground needs. This only ever
+// supplies the STARTING value -- an explicit slider choice
+// (BOARD_FILL_OPACITY_STORAGE_KEY) always wins over it, on either
+// basemap, once one exists; see readBoardFillOpacityPct/
+// boardFillOpacityDefaultPct below.
+const BOARD_FILL_OPACITY_DEFAULT_PCT_LIGHT = 45;
+
 // The z10->z13 lift BOARD_FILL_OPACITY_ZOOM bakes in (0.92 vs 0.85, see
 // its own comment: board-line's team rim is hidden below z13, and this
 // makes up a little of the lost saturation). Kept as a ratio, not a
@@ -448,11 +479,22 @@ const BOARD_FILL_OPACITY_RAMP_RATIO = 0.92 / BOARD_FILL_OPACITY.gold;
 const BOARD_FILL_OPACITY_STORAGE_KEY = 'mwBoardFillOpacityPct';
 
 // The baked hillshade archive carries real alpha -- transparent on flat
-// ground, black/white toward shadow/highlight. Both themes sit on the
+// ground, black/white toward shadow/highlight. Both SKINS sit on the
 // same dark basemap now, so both get the full-strength value that used
 // to be neon-only; gold's old 0.7 existed only to keep a light basemap
-// from washing out, which no longer applies.
+// from washing out, which no longer applied once the basemap itself
+// went dark on both skins.
 const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
+
+// That old 0.7 is back, though -- not as a skin value, but as the
+// BASEMAP MODE factor (feature: map-light-mode): it multiplies on top
+// of HILLSHADE_OPACITY[theme] above rather than replacing it, so the
+// two axes (gold/neon skin, light/dark basemap) stay independent. At
+// full strength (1.0) on the dark basemap the imagery is unchanged from
+// today; at 0.7 on the light basemap it holds back exactly as much as
+// it used to when gold's basemap itself was light. See
+// applyBasemapTheme below for where this is applied.
+const HILLSHADE_OPACITY_MODE_FACTOR = { dark: 1.0, light: 0.7 };
 
 // Each checkbox id -> the style layer id(s) it toggles, and the
 // minimum zoom its underlying data starts at (measured from the tile
@@ -3098,19 +3140,85 @@ function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === 'neon' ? 'neon' : 'gold';
 }
 
-// No basemap layer left to flip visibility on -- both themes share the
-// one dark BASEMAP_ID layer now (see its comment above). Never touches
-// the board's team-colour expression -- that stays constant across
-// themes on purpose (gameplay, not branding). The hillshade layer used
-// to get a per-theme exaggeration re-tune here too; that was a
-// raster-dem paint property computed in the browser, and the
-// pre-rendered hillshade imagery has its exaggeration baked in at
-// build time with no such property left to set. raster-opacity is a
-// different paint property that survives the switch to baked imagery
-// (see HILLSHADE_OPACITY), so it's still tuned here per theme.
+// ===== Basemap mode: light/dark (feature: map-light-mode) =====
+//
+// A SEPARATE axis from currentTheme() above. currentTheme() is the
+// site-wide gold/neon skin, written to <html data-theme> by
+// theme-toggle.js and shared with every other page. This is a
+// map2-only choice -- which of the two basemap sources (BASEMAP_ID,
+// dark, vs BASEMAP_LIGHT_ID, light) is visible -- made in this page's
+// own Layers panel and remembered in this page's own localStorage key,
+// same pattern as the opacity slider (BOARD_FILL_OPACITY_STORAGE_KEY)
+// and every other "remembered choice" on this page: read once here at
+// module scope so it is available the instant applyBasemapTheme first
+// runs, no async gap where the wrong basemap would flash on screen.
+const BASEMAP_MODE_STORAGE_KEY = 'mwLightBasemap';
+
+function readLightBasemapPref() {
+  try {
+    return localStorage.getItem(BASEMAP_MODE_STORAGE_KEY) === '1';
+  } catch {
+    // Storage unavailable (private browsing, quota) -- default to dark,
+    // same as a first-time visitor with no stored choice at all.
+    return false;
+  }
+}
+
+function rememberLightBasemapPref(isLight) {
+  try {
+    localStorage.setItem(BASEMAP_MODE_STORAGE_KEY, isLight ? '1' : '0');
+  } catch {
+    // Swallowed, same as every other localStorage write on this page --
+    // the toggle still works for the rest of this visit, it just does
+    // not survive a reload.
+  }
+}
+
+let basemapModeIsLight = readLightBasemapPref();
+
+function currentBasemapMode() {
+  return basemapModeIsLight ? 'light' : 'dark';
+}
+
+// Grid lines and My Location (both feature: map-controls) read their
+// colours off gold/neon theme TOKENS via themeColor() -- --mw-text-6,
+// --mw-accent, --mw-gold-light -- every one of which was picked to read
+// against a dark ground, because until this feature every ground was
+// dark. Measured against CARTO light_all during this feature's own
+// screenshot verification pass: --mw-text-6 (gold #888 / neon #5F7183)
+// all but disappears on the light basemap's near-white ground, and the
+// pale --mw-gold-light/--mw-accent tones washed-out the same way. These
+// are literal colours rather than a third set of theme tokens because
+// they exist for the basemap-mode axis only -- neither gold nor neon's
+// palette, just "dark enough to hold a line on a light ground" -- see
+// applyBasemapTheme below for where they replace the token reads.
+const GRID_LINE_COLOR_LIGHT = '#3a3a3a';
+const MY_LOCATION_STROKE_LIGHT = 'rgba(15, 15, 15, 0.75)';
+
+// Flips which of the two basemap sources is visible (BASEMAP_ID dark /
+// BASEMAP_LIGHT_ID light -- see their own comment above for why this is
+// a second source/layer pair again, on a different axis than the old
+// gold/neon one). Never touches the board's team-colour expression --
+// that stays constant across both the skin and the basemap mode, on
+// purpose (gameplay, not branding). The hillshade layer used to get a
+// per-theme exaggeration re-tune here too; that was a raster-dem paint
+// property computed in the browser, and the pre-rendered hillshade
+// imagery has its exaggeration baked in at build time with no such
+// property left to set. raster-opacity is a different paint property
+// that survives the switch to baked imagery (see HILLSHADE_OPACITY /
+// HILLSHADE_OPACITY_MODE_FACTOR), so it's still tuned here, now against
+// BOTH axes at once.
+//
+// Called on every gold/neon skin flip (watchTheme's MutationObserver)
+// AND every light/dark basemap flip (setupBasemapModeToggle's checkbox
+// listener) -- one function repaints for whichever axis just changed,
+// so the two can never fall out of sync with each other.
 function applyBasemapTheme(map) {
   const theme = currentTheme();
-  map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
+  const mode = currentBasemapMode();
+  map.setLayoutProperty(BASEMAP_ID, 'visibility', mode === 'light' ? 'none' : 'visible');
+  map.setLayoutProperty(BASEMAP_LIGHT_ID, 'visibility', mode === 'light' ? 'visible' : 'none');
+  map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme] * HILLSHADE_OPACITY_MODE_FACTOR[mode]);
   // board-fill's opacity is now owned by the slider (see
   // BOARD_FILL_OPACITY_DEFAULT_PCT/applyBoardFillOpacity above/below) --
   // BOARD_FILL_OPACITY_ZOOM[theme] is only the SHAPE that helper scales,
@@ -3135,12 +3243,16 @@ function applyBasemapTheme(map) {
   // Grid lines (feature: map-controls) and My Location (same) both read
   // their colours off theme tokens via themeColor() at addLayer time --
   // re-set here too so a theme flip repaints them instead of leaving
-  // gold's colours on screen under the neon skin.
-  map.setPaintProperty('cell-grid-lines', 'line-color', themeColor('--mw-text-6'));
+  // gold's colours on screen under the neon skin. On the light basemap
+  // those tokens are swapped for the literal, basemap-mode-only colours
+  // above instead (GRID_LINE_COLOR_LIGHT/MY_LOCATION_STROKE_LIGHT) --
+  // neither skin's token reads on a light ground, see their own comment.
+  const light = mode === 'light';
+  map.setPaintProperty('cell-grid-lines', 'line-color', light ? GRID_LINE_COLOR_LIGHT : themeColor('--mw-text-6'));
   map.setPaintProperty('my-location-accuracy', 'circle-color', themeColor('--mw-accent'));
-  map.setPaintProperty('my-location-accuracy', 'circle-stroke-color', themeColor('--mw-accent'));
+  map.setPaintProperty('my-location-accuracy', 'circle-stroke-color', light ? MY_LOCATION_STROKE_LIGHT : themeColor('--mw-accent'));
   map.setPaintProperty('my-location-dot', 'circle-color', themeColor('--mw-accent'));
-  map.setPaintProperty('my-location-dot', 'circle-stroke-color', themeColor('--mw-gold-light'));
+  map.setPaintProperty('my-location-dot', 'circle-stroke-color', light ? MY_LOCATION_STROKE_LIGHT : themeColor('--mw-gold-light'));
 }
 
 // theme-toggle.js sets data-theme on <html> directly; observing the
@@ -3342,16 +3454,38 @@ function boardFillOpacityExpression(pct) {
   ];
 }
 
+// The DEFAULT this slider opens at (as opposed to a viewer's own stored
+// choice, read below) now depends on the basemap mode -- see
+// BOARD_FILL_OPACITY_DEFAULT_PCT_LIGHT's own comment for why a light
+// basemap gets a lower default than the dark basemap's DEFAULT_PCT.
+function boardFillOpacityDefaultPct() {
+  return currentBasemapMode() === 'light' ? BOARD_FILL_OPACITY_DEFAULT_PCT_LIGHT : BOARD_FILL_OPACITY_DEFAULT_PCT;
+}
+
+// True only once the viewer has actually moved the slider (or a
+// previous visit had), as opposed to still sitting on whichever
+// basemap-mode default applied at load. setupBasemapModeToggle below
+// uses this to decide whether flipping light/dark should re-derive the
+// slider's value from the new mode's default (no explicit pref yet) or
+// leave an explicit choice alone (see its own comment).
+function hasExplicitBoardFillOpacityPref() {
+  try {
+    return localStorage.getItem(BOARD_FILL_OPACITY_STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
 function readBoardFillOpacityPct() {
   try {
     const raw = localStorage.getItem(BOARD_FILL_OPACITY_STORAGE_KEY);
-    if (raw === null) return BOARD_FILL_OPACITY_DEFAULT_PCT;
+    if (raw === null) return boardFillOpacityDefaultPct();
     const n = Number(raw);
-    return (Number.isFinite(n) && n >= 0 && n <= 100) ? n : BOARD_FILL_OPACITY_DEFAULT_PCT;
+    return (Number.isFinite(n) && n >= 0 && n <= 100) ? n : boardFillOpacityDefaultPct();
   } catch {
     // Storage unavailable (private browsing, quota) -- fall back to the
     // same default a first-time visitor gets.
-    return BOARD_FILL_OPACITY_DEFAULT_PCT;
+    return boardFillOpacityDefaultPct();
   }
 }
 
@@ -3368,7 +3502,10 @@ function rememberBoardFillOpacityPct(pct) {
 // Read once at module scope (like BOARD_MODE_KEY's `mode` and every
 // other "remembered choice" on this page) so the value is available the
 // instant setupOpacitySlider/applyBasemapTheme run, with no async gap
-// where the layer would paint at the wrong opacity for one frame.
+// where the layer would paint at the wrong opacity for one frame. Runs
+// after basemapModeIsLight is already set (see currentBasemapMode's own
+// section, earlier in the file) so boardFillOpacityDefaultPct above
+// already sees the right starting mode.
 let currentBoardFillOpacityPct = readBoardFillOpacityPct();
 
 // The single place that ever calls setPaintProperty for board-fill's
@@ -3395,20 +3532,65 @@ function applyBoardFillOpacity(map) {
 // `pointer-events: none`, which nothing here sets. Verified by
 // screenshot + a click at opacity 0 during this change's own
 // verification pass (see the deploy notes) rather than assumed.
-function setupOpacitySlider(map) {
+// Pushes currentBoardFillOpacityPct into the slider's own DOM (its
+// thumb position and the "NN%" readout beside it) without touching
+// localStorage or the map paint property -- callers that already own
+// those (setupOpacitySlider's 'input' handler, setupBasemapModeToggle's
+// mode-flip re-derivation) do those themselves. Split out so the two
+// call sites can never let the slider's on-screen value drift from
+// currentBoardFillOpacityPct.
+function syncOpacitySliderUI() {
   const slider = document.getElementById('mw-layer-opacity');
   const valueLabel = document.getElementById('mw-layer-opacity-value');
+  if (slider) slider.value = String(currentBoardFillOpacityPct);
+  if (valueLabel) valueLabel.textContent = `${currentBoardFillOpacityPct}%`;
+}
+
+function setupOpacitySlider(map) {
+  const slider = document.getElementById('mw-layer-opacity');
   if (!slider) return;
 
-  slider.value = String(currentBoardFillOpacityPct);
-  if (valueLabel) valueLabel.textContent = `${currentBoardFillOpacityPct}%`;
+  syncOpacitySliderUI();
 
   slider.addEventListener('input', () => {
     const pct = Number(slider.value);
-    currentBoardFillOpacityPct = Number.isFinite(pct) ? pct : BOARD_FILL_OPACITY_DEFAULT_PCT;
-    if (valueLabel) valueLabel.textContent = `${currentBoardFillOpacityPct}%`;
+    currentBoardFillOpacityPct = Number.isFinite(pct) ? pct : boardFillOpacityDefaultPct();
+    syncOpacitySliderUI();
     applyBoardFillOpacity(map);
     rememberBoardFillOpacityPct(currentBoardFillOpacityPct);
+  });
+}
+
+// ===== Light/dark basemap toggle (feature: map-light-mode) =====
+//
+// Wires the "Light basemap" checkbox in the Layers panel (map2.html's
+// #mw-layer-lightbasemap) to currentBasemapMode() -- see that
+// function's own section, above, for what it drives (BASEMAP_ID vs
+// BASEMAP_LIGHT_ID visibility, hillshade opacity, grid-line/My Location
+// colour) and why it is a separate axis from the gold/neon skin.
+//
+// If the viewer has never touched the claimed-squares opacity slider
+// (hasExplicitBoardFillOpacityPref() false), flipping this also
+// re-derives currentBoardFillOpacityPct from the new mode's own default
+// (boardFillOpacityDefaultPct()) and pushes that into the slider's UI --
+// so a first-time visitor who checks "Light basemap" actually sees the
+// lighter default fill immediately, not just on their next reload. Once
+// an explicit choice exists, this never touches it again: "the ramp
+// still works on top of whatever you choose" applies on either basemap.
+function setupBasemapModeToggle(map) {
+  const checkbox = document.getElementById('mw-layer-lightbasemap');
+  if (!checkbox) return;
+
+  checkbox.checked = basemapModeIsLight;
+
+  checkbox.addEventListener('change', () => {
+    basemapModeIsLight = checkbox.checked;
+    rememberLightBasemapPref(basemapModeIsLight);
+    if (!hasExplicitBoardFillOpacityPref()) {
+      currentBoardFillOpacityPct = boardFillOpacityDefaultPct();
+      syncOpacitySliderUI();
+    }
+    applyBasemapTheme(map);
   });
 }
 
@@ -3957,10 +4139,26 @@ const CARTO_TILE_URLS = [
   'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
 ];
 
-function cartoTiles(key) {
+// CARTO's light counterpart to dark_all above -- same tile scheme, same
+// three-host round robin, same key/ratio handling, just the light
+// "Positron" style (feature: map-light-mode -- see BASEMAP_LIGHT_ID's
+// own comment for why this basemap exists at all). Declared the exact
+// same way as CARTO_TILE_URLS on purpose, right beside it, rather than
+// folding the style name into a parameter -- two named constants read
+// as two basemaps at a glance; a style-name argument would not.
+const CARTO_LIGHT_TILE_URLS = [
+  'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{ratio}.png',
+  'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{ratio}.png',
+  'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{ratio}.png',
+];
+
+// Takes the URL list (CARTO_TILE_URLS or CARTO_LIGHT_TILE_URLS -- both
+// share the same {key} handling, so this is generic over which one)
+// rather than being hardcoded to the dark set, now that there are two.
+function cartoTiles(urls, key) {
   const k = String(key || '').trim();
-  if (!k) return CARTO_TILE_URLS.slice();
-  return CARTO_TILE_URLS.map((u) => `${u}?key=${encodeURIComponent(k)}`);
+  if (!k) return urls.slice();
+  return urls.map((u) => `${u}?key=${encodeURIComponent(k)}`);
 }
 
 async function fetchBootConfig() {
@@ -4164,7 +4362,22 @@ async function main() {
         sources: {
           [BASEMAP_ID]: {
             type: 'raster',
-            tiles: cartoTiles(cartoKey),
+            tiles: cartoTiles(CARTO_TILE_URLS, cartoKey),
+            tileSize: 256,
+            attribution: '© OpenStreetMap contributors © CARTO',
+            maxzoom: 20,
+          },
+          // Light basemap mode's own source (feature: map-light-mode --
+          // see BASEMAP_LIGHT_ID's own comment above for why this is a
+          // second source/layer pair on a different axis than the
+          // gold/neon skin). Declared exactly like BASEMAP_ID above --
+          // same tileSize/attribution/maxzoom -- just CARTO's light_all
+          // tiles instead of dark_all. Attribution is identical CARTO
+          // wording either way, so it stays correct regardless of which
+          // basemap ends up visible.
+          [BASEMAP_LIGHT_ID]: {
+            type: 'raster',
+            tiles: cartoTiles(CARTO_LIGHT_TILE_URLS, cartoKey),
             tileSize: 256,
             attribution: '© OpenStreetMap contributors © CARTO',
             maxzoom: 20,
@@ -4188,6 +4401,19 @@ async function main() {
             id: BASEMAP_ID,
             type: 'raster',
             source: BASEMAP_ID,
+            // Set from the persisted choice up front (basemapModeIsLight,
+            // read at module load -- see currentBasemapMode's own
+            // section) rather than left to default-visible and fixed up
+            // once applyBasemapTheme runs after 'load' -- a returning
+            // visitor who picked light mode would otherwise see one
+            // frame of the dark basemap before the swap.
+            layout: { visibility: basemapModeIsLight ? 'none' : 'visible' },
+          },
+          {
+            id: BASEMAP_LIGHT_ID,
+            type: 'raster',
+            source: BASEMAP_LIGHT_ID,
+            layout: { visibility: basemapModeIsLight ? 'visible' : 'none' },
           },
           {
             id: HILLSHADE_ID,
@@ -4656,6 +4882,7 @@ async function main() {
     setupCellClickPopup(map);
     setupLayerSwitcher(map);
     setupOpacitySlider(map);
+    setupBasemapModeToggle(map);
     setupGridLines(map);
     setupMyLocationControl(map);
     watchTheme(map);

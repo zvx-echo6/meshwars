@@ -141,7 +141,7 @@
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
   <link rel="stylesheet" href="/static/coverage.css?v=20260904-4" />
   <link rel="stylesheet" href="/static/mc.css?v=20260825-1" />
-  <link rel="stylesheet" href="/static/map2.css?v=20260909-1" />
+  <link rel="stylesheet" href="/static/map2.css?v=20260909-2" />
 </head>
 <body>
 
@@ -234,6 +234,19 @@
         <li>
           <label><input type="checkbox" id="mw-layer-places"> Places</label>
         </li>
+        <!-- Light/dark basemap (map2.js's setupBasemapModeToggle/
+             applyBasemapTheme, feature: map-light-mode). A SEPARATE
+             axis from the gold/neon skin toggle in the nav bar -- this
+             one only swaps which of the two CARTO basemap sources is
+             visible under the hillshade/board, and is remembered in its
+             own localStorage key the same way the opacity slider below
+             remembers its own. Checked state at load comes from that
+             stored choice (map2.js's readLightBasemapPref), not this
+             markup's unchecked default, same reasoning as every other
+             checkbox in this panel. -->
+        <li>
+          <label><input type="checkbox" id="mw-layer-lightbasemap"> Light basemap</label>
+        </li>
         <!-- Claimed-squares opacity slider (map2.js's setupOpacitySlider/
              applyBoardFillOpacity). Applies live via setPaintProperty on
              every 'input' event, no apply button; the shown percentage
@@ -287,7 +300,7 @@
   <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
           crossorigin="anonymous"></script>
 
-  <script src="/static/map2.js?v=20260909-1" type="module"></script>
+  <script src="/static/map2.js?v=20260909-2" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>
