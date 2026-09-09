@@ -494,6 +494,13 @@ const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
 // today; at 0.7 on the light basemap it holds back exactly as much as
 // it used to when gold's basemap itself was light. See
 // applyBasemapTheme below for where this is applied.
+// How much colour to put back into the light basemap. raster-saturation
+// runs -1 (grey) to 1 (fully saturated); Voyager stock sits low enough
+// that parks and water read as tints rather than colours. A small
+// contrast lift stops the extra saturation from flattening the tone.
+const BASEMAP_LIGHT_SATURATION = 0.45;
+const BASEMAP_LIGHT_CONTRAST = 0.08;
+
 const HILLSHADE_OPACITY_MODE_FACTOR = { dark: 1.0, light: 0.4 };
 
 // The hillshade archive is grayscale imagery whose HIGHLIGHTS are near
@@ -4434,6 +4441,19 @@ async function main() {
             type: 'raster',
             source: BASEMAP_LIGHT_ID,
             layout: { visibility: basemapModeIsLight ? 'visible' : 'none' },
+            // Voyager ships deliberately muted -- it is designed as a
+            // backdrop for someone else's data, so its greens and blues
+            // are dialled well back. On this map it IS the reference
+            // layer a player reads terrain and parks from, and at stock
+            // saturation it reads as grey even with the hillshade off.
+            // Pushed up here rather than by picking a different style:
+            // Voyager's palette is the OSM-familiar one, it is just too
+            // quiet, and raster-saturation fixes exactly that without
+            // changing which colours mean what.
+            paint: {
+              'raster-saturation': BASEMAP_LIGHT_SATURATION,
+              'raster-contrast': BASEMAP_LIGHT_CONTRAST,
+            },
           },
           {
             id: HILLSHADE_ID,
