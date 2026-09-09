@@ -667,3 +667,76 @@ def test_in_city_limits_plain_dict_fixture_still_works():
     buckets = _buckets_with_one_anchor(80.0, 13.0, 5_000.0 + bps._haversine_m(80.0, 10.0, 80.0, 13.0))
     assert not isinstance(buckets, bps._AnchorBuckets)
     assert bps._in_city_limits(80.0, 10.0, buckets) is True
+
+
+# --------------------------------------------------------------------
+# extract_osm_parks()'s OSM-vs-OSM self-dedup pass (added 2026-09-08):
+# _osm_self_dedup_key() and _dedup_osm_self_group().
+# --------------------------------------------------------------------
+
+def test_osm_self_dedup_key_is_case_and_diacritic_insensitive():
+    assert bps._osm_self_dedup_key("Kakadu National Park") == \
+        bps._osm_self_dedup_key("KAKADU NATIONAL PARK")
+    assert bps._osm_self_dedup_key("Cafe du Parc") == bps._osm_self_dedup_key("Café du Parc")
+
+
+def test_osm_self_dedup_key_ignores_punctuation_and_whitespace():
+    assert bps._osm_self_dedup_key("St. James's Park") == bps._osm_self_dedup_key("St James s Park")
+    assert bps._osm_self_dedup_key("  City   Park  ") == bps._osm_self_dedup_key("City Park")
+
+
+def test_osm_self_dedup_key_is_exact_not_fuzzy():
+    """The hard variant case (module docstring's 'OSM-against-ITSELF'
+    section) is deliberately left alone -- a substring/contains match
+    like "Kakadu Park" vs "Kakadu National Park World Heritage Site"
+    must NOT collapse to the same key."""
+    assert bps._osm_self_dedup_key("Kakadu Park") != \
+        bps._osm_self_dedup_key("Kakadu National Park World Heritage Site")
+
+
+def test_osm_self_dedup_key_blank_name_is_blank():
+    assert bps._osm_self_dedup_key("") == ""
+    assert bps._osm_self_dedup_key(None) == ""
+
+
+def _park_candidate(idx, lat, lon, area_m2):
+    return {"idx": idx, "row": [f"row{idx}"], "name_key": "x", "lat": lat, "lon": lon,
+            "area_m2": area_m2}
+
+
+def test_dedup_osm_self_group_keeps_larger_of_two_close_duplicates():
+    """The way-vs-relation case: same park mapped twice a few hundred
+    metres apart -- keep the larger (a relation covering the whole park
+    beats a way covering one corner)."""
+    small = _park_candidate(0, 43.6, -116.2, area_m2=1_000.0)
+    large = _park_candidate(1, 43.6001, -116.2001, area_m2=50_000.0)
+    kept = bps._dedup_osm_self_group([small, large])
+    assert kept == [large]
+
+
+def test_dedup_osm_self_group_keeps_both_when_far_apart():
+    """Two genuinely distinct parks sharing an exact name in different
+    towns (e.g. two real "City Park"s) must both survive."""
+    here = _park_candidate(0, 43.6, -116.2, area_m2=1_000.0)
+    # ~5 km away, well past _OSM_SELF_DEDUP_M's 2 km threshold.
+    far = _park_candidate(1, 43.645, -116.2, area_m2=2_000.0)
+    kept = bps._dedup_osm_self_group([here, far])
+    assert {c["idx"] for c in kept} == {0, 1}
+
+
+def test_dedup_osm_self_group_is_greedy_not_transitive():
+    """A chain of three same-named candidates each ~1.5 km from the
+    next (A-B-C) spans ~3 km end to end -- more than _OSM_SELF_DEDUP_M's
+    2 km threshold between A and C directly. Greedy largest-first must
+    not let B chain A and C together into one group with a single
+    survivor."""
+    deg_per_km_lat = 1.0 / 111.32
+    a = _park_candidate(0, 43.60, -116.2, area_m2=100.0)
+    b = _park_candidate(1, 43.60 + 1.5 * deg_per_km_lat, -116.2, area_m2=90.0)  # largest, wins over both
+    c = _park_candidate(2, 43.60 + 3.0 * deg_per_km_lat, -116.2, area_m2=80.0)
+    b["area_m2"] = 1_000_000.0  # make B unambiguously the largest
+    kept = bps._dedup_osm_self_group([a, b, c])
+    # B suppresses both direct neighbours it is within 2km of; A and C
+    # are themselves >2km apart in this fixture, but B (largest, sorted
+    # first) already claims both, so only B should remain.
+    assert kept == [b]

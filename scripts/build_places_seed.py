@@ -26,6 +26,19 @@ inputs live, then `merge` wherever it is convenient:
                           "PARK SOURCES" below. Also takes fetch-pota's
                           output, but only to dedup against, not to seed
                           from.
+  4c. extract-osm-parks -- on navi, needs the OSM planet's leisure=park
+                          and boundary=protected_area ways/relations
+                          already extracted to a GeoJSONSeq (osmium
+                          export), plus extract-landmarks' and
+                          fetch-padus-parks'/fetch-pota's own outputs to
+                          dedup against. ADDED 2026-09-07, worldwide
+                          expansion: PAD-US (4b) is deliberately US-only
+                          (a US government dataset with no global
+                          equivalent), so outside the US "local park"
+                          coverage was zero -- this is OSM's answer to
+                          the same "Twin Falls has no parks" complaint
+                          that motivated 4b, everywhere PAD-US cannot
+                          reach. See "PARK SOURCES" below.
   5. merge            -- anywhere. Combines the stage outputs into the
                           final seed CSV in the `place` table's shape.
 
@@ -47,6 +60,18 @@ threshold change below re-pulled the same day):
                    western-us-11states.osm.pbf until the worldwide
                    expansion below switched the source to the full
                    planet extract.
+  OSM parks     -- ADDED 2026-09-07, same planet extract as OSM
+                   landmarks: every named leisure=park or
+                   boundary=protected_area way/relation on Earth
+                   (osmium tags-filter `wr/leisure=park`,
+                   `wr/boundary=protected_area`), pre-exported to a
+                   GeoJSONSeq with equal-area area_m2 already computed
+                   per feature -- extract_osm_parks() reads that
+                   extract directly rather than the planet PBF itself.
+                   See "PARK SOURCES" below for why this exists
+                   alongside PAD-US rather than instead of it, and how
+                   it avoids double-counting a park PAD-US or POTA
+                   already carries.
   PAD-US        -- /data/nav/padus/PADUS4_0_Geodatabase.gdb on navi,
                    layer PADUS4_0Combined_Proclamation_Marine_Fee_
                    Designation_Easement (all protected-area types in one
@@ -86,6 +111,89 @@ POTA-matched park). These carry source "PAD-US" rather than "POTA" or
 value as already US-only (see that module's docstring) rather than
 running it through POTA's "US-"-prefix check, which their "PADUS-<fid>"
 ref_code would fail.
+
+OSM PARKS (extract_osm_parks() added 2026-09-07, worldwide expansion):
+PAD-US is deliberately US-only (a US government dataset with no global
+equivalent -- see WORLDWIDE EXPANSION below), so fetch_padus_parks()'s
+local/city/county park density above never reached anywhere outside
+the US: the exact "Twin Falls has no parks" complaint, unsolved for
+every non-US town. OpenStreetMap tags ordinary municipal parks
+(leisure=park) and protected areas (boundary=protected_area) worldwide,
+so extract_osm_parks() pulls those as a third, independent park source
+-- the global answer to what fetch_padus_parks() already is for the
+US. Three things keep it from double-counting a park one of the other
+two sources -- or itself -- already carries:
+
+  - leisure=nature_reserve overlap with the landmark tier: a nature
+    reserve small enough to clear extract_landmarks()'s own
+    SQUARE_AREA_M2 gate is already written there (see LANDMARK_TAGS'
+    own comment on that tag); the OSM tags-filter that produced this
+    stage's GeoJSONSeq input has no size gate at all, so the identical
+    way/relation (same osm_type+osm_id) shows up in both extracts for
+    every small reserve. extract_osm_parks() reads extract_landmarks()'s
+    own output CSV first and skips any osm_type+osm_id already claimed
+    there, so a small reserve stays a landmark (its correct tier) and
+    only a reserve too large for that tier ever becomes a park.
+  - Overlap with POTA/PAD-US: every candidate is checked by name +
+    proximity against both fetch_pota()'s and fetch_padus_parks()'s own
+    output (the same Jaccard name-overlap technique fetch_padus_parks()
+    already uses to dedup against POTA, extended to test containment
+    against the candidate's own full geometry rather than a fixed
+    distance -- see the "BUG FOUND AND FIXED" comment at this stage's
+    own dedup call site for why) before being kept -- "Ann Morrison
+    Park" mapped in both OSM and PAD-US must not become two rows. RUN
+    GLOBALLY, not gated to the US play-area bbox: PAD-US really is
+    US-only, so a bbox gate is harmless for that half, but POTA is
+    WORLDWIDE (see this module's own "WORLDWIDE EXPANSION" note) --
+    fetch_pota() lists national parks and reserves on every continent.
+    A first cut of this stage gated the whole check to the US bbox on
+    the mistaken assumption that "no POTA or PAD-US row exists outside
+    the US" -- true for PAD-US, false for POTA -- and shipped 10,752
+    same-name-within-50km OSM/POTA collisions worldwide (Serengeti,
+    Kakadu, Fiordland, and thousands more) before this was caught and
+    fixed to run everywhere.
+  - OSM-against-ITSELF (added 2026-09-08): neither rule above ever
+    compares one OSM candidate to another. A same-exact-name-within-2km
+    proximity measurement over the finished worldwide park set, run
+    after the worldwide rebuild above had already passed every
+    correctness gate, found 32,085 such pairs total -- 31,052 of them
+    OSM-against-OSM (541 PAD-US-against-itself, 369 cross-source,
+    the last of those being the "Overlap with POTA/PAD-US" rule above
+    doing its job, not a defect). OSM commonly maps the same real park
+    twice: once as a way and once as a relation, or as two overlapping
+    way fragments of one boundary. _osm_self_dedup_key()/
+    _dedup_osm_self_group() (defined just above extract_osm_parks())
+    group surviving candidates by EXACT normalized name -- deliberately
+    not fuzzy/substring matching; see _osm_self_dedup_key()'s own
+    comment for why -- and within each name group keep only the
+    largest-by-area candidate(s) more than 2 km apart, greedy
+    largest-first, the same strategy build_places_osm_anchors.py already
+    uses to dedup city anchors. A feature with no name never reaches
+    this pass at all (dropped earlier, at the no_name filter below), so
+    unlike the bug caught mid-flight on the anchor build, there is no
+    blank-name bucket for it to wrongly collapse.
+
+Kept a named destination the same way OSM landmarks are (a feature with
+no `name` tag is not a place to send anyone to). No acreage floor and
+no separate utility-parcel/school exclusion list of its own --
+_compile_exclude_park_name_re() (the same predicate
+fetch_padus_parks() uses) is reused as-is, since OSM's own leisure=park
+tagging sweeps in the identical false positives PAD-US's LP designation
+does (school playgrounds tagged as a park, community gardens) and the
+fix for one dataset is the fix for the other.
+
+A geometry this large a source can range from a city block to
+Papahānaumokuākea Marine National Monument (1.5 million km^2,
+confirmed the single largest feature in the raw extract) --
+app/places_seed.py's _park_cells() walks a stored geometry's own
+bounding box at 300m grid resolution with no size guard of its own, so
+shipping that boundary unclipped would try to materialize on the order
+of ten billion grid cells for one row. extract_osm_parks() clips every
+matched boundary to a ~6km buffer around its own centroid before
+storage, exactly like match_parks()'s own clip and for the identical
+reason (see that clip's own comment) -- computed AFTER
+_frac_area_outside_city() has already measured the real, full,
+pre-clip shape, so the clip cannot affect which rate the park scores.
 
 PLAY AREA (from the running service's /config, NOT app/config.py's
 narrower Idaho-only defaults -- production overrides those via .env):
@@ -230,11 +338,28 @@ import csv
 import datetime
 import gzip
 import io
+import json
 import math
 import os
 import re
 import sys
+import unicodedata
 import urllib.request
+
+# Python's csv module defaults to a 131072-byte field-size limit --
+# fine for every column here except `geom` (a simplified WKT string),
+# which can still exceed that for a large, multi-part OSM relation
+# (a marine protected area's MultiPolygon spanning many islands) even
+# after extract_osm_parks()'s own storage clip and simplify(). merge()
+# is the only stage that ever reads a previously-written `geom` column
+# back in (every other stage only writes one), and it is the first
+# stage to read the real, worldwide OSM-parks output -- this raised
+# _csv.Error: field larger than field limit (131072) partway through a
+# real merge() run against it. 10,000,000 chars is generously above
+# anything this pipeline produces (a fixed value, not sys.maxsize,
+# which can raise OverflowError against the csv module's underlying C
+# long on some platforms).
+csv.field_size_limit(10_000_000)
 
 NORTH, SOUTH, WEST, EAST = 49.29, 25.8, -125.0, -93.5
 
@@ -1795,6 +1920,347 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
 
 
 # --------------------------------------------------------------------
+# Stage 4c: OSM parks (leisure=park, boundary=protected_area) --
+# worldwide, run on navi -- see module docstring's "OSM PARKS" section
+# for the full rationale, including the three dedup rules below (the
+# self-dedup pass, added 2026-09-08, is the newest of the three).
+# --------------------------------------------------------------------
+
+# Storage clip radius for a matched boundary -- identical value and
+# identical reasoning to match_parks()'s own 6 km clip (see that
+# clip's own comment): _frac_area_outside_city() has already measured
+# the real, full, pre-clip shape by the time this runs, so shrinking
+# the STORED geometry afterward cannot change which rate the park
+# scored.
+_OSM_PARK_CLIP_DEG = 0.06
+
+
+def _osm_self_dedup_key(name: str) -> str:
+    """Exact-name grouping key for the OSM-vs-OSM self-dedup pass in
+    extract_osm_parks() below (added 2026-09-08: a proximity measurement
+    over the finished worldwide park set found 31,052 same-exact-name
+    park pairs within 2 km, and 31,052 of those -- essentially all of
+    them -- were OSM-against-OSM, not against POTA/PAD-US, which
+    extract_osm_parks() already dedups against above. OSM frequently
+    maps the same park twice: once as a way and once as a relation, or
+    as two overlapping way fragments of one boundary; nothing before
+    this pass ever compared one OSM candidate against another).
+
+    NFKD-strip diacritics, lowercase, collapse punctuation/whitespace --
+    the same normalization build_places_osm_anchors.py's normalize()
+    uses for city anchors (see that function's own comment on why
+    ascii-only would be wrong here too). Deliberately NOT _norm_name()'s
+    token-set/Jaccard scorer a few hundred lines above -- that is a
+    fuzzy "these are probably the same place" test, built for
+    cross-source variants. This pass targets a narrower, higher-
+    confidence case (the literal same object, mapped twice) and stays
+    exact on purpose: the measurement also found 13,579 pairs where one
+    name merely CONTAINS the other ("Kakadu Park" vs "Kakadu National
+    Park World Heritage Site") -- some of those are genuinely distinct
+    sub-units ("Monocacy National Battlefield - Best Farm"), so fuzzy or
+    substring matching would delete real, distinct parks. That is a
+    separate, harder problem, deliberately left alone here.
+    """
+    if not name:
+        return ""
+    n = unicodedata.normalize("NFKD", name)
+    n = "".join(c for c in n if not unicodedata.combining(c))
+    n = n.lower()
+    n = re.sub(r"[^\w\s]", " ", n, flags=re.UNICODE)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
+
+
+# Proximity threshold for the self-dedup pass -- 2 km, the same radius
+# the measurement that found this defect used (31,052 exact-name pairs
+# within 2 km, essentially all OSM-against-OSM). Deliberately much
+# tighter than build_places_osm_anchors.py's 50 km DEDUP_RADIUS_KM for
+# city anchors: a city name can legitimately repeat every few hundred
+# km (a country's admin structure reuses "Springfield"/"Georgetown"
+# sparsely), but two mappings of the SAME park -- one way, one
+# relation, or two overlapping boundary fragments -- sit at the same
+# coordinates or at most a few hundred metres apart (their centroids
+# can drift a little if the fragments don't overlap exactly). A radius
+# anywhere near 50 km would start merging distinct same-named parks in
+# neighbouring towns -- there is more than one real "City Park" or
+# "Riverside Park" in the US alone. 2 km comfortably covers the
+# same-object case without reaching a second town.
+_OSM_SELF_DEDUP_M = 2000.0
+
+
+def _dedup_osm_self_group(rows):
+    """Greedy largest-first within one exact-name group -- identical
+    strategy to build_places_osm_anchors.py's own _dedup_group() (see
+    that function's comment for why), not a transitive union-find over
+    the proximity threshold: two same-named parks far enough apart to
+    both legitimately survive can never get chained together through a
+    third same-named park that happens to sit between them. "Largest"
+    is the untouched props.area_m2 already computed for each candidate
+    (pre storage-clip) -- a relation covering the whole park outranks a
+    way covering one corner of it.
+    """
+    ordered = sorted(rows, key=lambda r: -r["area_m2"])
+    kept = []
+    for r in ordered:
+        if not any(_haversine_m(r["lat"], r["lon"], k["lat"], k["lon"]) <= _OSM_SELF_DEDUP_M
+                   for k in kept):
+            kept.append(r)
+    return kept
+
+
+def extract_osm_parks(geojsonseq_path: str, landmarks_csv: str, pota_csv: str,
+                       padus_csv: str, out_path: str) -> None:
+    """Run on navi:  python3 build_places_seed.py extract-osm-parks \\
+        parks.geojsonseq landmarks.csv pota.csv padus_parks.csv out.csv
+
+    geojsonseq_path is a pre-filtered, pre-exported GeoJSONSeq (osmium
+    tags-filter `wr/leisure=park`,`wr/boundary=protected_area` then
+    `osmium export`) -- this function reads that extract directly, not
+    the planet PBF itself (see module docstring's "OSM parks" SOURCES
+    entry). Each feature's `properties.area_m2` is trusted as given
+    (computed by the export in an equal-area projection) rather than
+    re-derived from the lon/lat geometry the way fetch_padus_parks()
+    has to for PAD-US's integer-acre GIS_Acres column -- there is no
+    equivalent precision problem here to work around.
+
+    landmarks_csv is extract_landmarks()'s own output, read ONLY to
+    build a set of osm_type+osm_id keys already claimed by the landmark
+    tier -- see "leisure=nature_reserve overlap" in the module
+    docstring for why the exact same object can appear in both extracts
+    and why the landmark tier always wins that overlap.
+
+    pota_csv and padus_csv are fetch_pota()'s and fetch_padus_parks()'s
+    own outputs, read ONLY to dedup against -- globally, not gated to
+    the US play-area bbox, since fetch_pota() is worldwide -- see
+    "Overlap with POTA/PAD-US" in the module docstring. Neither is
+    read for its geometry (POTA carries none; PAD-US's own
+    boundary is not needed here) -- name + point is all the dedup check
+    uses, same as fetch_padus_parks()'s own dedup against POTA.
+    """
+    import shapely
+    from shapely.geometry import shape as shapely_shape
+    from shapely.strtree import STRtree
+
+    exclude_re = _compile_exclude_park_name_re()
+    buckets = _load_city_anchors(_DEFAULT_PLACES_CSV)
+
+    landmark_osm_keys = set()
+    with open(landmarks_csv, encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            landmark_osm_keys.add(row["ref_code"])  # "n<id>" / "w<id>"
+
+    dedup_pts = []
+    dedup_names = []
+    for src_csv in (pota_csv, padus_csv):
+        with open(src_csv, encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                try:
+                    lat = float(row["lat"])
+                    lon = float(row["lon"])
+                except (KeyError, ValueError):
+                    continue
+                dedup_pts.append(shapely.Point(lon, lat))
+                dedup_names.append(row["name"])
+    dedup_tree = STRtree(dedup_pts) if dedup_pts else None
+
+    kept = 0
+    larger = 0
+    smaller = 0
+    total = 0
+    counts = {
+        "no_name": 0, "dup_of_landmark": 0, "name_excluded": 0,
+        "dup_of_us_park": 0, "bad_geom": 0, "dup_of_osm_self": 0,
+    }
+
+    # Every candidate that clears the per-row filters below is buffered
+    # here rather than written immediately -- the OSM-vs-OSM self-dedup
+    # pass after this loop (see module docstring's "OSM-against-ITSELF"
+    # section and _dedup_osm_self_group()'s own comment) needs every
+    # surviving candidate's name/location/area before it can decide
+    # which of a same-named cluster to keep, so nothing can be written
+    # until that pass has run. `idx` preserves the geojsonseq's own
+    # ordering so the final CSV comes out in the same relative order it
+    # would have without this pass, not grouped by name. 594,487
+    # candidates survived the per-row filters on the full planet extract
+    # (2026-09 run) -- comfortably bufferable in memory (the written CSV
+    # itself is ~156 MB; navi has tens of GB free).
+    candidates = []
+
+    with open(geojsonseq_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            rec = json.loads(line)
+            props = rec["properties"]
+            name = (props.get("name") or "").strip()
+            if not name:
+                counts["no_name"] += 1
+                continue
+
+            osm_type = props.get("osm_type") or ""
+            osm_id = props.get("osm_id")
+            code = f"{osm_type[:1]}{osm_id}"
+            if code in landmark_osm_keys:
+                counts["dup_of_landmark"] += 1
+                continue
+
+            if exclude_re.search(name):
+                counts["name_excluded"] += 1
+                continue
+
+            try:
+                geom = shapely_shape(rec["geometry"])
+                if not geom.is_valid:
+                    geom = geom.buffer(0)
+            except Exception:
+                counts["bad_geom"] += 1
+                continue
+            if geom.is_empty:
+                counts["bad_geom"] += 1
+                continue
+
+            centroid = geom.centroid
+            lat, lon = centroid.y, centroid.x
+            area_m2 = props.get("area_m2")
+            if not area_m2:
+                area_m2 = geom.area * (111_320.0 ** 2) * math.cos(math.radians(lat))
+
+            # DEDUP AGAINST POTA/PAD-US -- see module docstring's "US
+            # overlap" section. Run GLOBALLY, not bbox-gated: PAD-US
+            # really is US-only, so gating on the US play-area bbox was
+            # harmless for that half, but POTA is WORLDWIDE (see this
+            # module's own "WORLDWIDE EXPANSION" note) -- fetch_pota()
+            # lists national parks and reserves on every continent, not
+            # just the US. Gating this check to the US bbox (the first
+            # cut of this stage did exactly that) silently let every
+            # non-US POTA park duplicate its OSM twin freely: confirmed
+            # 10,752 same-name-within-50km collisions across the raw
+            # extract, the overwhelming majority of them outside the
+            # US -- Serengeti National Park, Kakadu National Park,
+            # Fiordland National Park, and thousands more, none of which
+            # the bbox-gated version ever had a chance to catch.
+            #
+            # BUG FOUND AND FIXED before this ran for real (2026-09-07):
+            # the first cut of this check also queried and distance-
+            # tested against this candidate's own CENTROID only, the
+            # same technique fetch_padus_parks() uses against POTA --
+            # correct for an ordinary city park, where centroid and POTA
+            # point sit metres apart, but wrong for a National Forest-
+            # scale relation: a POTA point is often placed at one
+            # specific activation spot (a trailhead, a visitor centre),
+            # which can be tens of km from the geometric centroid of a
+            # shape that size. Confirmed duplicating Yosemite National
+            # Park, Flathead National Forest, and Sequoia National
+            # Forest -- each shipped as BOTH a POTA/PAD-US row and a
+            # separate OSM row, exactly the double-counting this stage
+            # exists to avoid -- before the fix below caught it. Now
+            # queries and tests containment against the candidate's
+            # real, full, pre-clip GEOMETRY (bbox padded by
+            # _DEDUP_NEAR_DEG so a POTA point sitting just outside its
+            # own park's mapped boundary -- the same hand-entered-point
+            # slop match_parks() itself tolerates -- still counts as a
+            # dup), not a small fixed buffer around one point: a dup is
+            # a strong name match (score >= 0.5) whose US/POTA point
+            # either falls INSIDE this geometry (match_parks()'s own
+            # "contains" test, valid at any size) or within
+            # _DEDUP_NEAR_DEG of the centroid (the original small-park
+            # case, kept for a park whose own centroid sits near its
+            # POTA point but whose true shape is thin/irregular enough
+            # that containment alone might miss it at the boundary).
+            if dedup_tree is not None:
+                pt = shapely.Point(lon, lat)
+                minlon, minlat, maxlon, maxlat = geom.bounds
+                query_box = shapely.box(minlon - _DEDUP_NEAR_DEG, minlat - _DEDUP_NEAR_DEG,
+                                         maxlon + _DEDUP_NEAR_DEG, maxlat + _DEDUP_NEAR_DEG)
+                is_dup = False
+                for i in dedup_tree.query(query_box):
+                    if _name_score(name, dedup_names[i]) < 0.5:
+                        continue
+                    if geom.contains(dedup_pts[i]) or pt.distance(dedup_pts[i]) < _DEDUP_NEAR_DEG:
+                        is_dup = True
+                        break
+                if is_dup:
+                    counts["dup_of_us_park"] += 1
+                    continue
+
+            # PARK-SIZE SCORING, against the real, full, pre-clip shape
+            # -- see PARK_REMOTE_AREA_FRAC's own comment above
+            # match_parks(). true_area_m2 is passed so a self-
+            # intersecting OSM relation that make_valid() cannot fully
+            # resolve is measured, not silently mis-clipped -- see the
+            # CLIPPED-GEOMETRY GUARD comment above _frac_area_outside_city.
+            frac_outside = _frac_area_outside_city(geom, buckets, true_area_m2=area_m2)
+
+            # STORAGE CLIP -- see module docstring and _OSM_PARK_CLIP_DEG's
+            # own comment: this dataset's boundary=protected_area side
+            # ranges up to Papahānaumokuākea's 1.5 million km^2, and
+            # app/places_seed.py's _park_cells() has no size guard of
+            # its own against a stored geometry that large.
+            pt = shapely.Point(lon, lat)
+            try:
+                clipped = geom.intersection(pt.buffer(_OSM_PARK_CLIP_DEG))
+            except Exception:
+                g_fixed = geom.buffer(0)
+                try:
+                    clipped = g_fixed.intersection(pt.buffer(_OSM_PARK_CLIP_DEG))
+                except Exception:
+                    clipped = g_fixed
+            if clipped.is_empty:
+                clipped = geom
+            simplified = clipped.simplify(0.0008, preserve_topology=True)
+
+            candidates.append({
+                "idx": total,
+                "row": ["park", f"OSM-{code}", name, f"{lat:.6f}", f"{lon:.6f}",
+                        POINTS["park"], "OSM", f"{area_m2:.0f}", simplified.wkt, "",
+                        f"{frac_outside:.4f}"],
+                "name_key": _osm_self_dedup_key(name),
+                "lat": lat, "lon": lon, "area_m2": area_m2,
+            })
+
+    # OSM-VS-OSM SELF-DEDUP -- see module docstring's "OSM-against-
+    # ITSELF" section, _osm_self_dedup_key()'s comment (why exact-name
+    # only, not fuzzy/substring), and _dedup_osm_self_group()'s comment
+    # (why greedy-largest-first, not transitive union-find). Every
+    # candidate reaching this point already has a non-empty name --
+    # blank-name features were dropped above at the "no_name" filter,
+    # never buffered at all -- so, unlike the bug caught mid-flight on
+    # the anchor build, there is no blank-name bucket for this grouping
+    # to wrongly collapse into one giant group.
+    name_groups: dict[str, list[dict]] = {}
+    for c in candidates:
+        name_groups.setdefault(c["name_key"], []).append(c)
+
+    survivors = []
+    for group in name_groups.values():
+        if len(group) == 1:
+            survivors.extend(group)
+            continue
+        deduped = _dedup_osm_self_group(group)
+        counts["dup_of_osm_self"] += len(group) - len(deduped)
+        survivors.extend(deduped)
+    survivors.sort(key=lambda c: c["idx"])
+
+    with open(out_path, "w", newline="", encoding="utf-8") as out:
+        w = csv.writer(out)
+        w.writerow(SEED_FIELDS)
+        for c in survivors:
+            w.writerow(c["row"])
+            kept += 1
+            if c["area_m2"] >= SQUARE_AREA_M2:
+                larger += 1
+            else:
+                smaller += 1
+
+    print(f"osm-parks: {total} candidates, wrote {kept} OSM parks "
+          f"(larger-than-cell={larger} permanent, smaller-than-cell={smaller} rotating) "
+          f"-> {out_path}", file=sys.stderr)
+    print(f"osm-parks: excluded {counts}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------
 # Stage 5: merge -- also where the real, effort-based points value is
 # computed (score_points below), since that is the first point in the
 # pipeline where the full row set exists.
@@ -2102,6 +2568,13 @@ def main():
     p.add_argument("pota_csv")
     p.add_argument("out")
 
+    p = sub.add_parser("extract-osm-parks")
+    p.add_argument("geojsonseq")
+    p.add_argument("landmarks_csv")
+    p.add_argument("pota_csv")
+    p.add_argument("padus_csv")
+    p.add_argument("out")
+
     p = sub.add_parser("merge")
     p.add_argument("inputs", nargs="+")
     p.add_argument("--out", required=True)
@@ -2120,6 +2593,9 @@ def main():
         match_parks(args.pota_csv, args.out)
     elif args.cmd == "fetch-padus-parks":
         fetch_padus_parks(args.pota_csv, args.out)
+    elif args.cmd == "extract-osm-parks":
+        extract_osm_parks(args.geojsonseq, args.landmarks_csv, args.pota_csv,
+                           args.padus_csv, args.out)
     elif args.cmd == "merge":
         merge(args.inputs, args.out, args.places_csv)
 
