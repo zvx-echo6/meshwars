@@ -91,7 +91,7 @@ from shapely import wkt as shapely_wkt
 from shapely.geometry import MultiPolygon, Polygon, box as shapely_box
 
 from .config import settings
-from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, cell_indices, distance_m
+from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
 
 log = logging.getLogger("places_seed")
 
@@ -211,26 +211,33 @@ _METERS_PER_DEG_LAT = 111_320.0
 # the trip even where they cannot legally cross the line, and the game
 # should credit that.
 #
-# Now every place's credit zone is expanded outward by one ring of
-# cells (see _ring_expand below) from its base geometry test, EXCEPT
-# summits -- a SOTA activation requires physically standing on the
-# summit itself, which is the entire point of that game mode, so
-# summits keep their own single square (or terrain-qualified set, see
-# _load_summit_cells) with no ring added.
-def _ring_expand(cells: set[str]) -> set[str]:
-    """`cells` plus every cell adjacent to one of them, including
-    diagonally -- one ring of cells added outward from the set. A pure
-    index computation over cell ids (see app/grid.cell_indices), not a
-    second geometry pass, so it is cheap even for a set with tens of
-    thousands of cells (the largest boundary-matched parks).
-    """
-    expanded: set[str] = set(cells)
-    for cid in cells:
-        lat_idx, lon_idx = cell_indices(cid)
-        for d_lat in (-1, 0, 1):
-            for d_lon in (-1, 0, 1):
-                expanded.add(f"{lat_idx + d_lat}_{lon_idx + d_lon}")
-    return expanded
+# Every place's credit zone is expanded outward by one ring of cells
+# from its base geometry test, EXCEPT summits -- a SOTA activation
+# requires physically standing on the summit itself, which is the
+# entire point of that game mode, so summits keep their own single
+# square (or terrain-qualified set, see _load_summit_cells) with no
+# ring added.
+#
+# WHERE THE RING IS APPLIED -- MOVED 2026-09-09 ("move the reachable
+# ring from storage time to lookup time"): until then, this module
+# expanded each place's own base cell set by one ring (via a private
+# _ring_expand() that used to live here) and stored every resulting
+# cell as its own place_cell row. With 1,281,030 landmarks alone (9
+# rows each instead of 1) that ballooned place_cell to roughly 80M rows
+# and pushed a full seed load past an hour. `place_cell` now stores
+# ONLY a place's own occupied cell(s) -- exactly the base sets built
+# below, with no expansion -- and app/place_scoring.credit_places()
+# expands the PING's cell by one ring at lookup time instead
+# (app.grid.ring_expand()), gated so a summit's stored cell(s) still
+# credit ONLY on an exact match. This is exactly equivalent for every
+# non-summit place: "is the ping's cell inside the place's 3x3?" and
+# "is the place's cell inside the ping's 3x3?" are the same question,
+# by symmetry of the ring itself, so moving which side does the
+# expanding changes nothing about who gets credited -- only where the
+# 9x-larger set briefly exists (a handful of query parameters per ping,
+# not ~80M permanent rows). See docs/features/places.md's reachable-ring
+# section and credit_places()'s own comment for the full story,
+# including why summits are excluded from the query-side expansion too.
 
 # SUMMIT/LANDMARK DOUBLE-DIP FILTER (added 2026-08-25) -- some SOTA
 # summits carry a fire lookout, and OSM separately maps that lookout as
@@ -405,17 +412,19 @@ def _cell_area_m2(lat: float) -> float:
 def _park_cells(geom: Polygon | MultiPolygon) -> set[str]:
     """Cell ids whose area intersects `geom` AT ALL (changed 2026-09-07
     from ">50% inside the boundary" -- see the REACHABLE-RING CREDIT
-    note above _ring_expand for why). Walked per polygon part of a
-    MultiPolygon (a national forest made of scattered units, say)
-    rather than over the union's bounding box, so the empty ground
-    between distant parts is never iterated.
+    note above for why). Walked per polygon part of a MultiPolygon (a
+    national forest made of scattered units, say) rather than over the
+    union's bounding box, so the empty ground between distant parts is
+    never iterated.
 
-    This is the base set only -- the caller (load_places_seed) still
-    runs it through _ring_expand() to add one ring of cells outward, so
-    the reachable perimeter (anyone standing just outside the boundary)
-    credits too, not just the sliver of cells the polygon itself
-    touches. No longer needs `lat`: the old area-ratio test compared
-    cell area to cell area at a given latitude, but a plain
+    This is exactly the set `load_places_seed` stores as this park's
+    place_cell rows -- no ring expansion happens here or at the caller
+    (moved to lookup time 2026-09-09, see the REACHABLE-RING CREDIT
+    note above and app/place_scoring.credit_places()): the reachable
+    perimeter (anyone standing just outside the boundary) credits via
+    the ping-side ring expansion instead, not by this function widening
+    its own output. No longer needs `lat`: the old area-ratio test
+    compared cell area to cell area at a given latitude, but a plain
     intersects() test has no area comparison left to make.
     """
     parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
@@ -713,12 +722,14 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                 if ref_type == "park":
                     if geom_wkt and area_m2 is not None and area_m2 >= _cell_area_m2(lat):
                         # Matched boundary at or above one grid cell:
-                        # score any cell the boundary intersects at all,
-                        # PLUS one ring of cells outward from that set --
-                        # see the REACHABLE-RING CREDIT note above
-                        # _ring_expand. Always active.
+                        # store any cell the boundary intersects at all
+                        # -- see the REACHABLE-RING CREDIT note above
+                        # for why the outward ring is no longer added
+                        # HERE (it is added at credit time instead, to
+                        # the ping's cell, not stored on this row).
+                        # Always active.
                         geom = shapely_wkt.loads(geom_wkt)
-                        cells = _ring_expand(_park_cells(geom))
+                        cells = _park_cells(geom)
                         rotates = False
                         stats["park_matched"] += 1
                         stats["park_matched_larger"] += 1
@@ -726,18 +737,18 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                             # Boundary matched but the polygon touches no
                             # cell at all (a sliver, or a simplification
                             # artifact) -- fall back to the point's own
-                            # ring so the park is not silently
+                            # cell so the park is not silently
                             # unscoreable.
-                            cells = _ring_expand({cell_id(lat, lon)})
+                            cells = {cell_id(lat, lon)}
                     else:
                         # Either unmatched (no boundary at all) or
                         # matched but smaller than one cell -- both
-                        # score a 3x3 block around their point (the
-                        # point's own cell plus its ring), same reachable
-                        # rule a landmark gets below. Unmatched stays
-                        # permanent (rotates=False); a genuinely small
-                        # matched park rotates like a landmark.
-                        cells = _ring_expand({cell_id(lat, lon)})
+                        # store just their own point's cell, same as a
+                        # landmark below (the reachable ring around it is
+                        # added at credit time, not here). Unmatched
+                        # stays permanent (rotates=False); a genuinely
+                        # small matched park rotates like a landmark.
+                        cells = {cell_id(lat, lon)}
                         if geom_wkt and area_m2 is not None:
                             stats["park_matched"] += 1
                             stats["park_matched_smaller"] += 1
@@ -751,21 +762,22 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                     # is absent or has no row for this summit -- which is
                     # exactly the behaviour summits had before, so a
                     # missing artifact degrades rather than breaks.
-                    # Deliberately NOT ring-expanded (unlike every other
-                    # ref_type, see the REACHABLE-RING CREDIT note above
-                    # _ring_expand): a SOTA activation requires physically
-                    # reaching the summit, and that is the point of the
-                    # game mode.
+                    # Deliberately NOT ring-expanded, at storage time or
+                    # credit time (unlike every other ref_type -- see
+                    # the REACHABLE-RING CREDIT note above and
+                    # app/place_scoring.credit_places()): a SOTA
+                    # activation requires physically reaching the
+                    # summit, and that is the point of the game mode.
                     cells = summit_cells.get(row["ref_code"]) or {cell_id(lat, lon)}
                 else:
-                    # Landmark: the point's own cell plus one ring around
-                    # it (a 3x3 block) -- see the REACHABLE-RING CREDIT
-                    # note above _ring_expand. A landmark's point can
-                    # land inside a fence (a school, private property)
-                    # with no boundary data at all to test against, so
-                    # the ring is the only way this game credits the
+                    # Landmark: just the point's own cell -- see the
+                    # REACHABLE-RING CREDIT note above. A landmark's
+                    # point can land inside a fence (a school, private
+                    # property) with no boundary data at all to test
+                    # against, so the ring (added at credit time, not
+                    # stored here) is the only way this game credits the
                     # sidewalk outside it.
-                    cells = _ring_expand({cell_id(lat, lon)})
+                    cells = {cell_id(lat, lon)}
 
                 stats["kept"][ref_type] += 1
 

@@ -18,7 +18,6 @@ from app.places_seed import (
     _cell_area_m2,
     _classify_row,
     _park_cells,
-    _ring_expand,
 )
 from shapely.geometry import box
 
@@ -168,33 +167,12 @@ def test_park_cells_finds_no_cells_when_geometry_does_not_touch_the_grid():
     assert cells == {cell_id(43.0005, -116.0005)}
 
 
-# --- ring expansion: point places get a 3x3 block, boundary parks get one ring outward ---
-
-
-def test_ring_expand_of_a_single_cell_is_a_3x3_block():
-    expanded = _ring_expand({"10_20"})
-    assert expanded == {
-        "9_19", "9_20", "9_21",
-        "10_19", "10_20", "10_21",
-        "11_19", "11_20", "11_21",
-    }
-
-
-def test_ring_expand_of_two_adjacent_cells_merges_their_rings():
-    # Two touching cells' 3x3 blocks overlap; the result is their union,
-    # not two disjoint 3x3 blocks (9+9=18) -- de-duplicated by the set.
-    expanded = _ring_expand({"10_20", "10_21"})
-    assert len(expanded) < 18
-    assert "10_20" in expanded and "10_21" in expanded
-    assert "9_19" in expanded and "11_22" in expanded  # outer corners of the combined block
-
-
-def test_ring_expand_adds_exactly_one_ring_not_two():
-    """A cell two squares away from the base set must NOT be included --
-    only one ring outward, not a second pass."""
-    expanded = _ring_expand({"10_20"})
-    assert "12_20" not in expanded
-    assert "10_22" not in expanded
+# ring expansion (_ring_expand, as it was called here) MOVED to
+# app/grid.ring_expand() 2026-09-09 -- see tests/test_grid.py. It is no
+# longer called from this module at all; the end-to-end tests further
+# down (test_landmark_credits_from_an_adjacent_cell and friends) prove
+# the credit-time call site app/place_scoring.py now uses is exactly
+# equivalent to the seed-time one this module used to have.
 
 
 # ---------------------------------------------------------------------
@@ -524,21 +502,32 @@ def test_shipped_summit_cells_artifact_is_loadable_and_exclusive():
 # REACHABLE-RING CREDIT, end to end: load_places_seed()'s cell mapping
 # combined with app/place_scoring.credit_places() -- proving the ring
 # actually pays out from app/place_scoring.py's point of view, not just
-# that _ring_expand()/_park_cells() produce the right cell sets in
-# isolation (see the unit tests above). place_scoring.py itself is
-# UNCHANGED by this feature (still a single indexed lookup on
-# place_cell) -- these tests exist to prove that fact holds end to end.
+# that _park_cells() produces the right base cell set in isolation (see
+# the unit tests above) or that app.grid.ring_expand() itself is
+# correct in isolation (tests/test_grid.py).
+#
+# MOVED 2026-09-09 ("move the reachable ring from storage time to
+# lookup time"): place_cell now stores ONLY a place's own occupied
+# cell(s) -- no ring -- and credit_places() expands the ping's cell by
+# one ring at query time instead. These tests now prove EQUIVALENCE
+# directly: place_cell holds the narrower, un-ringed set (asserted
+# below), while credit_places() still pays out from every cell the OLD
+# storage-side ring would have included, because ring adjacency is
+# symmetric -- and, for summits, still does NOT pay out from a
+# neighbouring cell, because credit_places() gates its query-side ring
+# on ref_type, not just on what happens to be stored.
 # ---------------------------------------------------------------------
 
-from app.grid import cell_bounds, cell_id, cell_indices
+from app.grid import cell_bounds, cell_id, cell_indices, ring_expand
 from app.place_rotation import week_start_for_ts
 from app.place_scoring import credit_places
 
 
-def test_landmark_credits_from_an_adjacent_cell(conn, tmp_path, monkeypatch):
+def test_landmark_credits_from_its_own_cell_and_all_8_neighbours(conn, tmp_path, monkeypatch):
     """A landmark's point can sit inside a fence with nothing to stop
     it -- the reachable ring is what lets a player standing on the
-    sidewalk outside still score it."""
+    sidewalk outside still score it, from ANY of the 8 directions, not
+    just one arbitrarily-picked neighbour."""
     csv_path = tmp_path / "places.csv"
     monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
 
@@ -548,36 +537,54 @@ def test_landmark_credits_from_an_adjacent_cell(conn, tmp_path, monkeypatch):
 
     place_id = conn.execute("SELECT id FROM place WHERE ref_code = 'n1'").fetchone()[0]
     own_cid = cell_id(lat, lon)
-    lat_idx, lon_idx = cell_indices(own_cid)
-    adjacent_cid = f"{lat_idx}_{lon_idx + 1}"
 
-    assert conn.execute(
-        "SELECT 1 FROM place_cell WHERE place_id = ? AND cell_id = ?", (place_id, adjacent_cid),
-    ).fetchone() is not None, "adjacent cell must be in the landmark's ring"
+    # STORAGE: place_cell now holds ONLY the landmark's own cell -- the
+    # ring is no longer stored at all (see app/places_seed.py's
+    # REACHABLE-RING CREDIT note).
+    stored = {r[0] for r in conn.execute(
+        "SELECT cell_id FROM place_cell WHERE place_id = ?", (place_id,)
+    )}
+    assert stored == {own_cid}, "place_cell must store only the landmark's own cell, no ring"
 
     # Landmarks rotate weekly (app/places_seed.py's _classify_row) --
-    # irrelevant to what this test is proving (the ring mapping), so
+    # irrelevant to what this test is proving (the ring credit), so
     # force it always-active rather than pulling in place_rotation's
     # weekly-draw machinery just to make it live this week.
     conn.execute("UPDATE place SET rotates = 0 WHERE id = ?", (place_id,))
 
+    # CREDIT: every one of the 9 cells in the ring -- the landmark's
+    # own plus all 8 neighbours -- must still credit, each for a fresh
+    # player so the weekly cap/one-per-week rule can't be why one fails.
     now = int(time.time())
-    credited = credit_places(conn, player_id=1, cell_id=adjacent_cid, ts=now, paint_outcome="captured")
-    assert credited == [(place_id, 5)]
+    ring = sorted(ring_expand({own_cid}))
+    assert len(ring) == 9
+    for i, cid in enumerate(ring, start=100):
+        credited = credit_places(conn, player_id=i, cell_id=cid, ts=now, paint_outcome="captured")
+        assert credited == [(place_id, 5)], f"cell {cid} (own={cid == own_cid}) must credit"
 
 
 def test_summit_does_not_credit_from_an_adjacent_cell(conn, tmp_path, monkeypatch):
     """Deliberate exception to the reachable-ring rule: a SOTA
     activation requires physically reaching the summit, so unlike every
     other place type a summit's place_cell mapping is NOT ring-expanded
-    -- an adjacent cell must not credit it."""
+    at storage time, AND credit_places() must not ring-expand the
+    ping's cell into crediting it either -- an adjacent cell must not
+    credit a summit under either scheme."""
     csv_path = tmp_path / "places.csv"
     monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
     # No terrain-qualified squares for this ref_code -- force the
     # fallback to the summit's own single cell (see
     # _load_summit_cells' docstring) so this test is not at the mercy
-    # of the real shipped summit_cells.csv's terrain data.
-    monkeypatch.setattr(places_seed_module, "_SUMMIT_CELLS_PATH", str(tmp_path / "no_such_file.csv"))
+    # of the real shipped summit_cells.csv's terrain data. Monkeypatches
+    # _load_summit_cells() ITSELF, not just _SUMMIT_CELLS_PATH: that
+    # function's `path` parameter defaults to _SUMMIT_CELLS_PATH at
+    # DEF time (module import), so patching the module-level constant
+    # afterward never reaches load_places_seed()'s own no-argument call
+    # -- a real footgun this test used to fall into silently (it still
+    # passed, but only because "W7I/SW-001" also happens to be absent
+    # from the real shipped summit_cells.csv, not because the patch
+    # below did anything).
+    monkeypatch.setattr(places_seed_module, "_load_summit_cells", lambda *a, **k: {})
 
     lat, lon = 43.0, -116.0
     _write_seed_csv(csv_path, [
@@ -600,19 +607,124 @@ def test_summit_does_not_credit_from_an_adjacent_cell(conn, tmp_path, monkeypatc
     credited = credit_places(conn, player_id=1, cell_id=own_cid, ts=now, paint_outcome="captured")
     assert credited == [(place_id, 100)]
 
-    # The actual assertion: an adjacent cell -- which a landmark or
-    # boundary-matched park's ring WOULD include -- credits nothing for
-    # a summit, for a different player so the weekly cap can't be why.
+    # The actual assertion: an adjacent cell -- which credit_places()'s
+    # query-side ring WOULD include for a landmark or boundary-matched
+    # park -- credits nothing for a summit, for a different player so
+    # the weekly cap can't be why. This is THE regression this whole
+    # change could get wrong: a query that ring-matched every ref_type
+    # alike would silently pass every other test in this file while
+    # breaking SOTA's core rule right here.
     credited = credit_places(conn, player_id=2, cell_id=adjacent_cid, ts=now, paint_outcome="captured")
     assert credited == []
 
 
+def test_summit_credits_from_its_terrain_qualified_set_but_not_a_grid_adjacent_cell_outside_it(
+    conn, tmp_path, monkeypatch,
+):
+    """CORRECTION (2026-09-09): summits are NOT "no ring" -- SOTA's
+    activation zone genuinely extends beyond the peak's own square (near
+    AND below it counts, not only standing exactly on the summit). That
+    zone already exists as summit_cells.csv's terrain-qualified set
+    (elevation-based, built against the planet DEM on navi), which IS
+    the summit's ring -- just shaped by the mountain instead of by grid
+    adjacency, and a strictly BETTER one for that reason: a flat 3x3
+    would sweep in squares that sit hundreds of metres below the summit
+    and outside SOTA's real activation zone.
+
+    So the rule is: store the terrain-qualified set exactly as-is
+    (already true, untouched by this change -- see the test above's
+    fallback case for the single-cell case when no terrain data exists)
+    and match it EXACTLY at credit time, with NO additional query-side
+    8-neighbour expansion layered on top. This test proves both halves
+    with a set that is deliberately NOT ring-shaped: the peak's own
+    cell, plus one immediate neighbour, plus one cell that is FAR from
+    the peak in grid terms (three rows away) -- standing in for a
+    terrain-following square a flat ring could never reach on its own.
+    A cell grid-adjacent to the peak but OUTSIDE this set must not
+    credit, proving credit_places() is not silently unioning in a flat
+    ring around a summit's own cell alongside its terrain set.
+    """
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    lat, lon = 43.0, -116.0
+    own_cid = cell_id(lat, lon)
+    lat_idx, lon_idx = cell_indices(own_cid)
+
+    # Terrain-qualified set: own cell, one immediate (east) neighbour,
+    # and one cell three rows south -- NOT grid-adjacent to anything
+    # else in the set, so a flat ring could never produce it.
+    east_cid = f"{lat_idx}_{lon_idx + 1}"
+    terrain_cid = f"{lat_idx - 3}_{lon_idx + 2}"
+    summit_cells_path = tmp_path / "summit_cells.csv"
+    summit_cells_path.write_text(
+        "ref_code,base_y,base_x,offsets\n"
+        f"W7I/SW-001,{lat_idx},{lon_idx},0:0 0:1 -3:2\n"
+    )
+    # Parse via the REAL _load_summit_cells() (so this test also proves
+    # the fixture CSV parses to what it claims), then monkeypatch
+    # _load_summit_cells ITSELF to return that result -- patching just
+    # _SUMMIT_CELLS_PATH does not work here: that function's `path`
+    # parameter defaults to _SUMMIT_CELLS_PATH at DEF time (module
+    # import), so load_places_seed()'s own no-argument call
+    # (`_load_summit_cells()`) never sees a module-level patch made
+    # after import. See test_summit_does_not_credit_from_an_adjacent_
+    # cell's own comment on this same footgun.
+    parsed = places_seed_module._load_summit_cells(str(summit_cells_path))
+    assert parsed == {"W7I/SW-001": {own_cid, east_cid, terrain_cid}}, "fixture CSV parsed unexpectedly"
+    monkeypatch.setattr(places_seed_module, "_load_summit_cells", lambda *a, **k: parsed)
+
+    _write_seed_csv(csv_path, [
+        {**_seed_row("summit", "W7I/SW-001", lat=lat, lon=lon, points=100), "name": "Steel Mountain"},
+    ])
+    load_places_seed(conn)
+
+    place_id = conn.execute("SELECT id FROM place WHERE ref_code = 'W7I/SW-001'").fetchone()[0]
+
+    stored = {r[0] for r in conn.execute(
+        "SELECT cell_id FROM place_cell WHERE place_id = ?", (place_id,)
+    )}
+    assert stored == {own_cid, east_cid, terrain_cid}, (
+        "the terrain-qualified set must be stored exactly as-is, not reduced to one cell"
+    )
+
+    now = int(time.time())
+    # Positive: every cell actually IN the terrain-qualified set credits,
+    # including the far-away terrain cell no flat ring would ever reach.
+    for i, cid in enumerate((own_cid, east_cid, terrain_cid), start=1):
+        credited = credit_places(conn, player_id=i, cell_id=cid, ts=now, paint_outcome="captured")
+        assert credited == [(place_id, 100)], f"cell {cid} is in the terrain set and must credit"
+
+    # Negative: a cell grid-adjacent to the peak's own square but NOT
+    # part of the terrain-qualified set must NOT credit -- proving
+    # credit_places() applies no flat 8-neighbour ring to a summit on
+    # top of its terrain set.
+    north_of_own = f"{lat_idx + 1}_{lon_idx}"
+    assert north_of_own not in stored
+    credited = credit_places(conn, player_id=10, cell_id=north_of_own, ts=now, paint_outcome="captured")
+    assert credited == [], "a grid-adjacent-but-not-terrain-qualified cell must not credit a summit"
+
+    # Also grid-adjacent to the FAR terrain cell, not just the peak's
+    # own square -- the same guarantee has to hold everywhere in the set,
+    # not only around the summit's own cell.
+    adjacent_to_terrain_cell = f"{lat_idx - 3}_{lon_idx + 3}"
+    assert adjacent_to_terrain_cell not in stored
+    credited = credit_places(
+        conn, player_id=11, cell_id=adjacent_to_terrain_cell, ts=now, paint_outcome="captured",
+    )
+    assert credited == [], "no ring around any terrain-qualified cell either, not just the peak's own"
+
+
 def test_big_boundary_matched_park_credits_from_a_perimeter_cell_outside_the_boundary(conn, tmp_path, monkeypatch):
     """Rocky Mountain Arsenal NWR's actual case, in miniature: a park
-    whose boundary covers a 3x3 block of cells must also credit from
-    the ring one square further out -- cells the polygon itself never
-    touches at all, standing in for "the reachable perimeter just
-    outside a mostly-closed boundary"."""
+    whose boundary covers a 3x3 block of cells must also credit from a
+    perimeter cell one square further out -- a cell the polygon itself
+    never touches at all, standing in for "the reachable perimeter just
+    outside a mostly-closed boundary". place_cell no longer stores that
+    perimeter cell at all (see the STORAGE assertions below); the
+    credit comes entirely from credit_places()'s query-side ring
+    matching the perimeter cell's OWN ring against the park's stored
+    (un-ringed) boundary cells."""
     csv_path = tmp_path / "places.csv"
     monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
 
@@ -637,19 +749,24 @@ def test_big_boundary_matched_park_credits_from_a_perimeter_cell_outside_the_bou
     place_id = conn.execute("SELECT id FROM place WHERE ref_code = 'US-9999'").fetchone()[0]
 
     # The polygon covers exactly the 3x3 block (clat-1..clat+1,
-    # clon-1..clon+1); a cell two squares out in one axis (part of the
-    # ring-expanded 5x5, but never touched by the polygon itself) is
-    # the "perimeter, entirely outside the boundary" case.
-    perimeter_cid = f"{clat + 2}_{clon}"
-    inside_cid = f"{clat + 1}_{clon}"  # inside the actual boundary, for contrast
+    # clon-1..clon+1) -- this IS the full stored place_cell set now,
+    # with no ring added on top of it.
+    perimeter_cid = f"{clat + 2}_{clon}"     # one square past the boundary -- reachable perimeter
+    inside_cid = f"{clat + 1}_{clon}"        # inside the actual boundary, for contrast
+    two_out_cid = f"{clat + 3}_{clon}"       # two squares past -- must stay unreachable
 
     cells = {r[0] for r in conn.execute(
         "SELECT cell_id FROM place_cell WHERE place_id = ?", (place_id,)
     )}
-    assert inside_cid in cells
-    assert perimeter_cid in cells, "the ring must reach one square past the boundary itself"
-    assert f"{clat + 3}_{clon}" not in cells, "only ONE ring outward, not two"
+    assert cells == {f"{y}_{x}" for y in (clat - 1, clat, clat + 1) for x in (clon - 1, clon, clon + 1)}, (
+        "place_cell must store exactly the boundary's own 3x3 block, no ring"
+    )
+    assert perimeter_cid not in cells, "the perimeter cell must NOT be stored -- the ring is query-side now"
 
     now = int(time.time())
     credited = credit_places(conn, player_id=1, cell_id=perimeter_cid, ts=now, paint_outcome="captured")
-    assert credited == [(place_id, 25)]
+    assert credited == [(place_id, 25)], "the perimeter cell must still credit via the query-side ring"
+
+    # Two squares out must still be unreachable -- only ONE ring, not two.
+    credited = credit_places(conn, player_id=2, cell_id=two_out_cid, ts=now, paint_outcome="captured")
+    assert credited == []

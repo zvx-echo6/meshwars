@@ -69,6 +69,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
+from .grid import ring_expand
 from .place_rotation import resolve_week, week_start_for_ts
 
 log = logging.getLogger("place_scoring")
@@ -151,9 +152,63 @@ def credit_places(
     if by_air or paint_outcome == "no_signal":
         return []
 
+    # REACHABLE-RING CREDIT, query side (moved here 2026-09-09 from
+    # app/places_seed.py's seed-build-time _ring_expand() -- see
+    # docs/features/places.md's reachable-ring section and this
+    # module's own docstring). `place_cell` stores only a place's own
+    # occupied cell(s); the ring that makes "the fence line, the
+    # trailhead, the reachable perimeter" credit is expanded HERE
+    # instead, against the ping's own cell, and matched against
+    # whatever place_cell already has on file. This is exactly
+    # equivalent to the old storage-side expansion for every non-summit
+    # place: "is the ping's cell inside the place's 3x3?" and "is the
+    # place's cell inside the ping's 3x3?" are the same question, by
+    # simple symmetry of the ring itself (both sides are the identical
+    # King's-move adjacency test) -- moving which side does the
+    # expanding cannot change who gets credited, only where the
+    # temporarily-9x-larger set exists (a handful of query parameters
+    # per ping, not a permanent row per place per ring cell). This is
+    # also WHY the old change ballooned `place_cell`: 1,281,030
+    # landmarks alone at 9 stored rows each pushed the table past 79M
+    # rows and a full seed load past an hour; storing only the base
+    # cell and expanding the far smaller number of PINGS instead fixes
+    # that without touching who qualifies for a ring at all.
+    #
+    # SUMMITS ARE THE ONE EXCEPTION, and the entire reason this cannot
+    # be a blind "match cell_id IN (ring)" query: a SOTA activation
+    # requires physically reaching the summit (see the REACHABLE-RING
+    # CREDIT note in app/places_seed.py), so a summit's stored cell(s)
+    # must credit ONLY on an EXACT match against the ping's own cell,
+    # never via a neighbouring cell -- exactly as they always have,
+    # ring or no ring, since a summit's place_cell rows were never
+    # ring-expanded even under the old storage-side scheme. The WHERE
+    # clause below encodes precisely that: `pc.cell_id = ?` (the ping's
+    # own cell) always qualifies, for any ref_type, including summit;
+    # a neighbouring cell only qualifies when the place backing it is
+    # NOT a summit. Getting this gate wrong -- e.g. matching the whole
+    # ring for every ref_type -- would silently hand every summit a
+    # ring and break SOTA's core rule without a single test failing
+    # anywhere else in this module (see tests/test_places_seed.py's
+    # test_summit_does_not_credit_from_an_adjacent_cell for the
+    # regression coverage).
+    #
+    # Still a plain indexed lookup on `place_cell.cell_id`
+    # (idx_place_cell_cell) -- 9 index probes via the IN(...) list
+    # instead of 1, never a table scan -- joined to `place` by its
+    # primary key `id` to read ref_type, which costs nothing extra per
+    # matched row. DISTINCT because a place spanning more than one of
+    # the ping's 9 cells (a boundary-matched park whose footprint
+    # touches several of them) would otherwise list the same place_id
+    # more than once.
+    ring_cells = list(ring_expand({cell_id}))
+    marks = ",".join("?" * len(ring_cells))
     place_ids = [
         r[0] for r in conn.execute(
-            "SELECT place_id FROM place_cell WHERE cell_id = ?", (cell_id,)
+            "SELECT DISTINCT pc.place_id FROM place_cell pc "
+            "  JOIN place p ON p.id = pc.place_id "
+            f" WHERE pc.cell_id IN ({marks}) "
+            "   AND (pc.cell_id = ? OR p.ref_type != 'summit')",
+            (*ring_cells, cell_id),
         )
     ]
     if not place_ids:
