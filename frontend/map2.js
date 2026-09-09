@@ -4146,10 +4146,18 @@ const CARTO_TILE_URLS = [
 // same way as CARTO_TILE_URLS on purpose, right beside it, rather than
 // folding the style name into a parameter -- two named constants read
 // as two basemaps at a glance; a style-name argument would not.
+// Voyager, not light_all/positron. positron is deliberately desaturated
+// -- near-grayscale -- which makes it a poor ground for a grayscale
+// hillshade: terrain and basemap compete in the same narrow tonal range
+// and parks, water and woodland all read as the same pale grey. Voyager
+// is CARTO's coloured style and carries the OSM-familiar palette (green
+// parks and forest, blue water, tan built-up), so the shaded relief sits
+// on top of colour instead of on top of more grey. Same provider, same
+// attribution, same {key} handling as the dark set above.
 const CARTO_LIGHT_TILE_URLS = [
-  'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{ratio}.png',
-  'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{ratio}.png',
-  'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{ratio}.png',
+  'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{ratio}.png',
+  'https://b.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{ratio}.png',
+  'https://c.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{ratio}.png',
 ];
 
 // Takes the URL list (CARTO_TILE_URLS or CARTO_LIGHT_TILE_URLS -- both
