@@ -183,6 +183,56 @@
   }
 }
 
+/* Light/dark basemap switch (map2.js's setupBasemapModeToggle, feature:
+ * map-light-mode) -- the Layers panel's own row above the "LAYERS"
+ * list. Same surface/border/active-state language as the board switch
+ * (mc.css's .mc-switch-row/.mc-switch-btn, top-right panel) so the two
+ * read as the same kind of control, just narrower to fit this panel
+ * (min-width 150px here vs. the scoreboard card's own width) --
+ * deliberately not the mc.css classes themselves, since this row's
+ * bottom border also has to double as the panel's own quiet separator
+ * ahead of .mw-layers-title, a job .mc-switch-row never has to do. */
+.mw-basemap-switch-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--mw-line);
+}
+
+.mw-basemap-switch-btn {
+  flex: 1 1 0;
+  background: var(--mw-raised);
+  color: var(--mw-text-2);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.mw-basemap-switch-btn:hover {
+  background: var(--mw-line);
+}
+
+/* Keyboard focus -- the board switch this is styled after has no
+ * explicit :focus-visible rule of its own (it relies on the browser
+ * default outline), which is invisible against .mc-switch-btn's own
+ * near-black --mw-raised fill in the gold skin. Given a visible ring
+ * here rather than repeating that gap. */
+.mw-basemap-switch-btn:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 1px;
+}
+
+.mw-basemap-switch-btn.active {
+  background: var(--mw-accent-active);
+  color: var(--mw-accent);
+  border-color: var(--mw-accent);
+}
+
 .mw-layers-title {
   font-weight: 600;
   margin-bottom: 6px;

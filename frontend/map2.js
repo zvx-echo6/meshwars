@@ -385,8 +385,8 @@ const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 //
 // BASEMAP_LIGHT_ID below is a second basemap source/layer again, but on
 // a DIFFERENT axis: a viewer's own light/dark choice (feature:
-// map-light-mode, the "Light basemap" checkbox in the Layers panel),
-// not the gold/neon skin. It exists so the baked hillshade (DEM_URL
+// map-light-mode, the Light/Dark buttons at the top of the Layers
+// panel), not the gold/neon skin. It exists so the baked hillshade (DEM_URL
 // above) can actually be judged against a light ground -- that was the
 // entire point of the request this shipped for -- and is deliberately
 // NOT coupled to currentTheme(): a viewer can run neon skin with the
@@ -3587,35 +3587,60 @@ function setupOpacitySlider(map) {
 
 // ===== Light/dark basemap toggle (feature: map-light-mode) =====
 //
-// Wires the "Light basemap" checkbox in the Layers panel (map2.html's
-// #mw-layer-lightbasemap) to currentBasemapMode() -- see that
-// function's own section, above, for what it drives (BASEMAP_ID vs
-// BASEMAP_LIGHT_ID visibility, hillshade opacity, grid-line/My Location
-// colour) and why it is a separate axis from the gold/neon skin.
+// Wires the Light/Dark button pair at the top of the Layers panel
+// (map2.html's #mw-basemap-toggle-light / #mw-basemap-toggle-dark) to
+// currentBasemapMode() -- see that function's own section, above, for
+// what it drives (BASEMAP_ID vs BASEMAP_LIGHT_ID visibility, hillshade
+// opacity, grid-line/My Location colour) and why it is a separate axis
+// from the gold/neon skin. Was a single "Light basemap" checkbox inside
+// the layer list; replaced with this pair (Matt's ask) because a
+// basemap CHOICE reads better as two mutually-exclusive buttons than a
+// checked/unchecked box, and because it is not itself a layer -- see
+// the markup comment in map2.html for why it now sits above the
+// "LAYERS" list rather than inside it. Storage key, stored values
+// ('1'/'0' via rememberLightBasemapPref/readLightBasemapPref) and the
+// module-scope basemapModeIsLight read that avoids a first-paint flash
+// are all unchanged, so a viewer's existing saved choice still applies.
 //
 // If the viewer has never touched the claimed-squares opacity slider
 // (hasExplicitBoardFillOpacityPref() false), flipping this also
 // re-derives currentBoardFillOpacityPct from the new mode's own default
 // (boardFillOpacityDefaultPct()) and pushes that into the slider's UI --
-// so a first-time visitor who checks "Light basemap" actually sees the
-// lighter default fill immediately, not just on their next reload. Once
-// an explicit choice exists, this never touches it again: "the ramp
-// still works on top of whatever you choose" applies on either basemap.
+// so a first-time visitor who picks Light actually sees the lighter
+// default fill immediately, not just on their next reload. Once an
+// explicit choice exists, this never touches it again: "the ramp still
+// works on top of whatever you choose" applies on either basemap.
 function setupBasemapModeToggle(map) {
-  const checkbox = document.getElementById('mw-layer-lightbasemap');
-  if (!checkbox) return;
+  const lightBtn = document.getElementById('mw-basemap-toggle-light');
+  const darkBtn = document.getElementById('mw-basemap-toggle-dark');
+  if (!lightBtn || !darkBtn) return;
 
-  checkbox.checked = basemapModeIsLight;
+  // Pressed state and the visual .active fill both come from
+  // basemapModeIsLight -- aria-pressed carries the choice to a screen
+  // reader, .active (mc-switch-btn's own convention, see mc.css) is
+  // what paints it, and both are re-derived here so the two can never
+  // disagree with each other or with the map underneath.
+  const syncButtons = () => {
+    lightBtn.classList.toggle('active', basemapModeIsLight);
+    lightBtn.setAttribute('aria-pressed', String(basemapModeIsLight));
+    darkBtn.classList.toggle('active', !basemapModeIsLight);
+    darkBtn.setAttribute('aria-pressed', String(!basemapModeIsLight));
+  };
+  syncButtons();
 
-  checkbox.addEventListener('change', () => {
-    basemapModeIsLight = checkbox.checked;
+  const chooseMode = (isLight) => {
+    basemapModeIsLight = isLight;
     rememberLightBasemapPref(basemapModeIsLight);
+    syncButtons();
     if (!hasExplicitBoardFillOpacityPref()) {
       currentBoardFillOpacityPct = boardFillOpacityDefaultPct();
       syncOpacitySliderUI();
     }
     applyBasemapTheme(map);
-  });
+  };
+
+  lightBtn.addEventListener('click', () => chooseMode(true));
+  darkBtn.addEventListener('click', () => chooseMode(false));
 }
 
 // ===== Cell grid lines (feature: map-controls) =====
