@@ -17,8 +17,10 @@ from __future__ import annotations
 from app.places_seed import (
     _cell_area_m2,
     _classify_row,
+    _park_band,
     _park_cells,
 )
+from app.grid import cell_indices
 from shapely.geometry import box
 
 
@@ -165,6 +167,71 @@ def test_park_cells_finds_no_cells_when_geometry_does_not_touch_the_grid():
     cells = _park_cells(tiny)
     from app.grid import cell_id
     assert cells == {cell_id(43.0005, -116.0005)}
+
+
+def test_park_band_drops_the_deep_interior_of_a_square():
+    """A clean 7x7 block of cells (indices 0..6 on both axes): at
+    width=1, only cells with an outside neighbour survive as "band" --
+    the deep interior (the inner 5x5, indices 1..5) has none and is
+    dropped. At width=2, the next ring in (indices 1..5's own edge)
+    drops too, leaving only the inner 3x3 (indices 2..4) as deep
+    interior."""
+    cells = {f"{y}_{x}" for y in range(7) for x in range(7)}
+
+    band1 = _park_band(cells, width=1)
+    assert "3_3" not in band1  # dead center: no outside neighbour at all
+    assert "0_0" in band1 and "6_6" in band1  # corners are edge cells
+    assert "0_3" in band1  # an edge midpoint
+    assert len(band1) == 49 - 25  # everything except the inner 5x5
+
+    band2 = _park_band(cells, width=2)
+    assert "3_3" not in band2  # depth 4 from the edge, still well past width=2
+    assert "2_2" not in band2  # depth 3 from the edge -- the new, deeper cutoff
+    assert "1_1" in band2  # depth exactly 2: within width=2, still band
+    assert "1_0" in band2  # depth 1 from the edge (column 0 is missing)
+    assert len(band2) == 49 - 9  # everything except the inner 3x3
+
+
+def test_park_band_keeps_a_footprint_narrower_than_the_band_whole():
+    """A single-row strip: every cell in it is missing a neighbour
+    above and below (outside the strip), so nothing survives even one
+    erosion. There is no deeper interior to drop -- the whole footprint
+    already IS the band, at any width."""
+    strip = {f"5_{x}" for x in range(10)}
+    assert _park_band(strip, width=1) == strip
+    assert _park_band(strip, width=3) == strip
+
+
+def test_park_band_matches_the_direct_chebyshev_definition_on_a_ragged_shape():
+    """_park_band()'s iterative erosion (cheap: linear in the cell
+    count per width step, reusing the previous pass) must agree with
+    the direct, expensive definition -- a cell is banded iff some cell
+    within Chebyshev distance `width` of it is NOT in the footprint --
+    on an irregular shape (an L-notch plus a one-cell hole), not just a
+    clean square, since a real park's boundary and any enclosed gap
+    exercise the cumulative-erosion logic a plain square cannot."""
+    cells = {f"{y}_{x}" for y in range(9) for x in range(9)}
+    cells -= {f"{y}_{x}" for y in range(5, 9) for x in range(5, 9)}  # notch out a corner
+    cells.discard("4_4")  # a one-cell hole in the remaining body
+
+    def direct_band(cells: set[str], width: int) -> set[str]:
+        out = set()
+        for c in cells:
+            y, x = cell_indices(c)
+            hit = False
+            for dy in range(-width, width + 1):
+                for dx in range(-width, width + 1):
+                    if f"{y+dy}_{x+dx}" not in cells:
+                        hit = True
+                        break
+                if hit:
+                    break
+            if hit:
+                out.add(c)
+        return out
+
+    for width in (1, 2, 3):
+        assert _park_band(cells, width) == direct_band(cells, width), width
 
 
 # ring expansion (_ring_expand, as it was called here) MOVED to
@@ -770,3 +837,115 @@ def test_big_boundary_matched_park_credits_from_a_perimeter_cell_outside_the_bou
     # Two squares out must still be unreachable -- only ONE ring, not two.
     credited = credit_places(conn, player_id=2, cell_id=two_out_cid, ts=now, paint_outcome="captured")
     assert credited == []
+
+
+def test_large_park_stores_a_band_not_the_filled_interior(conn, tmp_path, monkeypatch):
+    """A park at or above _PARK_BAND_THRESHOLD_CELLS must store only
+    its boundary band (see the PARK BAND STORAGE note in
+    app/places_seed.py), not every cell its boundary intersects --
+    proven here on a clean 15x15 block (225 cells, comfortably over the
+    100-cell threshold) so "deep interior" and "boundary" are
+    unambiguous. Three positions get checked against BOTH storage
+    (place_cell) and live credit_places():
+
+      - dead center (Chebyshev distance 7 from every edge): far outside
+        even a width-2 band -- must NOT be stored, and a ping there
+        must NOT credit. This is the intended rule from the module
+        docstring's PARK BAND STORAGE note, demonstrated directly:
+        credit is for reaching the park, not for how far into its
+        interior someone gets, so the deep interior scores the same as
+        never having come at all -- nothing.
+      - the outermost boundary row: must BE stored (it's the band's
+        own edge) and must credit directly, same as any place_cell hit.
+      - one square past the boundary, touching no stored cell at all:
+        must still credit, via credit_places()'s query-side ring --
+        exactly the same reachable-perimeter mechanism the small-park
+        test above proves, now shown to survive banding too.
+    """
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    lat, lon = 43.0, -116.0
+    center_cid = cell_id(lat, lon)
+    clat, clon = cell_indices(center_cid)
+    half = 7  # 15x15 block: clat-7..clat+7, clon-7..clon+7
+    sw_south, sw_west, _, _ = cell_bounds(f"{clat - half}_{clon - half}")
+    _, _, ne_north, ne_east = cell_bounds(f"{clat + half}_{clon + half}")
+    eps = 1e-7
+    from shapely.geometry import box as shapely_box
+    poly = shapely_box(sw_west + eps, sw_south + eps, ne_east - eps, ne_north - eps)
+
+    area_m2 = _cell_area_m2(lat) * 300  # comfortably at/above one cell
+
+    row = _seed_row("park", "US-BIGPARK", lat=lat, lon=lon, points=25)
+    row["area_m2"] = f"{area_m2:.0f}"
+    row["geom"] = poly.wkt
+    _write_seed_csv(csv_path, [row])
+    load_places_seed(conn)
+
+    place_id = conn.execute("SELECT id FROM place WHERE ref_code = 'US-BIGPARK'").fetchone()[0]
+    stored = {r[0] for r in conn.execute(
+        "SELECT cell_id FROM place_cell WHERE place_id = ?", (place_id,)
+    )}
+
+    # 225 cells filled, but nowhere near 225 stored -- it was banded.
+    assert 0 < len(stored) < 225, f"expected a band well under the full 225-cell fill, got {len(stored)}"
+
+    deep_center_cid = f"{clat}_{clon}"
+    boundary_cid = f"{clat + half}_{clon}"        # outermost row -- part of the band
+    just_outside_cid = f"{clat + half + 1}_{clon}"  # one square past the boundary
+
+    assert deep_center_cid not in stored, "the dead center must NOT survive banding"
+    assert boundary_cid in stored, "the outermost boundary row must be stored"
+    assert just_outside_cid not in stored, "outside reach comes from the query-side ring, not storage"
+
+    now = int(time.time())
+    credited = credit_places(conn, player_id=1, cell_id=deep_center_cid, ts=now, paint_outcome="captured")
+    assert credited == [], "deep interior must NOT credit -- reaching the park is the credit, not going further in"
+
+    credited = credit_places(conn, player_id=2, cell_id=boundary_cid, ts=now, paint_outcome="captured")
+    assert credited == [(place_id, 25)], "a stored boundary cell must credit directly"
+
+    credited = credit_places(conn, player_id=3, cell_id=just_outside_cid, ts=now, paint_outcome="captured")
+    assert credited == [(place_id, 25)], "one square past the boundary must still credit via the query-side ring"
+
+
+def test_small_park_below_band_threshold_still_stores_filled_interior(conn, tmp_path, monkeypatch):
+    """A park just under _PARK_BAND_THRESHOLD_CELLS (81 cells, a clean
+    9x9 block) must store every one of its filled cells, unchanged --
+    including its own dead center -- and a ping there must credit
+    exactly like it always has. Banding only starts at the threshold;
+    below it, "interior" isn't a meaningful distinction (see the PARK
+    BAND STORAGE note in app/places_seed.py)."""
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    lat, lon = 43.0, -116.0
+    center_cid = cell_id(lat, lon)
+    clat, clon = cell_indices(center_cid)
+    half = 4  # 9x9 block: 81 cells, under the 100-cell threshold
+    sw_south, sw_west, _, _ = cell_bounds(f"{clat - half}_{clon - half}")
+    _, _, ne_north, ne_east = cell_bounds(f"{clat + half}_{clon + half}")
+    eps = 1e-7
+    from shapely.geometry import box as shapely_box
+    poly = shapely_box(sw_west + eps, sw_south + eps, ne_east - eps, ne_north - eps)
+
+    area_m2 = _cell_area_m2(lat) * 300
+
+    row = _seed_row("park", "US-SMALLPARK", lat=lat, lon=lon, points=25)
+    row["area_m2"] = f"{area_m2:.0f}"
+    row["geom"] = poly.wkt
+    _write_seed_csv(csv_path, [row])
+    load_places_seed(conn)
+
+    place_id = conn.execute("SELECT id FROM place WHERE ref_code = 'US-SMALLPARK'").fetchone()[0]
+    stored = {r[0] for r in conn.execute(
+        "SELECT cell_id FROM place_cell WHERE place_id = ?", (place_id,)
+    )}
+    expected = {f"{y}_{x}" for y in range(clat - half, clat + half + 1) for x in range(clon - half, clon + half + 1)}
+    assert stored == expected, "a park below the band threshold must store its full filled footprint"
+
+    deep_center_cid = f"{clat}_{clon}"
+    now = int(time.time())
+    credited = credit_places(conn, player_id=1, cell_id=deep_center_cid, ts=now, paint_outcome="captured")
+    assert credited == [(place_id, 25)], "below the threshold, the interior still credits exactly as before"

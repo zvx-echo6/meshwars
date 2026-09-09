@@ -91,9 +91,28 @@ from shapely import wkt as shapely_wkt
 from shapely.geometry import MultiPolygon, Polygon, box as shapely_box
 
 from .config import settings
-from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
+from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, cell_indices, distance_m
 
 log = logging.getLogger("places_seed")
+
+# Found while measuring this module's own load time against the real
+# worldwide seed (2026-09-09): Python's csv module defaults to a
+# 131,072-byte field limit, and this seed's largest park geometries --
+# multi-part, dateline-crossing marine protected areas with hundreds of
+# WKT coordinate pairs -- exceed it, so csv.DictReader raises
+# `_csv.Error: field larger than field limit` partway through a real
+# load. scripts/build_places_seed.py already hit this exact error and
+# raised its own limit to 10,000,000 (see that module's comment) when
+# it started reading worldwide OSM parks back in -- but that fix lives
+# in the CSV-building script's process, not this loader's, and
+# `csv.field_size_limit()` is process-global, not shared between the
+# two. Without this, THIS module -- the one that actually has to read
+# the CSV that fix produced -- crashes on first contact with it. Same
+# value, same reasoning: generously above anything this pipeline
+# produces, and a fixed number rather than sys.maxsize (which can raise
+# OverflowError against the csv module's underlying C long on some
+# platforms).
+csv.field_size_limit(10_000_000)
 
 # True for the duration of a real (non-skip) load -- see app/db.py's
 # init_db(), which now runs that load on a background thread rather
@@ -238,6 +257,51 @@ _METERS_PER_DEG_LAT = 111_320.0
 # not ~80M permanent rows). See docs/features/places.md's reachable-ring
 # section and credit_places()'s own comment for the full story,
 # including why summits are excluded from the query-side expansion too.
+
+# PARK BAND STORAGE (added 2026-09-09) -- CREDIT IS FOR REACHING A
+# PARK, not for the square footage of its backcountry (Matt's framing,
+# and the design rule this section implements, not a limitation it
+# works around). A park's activation zone is the band of ground around
+# its edge that a real visitor can actually stand on -- the fence line,
+# the trailhead, the pull-off, the shoreline. The interior beyond that
+# band is not a bigger version of the same achievement; it is a
+# different place nobody arriving at the park has reached, so it is not
+# part of what "reaching this park" means. Storing it was never doing
+# useful work: _park_cells() filled every cell a park's boundary
+# touches, including cells deep inside a large park that no fence line
+# or trailhead is anywhere near -- Payette National Forest's own
+# interior, not its edge -- and the ring move just above only ever
+# addressed the OTHER 3.1% of `place_cell` (point-type places); the
+# 96.9% that was park interior needed this, a different fix for a
+# different shape of waste.
+#
+# So: a park at or above _PARK_BAND_THRESHOLD_CELLS stores only its
+# boundary band (_park_band() below) -- the outermost
+# _PARK_BAND_WIDTH_CELLS layers of its own filled set, computed by
+# grid-index erosion over the cells _park_cells() already produced, not
+# by re-walking the geometry. A park BELOW the threshold is stored
+# filled, unchanged: it is small enough that "the interior" and "the
+# edge" are not a meaningful distinction (a pocket park a few cells
+# across has no backcountry to exclude in the first place), and banding
+# it would only shrink a set that was never large enough to matter
+# while changing behaviour for the common case -- most matched parks
+# are exactly this small (see the threshold/width rationale in
+# _park_band()'s docstring for the measured distribution). Summits are
+# untouched by any of this: they were never filled by _park_cells() in
+# the first place (see _load_summit_cells() above), and this section
+# does not touch them.
+#
+# By design, someone who travels past the band into a large park's
+# interior does not get a second, bigger credit for going further in --
+# the trip that counts is the one that reaches the park at all, and
+# that trip is fully captured by the band. This is not narrower than
+# what a filled interior used to reward; a filled interior rewarded
+# "anywhere inside the line," which was never about distance travelled
+# either. Falling row count and DB size are a consequence of that
+# correction, not the reason for it -- do not read the band as a
+# storage optimization standing in for "really" wanting the filled
+# interior back; the filled interior was the wrong model, band or no
+# storage pressure.
 
 # SUMMIT/LANDMARK DOUBLE-DIP FILTER (added 2026-08-25) -- some SOTA
 # summits carry a fire lookout, and OSM separately maps that lookout as
@@ -417,8 +481,10 @@ def _park_cells(geom: Polygon | MultiPolygon) -> set[str]:
     union's bounding box, so the empty ground between distant parts is
     never iterated.
 
-    This is exactly the set `load_places_seed` stores as this park's
-    place_cell rows -- no ring expansion happens here or at the caller
+    This is the park's full filled footprint -- `load_places_seed`
+    stores it as-is for a small park, or reduces it to `_park_band()`'s
+    boundary band first for a large one (see the PARK BAND STORAGE note
+    above); either way, no ring expansion happens here or at the caller
     (moved to lookup time 2026-09-09, see the REACHABLE-RING CREDIT
     note above and app/place_scoring.credit_places()): the reachable
     perimeter (anyone standing just outside the boundary) credits via
@@ -441,6 +507,96 @@ def _park_cells(geom: Polygon | MultiPolygon) -> set[str]:
                 if cell_poly.intersects(part):
                     cells.add(cid)
     return cells
+
+
+# A park's footprint below this many cells is stored filled, unchanged
+# -- see the PARK BAND STORAGE note above. Measured by walking every
+# boundary-matched, larger-than-a-cell park in the current worldwide
+# seed (93,218 of them, matching the production count exactly): 84.6%
+# (78,887) fall under 100 cells -- roughly 9-12 km^2 depending on
+# latitude, a large city park, not backcountry -- and the median
+# matched park is 12 cells. 100 is comfortably inside that bulk -- it
+# costs the small-park common case nothing (nothing this small has an
+# interior worth distinguishing from its edge in the first place) while
+# still catching every park large enough for "the middle of it" to be a
+# real, separate place, not just a rounding artifact of the grid.
+_PARK_BAND_THRESHOLD_CELLS = 100
+
+# Width of the stored boundary band, in grid cells (~300m each), for a
+# park at or above the threshold -- see the PARK BAND STORAGE note
+# above. 1 cell is fragile: a boundary that clips a cell corner
+# diagonally, or a real visitor whose GPS/trail puts them one square
+# further inside than the line on the map, would fall outside a
+# 1-wide band and lose credit for a trip that plainly reached the park.
+# 2 cells absorbs that slop -- roughly 600m of give inside the mapped
+# edge -- while still cutting storage dramatically: measured across
+# every park at or above the threshold in the current seed, the width-2
+# band totals 25% of the filled cell count it replaces, and that
+# fraction keeps shrinking the bigger the park -- Wrangell-Saint Elias
+# Wilderness (635,115 filled cells) bands down to 18,973, three
+# percent, because perimeter grows with the square root of area while
+# the filled interior grows with area itself. Only parks barely over
+# the threshold see a band close to their full size, and those are
+# small in absolute cell count either way. The query-side ring
+# expansion (app/grid.ring_expand(), see the REACHABLE-RING CREDIT note
+# above) still adds one more cell of reach on the OUTSIDE at credit
+# time, on top of this -- this constant is only about how far the
+# stored band reaches back in from the edge.
+_PARK_BAND_WIDTH_CELLS = 2
+
+
+def _erode_once(cells: set[str]) -> set[str]:
+    """`cells` restricted to members all 8 of whose neighbours are also
+    in `cells` -- i.e. not adjacent to anything outside the set. Pure
+    grid-index arithmetic (cell_indices() plus set membership), no
+    geometry calls, so it costs nothing beyond what _park_cells()
+    already spent building the set it erodes. One call peels off
+    exactly the outermost layer; see _park_band() for why width is
+    layers of this, not one geometric buffer."""
+    out: set[str] = set()
+    for cid in cells:
+        lat_idx, lon_idx = cell_indices(cid)
+        interior = True
+        for d_lat in (-1, 0, 1):
+            for d_lon in (-1, 0, 1):
+                if d_lat == 0 and d_lon == 0:
+                    continue
+                if f"{lat_idx + d_lat}_{lon_idx + d_lon}" not in cells:
+                    interior = False
+                    break
+            if not interior:
+                break
+        if interior:
+            out.add(cid)
+    return out
+
+
+def _park_band(cells: set[str], width: int = _PARK_BAND_WIDTH_CELLS) -> set[str]:
+    """`cells` (a park's full _park_cells() footprint) reduced to its
+    outermost `width` layers -- the boundary band a large park stores
+    instead of its filled interior (see the PARK BAND STORAGE note
+    above). Erodes `width` times (_erode_once() above) rather than
+    testing every cell against a `width`-radius box: each pass is
+    O(|current interior|), not O(|cells| * width^2), which matters here
+    -- some of this seed's worldwide OSM-matched "parks" are marine
+    protected areas running past ten million cells, and this function
+    still has to walk whatever _park_cells() handed it once per width
+    step, not once per cell per offset. band = cells that do NOT
+    survive `width` erosions, i.e. cells within `width` steps of the
+    park's own edge (its own hole boundaries count as "edge" too, same
+    as its outer ring, via the same all-8-neighbours test).
+
+    Returns `cells` unchanged if erosion empties out before `width`
+    passes complete (a park narrower than `2*width` cells in every
+    direction, e.g. a thin coastal strip) -- there is no deeper interior
+    left to drop, so the whole footprint already IS the band.
+    """
+    interior = cells
+    for _ in range(width):
+        if not interior:
+            return cells
+        interior = _erode_once(interior)
+    return cells - interior
 
 
 def _classify_row(row: dict) -> tuple[bool, bool]:
@@ -513,6 +669,10 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         # below one cell (scores a 3x3 point block, rotates like a
         # landmark).
         "park_matched_larger": 0, "park_matched_smaller": 0,
+        # Of the larger-than-a-cell ones only: reduced to a boundary
+        # band (_PARK_BAND_THRESHOLD_CELLS or more) vs stored filled
+        # (below it) -- see the PARK BAND STORAGE note above.
+        "park_banded": 0, "park_filled": 0,
         # Reconcile outcome: rows flipped active->inactive this pass
         # because they were not present in this load at all (never
         # deleted -- see the reconcile note above).
@@ -581,7 +741,21 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # the reload (the algorithm change already does that on its own),
     # but every previous entry in this list bumps the version for a
     # fingerprint-invalidating change, so this one does too.
-    _RECONCILE_VERSION = 5
+    #
+    # v6 (2026-09-09, "park band storage"): a large park's place_cell
+    # rows shrank from its filled interior to _park_band()'s boundary
+    # band -- see the PARK BAND STORAGE note above. The CSV itself (and
+    # its hash) is unchanged; without this bump, a database already
+    # fingerprinted under v5 would read as up to date under the new
+    # code and keep every already-loaded park's old FILLED rows
+    # forever, which is the entire multi-gigabyte problem this change
+    # exists to fix. Once, on the deploy that ships this version, every
+    # large park's place_cell rows get deleted and re-inserted as a
+    # band (`_flush_cell_buffers()`'s DELETE-then-INSERT per place,
+    # unchanged) -- after that the fingerprint matches again and
+    # ordinary restarts stay a cheap no-op, same as any other version
+    # bump in this list.
+    _RECONCILE_VERSION = 6
     seed_hash = _sha256_file(_DATA_PATH)
     # summit_cells.csv rides along in the fingerprint too. It decides
     # every summit's place_cell rows but is a SEPARATE file from the seed
@@ -740,6 +914,20 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                             # cell so the park is not silently
                             # unscoreable.
                             cells = {cell_id(lat, lon)}
+                        elif len(cells) >= _PARK_BAND_THRESHOLD_CELLS:
+                            # Large park: store the boundary band, not
+                            # the filled interior -- see the PARK BAND
+                            # STORAGE note above. _park_band() erodes
+                            # the filled set just computed; it never
+                            # re-walks the geometry.
+                            cells = _park_band(cells)
+                            stats["park_banded"] += 1
+                        else:
+                            # Small park: filled, unchanged -- below
+                            # the threshold "interior" isn't a
+                            # meaningful idea (see the PARK BAND STORAGE
+                            # note above).
+                            stats["park_filled"] += 1
                     else:
                         # Either unmatched (no boundary at all) or
                         # matched but smaller than one cell -- both
@@ -854,13 +1042,15 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     elapsed = time.monotonic() - t0
     log.info(
         "places_seed: loaded summit=%d park=%d landmark=%d (excluded non-US: summit=%d park=%d landmark=%d) "
-        "park boundary matched=%d unmatched=%d (of matched: larger-than-cell=%d smaller-than-cell=%d) "
+        "park boundary matched=%d unmatched=%d (of matched: larger-than-cell=%d smaller-than-cell=%d, "
+        "of larger-than-cell: banded=%d filled=%d) "
         "landmark colocated with summit=%d (dropped, within %.0fm) "
         "deactivated=%d (left the seed, kept as history) in %.1fs",
         stats["kept"]["summit"], stats["kept"]["park"], stats["kept"]["landmark"],
         stats["excluded"]["summit"], stats["excluded"]["park"], stats["excluded"]["landmark"],
         stats["park_matched"], stats["park_unmatched"],
         stats["park_matched_larger"], stats["park_matched_smaller"],
+        stats["park_banded"], stats["park_filled"],
         stats["landmark_colocated_with_summit"], _SUMMIT_COLOCATION_RADIUS_M,
         stats["deactivated"], elapsed,
     )
