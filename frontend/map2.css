@@ -223,6 +223,57 @@
   cursor: default;
 }
 
+/* Claimed-squares opacity slider (map2.js's setupOpacitySlider). A
+ * little extra vertical breathing room top and bottom marks it as a
+ * different kind of control from the checkbox rows around it, without a
+ * divider line heavy enough to read as a separate section of the panel.
+ */
+.mw-layers-opacity-row {
+  padding: 6px 0 4px;
+}
+
+.mw-layers-opacity-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+/* Same caption token as the unavailable-row note above -- this is a
+ * live readout, not the control itself, so it stays one step quieter
+ * than the "Claimed squares" label beside it. Tabular numerals so the
+ * percentage does not shift the label's width as it counts. */
+.mw-layers-opacity-value {
+  color: var(--mw-text-6);
+  font-variant-numeric: tabular-nums;
+}
+
+/* accent-color is the one styling hook a plain <input type="range">
+ * exposes without a full cross-browser thumb/track rebuild, and it
+ * takes the same --mw-accent token every other selected/active control
+ * in this panel already uses (.mw-layers-toggle:hover, etc). */
+.mw-layers-opacity-slider {
+  width: 100%;
+  accent-color: var(--mw-accent);
+  cursor: pointer;
+}
+
+/* "My location" status line (map2.js's setupMyLocationControl) -- the
+ * cell id readout in the normal case, a failure message in the error
+ * one. Indented to roughly clear the checkbox above it rather than
+ * sitting flush left under the whole row. */
+.mw-mylocation-status {
+  margin: 2px 0 2px 22px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--mw-text-6);
+}
+
+.mw-mylocation-status-error {
+  color: var(--mw-hostile);
+}
+
 /* Places Worth Going (docs/features/places.md): NOT a floating panel of
  * its own -- two separate floating-panel attempts both ended up either
  * clipped behind the territory panel or (once moved to the bottom-right

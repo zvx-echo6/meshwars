@@ -422,6 +422,31 @@ const BOARD_SEP_WIDTH_ZOOM = ['interpolate', ['linear'], ['zoom'], 11, 0, 12, 0.
 // competing for the same handful of pixels at low zoom.
 const BOARD_LINE_WIDTH_ZOOM = ['interpolate', ['linear'], ['zoom'], 11, 1.5, 13, 2, 14, 2.5, 15, 3, 16, 3];
 
+// ===== Claimed-squares opacity slider (feature: map-controls) =====
+//
+// The slider in the Layers panel (map2.html's #mw-layer-opacity) drives
+// 'board-fill''s fill-opacity directly, replacing BOARD_FILL_OPACITY_ZOOM
+// above as that layer's paint source once the panel wires up -- see
+// applyBoardFillOpacity()/setupOpacitySlider() near setupLayerSwitcher
+// below, and applyBasemapTheme's own board-fill line, which now calls
+// applyBoardFillOpacity() instead of setting BOARD_FILL_OPACITY_ZOOM[theme]
+// directly so a theme flip can never silently override the viewer's
+// chosen value.
+//
+// Default matches BOARD_FILL_OPACITY.gold/.neon above (both 0.85) -- read
+// off that constant rather than a second hardcoded number, so the two
+// can never drift apart.
+const BOARD_FILL_OPACITY_DEFAULT_PCT = Math.round(BOARD_FILL_OPACITY.gold * 100);
+
+// The z10->z13 lift BOARD_FILL_OPACITY_ZOOM bakes in (0.92 vs 0.85, see
+// its own comment: board-line's team rim is hidden below z13, and this
+// makes up a little of the lost saturation). Kept as a ratio, not a
+// second absolute value, so the same proportional lift applies at
+// whatever opacity the viewer actually picks, not just the original 85%.
+const BOARD_FILL_OPACITY_RAMP_RATIO = 0.92 / BOARD_FILL_OPACITY.gold;
+
+const BOARD_FILL_OPACITY_STORAGE_KEY = 'mwBoardFillOpacityPct';
+
 // The baked hillshade archive carries real alpha -- transparent on flat
 // ground, black/white toward shadow/highlight. Both themes sit on the
 // same dark basemap now, so both get the full-strength value that used
@@ -1807,6 +1832,13 @@ function setBoardMode(newMode, map) {
   // otherwise switching boards leaves the other board's colours on them.
   loadPlacesViewport(map);
   loadPlacesPanel(map);
+  // loadBoardData above only replaces board-fill's DATA (setData on the
+  // 'board' source) -- it never touches board-fill's paint properties,
+  // so the slider's chosen opacity is never actually at risk here today.
+  // Reapplied anyway, defensively: this is exactly the kind of call that
+  // is easy to add above this line later (an addLayer, a style swap)
+  // without remembering it would silently reset a viewer's own choice.
+  applyBoardFillOpacity(map);
 }
 
 // ===== First-visit board choice =====
@@ -3079,7 +3111,12 @@ function currentTheme() {
 function applyBasemapTheme(map) {
   const theme = currentTheme();
   map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
-  map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY_ZOOM[theme]);
+  // board-fill's opacity is now owned by the slider (see
+  // BOARD_FILL_OPACITY_DEFAULT_PCT/applyBoardFillOpacity above/below) --
+  // BOARD_FILL_OPACITY_ZOOM[theme] is only the SHAPE that helper scales,
+  // never set on the layer directly, so a theme flip re-paints the
+  // viewer's own chosen opacity instead of silently resetting it.
+  applyBoardFillOpacity(map);
   // Zoom-interpolated, not per-theme (see BOARD_SEP_WIDTH_ZOOM/
   // BOARD_LINE_WIDTH_ZOOM above) -- set here rather than in the
   // addLayer literal because this theme pass runs after those
@@ -3095,6 +3132,15 @@ function applyBasemapTheme(map) {
   for (const type of PLACE_TYPES) {
     map.setLayoutProperty(`places-icons-${type}`, 'icon-image', placeIconExpression(type, theme));
   }
+  // Grid lines (feature: map-controls) and My Location (same) both read
+  // their colours off theme tokens via themeColor() at addLayer time --
+  // re-set here too so a theme flip repaints them instead of leaving
+  // gold's colours on screen under the neon skin.
+  map.setPaintProperty('cell-grid-lines', 'line-color', themeColor('--mw-text-6'));
+  map.setPaintProperty('my-location-accuracy', 'circle-color', themeColor('--mw-accent'));
+  map.setPaintProperty('my-location-accuracy', 'circle-stroke-color', themeColor('--mw-accent'));
+  map.setPaintProperty('my-location-dot', 'circle-color', themeColor('--mw-accent'));
+  map.setPaintProperty('my-location-dot', 'circle-stroke-color', themeColor('--mw-gold-light'));
 }
 
 // theme-toggle.js sets data-theme on <html> directly; observing the
@@ -3261,6 +3307,330 @@ function setupOverlayLayers(map) {
 // produced 12GB of intermediates with the finest pass still unfinished.
 // Hillshade alone carries the terrain now. Do not re-add this without
 // solving the cost, not just the symptom.
+
+// Reads a theme token straight off the document, the same way
+// play-area-map.js's Leaflet rectangle does -- a MapLibre paint property
+// cannot be handed a CSS var() any more than Leaflet's canvas styling
+// can, so this is what "use the theme token, not a literal colour" has
+// to mean for a map layer. Re-read on every call rather than cached, so
+// a theme flip (watchTheme's MutationObserver -> applyBasemapTheme)
+// always gets the current skin's value. No literal-colour fallback on
+// purpose (unlike play-area-map.js's Leaflet copy of this pattern) --
+// theme.css is a regular <link> loaded before this module in map2.html,
+// so an empty read here would mean the stylesheet itself failed, and
+// the map's own load-failure banner (see this file's own header
+// comment on bootCheckpoint) is the honest way to surface that, not a
+// silently invented colour standing in for it.
+function themeColor(varName) {
+  return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+}
+
+// ===== Claimed-squares opacity slider (feature: map-controls) =====
+//
+// Builds the fill-opacity paint expression for a given viewer-chosen
+// percentage (0-100), preserving the SHAPE of BOARD_FILL_OPACITY_ZOOM
+// above (the small z10->z13 lift that makes up for board-line's team
+// rim being hidden below z13) scaled by BOARD_FILL_OPACITY_RAMP_RATIO so
+// that lift is still present at whatever opacity the viewer picks, not
+// just the original hardcoded 85%.
+function boardFillOpacityExpression(pct) {
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const target = clamp01(pct / 100);
+  return ['interpolate', ['linear'], ['zoom'],
+    10, clamp01(target * BOARD_FILL_OPACITY_RAMP_RATIO),
+    13, target,
+  ];
+}
+
+function readBoardFillOpacityPct() {
+  try {
+    const raw = localStorage.getItem(BOARD_FILL_OPACITY_STORAGE_KEY);
+    if (raw === null) return BOARD_FILL_OPACITY_DEFAULT_PCT;
+    const n = Number(raw);
+    return (Number.isFinite(n) && n >= 0 && n <= 100) ? n : BOARD_FILL_OPACITY_DEFAULT_PCT;
+  } catch {
+    // Storage unavailable (private browsing, quota) -- fall back to the
+    // same default a first-time visitor gets.
+    return BOARD_FILL_OPACITY_DEFAULT_PCT;
+  }
+}
+
+function rememberBoardFillOpacityPct(pct) {
+  try {
+    localStorage.setItem(BOARD_FILL_OPACITY_STORAGE_KEY, String(pct));
+  } catch {
+    // Swallowed, same as every other localStorage write on this page --
+    // the slider still works for the rest of this visit, it just does
+    // not survive a reload.
+  }
+}
+
+// Read once at module scope (like BOARD_MODE_KEY's `mode` and every
+// other "remembered choice" on this page) so the value is available the
+// instant setupOpacitySlider/applyBasemapTheme run, with no async gap
+// where the layer would paint at the wrong opacity for one frame.
+let currentBoardFillOpacityPct = readBoardFillOpacityPct();
+
+// The single place that ever calls setPaintProperty for board-fill's
+// opacity -- applyBasemapTheme (theme flips) and setupOpacitySlider (the
+// slider itself, and its localStorage-restored starting value) both
+// route through this rather than setting the paint property directly,
+// so the two can never disagree about what "the current opacity" is.
+function applyBoardFillOpacity(map) {
+  map.setPaintProperty('board-fill', 'fill-opacity', boardFillOpacityExpression(currentBoardFillOpacityPct));
+}
+
+// Wires the range input in the Layers panel (map2.html's
+// #mw-layer-opacity) to board-fill's opacity. No apply button -- every
+// 'input' event (fired continuously while dragging, unlike 'change'
+// which only fires on release) re-paints live and re-persists the
+// choice.
+//
+// Does NOT gate on opacity 0 breaking cell popups: setupCellClickPopup's
+// map.on('click', 'board-fill', ...) hit-tests against the layer's
+// GEOMETRY (MapLibre's querySourceFeatures/queryRenderedFeatures pick
+// buffer), not its rendered alpha -- fill-opacity 0 makes a square
+// invisible, never unclickable, the same way `opacity: 0` on a DOM
+// element still receives clicks unless paired with
+// `pointer-events: none`, which nothing here sets. Verified by
+// screenshot + a click at opacity 0 during this change's own
+// verification pass (see the deploy notes) rather than assumed.
+function setupOpacitySlider(map) {
+  const slider = document.getElementById('mw-layer-opacity');
+  const valueLabel = document.getElementById('mw-layer-opacity-value');
+  if (!slider) return;
+
+  slider.value = String(currentBoardFillOpacityPct);
+  if (valueLabel) valueLabel.textContent = `${currentBoardFillOpacityPct}%`;
+
+  slider.addEventListener('input', () => {
+    const pct = Number(slider.value);
+    currentBoardFillOpacityPct = Number.isFinite(pct) ? pct : BOARD_FILL_OPACITY_DEFAULT_PCT;
+    if (valueLabel) valueLabel.textContent = `${currentBoardFillOpacityPct}%`;
+    applyBoardFillOpacity(map);
+    rememberBoardFillOpacityPct(currentBoardFillOpacityPct);
+  });
+}
+
+// ===== Cell grid lines (feature: map-controls) =====
+//
+// A close-zoom-only reference overlay drawing the same lattice
+// app/grid.py works from -- CELL_LAT_DEG/CELL_LON_DEG/cellIndicesFor
+// above are the one definition of that lattice on this side of the
+// wire (see the lattice chunk loader's own comment on why there is only
+// one JS copy), reused here rather than restated.
+//
+// GRID_MIN_ZOOM was picked by rendering, not guessed: at z13 a cell is
+// only ~21px wide (see BOARD_LINE_WIDTH_ZOOM's own per-zoom cell-width
+// measurements above) and a full lattice at that size reads as a fine
+// crosshatch competing with board-line/board-sep, which are already
+// drawing cell edges there. At z14 a cell is ~43px wide and the lattice
+// reads as a distinct, legible reference grid instead of noise. z14 is
+// also one zoom past board-line's own z13 floor, so the grid overlay
+// never appears before the team rim it visually sits alongside does.
+const GRID_MIN_ZOOM = 14;
+
+// One line per lattice boundary crossing the viewport, padded by one
+// cell on every side so a line never visibly stops short at the edge
+// while panning. Regenerated for the current viewport only (see
+// updateGridLines) -- a global grid was never built, deliberately (see
+// this file's own header comment on why a global GeoJSON source is the
+// wrong shape for this data).
+function gridLineFeatures(bounds) {
+  const south = bounds.getSouth();
+  const west = bounds.getWest();
+  const north = bounds.getNorth();
+  const east = bounds.getEast();
+  const [latS, lonW] = cellIndicesFor(south, west);
+  const [latN, lonE] = cellIndicesFor(north, east);
+  const xMin = west - CELL_LON_DEG;
+  const xMax = east + CELL_LON_DEG;
+  const yMin = south - CELL_LAT_DEG;
+  const yMax = north + CELL_LAT_DEG;
+
+  const features = [];
+  for (let i = latS; i <= latN + 1; i++) {
+    const lat = i * CELL_LAT_DEG;
+    features.push({
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'LineString', coordinates: [[xMin, lat], [xMax, lat]] },
+    });
+  }
+  for (let j = lonW; j <= lonE + 1; j++) {
+    const lon = j * CELL_LON_DEG;
+    features.push({
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'LineString', coordinates: [[lon, yMin], [lon, yMax]] },
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+// Below GRID_MIN_ZOOM the layer is hidden and its source is left
+// whatever it last held -- there is nothing on screen to keep current,
+// and the next crossing back above GRID_MIN_ZOOM regenerates it fresh
+// on that moveend. No toggle for this layer (see this feature's own
+// spec): visibility is purely a function of zoom.
+function updateGridLines(map) {
+  if (!map.getLayer('cell-grid-lines')) return;
+  const zoom = map.getZoom();
+  if (zoom < GRID_MIN_ZOOM) {
+    map.setLayoutProperty('cell-grid-lines', 'visibility', 'none');
+    return;
+  }
+  map.setLayoutProperty('cell-grid-lines', 'visibility', 'visible');
+  const src = map.getSource('grid-lines');
+  if (src) src.setData(gridLineFeatures(map.getBounds()));
+}
+
+function setupGridLines(map) {
+  map.on('moveend', () => updateGridLines(map));
+  updateGridLines(map); // in case the opening view already sits past GRID_MIN_ZOOM
+}
+
+// ===== My Location (feature: map-controls) =====
+//
+// PRIVACY, non-negotiable: everything in this section stays in this
+// browser tab. The coordinates navigator.geolocation reports are used
+// ONLY to (a) place a marker + accuracy circle on this MapLibre instance
+// and (b) compute a cell id locally with cellIndicesFor -- the exact
+// same lattice math app/grid.py uses server-side. Nothing below this
+// comment calls fetch(), sendClientLog(), or localStorage with a
+// coordinate in it. A future reader tempted to "also log this for
+// debugging" or wire it into telemetry: don't. The position must never
+// leave this tab.
+let myLocationWatchId = null;
+
+// Converts a geolocation accuracy radius (metres, isotropic -- a real
+// ground distance in every direction) into a MapLibre circle-radius
+// expression. This is the standard formula from Mapbox GL JS's own
+// "show accuracy circle" example: metres -> pixels AT ZOOM 20, then an
+// exponential-base-2 zoom interpolation scales it for every other zoom,
+// because each zoom level halves/doubles the ground distance a screen
+// pixel covers. Latitude enters because a fixed span of LONGITUDE covers
+// fewer real metres the further from the equator it is, while the
+// accuracy radius itself is a real-world (isotropic) distance.
+function metersToPixelsAtMaxZoom(meters, latitude) {
+  return meters / 0.075 / Math.cos((latitude * Math.PI) / 180);
+}
+
+function setGeoStatus(msg, isError) {
+  const el = document.getElementById('mw-mylocation-status');
+  if (!el) return;
+  if (!msg) {
+    el.hidden = true;
+    el.textContent = '';
+    el.classList.remove('mw-mylocation-status-error');
+    return;
+  }
+  el.hidden = false;
+  el.textContent = msg;
+  el.classList.toggle('mw-mylocation-status-error', !!isError);
+}
+
+function stopMyLocationWatch() {
+  if (myLocationWatchId !== null && navigator.geolocation) {
+    navigator.geolocation.clearWatch(myLocationWatchId);
+  }
+  myLocationWatchId = null;
+}
+
+function clearMyLocationMarker(map) {
+  const src = map.getSource('my-location');
+  if (src) src.setData({ type: 'FeatureCollection', features: [] });
+}
+
+// The actual point of this feature (see the ask this shipped from): not
+// just a dot on the map, but the cell id the viewer is standing in,
+// computed with the exact same floor-based lattice math as
+// app/grid.py's cell_id() -- see cellIndicesFor's own comment on why
+// that has to stay floor, not a truncating int().
+function onGeoPosition(map, pos) {
+  const lat = pos.coords.latitude;
+  const lon = pos.coords.longitude;
+  const accuracy = Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 0;
+
+  const src = map.getSource('my-location');
+  if (src) {
+    src.setData({
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        properties: { accuracyRadiusPx: metersToPixelsAtMaxZoom(accuracy, lat) },
+        geometry: { type: 'Point', coordinates: [lon, lat] },
+      }],
+    });
+  }
+
+  const [latIdx, lonIdx] = cellIndicesFor(lat, lon);
+  setGeoStatus(`You are in ${latIdx}_${lonIdx}`, false);
+}
+
+// GeolocationPositionError codes: 1 PERMISSION_DENIED, 2
+// POSITION_UNAVAILABLE, 3 TIMEOUT. Denial is fatal -- the browser will
+// never grant this tab permission without the viewer changing a site
+// setting first, so retrying is pointless and the checkbox is switched
+// back off. Unavailable/timeout are transient (a bad fix indoors, a slow
+// GPS lock) -- watchPosition itself keeps retrying those on its own, so
+// the watch stays open and the message is just informational.
+function onGeoError(map, checkbox, err) {
+  let msg;
+  let fatal = false;
+  switch (err && err.code) {
+    case 1:
+      msg = 'Location permission denied.';
+      fatal = true;
+      break;
+    case 2:
+      msg = 'Location unavailable right now.';
+      break;
+    case 3:
+      msg = 'Location request timed out -- still trying.';
+      break;
+    default:
+      msg = 'Could not get your location.';
+      fatal = true;
+      break;
+  }
+  setGeoStatus(msg, true);
+  if (fatal) {
+    stopMyLocationWatch();
+    clearMyLocationMarker(map);
+    if (checkbox) checkbox.checked = false;
+  }
+}
+
+function setupMyLocationControl(map) {
+  const checkbox = document.getElementById('mw-layer-mylocation');
+  if (!checkbox) return;
+
+  checkbox.addEventListener('change', () => {
+    if (!checkbox.checked) {
+      // "Unchecking clears the watch and removes the marker" -- both,
+      // always, never just one: a stopped watch with a stale marker
+      // still on screen would look like a live fix that stopped moving.
+      stopMyLocationWatch();
+      clearMyLocationMarker(map);
+      setGeoStatus('');
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setGeoStatus('This browser does not support geolocation.', true);
+      checkbox.checked = false;
+      return;
+    }
+
+    setGeoStatus('Locating...', false);
+    myLocationWatchId = navigator.geolocation.watchPosition(
+      (pos) => onGeoPosition(map, pos),
+      (err) => onGeoError(map, checkbox, err),
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+    );
+  });
+}
 
 // A checked box over a layer with no data at the current zoom reads as
 // broken -- there is nothing wrong, the tiles just do not exist below
@@ -4196,6 +4566,75 @@ async function main() {
       },
     });
 
+    // Cell grid lines (feature: map-controls -- see GRID_MIN_ZOOM/
+    // setupGridLines above). Source starts empty; setupGridLines below
+    // fills it in for the current viewport once the map is idle enough
+    // to call moveend, and hides the layer below GRID_MIN_ZOOM. Colour
+    // comes from the theme's own least-emphasis line token via
+    // themeColor() (see that function's own comment on why a paint
+    // property has to read the token this way, not with var()) rather
+    // than a literal hex, and applyBasemapTheme re-reads it on every
+    // theme flip below.
+    map.addSource('grid-lines', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+    });
+    map.addLayer({
+      id: 'cell-grid-lines',
+      type: 'line',
+      source: 'grid-lines',
+      layout: { visibility: 'none' },
+      paint: {
+        // --mw-text-6 ("captions, disabled, least emphasis" -- see
+        // theme.css's own comment on it) rather than a border token: a
+        // border colour reads correctly against the panel chrome it was
+        // designed for, but measured too dark to read at all against
+        // this basemap's near-black ground (--mw-ink) once actually
+        // rendered -- caught and switched to this token during this
+        // change's own screenshot verification pass, see the deploy
+        // notes.
+        'line-color': themeColor('--mw-text-6'),
+        'line-width': 0.75,
+        'line-opacity': 0.5,
+      },
+    });
+
+    // "My location" (feature: map-controls -- see the PRIVACY comment on
+    // setupMyLocationControl above). Source starts empty; nothing is
+    // written to it until the viewer checks the box and a real
+    // watchPosition fix comes back.
+    map.addSource('my-location', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+    });
+    map.addLayer({
+      id: 'my-location-accuracy',
+      type: 'circle',
+      source: 'my-location',
+      paint: {
+        // See metersToPixelsAtMaxZoom's own comment for this expression
+        // shape -- exponential-base-2 zoom interpolation from a pixel
+        // radius computed at zoom 20.
+        'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 0, 0, 20, ['get', 'accuracyRadiusPx']],
+        'circle-color': themeColor('--mw-accent'),
+        'circle-opacity': 0.15,
+        'circle-stroke-color': themeColor('--mw-accent'),
+        'circle-stroke-width': 1,
+        'circle-stroke-opacity': 0.6,
+      },
+    });
+    map.addLayer({
+      id: 'my-location-dot',
+      type: 'circle',
+      source: 'my-location',
+      paint: {
+        'circle-radius': 6,
+        'circle-color': themeColor('--mw-accent'),
+        'circle-stroke-color': themeColor('--mw-gold-light'),
+        'circle-stroke-width': 2,
+      },
+    });
+
     setupOverlayLayers(map);
     // Wrapped on its own, separate from the try/catch already around
     // setBoardMode/loadPlacesViewport/loadPlacesPanel below: icon
@@ -4216,6 +4655,9 @@ async function main() {
     setupPlacesLayer(map);
     setupCellClickPopup(map);
     setupLayerSwitcher(map);
+    setupOpacitySlider(map);
+    setupGridLines(map);
+    setupMyLocationControl(map);
     watchTheme(map);
     applyBasemapTheme(map);
 
