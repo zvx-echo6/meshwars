@@ -512,6 +512,10 @@ const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
 // player's own territory, 13/22 read as a bulky blob. The rings do the
 // work through CRISPNESS, not bulk -- thin bright ring, thin dark
 // outline, tight against the fill -- so this stays small and sharp.
+// How far the halo's tint is lifted from the team colour: enough to
+// read as a different shade against both the dot and same-team
+// ground, not so far that it turns white and loses the team read.
+const MY_LOCATION_HALO_TINT = 0.55;
 const MY_LOCATION_TEAM_DOT_RADIUS = 8;
 const MY_LOCATION_HALO_RADIUS = 13;
 
@@ -545,7 +549,7 @@ function startMyLocationPulse(map) {
     map.setPaintProperty('my-location-halo', 'circle-radius', MY_LOCATION_HALO_RADIUS * scale);
     // Fade the ring slightly as it grows so the pulse reads as a breath
     // rather than a hard ring changing size.
-    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.55 - (scale - MY_LOCATION_PULSE_MIN) * 0.35);
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.5 - (scale - MY_LOCATION_PULSE_MIN) * 0.32);
     myLocationPulseRaf = requestAnimationFrame(step);
   };
   myLocationPulseRaf = requestAnimationFrame(step);
@@ -3373,8 +3377,13 @@ function applyMyLocationColors(map) {
     // real square is never near-white AND near-black at once, so at
     // least one of the halo's two rings holds contrast against
     // whatever the dot is sitting on.
-    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.55);
-    map.setPaintProperty('my-location-halo', 'circle-stroke-opacity', 1);
+    // A lifted tint of the same team colour -- see shadeColor above for
+    // why lighter rather than darker.
+    const haloColor = shadeColor(teamColor, MY_LOCATION_HALO_TINT);
+    map.setPaintProperty('my-location-halo', 'circle-color', haloColor);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-color', haloColor);
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.5);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-opacity', 0.9);
     map.setPaintProperty('my-location-halo', 'circle-radius', MY_LOCATION_HALO_RADIUS);
     map.setPaintProperty('my-location-dot', 'circle-radius', MY_LOCATION_TEAM_DOT_RADIUS);
     map.setPaintProperty('my-location-dot', 'circle-color', teamColor);
@@ -3576,6 +3585,35 @@ function setupOverlayLayers(map) {
 // silently invented colour standing in for it.
 function themeColor(varName) {
   return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+}
+
+// Mix a CSS colour toward white (amount > 0) or toward black (amount <
+// 0) and return an rgb() string. Used for the location halo, which has
+// to be the player's TEAM colour but a visibly different shade from two
+// things at once: the dot at its centre (full team colour) and the
+// ground under it, which is very often that same team's territory.
+// A lighter tint separates from both -- the ground is the team colour
+// darkened by the basemap showing through its fill opacity, so lifting
+// toward white moves away from it rather than toward it.
+//
+// Accepts whatever getComputedStyle hands back for a custom property,
+// which is '#rrggbb' for these tokens today but is allowed to be an
+// rgb()/rgba() string, so both are parsed rather than assuming hex.
+function shadeColor(css, amount) {
+  let r, g, b;
+  const hex = css.trim().match(/^#([0-9a-f]{6})$/i);
+  if (hex) {
+    const n = parseInt(hex[1], 16);
+    r = (n >> 16) & 255; g = (n >> 8) & 255; b = n & 255;
+  } else {
+    const m = css.match(/(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)/);
+    if (!m) return css;
+    r = +m[1]; g = +m[2]; b = +m[3];
+  }
+  const t = amount >= 0 ? 255 : 0;
+  const k = Math.abs(amount);
+  const mix = (c) => Math.round(c + (t - c) * k);
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
 }
 
 // ===== Claimed-squares opacity slider (feature: map-controls) =====
