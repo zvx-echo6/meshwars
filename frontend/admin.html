@@ -26,7 +26,7 @@
        admin.css (admin.css's own layout now shifts down by nav.css's
        --mw-nav-h). -->
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260907-3" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260909-1" />
 </head>
 <body>
 
@@ -285,7 +285,19 @@
             </label>
             <label class="adm-field-label">Start hour<input type="number" id="nf-start-hour" min="0" max="23" value="17" /></label>
             <label class="adm-field-label">End hour<input type="number" id="nf-end-hour" min="0" max="23" value="23" /></label>
-            <label class="adm-field-label">Timezone<input type="text" id="nf-timezone" autocomplete="off" value="America/Boise" /></label>
+            <label class="adm-field-label adm-field-label-wide">Timezone
+              <select id="nf-timezone">
+                <option value="America/Los_Angeles">Pacific - America/Los_Angeles</option>
+                <option value="America/Denver">Mountain - America/Denver</option>
+                <option value="America/Phoenix">Arizona, no DST - America/Phoenix</option>
+                <option value="America/Boise" selected>Mountain (Idaho) - America/Boise</option>
+                <option value="America/Chicago">Central - America/Chicago</option>
+                <option value="America/New_York">Eastern - America/New_York</option>
+                <option value="America/Anchorage">Alaska - America/Anchorage</option>
+                <option value="Pacific/Honolulu">Hawaii - Pacific/Honolulu</option>
+                <option value="UTC">UTC</option>
+              </select>
+            </label>
           </div>
           <div class="adm-form">
             <label class="adm-field-label">Start date<input type="date" id="nf-start-date" /></label>
@@ -442,7 +454,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260907-3"></script>
+  <script src="/static/admin.js?v=20260909-1"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

@@ -1366,6 +1366,32 @@ const NET_CONNECTOR_URL_EXAMPLES = {
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
+// nf-timezone is a curated <select>, not free text, so a stored value
+// outside the curated list (e.g. someone posted a valid IANA zone like
+// Europe/Helsinki straight to the API before this picker existed, or
+// ever will again via direct API use) can't just be assigned -- the
+// browser silently leaves an unmatched <select>.value at whatever was
+// already selected, which here would be the first/default option. That
+// would make merely opening this net for edit -- without even touching
+// the field -- rewrite its timezone to that default on next save. So
+// if the value isn't one of the curated options, inject it as an extra
+// option and select that instead of falling back.
+const NF_TIMEZONE_CUSTOM_OPTION_ID = 'nf-timezone-custom-option';
+function setNetTimezoneValue(tz) {
+  const select = document.getElementById('nf-timezone');
+  const existingCustom = document.getElementById(NF_TIMEZONE_CUSTOM_OPTION_ID);
+  if (existingCustom) existingCustom.remove();
+  select.value = tz;
+  if (select.value !== tz) {
+    const opt = document.createElement('option');
+    opt.id = NF_TIMEZONE_CUSTOM_OPTION_ID;
+    opt.value = tz;
+    opt.textContent = tz + ' (current value, not in list)';
+    select.appendChild(opt);
+    select.value = tz;
+  }
+}
+
 // end_hour is inclusive through :59:59 (see app/db.py's checkin_net
 // comment), so displaying it as HH:59 rather than HH:00 is what
 // actually matches the window a message gets judged against.
@@ -1755,7 +1781,7 @@ function resetNetForm() {
   document.getElementById('nf-weekday').value = '2';
   document.getElementById('nf-start-hour').value = '17';
   document.getElementById('nf-end-hour').value = '23';
-  document.getElementById('nf-timezone').value = 'America/Boise';
+  setNetTimezoneValue('America/Boise');
   document.getElementById('nf-start-date').value = '';
   document.getElementById('nf-enabled').checked = true;
   document.getElementById('nf-topic-root').value = '';
@@ -1789,7 +1815,7 @@ function startEditNet(n) {
   document.getElementById('nf-weekday').value = String(n.weekday);
   document.getElementById('nf-start-hour').value = String(n.start_hour);
   document.getElementById('nf-end-hour').value = String(n.end_hour);
-  document.getElementById('nf-timezone').value = n.timezone;
+  setNetTimezoneValue(n.timezone);
   document.getElementById('nf-start-date').value = n.start_date || '';
   document.getElementById('nf-enabled').checked = !!n.enabled;
   document.getElementById('nf-topic-root').value = n.topic_root || '';
