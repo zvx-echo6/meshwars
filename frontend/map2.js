@@ -498,8 +498,13 @@ const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
 // runs -1 (grey) to 1 (fully saturated); Voyager stock sits low enough
 // that parks and water read as tints rather than colours. A small
 // contrast lift stops the extra saturation from flattening the tone.
-const BASEMAP_LIGHT_SATURATION = 0.45;
-const BASEMAP_LIGHT_CONTRAST = 0.08;
+// Saturation only. A contrast lift was tried here and made things
+// visibly WORSE: raster-contrast separates around mid-grey, and on an
+// already-light raster that pushes the pale tones toward white, so the
+// ground bleached to cream and took the greens with it. Colour is the
+// thing that was missing, so raise colour and leave tone alone.
+const BASEMAP_LIGHT_SATURATION = 0.6;
+const BASEMAP_LIGHT_CONTRAST = 0;
 
 const HILLSHADE_OPACITY_MODE_FACTOR = { dark: 1.0, light: 0.4 };
 
