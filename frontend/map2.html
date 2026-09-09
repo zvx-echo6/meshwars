@@ -141,7 +141,7 @@
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
   <link rel="stylesheet" href="/static/coverage.css?v=20260904-4" />
   <link rel="stylesheet" href="/static/mc.css?v=20260825-1" />
-  <link rel="stylesheet" href="/static/map2.css?v=20260909-12" />
+  <link rel="stylesheet" href="/static/map2.css?v=20260910-1" />
 </head>
 <body>
 
@@ -185,6 +185,28 @@
   <div id="mc-winner-banner" class="mc-winner-banner"></div>
 
   <div id="map"></div>
+
+  <!-- Center-and-follow (map2.js's setupFollowControl/engageFollow/
+       disengageFollow, feature: map-center-follow). Lower-right corner
+       on every viewport, sized as a button rather than a checkbox row
+       so it is a comfortable tap target on a phone (see .mw-follow-btn
+       in map2.css). Engaging it turns on My Location too if it is off
+       -- following without a position fix is meaningless -- and the two
+       controls are kept from ever disagreeing about state (see
+       setupMyLocationControl's unchecked branch and onGeoError's fatal
+       branch, both of which call disengageFollow). aria-pressed is the
+       actual state; the icon is a plain crosshair (not an arrow) since
+       this feature never rotates the map to heading-up. -->
+  <button type="button" id="mw-follow-btn" class="mw-follow-btn"
+          aria-pressed="false" aria-label="Follow my location" title="Follow my location">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/>
+      <line x1="12" y1="2" x2="12" y2="6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <line x1="12" y1="17.5" x2="12" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <line x1="2" y1="12" x2="6.5" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <line x1="17.5" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </button>
 
   <div id="loading-overlay">
     <div class="loading-inner">
@@ -312,7 +334,7 @@
   <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
           crossorigin="anonymous"></script>
 
-  <script src="/static/map2.js?v=20260909-12" type="module"></script>
+  <script src="/static/map2.js?v=20260910-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

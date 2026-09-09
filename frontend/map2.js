@@ -3892,6 +3892,147 @@ function setupGridLines(map) {
 // nav-auth.js/account.js and carries nothing this feature writes to.
 let myLocationWatchId = null;
 
+// ===== Center-and-follow (feature: map-center-follow) =====
+//
+// Layered on top of My Location rather than a separate watch: follow
+// has no meaning without a live fix, so engaging it just makes sure My
+// Location's own checkbox/watch is on (see engageFollow) and then rides
+// every onGeoPosition callback that watch already produces. Turning My
+// Location off -- by its own checkbox, or its own fatal-error path --
+// always turns follow off too (see setupMyLocationControl/onGeoError).
+//
+// lastGeoFix is the latest fix regardless of whether follow is on, so
+// engaging follow can center immediately on whatever My Location
+// already has rather than waiting for the next watchPosition callback.
+let lastGeoFix = null;
+let followActive = false;
+// The fix last centered on. Reset to null on every engage so the very
+// next fix is always treated as "first" (see applyFollowCenter) --
+// that is what makes engaging apply the zoom bump and skip the
+// movement threshold on that first center.
+let followLastCenter = null;
+
+// Ignore fixes that haven't moved further than this: consumer GPS
+// jitters several metres standing still (the accuracy circle itself is
+// routinely 5-20m), and recentering on every one of those would make
+// the map twitch instead of read as "following". 8m is comfortably
+// above typical stationary jitter but well under a walking pace's
+// stride-to-stride distance, so real movement still recenters promptly.
+const FOLLOW_RECENTER_THRESHOLD_M = 8;
+
+// "target roughly z15-16, but do NOT zoom out if they are already
+// closer in than that" -- below z15 the viewer is too zoomed out for
+// their own dot to be useful, so engaging bumps to 16; at z15 or
+// deeper, zoom is left alone entirely, on every later fix as well as
+// the first.
+const FOLLOW_ENGAGE_MIN_ZOOM = 15;
+const FOLLOW_ENGAGE_TARGET_ZOOM = 16;
+
+// A short eased pan, not a jump -- long enough to read as motion,
+// short enough to keep up with a fix arriving every few seconds.
+const FOLLOW_EASE_MS = 500;
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function setFollowUI(active) {
+  const btn = document.getElementById('mw-follow-btn');
+  if (!btn) return;
+  btn.setAttribute('aria-pressed', String(active));
+  btn.classList.toggle('active', active);
+  btn.title = active ? 'Stop following my location' : 'Follow my location';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+// Centers on (lat, lon) if this is the first fix since follow was
+// (re-)engaged (followLastCenter === null) or the fix has moved past
+// FOLLOW_RECENTER_THRESHOLD_M since the last center. Only the first
+// call after an engage is allowed to touch zoom, and only to bump it
+// up -- see FOLLOW_ENGAGE_MIN_ZOOM/TARGET_ZOOM above.
+function applyFollowCenter(map, lat, lon) {
+  const isEngage = followLastCenter === null;
+  if (!isEngage) {
+    const moved = haversineMeters(followLastCenter.lat, followLastCenter.lon, lat, lon);
+    if (moved < FOLLOW_RECENTER_THRESHOLD_M) return;
+  }
+  followLastCenter = { lat, lon };
+  const opts = { center: [lon, lat], duration: FOLLOW_EASE_MS };
+  if (isEngage && map.getZoom() < FOLLOW_ENGAGE_MIN_ZOOM) {
+    opts.zoom = FOLLOW_ENGAGE_TARGET_ZOOM;
+  }
+  map.easeTo(opts);
+}
+
+function engageFollow(map) {
+  if (followActive) return;
+  followActive = true;
+  followLastCenter = null;
+  setFollowUI(true);
+
+  // Reuse the existing checkbox/watch path rather than duplicating it --
+  // following without a position fix is meaningless, so make sure My
+  // Location is (or becomes) on. Dispatching 'change' runs the exact
+  // same handler a click would, including starting watchPosition.
+  const checkbox = document.getElementById('mw-layer-mylocation');
+  if (checkbox && !checkbox.checked) {
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+  }
+
+  // Don't wait on the next watchPosition callback if My Location was
+  // already on and already has a fix -- center on it right now.
+  if (lastGeoFix) applyFollowCenter(map, lastGeoFix.lat, lastGeoFix.lon);
+}
+
+function disengageFollow() {
+  if (!followActive) return;
+  followActive = false;
+  followLastCenter = null;
+  setFollowUI(false);
+}
+
+function setupFollowControl(map) {
+  const btn = document.getElementById('mw-follow-btn');
+  if (!btn) return;
+
+  btn.addEventListener('click', () => {
+    if (followActive) {
+      disengageFollow();
+    } else {
+      engageFollow(map);
+    }
+  });
+
+  // The pan-disengage trap: this feature's own recentering calls
+  // map.easeTo(), which fires 'movestart' exactly like a user drag,
+  // scroll-zoom, or pinch does -- so naively disengaging on every
+  // 'movestart' would turn follow off the instant it tried to follow.
+  // MapLibre distinguishes the two on the event object itself: a real
+  // user gesture's 'movestart' carries the DOM event that caused it as
+  // e.originalEvent (mousedown/touchstart/wheel/keydown); a
+  // programmatic move (easeTo/flyTo/jumpTo/fitBounds) fires 'movestart'
+  // with no originalEvent at all. This is the same mechanism already
+  // relied on and documented a few hundred lines up, for the opening
+  // view's own "has the viewer already grabbed the map" check
+  // (mapViewerInteracted, in main()) -- reused here rather than
+  // reinvented. Verified with Playwright: a simulated mouse
+  // down/move/up drag on the canvas disengages follow; two consecutive
+  // fed positions, each triggering this feature's own easeTo, do not.
+  map.on('movestart', (e) => {
+    if (followActive && e && e.originalEvent) {
+      disengageFollow();
+    }
+  });
+}
+
 // The signed-in viewer's team ('RED' | 'GREEN' | ... , see
 // app/account_api.py's _player_out -- player.team, upper case, the
 // same casing TEAM_COLORS above already keys on) once fetchViewerTeam
@@ -3993,6 +4134,9 @@ function onGeoPosition(map, pos) {
 
   const [latIdx, lonIdx] = cellIndicesFor(lat, lon);
   setGeoStatus(`You are in ${latIdx}_${lonIdx}`, false);
+
+  lastGeoFix = { lat, lon };
+  if (followActive) applyFollowCenter(map, lat, lon);
 }
 
 // GeolocationPositionError codes: 1 PERMISSION_DENIED, 2
@@ -4026,6 +4170,11 @@ function onGeoError(map, checkbox, err) {
     stopMyLocationWatch();
     clearMyLocationMarker(map);
     if (checkbox) checkbox.checked = false;
+    // This path turns My Location off without going through the
+    // checkbox's own 'change' handler (unchecking it here does not
+    // dispatch one), so follow -- which has no meaning without a live
+    // fix -- is disengaged directly here instead.
+    disengageFollow();
   }
 }
 
@@ -4041,6 +4190,9 @@ function setupMyLocationControl(map) {
       stopMyLocationWatch();
       clearMyLocationMarker(map);
       setGeoStatus('');
+      // My Location off means follow is meaningless -- keep the two
+      // controls from ever disagreeing about state.
+      disengageFollow();
       return;
     }
 
@@ -5207,6 +5359,7 @@ async function main() {
     setupBasemapModeToggle(map);
     setupGridLines(map);
     setupMyLocationControl(map);
+    setupFollowControl(map);
     watchTheme(map);
     applyBasemapTheme(map);
 
