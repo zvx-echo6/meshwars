@@ -3971,6 +3971,45 @@ function setFollowUI(active) {
 // FOLLOW_RECENTER_THRESHOLD_M since the last center. Only the first
 // call after an engage is allowed to touch zoom, and only to bump it
 // up -- see FOLLOW_ENGAGE_MIN_ZOOM/TARGET_ZOOM above.
+// Two things made following look jerky at speed, and they are separate:
+//
+//  1. The camera moved for FOLLOW_EASE_MS and then sat still until the
+//     next fix. With a 500ms ease and fixes about a second apart that is
+//     literally half a second of motion followed by half a second of
+//     nothing, which reads as a stutter rather than as travel. The fix
+//     is to stretch each move to cover the gap until the next fix is
+//     expected, so the camera is always moving, and to use LINEAR
+//     easing -- MapLibre's default ease accelerates and decelerates,
+//     which at one fix per second turns steady travel into a series of
+//     visible lurches.
+//
+//  2. The marker itself jumped. The dot is drawn from the source data,
+//     which was replaced outright on each fix, so at 80mph it teleported
+//     roughly 36 metres at a time. animateMarkerTo below walks it
+//     between the two fixes over the same interval, so the dot glides
+//     and the camera glides with it.
+//
+// followFixIntervalMs is measured rather than assumed: a phone that
+// reports twice a second and one that reports every three seconds both
+// want the animation to last until their own next fix, not some
+// constant picked here.
+let followFixIntervalMs = FOLLOW_EASE_MS;
+let followLastFixAt = null;
+
+function noteFollowFixInterval() {
+  const now = Date.now();
+  if (followLastFixAt !== null) {
+    const gap = now - followLastFixAt;
+    // Ignore absurd gaps (tab was backgrounded, GPS dropped out) so one
+    // stall does not leave every later move crawling over 30 seconds.
+    if (gap > 200 && gap < 5000) {
+      // Light smoothing: follow the trend without chasing one jittery gap.
+      followFixIntervalMs = Math.round(followFixIntervalMs * 0.6 + gap * 0.4);
+    }
+  }
+  followLastFixAt = now;
+}
+
 function applyFollowCenter(map, lat, lon) {
   const isEngage = followLastCenter === null;
   if (!isEngage) {
@@ -3978,9 +4017,15 @@ function applyFollowCenter(map, lat, lon) {
     if (moved < FOLLOW_RECENTER_THRESHOLD_M) return;
   }
   followLastCenter = { lat, lon };
-  const opts = { center: [lon, lat], duration: FOLLOW_EASE_MS };
-  if (isEngage && map.getZoom() < FOLLOW_ENGAGE_MIN_ZOOM) {
-    opts.zoom = FOLLOW_ENGAGE_TARGET_ZOOM;
+  const opts = { center: [lon, lat] };
+  if (isEngage) {
+    // The first move after engaging is a jump to where you are, not
+    // travel -- keep the original short ease and the zoom bump.
+    opts.duration = FOLLOW_EASE_MS;
+    if (map.getZoom() < FOLLOW_ENGAGE_MIN_ZOOM) opts.zoom = FOLLOW_ENGAGE_TARGET_ZOOM;
+  } else {
+    opts.duration = followFixIntervalMs;
+    opts.easing = (t) => t;
   }
   map.easeTo(opts);
 }
@@ -4119,7 +4164,64 @@ function stopMyLocationWatch() {
   myLocationWatchId = null;
 }
 
+// Writes the marker's source data. Kept as one place so the animation
+// below and the direct callers cannot drift apart on the feature shape.
+function writeMyLocationPoint(map, lat, lon, accuracy) {
+  const src = map.getSource('my-location');
+  if (!src) return;
+  src.setData({
+    type: 'FeatureCollection',
+    features: [{
+      type: 'Feature',
+      properties: { accuracyRadiusPx: metersToPixelsAtMaxZoom(accuracy, lat) },
+      geometry: { type: 'Point', coordinates: [lon, lat] },
+    }],
+  });
+}
+
+let markerAnimRaf = null;
+
+function stopMarkerAnimation() {
+  if (markerAnimRaf !== null) {
+    cancelAnimationFrame(markerAnimRaf);
+    markerAnimRaf = null;
+  }
+}
+
+// Walks the dot from wherever it currently is to the new fix over the
+// interval we expect the next fix to arrive in, so travel reads as
+// motion instead of a series of jumps. Straight linear interpolation:
+// between two consecutive GPS fixes a couple of seconds apart, a
+// straight line is as good a guess as anything, and easing here would
+// re-introduce the stop-start feel the camera change just removed.
+function setMyLocationPoint(map, lat, lon, accuracy) {
+  stopMarkerAnimation();
+  const from = lastGeoFix;
+  // No previous fix, a huge jump (first fix, or GPS relocating after a
+  // dropout), or reduced motion: place it directly.
+  const far = from ? haversineMeters(from.lat, from.lon, lat, lon) > 400 : true;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!from || far || reduce) {
+    writeMyLocationPoint(map, lat, lon, accuracy);
+    return;
+  }
+  const startAt = performance.now();
+  const dur = Math.max(200, followFixIntervalMs);
+  const step = (now) => {
+    const t = Math.min(1, (now - startAt) / dur);
+    writeMyLocationPoint(
+      map,
+      from.lat + (lat - from.lat) * t,
+      from.lon + (lon - from.lon) * t,
+      accuracy,
+    );
+    markerAnimRaf = t < 1 ? requestAnimationFrame(step) : null;
+  };
+  markerAnimRaf = requestAnimationFrame(step);
+}
+
 function clearMyLocationMarker(map) {
+  stopMarkerAnimation();
   const src = map.getSource('my-location');
   if (src) src.setData({ type: 'FeatureCollection', features: [] });
 }
@@ -4134,38 +4236,40 @@ function onGeoPosition(map, pos) {
   const lon = pos.coords.longitude;
   const accuracy = Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 0;
 
-  const src = map.getSource('my-location');
-  if (src) {
-    src.setData({
-      type: 'FeatureCollection',
-      features: [{
-        type: 'Feature',
-        properties: { accuracyRadiusPx: metersToPixelsAtMaxZoom(accuracy, lat) },
-        geometry: { type: 'Point', coordinates: [lon, lat] },
-      }],
-    });
-  }
-
-  // ?debug=1 shows what the watch is actually delivering: how many
-  // fixes have arrived, how old this one is, and its accuracy. Without
-  // it there is no way to tell "the watch is not firing" from "the
-  // watch is firing with stale positions" from the passenger seat.
+  // Glide the marker to the new fix rather than replacing the source
+  // outright: at 80mph a once-a-second fix moves the dot about 36
+  // metres, and setting it directly teleports it that far every time.
+  // Order matters here. The interval estimate feeds the marker
+  // animation's duration, the marker animation reads lastGeoFix as its
+  // STARTING point, and lastGeoFix is only overwritten afterwards --
+  // updating it first would make every glide start from where the dot
+  // already is and animate nothing.
+  const ageMs = Date.now() - (pos.timestamp || Date.now());
+  const gapMs = geoLastFixAt ? Date.now() - geoLastFixAt : 0;
   geoFixCount += 1;
-  if (geoDebugEnabled()) {
-    const ageMs = Date.now() - (pos.timestamp || Date.now());
-    const since = geoLastFixAt ? Math.round((Date.now() - geoLastFixAt) / 100) / 10 : 0;
-    geoLastFixAt = Date.now();
-    setGeoStatus(
-      `${latIdx}_${lonIdx} | fix #${geoFixCount} age ${Math.round(ageMs / 100) / 10}s`
-      + ` gap ${since}s acc ${Math.round(accuracy)}m`, false);
-    return;
-  }
+  geoLastFixAt = Date.now();
+
+  noteFollowFixInterval();
+  setMyLocationPoint(map, lat, lon, accuracy);
 
   const [latIdx, lonIdx] = cellIndicesFor(lat, lon);
-  setGeoStatus(`You are in ${latIdx}_${lonIdx}`, false);
+  // ?debug=1 shows what the watch is actually delivering: how many
+  // fixes have arrived, how old each one is, the gap since the last,
+  // and its accuracy. Without it there is no way to tell "the watch is
+  // not firing" from "the watch is firing with stale positions" from
+  // the passenger seat. It only changes the STATUS TEXT -- everything
+  // else on this path still runs, so turning diagnostics on must never
+  // change the behaviour being diagnosed.
+  if (geoDebugEnabled()) {
+    setGeoStatus(
+      `${latIdx}_${lonIdx} | fix #${geoFixCount} age ${Math.round(ageMs / 100) / 10}s`
+      + ` gap ${Math.round(gapMs / 100) / 10}s acc ${Math.round(accuracy)}m`, false);
+  } else {
+    setGeoStatus(`You are in ${latIdx}_${lonIdx}`, false);
+  }
 
-  lastGeoFix = { lat, lon };
   if (followActive) applyFollowCenter(map, lat, lon);
+  lastGeoFix = { lat, lon };
 }
 
 // GeolocationPositionError codes: 1 PERMISSION_DENIED, 2
