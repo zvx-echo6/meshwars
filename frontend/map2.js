@@ -3904,6 +3904,20 @@ let myLocationWatchId = null;
 // lastGeoFix is the latest fix regardless of whether follow is on, so
 // engaging follow can center immediately on whatever My Location
 // already has rather than waiting for the next watchPosition callback.
+let geoFixCount = 0;
+let geoLastFixAt = null;
+
+// Opt-in diagnostics for the location watch, read once per call rather
+// than cached so it can be flipped by editing the URL without a reload
+// of the module.
+function geoDebugEnabled() {
+  try {
+    return new URLSearchParams(window.location.search).get('debug') === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
 let lastGeoFix = null;
 let followActive = false;
 // The fix last centered on. Reset to null on every engage so the very
@@ -4132,6 +4146,21 @@ function onGeoPosition(map, pos) {
     });
   }
 
+  // ?debug=1 shows what the watch is actually delivering: how many
+  // fixes have arrived, how old this one is, and its accuracy. Without
+  // it there is no way to tell "the watch is not firing" from "the
+  // watch is firing with stale positions" from the passenger seat.
+  geoFixCount += 1;
+  if (geoDebugEnabled()) {
+    const ageMs = Date.now() - (pos.timestamp || Date.now());
+    const since = geoLastFixAt ? Math.round((Date.now() - geoLastFixAt) / 100) / 10 : 0;
+    geoLastFixAt = Date.now();
+    setGeoStatus(
+      `${latIdx}_${lonIdx} | fix #${geoFixCount} age ${Math.round(ageMs / 100) / 10}s`
+      + ` gap ${since}s acc ${Math.round(accuracy)}m`, false);
+    return;
+  }
+
   const [latIdx, lonIdx] = cellIndicesFor(lat, lon);
   setGeoStatus(`You are in ${latIdx}_${lonIdx}`, false);
 
@@ -4206,7 +4235,14 @@ function setupMyLocationControl(map) {
     myLocationWatchId = navigator.geolocation.watchPosition(
       (pos) => onGeoPosition(map, pos),
       (err) => onGeoError(map, checkbox, err),
-      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+      // maximumAge MUST be 0. At 5000 the browser is explicitly
+      // permitted to satisfy each callback from a cached fix up to five
+      // seconds old, and iOS takes that permission enthusiastically.
+      // Standing still that is invisible; at freeway speed five seconds
+      // is about 180 metres, so follow mode kept re-centring on where
+      // the car had already been and read as "not following". 0 forces
+      // a fresh reading every time, which is the whole point of a watch.
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
     );
 
     // Fired alongside the watch, never awaited before it -- a slow or
