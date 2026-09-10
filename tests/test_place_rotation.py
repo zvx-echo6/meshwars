@@ -10,8 +10,11 @@ import app.place_rotation as rot_module
 from app.grid import distance_m
 from app.place_rotation import (
     MIN_SPACING_MILES,
+    ROTATION_QUOTA_CAP,
+    ROTATION_QUOTA_FLOOR,
     _compute_week,
     current_week_start,
+    region_quota,
     resolve_week,
     week_start_for_date,
     week_start_for_ts,
@@ -27,6 +30,32 @@ def _insert_place(conn, place_id, ref_type, lat, lon, points=5, rotates=1):
         (place_id, ref_type, f"ref-{place_id}", f"place-{place_id}", lat, lon,
          points, "TEST", rotates, int(time.time())),
     )
+
+
+def _place_grid_in_cell(conn, first_id, lat_idx, lon_idx, rows, cols):
+    """Insert rows*cols landmarks, all inside the single region cell
+    (lat_idx, lon_idx), on a grid spanning the middle 70% of the cell
+    (same technique test_rotation_differs_by_week uses) -- comfortably
+    inside the cell's bounds and, for any rows/cols used in this file,
+    comfortably past MIN_SPACING_MILES apart, so every one of them
+    clears the spacing check and only the quota decides how many go
+    live. Returns the ids inserted.
+    """
+    lat_deg, lon_deg = rot_module._region_cell_degrees()
+    cell_south = lat_idx * lat_deg
+    cell_west = lon_idx * lon_deg
+    lat_step = (lat_deg * 0.7) / max(rows - 1, 1)
+    lon_step = (lon_deg * 0.7) / max(cols - 1, 1)
+    lat0 = cell_south + lat_deg * 0.15
+    lon0 = cell_west + lon_deg * 0.15
+    ids = []
+    place_id = first_id
+    for r in range(rows):
+        for c in range(cols):
+            _insert_place(conn, place_id, "landmark", lat0 + r * lat_step, lon0 + c * lon_step)
+            ids.append(place_id)
+            place_id += 1
+    return ids
 
 
 def test_week_start_snaps_to_wednesday():
@@ -176,3 +205,103 @@ def test_always_active_places_never_rotate(conn):
     chosen, _ = _compute_week(conn, WEEK)
     assert 1 not in chosen
     assert 2 in chosen
+
+
+# ---- density-scaled quota (2026-09-07) ---------------------------------
+
+
+def test_region_quota_floor_never_drops_below_15():
+    """Any cell at or under ROTATION_QUOTA_FLOOR candidates gets exactly
+    the floor's worth of quota (or less than the floor's worth of actual
+    candidates to fill it with) -- density scaling never produces a
+    quota below the pre-scaling flat value, for any candidate count from
+    zero up through the floor itself.
+    """
+    for candidates in (1, 2, 4, 10, 14, ROTATION_QUOTA_FLOOR):
+        assert region_quota(candidates) == ROTATION_QUOTA_FLOOR
+    assert region_quota(0) == 0  # nothing to place either way
+
+
+def test_region_quota_p90_density_exceeds_the_old_flat_quota():
+    """A p90-density cell (48 candidates, per the worldwide-seed
+    measurement) must get a quota above the old flat 15 -- 27, per
+    quota(48) = round(15 * sqrt(48/15)).
+    """
+    assert region_quota(48) == 27
+    assert region_quota(48) > ROTATION_QUOTA_FLOOR
+
+
+def test_region_quota_densest_case_capped_at_60_not_334():
+    """The measured worldwide max (7,420 candidates in one cell) must be
+    capped at ROTATION_QUOTA_CAP (60), not the ~334 an uncapped sqrt
+    would compute -- MIN_SPACING_MILES cannot physically seat anywhere
+    near that many in one 18-mile cell.
+    """
+    uncapped = round(ROTATION_QUOTA_FLOOR * (7420 / ROTATION_QUOTA_FLOOR) ** 0.5)
+    assert uncapped == 334  # sanity check on the math the cap is guarding against
+    assert region_quota(7420) == ROTATION_QUOTA_CAP == 60
+
+
+def test_sparse_cell_behaves_exactly_as_today(conn):
+    """A sparse cell (4 candidates, well under the floor) gets every
+    candidate that clears spacing, same as under the old flat-15 quota
+    -- density scaling must not change anything here.
+    """
+    ids = _place_grid_in_cell(conn, 0, lat_idx=100, lon_idx=-200, rows=2, cols=2)
+    assert len(ids) == 4
+
+    chosen, report = _compute_week(conn, WEEK)
+    assert sorted(chosen) == sorted(ids)
+    assert report["100_-200"]["candidates"] == 4
+    assert report["100_-200"]["chosen"] == 4
+
+
+def test_p90_density_cell_gets_more_than_15_live(conn):
+    """A p90-density cell (48 well-spaced candidates) must go live with
+    more than the old flat 15 -- exactly region_quota(48) == 27, since
+    nothing here fails the spacing check.
+    """
+    ids = _place_grid_in_cell(conn, 0, lat_idx=101, lon_idx=-201, rows=6, cols=8)
+    assert len(ids) == 48
+
+    chosen, report = _compute_week(conn, WEEK)
+    assert report["101_-201"]["candidates"] == 48
+    assert report["101_-201"]["chosen"] == 27
+    assert len(chosen) == 27
+    assert set(chosen).issubset(set(ids))
+
+
+def test_spacing_still_wins_over_a_higher_quota(conn):
+    """Quota is a ceiling, never a target to pad out to: a cell with
+    enough candidates to earn a quota above 15 (20 candidates ->
+    region_quota(20) == 17) but almost all of them clustered within
+    MIN_SPACING_MILES of each other must still come away with far fewer
+    live places than its quota -- spacing keeps deciding, density
+    scaling does not override it.
+    """
+    assert region_quota(20) == 17
+    for i in range(20):
+        _insert_place(conn, i, "landmark", 43.500 + (i * 0.0005), -116.500 + (i * 0.0005))
+
+    chosen, report = _compute_week(conn, WEEK)
+    key = list(report.keys())[0]
+    assert report[key]["candidates"] == 20
+    assert report[key]["chosen"] < 17
+    assert len(chosen) < 17
+
+
+def test_density_scaling_is_deterministic_across_runs(conn):
+    """The same week, resolved twice from scratch, must produce the
+    identical live set and region report for a dense cell -- density
+    scaling must not introduce any new source of non-determinism (it is
+    a pure function of len(candidates), computed without touching the
+    RNG).
+    """
+    _place_grid_in_cell(conn, 0, lat_idx=102, lon_idx=-202, rows=6, cols=8)
+
+    chosen_a, report_a = _compute_week(conn, WEEK)
+    chosen_b, report_b = _compute_week(conn, WEEK)
+
+    assert chosen_a == chosen_b
+    assert report_a == report_b
+
