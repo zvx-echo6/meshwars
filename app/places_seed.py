@@ -87,11 +87,15 @@ import gzip
 import hashlib
 import time
 
+import shapely.prepared
 from shapely import wkt as shapely_wkt
 from shapely.geometry import MultiPolygon, Polygon, box as shapely_box
 
 from .config import settings
-from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, cell_indices, distance_m
+from .grid import (
+    CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m,
+    ring_expand,
+)
 
 log = logging.getLogger("places_seed")
 
@@ -277,9 +281,23 @@ _METERS_PER_DEG_LAT = 111_320.0
 #
 # So: a park at or above _PARK_BAND_THRESHOLD_CELLS stores only its
 # boundary band (_park_band() below) -- the outermost
-# _PARK_BAND_WIDTH_CELLS layers of its own filled set, computed by
-# grid-index erosion over the cells _park_cells() already produced, not
-# by re-walking the geometry. A park BELOW the threshold is stored
+# _PARK_BAND_WIDTH_CELLS layers of its own filled set. FIXED 2026-09-09
+# ("the trap"): this used to mean grid-index erosion over the cells
+# _park_cells() already produced, which required that filled set to
+# exist first -- fine while scripts/build_places_seed.py's match_parks()
+# and extract_osm_parks() still clipped every stored boundary to a ~6 km
+# buffer around its own point (see those functions' own comments), but
+# that clip also cut every large park's CREDIT ZONE down to a ~12 km
+# window around one arbitrary interior point -- drive to Tioga Pass, 40
+# km from Yosemite's own stored point but unmistakably inside the park,
+# and it credited nothing. Once that clip is gone so the credit zone can
+# be the whole park, filling first and eroding after would hit the
+# exact disaster the clip used to dodge, one step later and harder to
+# diagnose -- so _park_band() now traces the boundary straight
+# from the geometry instead (see its own docstring and the BAND FROM THE
+# BOUNDARY note above it for the equivalence proof), and never calls
+# _park_cells() on a boundary big enough for that to be unsafe in the
+# first place. A park BELOW the threshold is stored
 # filled, unchanged: it is small enough that "the interior" and "the
 # edge" are not a meaningful distinction (a pocket park a few cells
 # across has no backcountry to exclude in the first place), and banding
@@ -544,59 +562,257 @@ _PARK_BAND_THRESHOLD_CELLS = 100
 # stored band reaches back in from the edge.
 _PARK_BAND_WIDTH_CELLS = 2
 
+# BAND FROM THE BOUNDARY, NOT FROM AN EROSION OF THE FILLED SET (fixed
+# 2026-09-09, "the trap") -- _park_band() used to take a park's full
+# _park_cells() footprint and erode it `width` times. That is exactly
+# right in what it computes (see the erosion-vs-tracing equivalence
+# proof in this module's own tests), but it requires the filled
+# footprint to already exist, and _park_cells() builds that by walking
+# every cell in a polygon's own bounding box -- for a large park that IS
+# the ten-billion-cell disaster the 6 km storage clip in
+# scripts/build_places_seed.py used to exist to dodge (see that
+# script's module docstring). Removing the clip without also fixing
+# this would just move the explosion one step later: match_parks() and
+# extract_osm_parks() now ship full, unclipped boundaries, so the first
+# thing that touches one of those boundaries -- this loader, not the
+# build script -- is the thing that has to not blow up.
+#
+# So the band is traced directly from the geometry instead: walk every
+# ring of every polygon part (the exterior AND every interior ring --
+# holes have an edge too) and collect the grid cells the boundary LINE
+# itself passes through (_park_boundary_line_cells() below). That cell
+# count is proportional to the boundary's length in cells (perimeter),
+# never to the area it encloses, so a national forest costs the same
+# order of work per km of edge as a pocket park, and a 1.5 million km^2
+# marine monument costs work proportional to its (very long, but finite
+# and walkable) coastline, not to its enclosed ocean.
+#
+# EQUIVALENCE TO THE OLD EROSION DEFINITION -- this is a refactor, not a
+# behaviour change, and the module's tests hold it to that: let d(c) be
+# the Chebyshev (8-connected) distance from filled cell `c` to the
+# nearest cell NOT in the filled set. `width` erosions strip exactly the
+# cells with d(c) <= width (iterating erosion by the same 3x3
+# structuring element `width` times is exactly one erosion by the
+# Chebyshev-radius-`width` ball -- Chebyshev balls compose additively
+# under Minkowski sum, so this is exact, not an approximation). The
+# cells with d(c) == 1 are precisely the cells the true geometric
+# boundary passes through: any cell the boundary curve enters must
+# border ground on the far side of that curve, and by construction nothing
+# closer than one grid step away can be "outside" a cell the curve never
+# reaches. So _park_boundary_line_cells() recovers exactly the old
+# algorithm's d==1 layer without ever computing the filled set, and
+# dilating that layer outward `width - 1` more steps and re-testing
+# actual intersection against the geometry (not just grid adjacency)
+# reconstructs fill ∩ {d(c) <= width} -- the same band, by the same
+# Minkowski-sum composition, for a cost proportional to the boundary
+# alone. test_park_band_matches_the_old_erosion_definition_on_a_real_
+# shaped_polygon proves the two algorithms agree on a polygon neither
+# axis-aligned nor grid-sized, not just a synthetic square.
+_PARK_BAND_DILATE_PASSES = _PARK_BAND_WIDTH_CELLS - 1
 
-def _erode_once(cells: set[str]) -> set[str]:
-    """`cells` restricted to members all 8 of whose neighbours are also
-    in `cells` -- i.e. not adjacent to anything outside the set. Pure
-    grid-index arithmetic (cell_indices() plus set membership), no
-    geometry calls, so it costs nothing beyond what _park_cells()
-    already spent building the set it erodes. One call peels off
-    exactly the outermost layer; see _park_band() for why width is
-    layers of this, not one geometric buffer."""
-    out: set[str] = set()
-    for cid in cells:
-        lat_idx, lon_idx = cell_indices(cid)
-        interior = True
-        for d_lat in (-1, 0, 1):
-            for d_lon in (-1, 0, 1):
-                if d_lat == 0 and d_lon == 0:
-                    continue
-                if f"{lat_idx + d_lat}_{lon_idx + d_lon}" not in cells:
-                    interior = False
-                    break
-            if not interior:
-                break
-        if interior:
-            out.add(cid)
-    return out
 
-
-def _park_band(cells: set[str], width: int = _PARK_BAND_WIDTH_CELLS) -> set[str]:
-    """`cells` (a park's full _park_cells() footprint) reduced to its
-    outermost `width` layers -- the boundary band a large park stores
-    instead of its filled interior (see the PARK BAND STORAGE note
-    above). Erodes `width` times (_erode_once() above) rather than
-    testing every cell against a `width`-radius box: each pass is
-    O(|current interior|), not O(|cells| * width^2), which matters here
-    -- some of this seed's worldwide OSM-matched "parks" are marine
-    protected areas running past ten million cells, and this function
-    still has to walk whatever _park_cells() handed it once per width
-    step, not once per cell per offset. band = cells that do NOT
-    survive `width` erosions, i.e. cells within `width` steps of the
-    park's own edge (its own hole boundaries count as "edge" too, same
-    as its outer ring, via the same all-8-neighbours test).
-
-    Returns `cells` unchanged if erosion empties out before `width`
-    passes complete (a park narrower than `2*width` cells in every
-    direction, e.g. a thin coastal strip) -- there is no deeper interior
-    left to drop, so the whole footprint already IS the band.
+def _grid_line_cells(x0: float, y0: float, x1: float, y1: float) -> set[tuple[int, int]]:
+    """Every grid cell (as (lat_idx, lon_idx)-shaped index pairs, here
+    still generic (x, y) grid-index coordinates) a straight segment from
+    (x0, y0) to (x1, y1) passes through, in a coordinate space already
+    divided by each axis' own cell size (so a cell is a unit square in
+    this space, regardless of CELL_LAT_DEG/CELL_LON_DEG not matching
+    each other 1:1). Amanatides-Woo voxel traversal: walks grid-line
+    crossings directly (O(cells crossed), never O(segment length in
+    degrees) or anything tied to how long the segment is in real
+    units), and -- unlike a plain Bresenham line -- visits every cell
+    the segment's own interior touches, including both cells on a
+    near-exact diagonal grid-corner crossing, so a boundary segment
+    that happens to graze a cell corner cannot silently skip it.
     """
-    interior = cells
-    for _ in range(width):
-        if not interior:
-            return cells
-        interior = _erode_once(interior)
-    return cells - interior
+    ix, iy = math.floor(x0), math.floor(y0)
+    ixe, iye = math.floor(x1), math.floor(y1)
+    cells = {(ix, iy)}
+    dx = x1 - x0
+    dy = y1 - y0
+    if dx == 0.0 and dy == 0.0:
+        return cells
+    step_x = 1 if dx > 0 else (-1 if dx < 0 else 0)
+    step_y = 1 if dy > 0 else (-1 if dy < 0 else 0)
+    if dx != 0.0:
+        t_max_x = ((ix + (1 if dx > 0 else 0)) - x0) / dx
+        t_delta_x = abs(1.0 / dx)
+    else:
+        t_max_x = math.inf
+        t_delta_x = math.inf
+    if dy != 0.0:
+        t_max_y = ((iy + (1 if dy > 0 else 0)) - y0) / dy
+        t_delta_y = abs(1.0 / dy)
+    else:
+        t_max_y = math.inf
+        t_delta_y = math.inf
+    # A segment is walked cell-step by cell-step, not integrated in one
+    # shot, so it needs a hard stop: without one, float drift in
+    # t_max_x/t_max_y could in principle loop past (ixe, iye) forever on
+    # a degenerate (near-zero-length in one axis) segment. The true
+    # walk never takes more steps than the Manhattan distance between
+    # start and end cell plus one (a corner-crossing step advances both
+    # axes at once); a small margin on top absorbs float slop without
+    # masking a real bug turning into a silent infinite loop.
+    max_steps = abs(ixe - ix) + abs(iye - iy) + 4
+    steps = 0
+    while (ix, iy) != (ixe, iye) and steps < max_steps:
+        if t_max_x < t_max_y:
+            ix += step_x
+            t_max_x += t_delta_x
+        elif t_max_y < t_max_x:
+            iy += step_y
+            t_max_y += t_delta_y
+        else:
+            # Exact corner crossing: the segment passes through the
+            # grid point where a vertical and a horizontal line meet.
+            # Stepping both axes and recording the intermediate cell
+            # too means the diagonal neighbour on the other side of
+            # that corner is never silently skipped.
+            cells.add((ix + step_x, iy))
+            ix += step_x
+            iy += step_y
+            t_max_x += t_delta_x
+            t_max_y += t_delta_y
+        cells.add((ix, iy))
+        steps += 1
+    return cells
+
+
+def _park_boundary_line_cells(geom: Polygon | MultiPolygon) -> set[str]:
+    """Cell ids the boundary LINE of `geom` passes through -- the
+    exterior ring and every interior ring (hole) of every polygon part,
+    each walked as its own closed sequence of segments via
+    _grid_line_cells() above. Cost is proportional to the boundary's
+    total length in grid cells, never to the area it encloses -- see
+    the BAND FROM THE BOUNDARY note above for why that distinction is
+    the whole point of this function existing.
+
+    Walked per polygon PART of a MultiPolygon, same reasoning
+    _park_cells() already applies to its own per-part bounding boxes:
+    a park made of scattered units (or, worse, one marine protected
+    area's outline running most of the way around an ocean) must never
+    have its parts' segments treated as spanning the empty water
+    between them -- and here that risk is moot in the first place,
+    since only each ring's OWN consecutive vertex pairs are ever walked,
+    never a straight line from one part's ring to another's.
+    """
+    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    cells: set[str] = set()
+    for part in parts:
+        for ring in (part.exterior, *part.interiors):
+            coords = list(ring.coords)
+            # Indexed [0]/[1], not unpacked as a 2-tuple: a ring built
+            # from a 3D (X/Y/Z) source geometry -- PAD-US/OGR occasionally
+            # carries a Z=0 dimension straight through WKB -- yields
+            # 3-tuples here, and this function only ever needs lon/lat.
+            for p0, p1 in zip(coords, coords[1:]):
+                x0, y0 = p0[0] / CELL_LON_DEG, p0[1] / CELL_LAT_DEG
+                x1, y1 = p1[0] / CELL_LON_DEG, p1[1] / CELL_LAT_DEG
+                for ix, iy in _grid_line_cells(x0, y0, x1, y1):
+                    cells.add(f"{iy}_{ix}")
+    return cells
+
+
+def _park_band(geom: Polygon | MultiPolygon, width: int = _PARK_BAND_WIDTH_CELLS) -> set[str]:
+    """The boundary band a large park stores instead of its filled
+    interior (see the PARK BAND STORAGE note above), computed straight
+    from `geom` -- never from a pre-built `_park_cells()` fill; see the
+    BAND FROM THE BOUNDARY note above for why that used to be the trap
+    here and what makes this equivalent to the old fill-then-erode
+    definition.
+
+    1. Trace the boundary itself (_park_boundary_line_cells()) -- this
+       is exactly the old algorithm's innermost eroded-away layer
+       (Chebyshev distance 1 from the fill set's own edge), reached
+       without ever materializing the fill.
+    2. Dilate that outward `width - 1` more steps (app.grid.ring_expand,
+       one ring per step -- the same 8-connected neighbourhood erosion
+       used, run in reverse) to reach every cell the old algorithm's
+       full `width`-deep band could have included.
+    3. Re-test each of those (still boundary-proportional, not
+       area-proportional, in count) candidate cells against the real
+       geometry and keep only the ones that actually intersect it --
+       this is what turns "cells near the traced line" (which spill
+       slightly outside the park too, since dilation does not know
+       which side is `interior`) back into "cells that are IN the
+       park and near its edge", exactly `_park_cells()`'s own
+       any-intersection test, just run over a small candidate set
+       instead of the whole bounding box.
+
+    Returns an empty set if `geom`'s boundary touches no cell at all (a
+    degenerate sliver) -- the caller already has a point-cell fallback
+    for exactly that case, same as it does for `_park_cells()`.
+    """
+    candidates = _park_boundary_line_cells(geom)
+    if not candidates:
+        return set()
+    for _ in range(max(0, width - 1)):
+        candidates = ring_expand(candidates)
+    prepared = shapely.prepared.prep(geom)
+    band: set[str] = set()
+    for cid in candidates:
+        south, west, north, east = cell_bounds(cid)
+        if prepared.intersects(shapely_box(west, south, east, north)):
+            band.add(cid)
+    return band
+
+
+# Cheap upper bound on the number of cells _park_cells(geom) would ever
+# have to test (never a guarantee on its RESULT size -- a thin diagonal
+# sliver can have a huge bbox and a tiny true footprint -- only on the
+# number of candidate cells it would need to shapely-intersects() to
+# find that footprint), computed from each polygon part's own bounds
+# with no geometry calls at all. Used below to decide, BEFORE calling
+# _park_cells(), whether it is safe to call it at all: a cell only ever
+# makes it into _park_cells()'s result if it lies within its own part's
+# bbox to begin with, so this sum can never be less than the true
+# result -- it is exactly the number of shapely .intersects() calls
+# _park_cells() would make.
+def _bbox_cell_upper_bound(geom: Polygon | MultiPolygon) -> int:
+    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    total = 0
+    for part in parts:
+        minx, miny, maxx, maxy = part.bounds
+        lat_span = math.floor(maxy / CELL_LAT_DEG) - math.floor(miny / CELL_LAT_DEG) + 1
+        lon_span = math.floor(maxx / CELL_LON_DEG) - math.floor(minx / CELL_LON_DEG) + 1
+        total += lat_span * lon_span
+    return total
+
+
+# Safe to fully materialize via _park_cells() (bounded shapely-
+# intersects call count) purely to test it against
+# _PARK_BAND_THRESHOLD_CELLS(100) below this many candidate bbox cells.
+# 5,000 is 50x the threshold itself -- comfortably wide enough that a
+# genuinely small, merely irregularly-shaped park (an L-shaped city
+# park, a thin river-corridor unit) never gets misclassified as "too
+# big to safely test", while remaining cheap in the worst case (5,000
+# shapely .intersects() calls is milliseconds, not the multi-hour
+# territory a real large park's un-clipped bbox can reach -- see the
+# BAND FROM THE BOUNDARY note above). A park whose bbox clears this cap
+# is, in every case seen in this seed, actually large by filled-cell
+# count too (a park cannot have a >5,000-cell bounding box and a
+# <100-cell true footprint without being a sliver so thin it would
+# fail to register as "reachable ground" in any meaningful sense
+# anyway) -- so above the cap this module skips the fill test entirely
+# and goes straight to banding via the geometry, never asking
+# _park_cells() to walk a bounding box that might be the ten-billion-
+# cell case this whole section exists to avoid.
+_PARK_FILL_SAFE_BBOX_CELLS = 5_000
+
+# Hard ceiling on a single park's stored band, applied AFTER banding
+# (so it catches whatever slips past the bbox pre-check above too --
+# some marine protected areas are enormous, and a handful of parks are
+# multipolygons with parts scattered clear across an ocean, both
+# measured in the current worldwide seed at costs still worth capping
+# even at boundary-proportional pricing: Papahānaumokuākea Marine
+# National Monument alone traces to a band north of this ceiling).
+# Hitting it does not fail the build -- the park falls back to its own
+# point cell (same fallback _park_cells() already uses for a sliver
+# that touches no cell at all) and is logged by name so a human can see
+# which row hit it, rather than one pathological row silently inflating
+# every other park's load time or the seed's own size.
+_PARK_BAND_MAX_CELLS = 200_000
 
 
 def _classify_row(row: dict) -> tuple[bool, bool]:
@@ -673,6 +889,12 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         # band (_PARK_BAND_THRESHOLD_CELLS or more) vs stored filled
         # (below it) -- see the PARK BAND STORAGE note above.
         "park_banded": 0, "park_filled": 0,
+        # Of the banded ones only: banded but still over
+        # _PARK_BAND_MAX_CELLS -- the pathological guard fell back to
+        # the park's own point cell instead (see that constant's own
+        # comment). Expected to be zero or near it; a nonzero count
+        # names real rows in the log line right above each increment.
+        "park_band_capped": 0,
         # Reconcile outcome: rows flipped active->inactive this pass
         # because they were not present in this load at all (never
         # deleted -- see the reconcile note above).
@@ -903,31 +1125,66 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                         # the ping's cell, not stored on this row).
                         # Always active.
                         geom = shapely_wkt.loads(geom_wkt)
-                        cells = _park_cells(geom)
                         rotates = False
                         stats["park_matched"] += 1
                         stats["park_matched_larger"] += 1
-                        if not cells:
-                            # Boundary matched but the polygon touches no
-                            # cell at all (a sliver, or a simplification
-                            # artifact) -- fall back to the point's own
-                            # cell so the park is not silently
-                            # unscoreable.
-                            cells = {cell_id(lat, lon)}
-                        elif len(cells) >= _PARK_BAND_THRESHOLD_CELLS:
-                            # Large park: store the boundary band, not
-                            # the filled interior -- see the PARK BAND
-                            # STORAGE note above. _park_band() erodes
-                            # the filled set just computed; it never
-                            # re-walks the geometry.
-                            cells = _park_band(cells)
-                            stats["park_banded"] += 1
+                        # THRESHOLD DECISION WITHOUT FILLING A HUGE
+                        # BOUNDARY -- see _PARK_FILL_SAFE_BBOX_CELLS'
+                        # own comment. Below the safe bbox cap it costs
+                        # nothing to just ask _park_cells() for the
+                        # exact answer, same as before this row's
+                        # boundary could ever have been large in the
+                        # first place. At or above it, the park is
+                        # certainly over _PARK_BAND_THRESHOLD_CELLS by
+                        # filled-cell count too -- go straight to
+                        # banding via the geometry and never call
+                        # _park_cells() on a bbox that size at all.
+                        if _bbox_cell_upper_bound(geom) < _PARK_FILL_SAFE_BBOX_CELLS:
+                            cells = _park_cells(geom)
+                            if not cells:
+                                # Boundary matched but the polygon touches
+                                # no cell at all (a sliver, or a
+                                # simplification artifact) -- fall back to
+                                # the point's own cell so the park is not
+                                # silently unscoreable.
+                                cells = {cell_id(lat, lon)}
+                            elif len(cells) >= _PARK_BAND_THRESHOLD_CELLS:
+                                # Large park: store the boundary band, not
+                                # the filled interior -- see the PARK BAND
+                                # STORAGE note above.
+                                cells = _park_band(geom)
+                                stats["park_banded"] += 1
+                            else:
+                                # Small park: filled, unchanged -- below
+                                # the threshold "interior" isn't a
+                                # meaningful idea (see the PARK BAND STORAGE
+                                # note above).
+                                stats["park_filled"] += 1
                         else:
-                            # Small park: filled, unchanged -- below
-                            # the threshold "interior" isn't a
-                            # meaningful idea (see the PARK BAND STORAGE
-                            # note above).
-                            stats["park_filled"] += 1
+                            cells = _park_band(geom)
+                            stats["park_banded"] += 1
+                            if not cells:
+                                cells = {cell_id(lat, lon)}
+                        if len(cells) > _PARK_BAND_MAX_CELLS:
+                            # PATHOLOGICAL GUARD -- see
+                            # _PARK_BAND_MAX_CELLS' own comment. Some
+                            # marine protected areas, and some parks
+                            # made of parts scattered clear across an
+                            # ocean, still band to an unreasonable cell
+                            # count even at boundary-proportional
+                            # pricing. Cap by falling back to the
+                            # park's own point cell (same fallback used
+                            # above for a sliver) rather than letting
+                            # one row's band inflate the seed or load
+                            # time -- and log which park hit it so a
+                            # human can see it, not guess at it later.
+                            log.warning(
+                                "places_seed: park %s (%s) banded to %d cells, "
+                                "over the %d cap -- falling back to its own point cell",
+                                row["ref_code"], row["name"], len(cells), _PARK_BAND_MAX_CELLS,
+                            )
+                            cells = {cell_id(lat, lon)}
+                            stats["park_band_capped"] += 1
                     else:
                         # Either unmatched (no boundary at all) or
                         # matched but smaller than one cell -- both
@@ -1043,14 +1300,14 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     log.info(
         "places_seed: loaded summit=%d park=%d landmark=%d (excluded non-US: summit=%d park=%d landmark=%d) "
         "park boundary matched=%d unmatched=%d (of matched: larger-than-cell=%d smaller-than-cell=%d, "
-        "of larger-than-cell: banded=%d filled=%d) "
+        "of larger-than-cell: banded=%d filled=%d capped=%d) "
         "landmark colocated with summit=%d (dropped, within %.0fm) "
         "deactivated=%d (left the seed, kept as history) in %.1fs",
         stats["kept"]["summit"], stats["kept"]["park"], stats["kept"]["landmark"],
         stats["excluded"]["summit"], stats["excluded"]["park"], stats["excluded"]["landmark"],
         stats["park_matched"], stats["park_unmatched"],
         stats["park_matched_larger"], stats["park_matched_smaller"],
-        stats["park_banded"], stats["park_filled"],
+        stats["park_banded"], stats["park_filled"], stats["park_band_capped"],
         stats["landmark_colocated_with_summit"], _SUMMIT_COLOCATION_RADIUS_M,
         stats["deactivated"], elapsed,
     )

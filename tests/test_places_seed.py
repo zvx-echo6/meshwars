@@ -15,12 +15,16 @@ POTA's active flag upstream) is kept regardless of country.
 from __future__ import annotations
 
 from app.places_seed import (
+    _bbox_cell_upper_bound,
     _cell_area_m2,
     _classify_row,
+    _PARK_BAND_MAX_CELLS,
     _park_band,
     _park_cells,
+    _PARK_BAND_THRESHOLD_CELLS,
+    _PARK_FILL_SAFE_BBOX_CELLS,
 )
-from app.grid import cell_indices
+from app.grid import cell_indices, CELL_LAT_DEG, CELL_LON_DEG
 from shapely.geometry import box
 
 
@@ -169,22 +173,81 @@ def test_park_cells_finds_no_cells_when_geometry_does_not_touch_the_grid():
     assert cells == {cell_id(43.0005, -116.0005)}
 
 
+# _park_band() REWRITE (2026-09-09, "the trap") -- it used to take a
+# park's full _park_cells() footprint (a set of cell ids) and erode it
+# `width` times. It now takes the GEOMETRY directly and traces the
+# boundary itself, never materializing a filled interior -- see that
+# function's own module comment ("BAND FROM THE BOUNDARY") for why the
+# old approach was unsafe once match_parks()/extract_osm_parks() stopped
+# clipping a large park's stored boundary to ~6km. The tests below hold
+# the new implementation to the OLD one's exact definition (a cell is
+# banded iff some cell within Chebyshev distance `width` of it is NOT in
+# the fill footprint) -- this is a refactor, not a behaviour change.
+
+def _direct_band(cells: set[str], width: int) -> set[str]:
+    """The band definition itself, computed the expensive/obvious way
+    (test every cell against every offset in a `width`-radius box) --
+    the ground truth every _park_band() test below checks the real
+    implementation against, independent of either the old erosion
+    strategy or the new boundary-tracing one."""
+    out = set()
+    for c in cells:
+        y, x = cell_indices(c)
+        hit = False
+        for dy in range(-width, width + 1):
+            for dx in range(-width, width + 1):
+                if f"{y + dy}_{x + dx}" not in cells:
+                    hit = True
+                    break
+            if hit:
+                break
+        if hit:
+            out.add(c)
+    return out
+
+
+def _cells_to_polygon(cells: set[str], eps: float = 1e-7):
+    """A single polygon whose footprint is exactly `cells` -- one exact
+    per-cell box per member (shared edges between adjacent members
+    dissolve cleanly under union), eroded by a hairline `eps` so a cell
+    just OUTSIDE the set does not register as intersecting merely by
+    touching the result at a shared edge or corner (shapely's
+    intersects() -- and so _park_cells()'s own any-intersection rule --
+    counts a touch, not just real overlap). `eps` is a small fraction of
+    a millimetre in degree terms, many orders of magnitude below
+    CELL_LAT_DEG/CELL_LON_DEG, so it can never move a boundary across a
+    cell edge or change which cells `cells` itself describes."""
+    from shapely.ops import unary_union
+    from app.grid import cell_bounds as _cb
+    boxes = []
+    for c in cells:
+        south, west, north, east = _cb(c)
+        boxes.append(box(west, south, east, north))
+    return unary_union(boxes).buffer(-eps)
+
+
 def test_park_band_drops_the_deep_interior_of_a_square():
     """A clean 7x7 block of cells (indices 0..6 on both axes): at
     width=1, only cells with an outside neighbour survive as "band" --
     the deep interior (the inner 5x5, indices 1..5) has none and is
     dropped. At width=2, the next ring in (indices 1..5's own edge)
     drops too, leaving only the inner 3x3 (indices 2..4) as deep
-    interior."""
+    interior. Traced from the geometry, not from a hand-built cell set,
+    but must land on exactly the same answer _direct_band() would give
+    for the equivalent fill."""
     cells = {f"{y}_{x}" for y in range(7) for x in range(7)}
+    poly = _cells_to_polygon(cells)
+    assert _park_cells(poly) == cells, "harness sanity: the polygon must fill to exactly this set"
 
-    band1 = _park_band(cells, width=1)
+    band1 = _park_band(poly, width=1)
+    assert band1 == _direct_band(cells, 1)
     assert "3_3" not in band1  # dead center: no outside neighbour at all
     assert "0_0" in band1 and "6_6" in band1  # corners are edge cells
     assert "0_3" in band1  # an edge midpoint
     assert len(band1) == 49 - 25  # everything except the inner 5x5
 
-    band2 = _park_band(cells, width=2)
+    band2 = _park_band(poly, width=2)
+    assert band2 == _direct_band(cells, 2)
     assert "3_3" not in band2  # depth 4 from the edge, still well past width=2
     assert "2_2" not in band2  # depth 3 from the edge -- the new, deeper cutoff
     assert "1_1" in band2  # depth exactly 2: within width=2, still band
@@ -196,42 +259,83 @@ def test_park_band_keeps_a_footprint_narrower_than_the_band_whole():
     """A single-row strip: every cell in it is missing a neighbour
     above and below (outside the strip), so nothing survives even one
     erosion. There is no deeper interior to drop -- the whole footprint
-    already IS the band, at any width."""
+    already IS the band, at any width. The strip's exterior ring runs
+    along both its long edges but stays within row 5 the whole way (a
+    1-cell-tall box has no separate "row above/below" to be a different
+    row from), so tracing it must recover the whole strip directly."""
     strip = {f"5_{x}" for x in range(10)}
-    assert _park_band(strip, width=1) == strip
-    assert _park_band(strip, width=3) == strip
+    poly = _cells_to_polygon(strip)
+    assert _park_cells(poly) == strip
+
+    assert _park_band(poly, width=1) == strip
+    assert _park_band(poly, width=3) == strip
 
 
-def test_park_band_matches_the_direct_chebyshev_definition_on_a_ragged_shape():
-    """_park_band()'s iterative erosion (cheap: linear in the cell
-    count per width step, reusing the previous pass) must agree with
-    the direct, expensive definition -- a cell is banded iff some cell
-    within Chebyshev distance `width` of it is NOT in the footprint --
-    on an irregular shape (an L-notch plus a one-cell hole), not just a
-    clean square, since a real park's boundary and any enclosed gap
-    exercise the cumulative-erosion logic a plain square cannot."""
-    cells = {f"{y}_{x}" for y in range(9) for x in range(9)}
-    cells -= {f"{y}_{x}" for y in range(5, 9) for x in range(5, 9)}  # notch out a corner
-    cells.discard("4_4")  # a one-cell hole in the remaining body
+def test_park_band_matches_the_direct_definition_on_a_shape_with_a_hole():
+    """The boundary tracer must walk an interior ring too, not just the
+    exterior one -- proven on a donut (a real park with a private
+    inholding, or a lake entirely inside its boundary, has exactly this
+    shape): a wide circle with a smaller circle cut out of its middle.
+    Confirmed a genuine `interiors` ring (not just a bigger notch) below
+    before trusting the comparison."""
+    from shapely.geometry import Point
 
-    def direct_band(cells: set[str], width: int) -> set[str]:
-        out = set()
-        for c in cells:
-            y, x = cell_indices(c)
-            hit = False
-            for dy in range(-width, width + 1):
-                for dx in range(-width, width + 1):
-                    if f"{y+dy}_{x+dx}" not in cells:
-                        hit = True
-                        break
-                if hit:
-                    break
-            if hit:
-                out.add(c)
-        return out
+    outer = Point(-116.0, 43.0).buffer(0.03)
+    inner = Point(-116.0, 43.0).buffer(0.012)
+    donut = outer.difference(inner)
+    assert len(donut.interiors) == 1, "harness sanity: must be a real hole, not a notch"
+
+    fill = _park_cells(donut)
+    assert len(fill) > _PARK_BAND_THRESHOLD_CELLS
+    # The hole itself must show up as an actual gap in the fill, not be
+    # papered over -- otherwise this test would silently degrade into
+    # the plain-circle equivalence test above.
+    center_cid = cell_id(43.0, -116.0)
+    assert center_cid not in fill, "harness sanity: the donut's own hole must exclude its centre"
 
     for width in (1, 2, 3):
-        assert _park_band(cells, width) == direct_band(cells, width), width
+        assert _park_band(donut, width) == _direct_band(fill, width), width
+
+
+def test_park_band_matches_the_old_erosion_definition_on_a_real_shaped_polygon():
+    """The refactor's central claim, proven on a polygon that is
+    neither axis-aligned nor grid-sized: tracing the boundary and
+    re-testing intersection over a small dilated candidate set (the new
+    _park_band()) must produce EXACTLY the same cells the old fill-
+    then-erode definition would have -- not merely something close to
+    it. A plain rectangle's edges happen to coincide with cell
+    boundaries and could hide a bug that a real park's boundary (a
+    curve cutting across cells at arbitrary angles and fractions) would
+    not. This shape is small enough that computing its fill directly
+    (_park_cells(), the same call the OLD algorithm depended on) is
+    itself still cheap -- the point of this test is correctness, not
+    dodging that call the way production now has to for a huge park.
+    """
+    from shapely.geometry import Point
+
+    geom = Point(-116.0, 43.0).buffer(0.03)  # a ~6.6km circle
+    fill = _park_cells(geom)
+    assert len(fill) > _PARK_BAND_THRESHOLD_CELLS  # comfortably big enough to matter
+
+    for width in (1, 2, 3):
+        assert _park_band(geom, width) == _direct_band(fill, width), width
+
+
+def test_park_band_walks_each_multipolygon_part_on_its_own():
+    """Two small squares far enough apart that nothing should ever
+    treat the empty ground between them as part of either one's
+    boundary -- proven by checking the band contains cells near BOTH
+    parts and nothing at all in between."""
+    from shapely.geometry import MultiPolygon
+
+    part_a = {f"{y}_{x}" for y in range(0, 12) for x in range(0, 12)}
+    part_b = {f"{y}_{x}" for y in range(500, 512) for x in range(500, 512)}
+    multi = MultiPolygon([_cells_to_polygon(part_a), _cells_to_polygon(part_b)])
+
+    band = _park_band(multi, width=2)
+    assert band == _direct_band(part_a, 2) | _direct_band(part_b, 2)
+    # Nothing from the empty gap leaked in.
+    assert not any(200 <= cell_indices(c)[0] <= 300 for c in band)
 
 
 # ring expansion (_ring_expand, as it was called here) MOVED to
@@ -949,3 +1053,180 @@ def test_small_park_below_band_threshold_still_stores_filled_interior(conn, tmp_
     now = int(time.time())
     credited = credit_places(conn, player_id=1, cell_id=deep_center_cid, ts=now, paint_outcome="captured")
     assert credited == [(place_id, 25)], "below the threshold, the interior still credits exactly as before"
+
+
+# ---------------------------------------------------------------------
+# THE TRAP, closed: a park whose bounding box is too large to safely
+# fill (see _PARK_FILL_SAFE_BBOX_CELLS's own comment) must never reach
+# _park_cells() at all -- not even once, just to test the fill-vs-band
+# threshold -- and must still band correctly straight from the
+# geometry. A genuinely pathological band (still too large even at
+# boundary-proportional pricing) must fall back to the park's own point
+# cell rather than inflate the load.
+# ---------------------------------------------------------------------
+
+def test_bbox_cell_upper_bound_sums_each_multipolygon_part_not_the_union():
+    """Two 10x10-cell blocks a thousand cells apart: the true bound is
+    each part's own small bbox added together, nowhere near what the
+    UNION's bounding box (which would span the empty gap between them)
+    would give -- proving this never falls into the same trap
+    _park_cells() itself already avoids by walking parts separately."""
+    from shapely.geometry import MultiPolygon
+
+    eps = 1e-9  # inset so the box's own edge doesn't land exactly on a
+    # cell boundary, which floor() would otherwise round up into an
+    # 11th cell -- the same convention every other polygon-from-cells
+    # helper in this file already uses.
+    part_a = box(eps, eps, 10 * CELL_LON_DEG - eps, 10 * CELL_LAT_DEG - eps)
+    part_b = box(1000 * CELL_LON_DEG + eps, 1000 * CELL_LAT_DEG + eps,
+                 1010 * CELL_LON_DEG - eps, 1010 * CELL_LAT_DEG - eps)
+    multi = MultiPolygon([part_a, part_b])
+
+    bound = _bbox_cell_upper_bound(multi)
+    assert bound == 100 + 100, "must be the sum of each part's own 10x10 bbox, not the union's"
+    assert bound < 1_000_000, "sanity: nowhere near what spanning the 1000-cell gap would cost"
+
+
+def test_huge_bbox_park_never_calls_park_cells_and_still_bands_from_the_geometry(
+    conn, tmp_path, monkeypatch,
+):
+    """A park whose bounding box clears _PARK_FILL_SAFE_BBOX_CELLS must
+    be banded WITHOUT ever calling _park_cells() -- poisoned here to
+    raise if it is, so this test fails loudly (not just slowly) if a
+    future change reintroduces the trap this module's whole park-band
+    rewrite exists to close. The park itself is a plain, solid square
+    (not a thin sliver) well over the safe-fill cap, so its band must
+    still land on a sane, non-empty answer: the outer edge stored, the
+    deep interior not.
+    """
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    def _poisoned(*a, **k):
+        raise AssertionError("_park_cells() must not be called for a bbox this large")
+    monkeypatch.setattr(places_seed_module, "_park_cells", _poisoned)
+
+    lat, lon = 43.0, -116.0
+    center_cid = cell_id(lat, lon)
+    clat, clon = cell_indices(center_cid)
+    # A solid square comfortably over _PARK_FILL_SAFE_BBOX_CELLS (its
+    # bbox cell count IS its true fill count, since it is solid, not a
+    # sliver -- side chosen so side*side clears the cap with margin).
+    import math as _math
+    half = _math.isqrt(_PARK_FILL_SAFE_BBOX_CELLS) // 2 + 20
+    sw_south, sw_west, _, _ = cell_bounds(f"{clat - half}_{clon - half}")
+    _, _, ne_north, ne_east = cell_bounds(f"{clat + half}_{clon + half}")
+    eps = 1e-7
+    poly = box(sw_west + eps, sw_south + eps, ne_east - eps, ne_north - eps)
+    assert _bbox_cell_upper_bound(poly) >= _PARK_FILL_SAFE_BBOX_CELLS
+
+    area_m2 = _cell_area_m2(lat) * ((2 * half + 1) ** 2)
+    row = _seed_row("park", "US-HUGEBBOX", lat=lat, lon=lon, points=25)
+    row["area_m2"] = f"{area_m2:.0f}"
+    row["geom"] = poly.wkt
+    _write_seed_csv(csv_path, [row])
+    stats = load_places_seed(conn)  # must not raise -- _park_cells is poisoned above
+    assert stats["park_banded"] == 1
+
+    place_id = conn.execute("SELECT id FROM place WHERE ref_code = 'US-HUGEBBOX'").fetchone()[0]
+    stored = {r[0] for r in conn.execute(
+        "SELECT cell_id FROM place_cell WHERE place_id = ?", (place_id,)
+    )}
+    assert 0 < len(stored) < (2 * half + 1) ** 2, "must be a band, not the (never computed) filled interior"
+    assert f"{clat}_{clon}" not in stored, "the dead center must not survive banding"
+    assert f"{clat + half}_{clon}" in stored, "the outermost edge must be stored"
+
+
+def test_park_band_over_the_pathological_cap_falls_back_to_its_point_cell(
+    conn, tmp_path, monkeypatch,
+):
+    """A park whose band still comes out over _PARK_BAND_MAX_CELLS
+    (some marine protected areas, or a park scattered across an ocean,
+    still band to an unreasonable count even at boundary-proportional
+    pricing) must not inflate the load -- it falls back to its own
+    point cell, same as a sliver that touches no cell at all, and the
+    fallback is counted so it is visible, not silently absorbed."""
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+    monkeypatch.setattr(places_seed_module, "_PARK_BAND_MAX_CELLS", 10)
+
+    lat, lon = 43.0, -116.0
+    center_cid = cell_id(lat, lon)
+    clat, clon = cell_indices(center_cid)
+    half = 20  # a clean square whose traced band is well over the (patched) cap of 10
+    sw_south, sw_west, _, _ = cell_bounds(f"{clat - half}_{clon - half}")
+    _, _, ne_north, ne_east = cell_bounds(f"{clat + half}_{clon + half}")
+    eps = 1e-7
+    poly = box(sw_west + eps, sw_south + eps, ne_east - eps, ne_north - eps)
+
+    area_m2 = _cell_area_m2(lat) * ((2 * half + 1) ** 2)
+    row = _seed_row("park", "US-CAPPEDPARK", lat=lat, lon=lon, points=25)
+    row["area_m2"] = f"{area_m2:.0f}"
+    row["geom"] = poly.wkt
+    _write_seed_csv(csv_path, [row])
+    stats = load_places_seed(conn)
+
+    assert stats["park_band_capped"] == 1
+    place_id = conn.execute("SELECT id FROM place WHERE ref_code = 'US-CAPPEDPARK'").fetchone()[0]
+    stored = {r[0] for r in conn.execute(
+        "SELECT cell_id FROM place_cell WHERE place_id = ?", (place_id,)
+    )}
+    assert stored == {center_cid}, "capped park must fall back to exactly its own point cell"
+
+
+# ---------------------------------------------------------------------
+# ACCEPTANCE TEST (2026-09-09): removing the ~6km storage clip must
+# actually widen a large park's CREDIT ZONE to the whole park, not just
+# grow the stored WKT for its own sake. Tioga Pass is the motivating,
+# real-world case Matt named: ~40 km from Yosemite's own POTA point
+# (37.7477, -119.585), unmistakably inside the park, and un-creditable
+# under the old clip (which limited the stored -- and so creditable --
+# boundary to a ~12 km window around that point). Uses Yosemite's own
+# real, production-simplified boundary (its dominant polygon part --
+# 99.99% of the park's area; the other ~31 parts are small detached
+# inholdings/administrative units not relevant to this test), captured
+# 2026-09-09 from the rebuilt worldwide seed -- not a synthetic shape,
+# the actual geometry this fix ships.
+# ---------------------------------------------------------------------
+
+def _load_yosemite_boundary_wkt() -> str:
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "yosemite_boundary.wkt")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_tioga_pass_credits_yosemite_40km_from_its_stored_point(conn, tmp_path, monkeypatch):
+    csv_path = tmp_path / "places.csv"
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(csv_path))
+
+    lat, lon = 37.7477, -119.585  # Yosemite's own POTA point
+    row = _seed_row("park", "US-0071", lat=lat, lon=lon, points=25)
+    row["name"] = "Yosemite National Park"
+    row["area_m2"] = "3006624120"  # the park's real, full area -- untouched by any clip
+    row["geom"] = _load_yosemite_boundary_wkt()
+    _write_seed_csv(csv_path, [row])
+    stats = load_places_seed(conn)
+    # Comfortably over the band threshold -- proves this ran the large-
+    # park path, not the small-park fill-unchanged one.
+    assert stats["park_banded"] == 1
+
+    place_id = conn.execute("SELECT id FROM place WHERE ref_code = 'US-0071'").fetchone()[0]
+    now = int(time.time())
+
+    # THE ACCEPTANCE TEST: Tioga Pass, ~40 km from the stored point,
+    # must credit Yosemite -- via the real runtime path, not just a
+    # stored-cell lookup.
+    tioga_cid = cell_id(37.9106, -119.2578)
+    credited = credit_places(conn, player_id=1, cell_id=tioga_cid, ts=now, paint_outcome="captured")
+    assert credited == [(place_id, 25)], (
+        "Tioga Pass is unmistakably inside Yosemite and must credit it -- "
+        "this is exactly what the 6km storage clip used to break"
+    )
+
+    # Negative control: Mammoth Lakes, a real town OUTSIDE the park (on
+    # the other side of the Sierra crest from Tioga Pass), must NOT
+    # credit -- proving this fix widened the credit zone to the park's
+    # real edge, not to "anything vaguely nearby".
+    mammoth_cid = cell_id(37.6485, -118.9668)
+    credited = credit_places(conn, player_id=2, cell_id=mammoth_cid, ts=now, paint_outcome="captured")
+    assert credited == [], "Mammoth Lakes is outside Yosemite and must not credit it"

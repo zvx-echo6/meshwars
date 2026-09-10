@@ -1392,6 +1392,31 @@ def _clean_matched_park_boundaries(matched_rows: list) -> dict:
     return stripped
 
 
+# Simplification tolerance for every stored park boundary (match_parks(),
+# fetch_padus_parks(), extract_osm_parks() all use this one constant) --
+# in degrees, applied by shapely's own Douglas-Peucker simplify(), which
+# bounds the perpendicular distance any point on the simplified line can
+# move from the original by this amount. 0.0008 deg is ~89m in the
+# north-south direction (111,320 m/deg times the tolerance) everywhere,
+# and no more than that east-west (111,320 * cos(lat) m/deg, always <=
+# the north-south figure) -- comfortably under CELL_LAT_DEG/CELL_LON_DEG's
+# own ~300m grid (app/grid.py), with margin to spare: a real visitor's
+# GPS/trail slop, or a genuine simplification wobble, would need to
+# exceed the ~211m of headroom left before a simplified vertex could
+# cross into a different grid cell than the true boundary would have
+# selected. Precision finer than that headroom is not accuracy this
+# game can ever notice -- no ping is scored more finely than which
+# 300m-ish cell it landed in -- so it is free to give up, and giving it
+# up here is what keeps a national forest's full, unclipped boundary
+# (removed 2026-09-09, see match_parks()'s and extract_osm_parks()'s own
+# "STORAGE CLIP" notes) from writing an unreasonably large WKT string
+# to the seed: every one of this constant's three call sites used to pay
+# this same cost only across an already-6km-clipped fragment, so this is
+# the one knob standing between "unclipped boundaries" and "the seed
+# balloons" now that the clip is gone.
+_PARK_GEOM_SIMPLIFY_DEG = 0.0008
+
+
 def match_parks(pota_csv: str, out_path: str) -> None:
     """Run on navi:  python3 build_places_seed.py match-parks pota.csv parks_matched.csv
 
@@ -1525,37 +1550,34 @@ def match_parks(pota_csv: str, out_path: str) -> None:
                 # down for storage -- a clipped geometry cannot answer
                 # this test (see that clip's own comment).
                 frac_outside = _frac_area_outside_city(g, buckets)
-                # PAD-US units are frequently multi-part -- a Wetland
-                # Management District or a Refuge can bundle dozens of
-                # parcels scattered across a whole region under one
-                # polygon. The 50%-of-a-square rule only ever gets
-                # evaluated for a square near where someone actually
-                # stood, so the geometry only needs to be right THERE:
-                # clip to a ~6 km buffer around the POTA point before
-                # simplifying. area_m2 above is untouched by this --
-                # it still reflects PAD-US's own whole-unit acreage
-                # (GIS_Acres), so the larger/smaller-than-a-square
-                # classification stays correct even for a park whose
-                # boundary got clipped for storage. A handful of huge,
-                # genuinely single-blob parks (Grand Canyon, Yosemite)
-                # lose their far side this way too, but nobody is
-                # claiming a square several km from where they
-                # activated and calling it that park either -- and the
-                # 6 km radius is still twenty grid squares deep in
-                # every direction.
+                # STORAGE CLIP REMOVED 2026-09-09 ("the trap") -- this
+                # used to clip to a ~6 km buffer around the POTA point
+                # before storing, on the reasoning that PAD-US units are
+                # frequently multi-part (a Wetland Management District
+                # or a Refuge can bundle dozens of parcels scattered
+                # across a whole region) and the 50%-of-a-square rule
+                # only ever gets evaluated near where someone actually
+                # stood. That reasoning ignored what else reads this
+                # column: app/places_seed.py's loader turns a matched
+                # boundary into the park's own CREDIT ZONE, and a
+                # clipped geometry meant Yosemite (and every other
+                # large, genuinely single-blob park -- Grand Canyon,
+                # Flathead National Forest) only credited within a
+                # ~12 km window around one arbitrary interior point.
+                # Someone at Tioga Pass, 40 km away and unmistakably
+                # inside Yosemite, got nothing. The full boundary now
+                # ships uncapped (still deduplicated/self-intersection-
+                # fixed and simplified below); app/places_seed.py's
+                # `_park_band()` is what keeps a huge boundary cheap to
+                # load, by tracing its edge instead of filling its
+                # interior -- see that function's own module comment.
                 try:
-                    clipped = g.intersection(pt.buffer(0.06))
+                    g_valid = g if g.is_valid else g.buffer(0)
                 except Exception:
                     # PAD-US ships a handful of self-intersecting
                     # polygons; buffer(0) is the standard shapely fixup.
-                    g_fixed = g.buffer(0)
-                    try:
-                        clipped = g_fixed.intersection(pt.buffer(0.06))
-                    except Exception:
-                        clipped = g_fixed
-                if clipped.is_empty:
-                    clipped = g
-                simplified = clipped.simplify(0.0008, preserve_topology=True)
+                    g_valid = g
+                simplified = g_valid.simplify(_PARK_GEOM_SIMPLIFY_DEG, preserve_topology=True)
                 geom_wkt = simplified.wkt
             out_rows.append({
                 "ref_code": row["reference"], "name": name, "lat": lat, "lon": lon,
@@ -1899,11 +1921,13 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
             # (simplified) boundary is kept for every matched park, and
             # the seed CSV is larger for it.
             # PARK-SIZE SCORING -- see PARK_REMOTE_AREA_FRAC's own
-            # comment above match_parks(). This stage never clips its
-            # geometry (unlike match_parks()'s 6 km storage clip), so
-            # `geom` here already is the full boundary the test needs.
+            # comment above match_parks(). This stage never clipped its
+            # geometry even before match_parks()'s and extract_osm_parks()'s
+            # own storage clips were removed 2026-09-09 (see those
+            # functions' "STORAGE CLIP" notes), so `geom` here already is
+            # the full boundary the test needs.
             frac_outside = _frac_area_outside_city(geom, buckets)
-            simplified = geom.simplify(0.0008, preserve_topology=True)
+            simplified = geom.simplify(_PARK_GEOM_SIMPLIFY_DEG, preserve_topology=True)
             w.writerow(["park", f"PADUS-{fid}", name, f"{lat:.6f}", f"{lon:.6f}",
                         POINTS["park"], "PAD-US", f"{area_m2:.0f}", simplified.wkt, "",
                         f"{frac_outside:.4f}"])
@@ -1925,15 +1949,6 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
 # for the full rationale, including the three dedup rules below (the
 # self-dedup pass, added 2026-09-08, is the newest of the three).
 # --------------------------------------------------------------------
-
-# Storage clip radius for a matched boundary -- identical value and
-# identical reasoning to match_parks()'s own 6 km clip (see that
-# clip's own comment): _frac_area_outside_city() has already measured
-# the real, full, pre-clip shape by the time this runs, so shrinking
-# the STORED geometry afterward cannot change which rate the park
-# scored.
-_OSM_PARK_CLIP_DEG = 0.06
-
 
 def _osm_self_dedup_key(name: str) -> str:
     """Exact-name grouping key for the OSM-vs-OSM self-dedup pass in
@@ -2193,23 +2208,30 @@ def extract_osm_parks(geojsonseq_path: str, landmarks_csv: str, pota_csv: str,
             # CLIPPED-GEOMETRY GUARD comment above _frac_area_outside_city.
             frac_outside = _frac_area_outside_city(geom, buckets, true_area_m2=area_m2)
 
-            # STORAGE CLIP -- see module docstring and _OSM_PARK_CLIP_DEG's
-            # own comment: this dataset's boundary=protected_area side
-            # ranges up to Papahānaumokuākea's 1.5 million km^2, and
+            # STORAGE CLIP REMOVED 2026-09-09 ("the trap") -- this used
+            # to clip to a ~6 km buffer around the feature's own point
+            # before storing, on the reasoning that this dataset's
+            # boundary=protected_area side ranges up to
+            # Papahānaumokuākea's 1.5 million km^2 and
             # app/places_seed.py's _park_cells() has no size guard of
-            # its own against a stored geometry that large.
-            pt = shapely.Point(lon, lat)
-            try:
-                clipped = geom.intersection(pt.buffer(_OSM_PARK_CLIP_DEG))
-            except Exception:
-                g_fixed = geom.buffer(0)
-                try:
-                    clipped = g_fixed.intersection(pt.buffer(_OSM_PARK_CLIP_DEG))
-                except Exception:
-                    clipped = g_fixed
-            if clipped.is_empty:
-                clipped = geom
-            simplified = clipped.simplify(0.0008, preserve_topology=True)
+            # its own against a stored geometry that large. True, but
+            # that reasoning stopped at the build script's own cost and
+            # ignored what the clip did to the CREDIT ZONE on the other
+            # end: every large single-blob park (a national forest, a
+            # marine monument someone can actually reach the edge of)
+            # only credited within a ~12 km window around one arbitrary
+            # point on its own boundary, not anywhere near its real
+            # edge. The full boundary now ships uncapped (simplified
+            # below to bound its stored size); the load-time cost this
+            # clip used to avoid is handled instead by
+            # app/places_seed.py's `_park_band()`, which traces a large
+            # boundary's edge directly rather than ever filling its
+            # interior -- see that function's own module comment -- and
+            # by its own pathological-case cap for the handful of
+            # multi-million-km^2 outliers that still need one. `geom`
+            # is already validity-fixed (buffer(0) above, right after
+            # parsing), so it needs no second fixup here.
+            simplified = geom.simplify(_PARK_GEOM_SIMPLIFY_DEG, preserve_topology=True)
 
             candidates.append({
                 "idx": total,
