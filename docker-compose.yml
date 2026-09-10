@@ -120,6 +120,14 @@ services:
       # with `chown -R 1000:1000 ./data`. SQLite needs write permission
       # on the DIRECTORY, not just game.db, to create its -wal and -shm
       # sidecars.
+      #
+      # The Places Worth Going seed also lives here (2026-09-08, moved
+      # out of the git-tracked app/reference/ -- see app/config.py's
+      # places_seed_path and docs/features/places.md): drop
+      # places_worth_going.csv.gz (or the decompressed .csv) at
+      # ./data/data/places_worth_going.csv.gz, no separate mount needed.
+      # Without it the app starts fine but with zero places -- see
+      # app/places_seed.py's missing-file log line.
       - ./data/data:/data
       # Terrain/overlay PMTiles archives (hillshade, public lands, USFS
       # roads and trails) the map serves from /tiles. Large (hundreds of

@@ -622,6 +622,136 @@ def test_emptied_place_table_forces_reload_despite_matching_fingerprint(conn, tm
     assert conn.execute("SELECT COUNT(*) FROM place").fetchone()[0] == 1
 
 
+# ---------------------------------------------------------------------
+# Missing seed file: since the seed moved out of the repo (2026-09-08,
+# see app/places_seed.py's "SEED LOCATION" module docstring section),
+# absence is a real, easy-to-hit deployment gap, not a hypothetical --
+# a fresh clone plus `docker compose up` hits this by default. Must NOT
+# raise (a board with no places data yet is a supported, non-fatal
+# state -- see load_places_seed()'s own `if not os.path.exists(...)`
+# handling), but the log line must be unmistakable: name the exact
+# configured path and say how to obtain the file, not a generic "no
+# data" line easy to miss in a startup log.
+# ---------------------------------------------------------------------
+
+
+def test_missing_seed_logs_a_loud_findable_error(conn, tmp_path, monkeypatch, caplog):
+    missing_path = tmp_path / "places_worth_going.csv.gz"
+    assert not missing_path.exists()
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(missing_path))
+    # This scenario is "neither the configured path NOR the legacy
+    # fallback exists" -- pin the legacy path away too, since the real
+    # app/reference/places_worth_going.csv.gz may still be sitting on
+    # disk in a given checkout (see _resolve_seed_path) and would
+    # otherwise silently turn this into a fallback-load instead of the
+    # loud-warning case this test is about.
+    monkeypatch.setattr(places_seed_module, "_LEGACY_DATA_PATH", str(tmp_path / "no_legacy_here.csv.gz"))
+
+    with caplog.at_level("WARNING", logger="places_seed"):
+        stats = load_places_seed(conn)
+
+    # Non-fatal: no exception, and the caller's stats/DB state stay in
+    # the same "no data yet" shape a missing file always produced.
+    assert stats["kept"] == {"summit": 0, "park": 0, "landmark": 0}
+    assert conn.execute("SELECT COUNT(*) FROM place").fetchone()[0] == 0
+
+    messages = [r.message for r in caplog.records if r.name == "places_seed"]
+    assert len(messages) == 1, messages
+    message = messages[0]
+    # The exact path it looked for -- an operator must be able to find
+    # this without reading source, especially when PLACES_SEED_PATH was
+    # customized away from the default.
+    assert str(missing_path) in message
+    # How to obtain the file -- the build pipeline's merge stage, not a
+    # bare "not found".
+    assert "build_places_seed.py" in message
+    assert "merge" in message
+    # Unmistakable that this means an empty board, not a partial one.
+    assert "ZERO" in message.upper()
+
+
+# ---------------------------------------------------------------------
+# Legacy in-repo fallback (2026-09-08): _resolve_seed_path() falls back
+# to the old app/reference/places_worth_going.csv.gz location when
+# nothing exists at the configured PLACES_SEED_PATH but that legacy
+# file is still sitting on disk (an image or checkout built before the
+# seed moved out of the repo). See app/places_seed.py's module
+# docstring "SEED LOCATION" section and _resolve_seed_path's own
+# docstring.
+# ---------------------------------------------------------------------
+
+
+def test_seed_found_at_configured_path_is_used_without_fallback(conn, tmp_path, monkeypatch, caplog):
+    configured_path = tmp_path / "configured" / "places.csv"
+    configured_path.parent.mkdir()
+    _write_seed_csv(configured_path, [_seed_row("landmark", "n1", lat=44.0, lon=-117.0)])
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(configured_path))
+    # No legacy file at all -- proves the configured path alone is
+    # enough, fallback never even considered.
+    monkeypatch.setattr(places_seed_module, "_LEGACY_DATA_PATH", str(tmp_path / "no_legacy" / "places_worth_going.csv.gz"))
+
+    with caplog.at_level("INFO", logger="places_seed"):
+        stats = load_places_seed(conn)
+
+    assert stats["kept"]["landmark"] == 1
+    messages = [r.message for r in caplog.records if r.name == "places_seed"]
+    used_messages = [m for m in messages if "using seed file at" in m]
+    assert len(used_messages) == 1, messages
+    assert str(configured_path) in used_messages[0]
+    assert not any("FALLBACK" in m for m in messages), "must not log a fallback line when the configured path was found"
+
+
+def test_legacy_seed_used_when_configured_path_absent(conn, tmp_path, monkeypatch, caplog):
+    configured_path = tmp_path / "configured" / "places_worth_going.csv.gz"  # never created
+    legacy_path = tmp_path / "legacy" / "places_worth_going.csv"
+    legacy_path.parent.mkdir()
+    _write_seed_csv(legacy_path, [_seed_row("landmark", "legacy-1", lat=44.0, lon=-117.0)])
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(configured_path))
+    monkeypatch.setattr(places_seed_module, "_LEGACY_DATA_PATH", str(tmp_path / "legacy" / "places_worth_going.csv.gz"))
+
+    with caplog.at_level("INFO", logger="places_seed"):
+        stats = load_places_seed(conn)
+
+    assert stats["kept"]["landmark"] == 1
+    assert conn.execute(
+        "SELECT 1 FROM place WHERE ref_code = 'legacy-1'"
+    ).fetchone() is not None
+
+    messages = [r.message for r in caplog.records if r.name == "places_seed"]
+    fallback_messages = [m for m in messages if "FALLBACK" in m]
+    assert len(fallback_messages) == 1, messages
+    # Names both the configured path it looked for and the legacy path
+    # it actually used, and says what an operator should do about it.
+    assert str(configured_path) in fallback_messages[0]
+    assert str(legacy_path) in fallback_messages[0]
+    assert "PLACES_SEED_PATH" in fallback_messages[0]
+
+
+def test_configured_path_takes_precedence_over_legacy_when_both_exist(conn, tmp_path, monkeypatch, caplog):
+    configured_path = tmp_path / "configured" / "places.csv"
+    configured_path.parent.mkdir()
+    _write_seed_csv(configured_path, [_seed_row("landmark", "configured-1", lat=44.0, lon=-117.0)])
+
+    legacy_path = tmp_path / "legacy" / "places_worth_going.csv"
+    legacy_path.parent.mkdir()
+    _write_seed_csv(legacy_path, [_seed_row("landmark", "legacy-1", lat=45.0, lon=-118.0)])
+
+    monkeypatch.setattr(places_seed_module, "_DATA_PATH", str(configured_path))
+    monkeypatch.setattr(places_seed_module, "_LEGACY_DATA_PATH", str(tmp_path / "legacy" / "places_worth_going.csv.gz"))
+
+    with caplog.at_level("INFO", logger="places_seed"):
+        stats = load_places_seed(conn)
+
+    assert stats["kept"]["landmark"] == 1
+    assert conn.execute("SELECT 1 FROM place WHERE ref_code = 'configured-1'").fetchone() is not None
+    assert conn.execute("SELECT 1 FROM place WHERE ref_code = 'legacy-1'").fetchone() is None, (
+        "the fresh seed at the configured path must never be silently shadowed by a stale legacy copy"
+    )
+
+    messages = [r.message for r in caplog.records if r.name == "places_seed"]
+    assert not any("FALLBACK" in m for m in messages), "the configured path existing must not trigger the fallback log"
+
+
 # --- summits are a terrain-qualified set of squares, not one square -----
 
 

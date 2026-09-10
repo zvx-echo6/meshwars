@@ -84,7 +84,7 @@ mkdir -p data/data data/tiles
 docker compose up -d --build
 ```
 
-Open `http://localhost:8090`.
+Open `http://localhost:8090`. The board comes up empty of places until you also add the Places Worth Going seed at `./data/data/places_worth_going.csv.gz` — see "Where the data and tiles live" below.
 
 ### Who it runs as
 
@@ -117,8 +117,10 @@ and move them.
 
 | Path | Mounted at | What it is |
 | --- | --- | --- |
-| `./data/data` | `/data` | The SQLite database (`game.db`) and its `-wal`/`-shm` sidecars. Must be writable by `PUID:PGID` — the **directory**, not just the file, because that is where SQLite creates the sidecars. |
+| `./data/data` | `/data` | The SQLite database (`game.db`) and its `-wal`/`-shm` sidecars, **and** the Places Worth Going seed (`places_worth_going.csv.gz`, or a decompressed `.csv`). Must be writable by `PUID:PGID` — the **directory**, not just the file, because that is where SQLite creates the sidecars. |
 | `./data/tiles` | `/tiles-data` (read-only) | Optional PMTiles overlay archives (hillshade, public lands, USFS roads and trails). Read-only, so ownership does not matter. Leave it empty and the map just draws without the overlays. |
+
+**The places seed is not included in this repository.** It is large (tens to well over 100MB) and grows with every rebuild, and git cannot diff compressed data, so it is not tracked here — see `docs/features/places.md`. Without `./data/data/places_worth_going.csv.gz` in place, MeshWars starts and runs normally, but the board has **zero places**: no summits, parks, or landmarks, and no error on startup, just a clear warning in the logs naming the exact path it looked for. (The one exception is an image or checkout built before the seed moved out of the repo that still happens to carry the old `app/reference/places_worth_going.csv.gz` on disk — the loader falls back to that copy rather than booting empty, and says in the logs that it did so. A fresh clone never has that file, so it still comes up with zero places until you supply one.) Build one yourself with `scripts/build_places_seed.py`'s `merge` stage (see that script's own `--help` and `docs/features/places.md`), or obtain a copy from wherever your instance's operator distributes it.
 
 These paths are set in `docker-compose.yml` directly; edit that file if
 you want them somewhere else.
