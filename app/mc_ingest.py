@@ -137,6 +137,37 @@ def _parse_heard_snr(text: str) -> float | None:
         return None
 
 
+# The two ping-type groups parse_repeaters() below branches on -- "heard"
+# entries (from heard_repeats) and "direct" entries (from repeater_id) --
+# kept as their own constants and reused BY parse_repeaters() itself
+# rather than inlined twice, so is_unknown_ping_type() just below checks
+# against exactly the same values parse_repeaters() branches on, with no
+# way for the two to drift apart.
+_HEARD_PING_TYPES = frozenset({"TX", "RX"})
+_DIRECT_PING_TYPES = frozenset({"DISC", "TRACE"})
+_RECOGNIZED_PING_TYPES = _HEARD_PING_TYPES | _DIRECT_PING_TYPES
+
+
+def is_unknown_ping_type(ping: dict) -> bool:
+    """True if `ping` names a `type` that parse_repeaters() does not
+    recognize -- e.g. a future MeshMapper build's "DEFER". Such a ping
+    still falls through parse_repeaters() to an empty repeater list (and
+    so still counts toward pings_no_repeaters, same as always); this is
+    purely additional observability so an unrecognized protocol type can
+    be told apart from a ping that legitimately heard no repeaters.
+
+    A MISSING/None `type` is deliberately NOT unknown: that is an absent
+    field (already handled -- and already indistinguishable from "heard
+    nothing" -- by every code path that reads ping.get("type") today),
+    not a PRESENT value this parser fails to recognize. Only a `type`
+    that is actually there, and not one of the four known values, counts.
+    """
+    if not isinstance(ping, dict):
+        return False
+    ping_type = ping.get("type")
+    return ping_type is not None and ping_type not in _RECOGNIZED_PING_TYPES
+
+
 def parse_repeaters(ping: dict) -> list[RepeaterEntry]:
     """Return the distinct repeaters this ping reached, with whatever
     signal/identity detail its ping type carries, from whichever field
@@ -166,7 +197,7 @@ def parse_repeaters(ping: dict) -> list[RepeaterEntry]:
         return []
     ping_type = ping.get("type")
 
-    if ping_type in ("TX", "RX"):
+    if ping_type in _HEARD_PING_TYPES:
         heard = ping.get("heard_repeats")
         if not isinstance(heard, str) or not heard or heard == "None":
             return []
@@ -194,7 +225,7 @@ def parse_repeaters(ping: dict) -> list[RepeaterEntry]:
                 entries[rid] = RepeaterEntry(repeater_id=rid, kind="heard", heard_snr=snr)
         return list(entries.values())
 
-    if ping_type in ("DISC", "TRACE"):
+    if ping_type in _DIRECT_PING_TYPES:
         rid = ping.get("repeater_id")
         if not isinstance(rid, str) or not rid or rid == "None":
             return []
@@ -512,6 +543,7 @@ class McIngestor:
             "pings_bad_coord": 0,
             "pings_out_of_area": 0,
             "pings_no_repeaters": 0,
+            "pings_unknown_type": 0,
         }
         conn = connect()
         try:
@@ -547,8 +579,8 @@ class McIngestor:
                 "INSERT INTO player_ingest_stat("
                 "  player_id, protocol, day, batches, pings_accepted, "
                 "  pings_no_contact, pings_wrong_owner, pings_duplicate, pings_bad_coord, "
-                "  pings_out_of_area, pings_no_repeaters) "
-                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?) "
+                "  pings_out_of_area, pings_no_repeaters, pings_unknown_type) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(player_id, protocol, day) DO UPDATE SET "
                 "  batches = batches + 1, "
                 "  pings_accepted = pings_accepted + excluded.pings_accepted, "
@@ -557,13 +589,14 @@ class McIngestor:
                 "  pings_duplicate = pings_duplicate + excluded.pings_duplicate, "
                 "  pings_bad_coord = pings_bad_coord + excluded.pings_bad_coord, "
                 "  pings_out_of_area = pings_out_of_area + excluded.pings_out_of_area, "
-                "  pings_no_repeaters = pings_no_repeaters + excluded.pings_no_repeaters",
+                "  pings_no_repeaters = pings_no_repeaters + excluded.pings_no_repeaters, "
+                "  pings_unknown_type = pings_unknown_type + excluded.pings_unknown_type",
                 (
                     player_id, PROTOCOL, day,
                     counters["pings_accepted"], counters["pings_no_contact"],
                     counters["pings_wrong_owner"], counters["pings_duplicate"],
                     counters["pings_bad_coord"], counters["pings_out_of_area"],
-                    counters["pings_no_repeaters"],
+                    counters["pings_no_repeaters"], counters["pings_unknown_type"],
                 ),
             )
 
@@ -581,11 +614,12 @@ class McIngestor:
 
         log.info(
             "mc ingest: player=%d batch processed accepted=%d no_contact=%d "
-            "wrong_owner=%d duplicate=%d bad_coord=%d out_of_area=%d no_repeaters=%d",
+            "wrong_owner=%d duplicate=%d bad_coord=%d out_of_area=%d no_repeaters=%d "
+            "unknown_type=%d",
             player_id, counters["pings_accepted"], counters["pings_no_contact"],
             counters["pings_wrong_owner"], counters["pings_duplicate"],
             counters["pings_bad_coord"], counters["pings_out_of_area"],
-            counters["pings_no_repeaters"],
+            counters["pings_no_repeaters"], counters["pings_unknown_type"],
         )
 
     def _process_one_ping(self, conn, player_id, ping, received_at, counters, season_id, team) -> None:
@@ -697,6 +731,18 @@ class McIngestor:
         # scoring later decides.
         entries = parse_repeaters(ping)
         record_repeater_observations(conn, PROTOCOL, cell, entries, ts)
+
+        # 5c. Unknown ping type -- observability only, never a rejection.
+        # A `type` that is present but not one of the four parse_repeaters()
+        # recognizes (e.g. "DEFER") falls through to an empty repeater
+        # list exactly like a legitimate "heard nothing" ping does, so
+        # without this it is invisible, silently indistinguishable from
+        # real no-coverage evidence in pings_no_repeaters (step 9, below)
+        # -- which it still also increments, since parse_repeaters()
+        # still returns []. is_unknown_ping_type() deliberately does NOT
+        # flag a missing/None `type`; see its own docstring.
+        if is_unknown_ping_type(ping):
+            counters["pings_unknown_type"] += 1
 
         # 6. Sanity gates -- these still never REJECT a ping. The speed
         # between consecutive fixes now also decides by_air, which the
