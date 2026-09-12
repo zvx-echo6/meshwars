@@ -2635,9 +2635,28 @@ MIGRATIONS = [
 PRAGMAS = [
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=NORMAL",
-    "PRAGMA busy_timeout=5000",
+    "PRAGMA busy_timeout=15000",
     "PRAGMA foreign_keys=ON",
     "PRAGMA temp_store=MEMORY",
+    # SIZED FOR THE WORLDWIDE SEED (2026-09-12). game.db was ~130 MB
+    # until Places Worth Going went worldwide; it is now ~1.8 GB, almost
+    # all of it `place` and `place_cell`. SQLite's default cache_size is
+    # -2000, i.e. 2 MB per connection, which was invisible against a
+    # 130 MB file and is hopeless against 1.8 GB: nearly every query
+    # went to disk, and on a shared-CPU VPS reads piled up behind the
+    # ingest loop's write transactions until they hit busy_timeout. That
+    # is what made a page load take 15 seconds -- five API calls all
+    # completing within 150 ms of each other at ~5.2 s, the signature of
+    # requests serialized behind a lock rather than five slow queries.
+    #
+    # mmap_size does the heavy lifting because it is SHARED: the pages
+    # live in the OS page cache once, however many connections are open.
+    # cache_size is PER CONNECTION and connect() hands every coroutine
+    # its own, so it stays deliberately modest -- 64 MB times a dozen
+    # live connections is affordable on the 4 GB the container now has,
+    # 256 MB times a dozen would not be.
+    "PRAGMA mmap_size=1073741824",   # 1 GiB, shared via the OS page cache
+    "PRAGMA cache_size=-65536",      # 64 MiB per connection
 ]
 
 # In-process write lock. SQLite serializes writes at the file level, but
