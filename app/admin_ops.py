@@ -40,7 +40,8 @@ from fastapi.responses import JSONResponse
 from . import mc_api, results
 from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
-    checkin_streak, load_checkin_config, streak_points, MC_PROTOCOL as CHK_MC,
+    checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
+    MC_PROTOCOL as CHK_MC,
     KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_PROTOCOL,
 )
 from .config import settings
@@ -519,14 +520,24 @@ async def admin_checkin_award(request: Request):
         if not season:
             return JSONResponse({"error": "no active season for that board"}, status_code=400)
         config = load_checkin_config(conn)
-        streak = checkin_streak(conn, player_id, protocol, net_date)
+        # net_id is set only when exactly one configured net shares this
+        # (protocol, weekday) -- see net_id_for_protocol_weekday's own
+        # docstring. There is no net_id field on this endpoint's request
+        # body (it takes protocol/net_date, matching what an operator
+        # actually knows about a missed night); this is not a new admin
+        # UI field, just best-effort attribution of what was already
+        # supplied. Left NULL when ambiguous, same as an unattributable
+        # historical row -- checkin_streak() handles a None net_id by
+        # finding no history rather than crashing (see its docstring).
+        net_id = net_id_for_protocol_weekday(conn, protocol, net_date)
+        streak = checkin_streak(conn, player_id, net_id, net_date)
         points = streak_points(config, streak)
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "INSERT OR IGNORE INTO mc_checkin_award"
-            "(season_id, player_id, net_date, points, protocol, message_id, awarded_at, streak) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (season["id"], player_id, net_date, points, protocol, "admin", now, streak))
+            "(season_id, player_id, net_date, points, protocol, message_id, awarded_at, streak, net_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (season["id"], player_id, net_date, points, protocol, "admin", now, streak, net_id))
         if cur.rowcount:
             _log_admin_action(
                 conn, actor_account_id=session.account_id, action="checkin_award",

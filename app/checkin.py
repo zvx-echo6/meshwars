@@ -282,6 +282,37 @@ def net_date_for_net(net, ts: int) -> str | None:
     return net_date
 
 
+def net_id_for_protocol_weekday(conn, protocol: str, net_date: str) -> int | None:
+    """The one checkin_net whose (protocol, weekday) matches `net_date`,
+    if -- and only if -- there is exactly one. Used to attribute a
+    checkin_net to an mc_checkin_award row that only carries protocol +
+    net_date: app/admin_ops.py's manual "credit a check-in somebody
+    earned but did not receive" endpoint (which takes protocol/net_date,
+    not a net_id, from its caller), and tools/backfill_net_id.py's
+    one-time correction of history written before net_id existed.
+    Shared here, rather than reimplemented in both places, so the two
+    can never quietly disagree about what "unambiguous" means.
+
+    Matches against EVERY net regardless of `enabled` -- what happened
+    on a given night is a fact about the past, not about whether an
+    operator has since disabled that net.
+
+    Returns None, never a guess, when zero or more than one net shares
+    that (protocol, weekday) -- e.g. two nets on the same protocol and
+    weekday, or a protocol/weekday combination no configured net has
+    ever used. See checkin_streak's own docstring for why a None net_id
+    is handled sensibly (no history, streak 1) rather than crashing.
+    """
+    weekday = datetime.strptime(net_date, "%Y-%m-%d").weekday()
+    rows = conn.execute(
+        "SELECT id FROM checkin_net WHERE protocol = ? AND weekday = ?",
+        (protocol, weekday),
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0]["id"]
+    return None
+
+
 def most_recent_mc_net_date(conn, now: int | None = None) -> str | None:
     """The most recent local net date (YYYY-MM-DD) that any currently
     enabled MeshCore-family net (checkin_net, protocol='mc' -- both
@@ -496,23 +527,39 @@ def seed_nets_from_env(conn) -> None:
               "on" if settings.mc_checkin_base_url else "off", settings.meshview_url)
 
 
-def checkin_streak(conn, player_id: int, protocol: str, net_date: str) -> int:
-    """How many consecutive nets this player has now attended, counting
-    the one on `net_date` as the most recent.
+def checkin_streak(conn, player_id: int, net_id: int | None, net_date: str) -> int:
+    """How many consecutive occurrences of THIS NET this player has now
+    attended, counting the one on `net_date` as the most recent.
 
-    Scoped by PROTOCOL, not by season. A streak is a record of turning up
-    rather than a score, so it survives a season boundary the way the
-    points it earned deliberately do not -- but it stays per board,
-    because a player who only ever wardrives MeshCore should not inherit
-    a streak from the Meshtastic net.
+    Scoped by NET (checkin_net.id), not by protocol and not by season. A
+    streak is a record of turning up to a SPECIFIC weekly slot, so it
+    survives a season boundary the way the points it earned deliberately
+    do not -- but it stays per net, because a player who attends
+    Freq51's Wednesday MeshCore net should not inherit a streak from a
+    completely different MeshCore net on a different weekday, and vice
+    versa.
 
-    The subtle part is what counts as a MISSED net. There is no table of
-    nets that happened -- a net is simply a Wednesday, and if nobody
-    posted on one, nothing anywhere records that it took place. So the
-    set of real nets is derived: a date is a net if ANY player earned an
-    award on it. A Wednesday nobody attended (a holiday, a week the net
-    was skipped) never appears in that set, so it cannot silently break
-    everybody's streak for a week they could not have shown up to.
+    THIS WAS PROTOCOL-SCOPED until 2026-09-10, which was a bug, not a
+    design choice: with two MeshCore nets running on different weekdays
+    (Freq51 Wednesday, Coloradomesh Thursday), their net_dates interleave
+    on one shared protocol-wide timeline, so a player who only ever
+    attends one of the two nets breaks their "streak" against the OTHER
+    net's dates the moment both nets have ever produced an award -- every
+    MeshCore player's streak collapsed to 1 starting the first Thursday
+    Coloradomesh awarded anyone (2026-09-03). Scoping by net_id instead
+    means each net's own timeline is independent, the way it always
+    should have been. See tools/backfill_net_id.py for the one-time
+    correction of history written under the old, broken scoping.
+
+    The subtle part is what counts as a MISSED occurrence of this net.
+    There is no table of nets that happened -- a net is simply (say) a
+    Wednesday, and if nobody posted on one, nothing anywhere records
+    that it took place. So the set of real occurrences is derived: a
+    date is an occurrence of THIS net if ANY player earned an award on
+    it under this net_id. A Wednesday nobody attended (a holiday, a week
+    the net was skipped) never appears in that set, so it cannot
+    silently break everybody's streak for a week they could not have
+    shown up to.
 
     Deterministic, and computed from committed history rather than
     carried forward on the previous award row: only dates strictly
@@ -520,12 +567,22 @@ def checkin_streak(conn, player_id: int, protocol: str, net_date: str) -> int:
     to award several players for the same net cannot change any of their
     streaks. Re-running it for an award that already exists produces the
     same number.
+
+    `net_id` may be None -- a legacy award row written before this
+    column existed (see app/db.py's MIGRATIONS), or an admin manual
+    credit where the net could not be determined unambiguously (see
+    app/admin_ops.py's admin_checkin_award). `net_id = ?` never matches
+    a NULL row in SQLite, so this simply finds no history and returns 1
+    rather than raising -- it does not (and cannot, without guessing)
+    reach across to a legacy row's unscoped history. Once
+    tools/backfill_net_id.py has attributed a net_id to the historical
+    rows, they participate in this scoping like any other row.
     """
     nets = [
         r["net_date"] for r in conn.execute(
             "SELECT DISTINCT net_date FROM mc_checkin_award "
-            " WHERE protocol = ? AND net_date < ? ORDER BY net_date DESC",
-            (protocol, net_date),
+            " WHERE net_id = ? AND net_date < ? ORDER BY net_date DESC",
+            (net_id, net_date),
         )
     ]
     if not nets:
@@ -534,8 +591,8 @@ def checkin_streak(conn, player_id: int, protocol: str, net_date: str) -> int:
     attended = {
         r["net_date"] for r in conn.execute(
             "SELECT net_date FROM mc_checkin_award "
-            " WHERE protocol = ? AND player_id = ? AND net_date < ?",
-            (protocol, player_id, net_date),
+            " WHERE net_id = ? AND player_id = ? AND net_date < ?",
+            (net_id, player_id, net_date),
         )
     }
 
@@ -566,7 +623,7 @@ def streak_points(config: dict, streak: int) -> float:
 
 def _award_checkin(
     conn, config: dict, season_id: int, player_id: int, net_date: str, protocol: str,
-    message_id: str, awarded_at: int, message_ts: int | None = None,
+    message_id: str, awarded_at: int, net_id: int | None, message_ts: int | None = None,
 ) -> None:
     """Credit one check-in, if this (season, player, net_date) hasn't
     already been credited -- see the module docstring for why that
@@ -580,6 +637,16 @@ def _award_checkin(
     it, so the number is auditable rather than something that has to be
     re-derived to be explained.
 
+    `net_id` is the checkin_net.id that produced this award -- threaded
+    through by every caller (each of which is already iterating one
+    specific net when it calls this) and stored alongside the row so
+    checkin_streak() can scope by the net that actually happened rather
+    than by protocol (see that function's own docstring for why
+    protocol-only scoping was a bug once two nets could share one
+    protocol). It is what checkin_streak() itself is computed against
+    here, so a row's own net_id and the history it was scored from are
+    always the same net.
+
     `message_ts` is when the player actually POSTED, taken from the
     message itself -- distinct from `awarded_at`, which is only when a
     poll happened to look at it and is therefore up to a full poll
@@ -589,21 +656,21 @@ def _award_checkin(
     posting times gone for good. Nothing reads it yet -- it exists so
     that when something does, there is history to read.
     """
-    streak = checkin_streak(conn, player_id, protocol, net_date)
+    streak = checkin_streak(conn, player_id, net_id, net_date)
     points = streak_points(config, streak)
     cur = conn.execute(
         "INSERT OR IGNORE INTO mc_checkin_award"
         "(season_id, player_id, net_date, points, protocol, message_id, awarded_at, "
-        " message_ts, streak) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " message_ts, streak, net_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (season_id, player_id, net_date, points, protocol, message_id,
-         awarded_at, message_ts, streak),
+         awarded_at, message_ts, streak, net_id),
     )
     if cur.rowcount:
         log.info(
             "checkin: awarded %.2f points to player %d for %s net %s "
-            "(season %d, message %s, streak %d)",
-            points, player_id, protocol, net_date, season_id, message_id, streak,
+            "(season %d, message %s, streak %d, net_id %s)",
+            points, player_id, protocol, net_date, season_id, message_id, streak, net_id,
         )
 
 
@@ -653,6 +720,34 @@ def _record_unresolved_sender(
         "  message_count = message_count + 1",
         (net_id, net_date, sender_name, seen_at, seen_at),
     )
+
+
+def _mt_sender_display_name(conn, pkt: dict, node_ref: str) -> str:
+    """Best human-readable label for an unregistered Meshtastic sender,
+    for _record_unresolved_sender's sender_name -- the MT counterpart of
+    the free-text `sender` MeshCore channel messages already carry (see
+    _process_mc_message). A meshview text packet has no confirmed name
+    field of its own (see app/meshview_client.py's extract_node_id/
+    extract_timestamp for the same tolerant-multiple-keys approach this
+    mirrors), so this tries a few plausible keys some meshview forks are
+    known to expose on a packet record first, then falls back to the
+    most recently seen NodeInfo long_name for this node_ref
+    (mt_node_key, app/db.py -- populated by app/ingest.py's own NodeInfo
+    poll, independent of this poller), and finally the bare node_ref
+    itself so this never returns nothing to log.
+    """
+    for key in ("from_node_name", "from_name", "fromName", "sender_name", "senderName"):
+        v = pkt.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    row = conn.execute(
+        "SELECT long_name FROM mt_node_key WHERE node_ref = ? AND long_name IS NOT NULL "
+        " ORDER BY last_seen DESC LIMIT 1",
+        (node_ref,),
+    ).fetchone()
+    if row and row["long_name"]:
+        return row["long_name"]
+    return node_ref
 
 
 def _mark_seen(conn, connector: str, packet_id: str, seen_at: int) -> None:
@@ -2316,7 +2411,7 @@ class CheckinPoller:
                 _record_unresolved_sender(conn, net["id"], net_date, normalized, received_at)
                 continue
             _award_checkin(conn, config, season_id, player_id, net_date, MC_PROTOCOL,
-                           pid_str, received_at, ts)
+                           pid_str, received_at, net["id"], ts)
 
         if not unresolved:
             # Only now: an awarded (or window-rejected-by-every-net)
@@ -2516,7 +2611,7 @@ class CheckinPoller:
                 unresolved = True  # not settled -- see _mark_seen
                 continue
             _award_checkin(conn, config, season_id, player_id, net_date, MT_PROTOCOL,
-                           pid_str, received_at, ts)
+                           pid_str, received_at, net["id"], ts)
 
         if not unresolved:
             _mark_seen(conn, connector_url, pid_str, received_at)
@@ -2594,10 +2689,20 @@ class CheckinPoller:
             if net_date is None:
                 continue  # outside THIS net's window -- its business with the message is over
             if player_id is None:
-                unresolved = True  # not settled -- see _mark_seen
+                # Not settled -- see _mark_seen. Recorded, not just
+                # dropped: the MeshCore path (_process_mc_message) has
+                # logged an unresolved sender to checkin_unresolved_sender
+                # since that table existed; this path never did, leaving
+                # operators with zero visibility into dropped Meshtastic
+                # senders. Same scoping (this net's own net_id/net_date),
+                # same upsert-not-insert semantics (_record_unresolved_sender
+                # itself dedupes), mirrored here rather than reinvented.
+                unresolved = True
+                display_name = _mt_sender_display_name(conn, pkt, node_ref)
+                _record_unresolved_sender(conn, net["id"], net_date, display_name, received_at)
                 continue
             _award_checkin(conn, config, season_id, player_id, net_date, MT_PROTOCOL,
-                           pid_str, received_at, message_ts)
+                           pid_str, received_at, net["id"], message_ts)
 
         if not unresolved:
             _mark_seen(conn, connector_url, pid_str, received_at)

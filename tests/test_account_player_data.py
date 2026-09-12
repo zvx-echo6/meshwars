@@ -136,13 +136,13 @@ def _season(path: str, protocol: str = "mc", started_at=0, ends_at=None, status=
 
 
 def _checkin(path: str, season_id: int, player_id: int, net_date: str, *,
-             points=10.0, protocol="mc", streak=None) -> None:
+             points=10.0, protocol="mc", streak=None, net_id=None) -> None:
     conn = sqlite3.connect(path)
     conn.execute(
         "INSERT INTO mc_checkin_award(season_id, player_id, net_date, points, protocol, "
-        "message_id, awarded_at, streak) VALUES (?,?,?,?,?,?,?,?)",
+        "message_id, awarded_at, streak, net_id) VALUES (?,?,?,?,?,?,?,?,?)",
         (season_id, player_id, net_date, points, protocol,
-         f"msg-{player_id}-{net_date}-{protocol}", NOW, streak),
+         f"msg-{player_id}-{net_date}-{protocol}", NOW, streak, net_id),
     )
     conn.commit()
     conn.close()
@@ -263,9 +263,14 @@ def test_stats_reuses_find_for_and_adds_streak_and_nets(client, db_path):
     # collect even where that heavy chain's own deps aren't installed.
     from app.checkin import checkin_streak
 
-    _checkin(db_path, season_id, player_id, "2026-08-05", points=10)
-    _checkin(db_path, season_id, player_id, "2026-08-12", points=10)
-    _checkin(db_path, season_id, player_id, "2026-08-19", points=15)
+    # checkin_streak() scopes by net_id now, not protocol (see that
+    # function's own docstring) -- a real checkin_net row is required
+    # so these three awards share one net's timeline. All three dates
+    # are Wednesdays (weekday=2), matching this net's own weekday.
+    net_id = _net(db_path, weekday=2)
+    _checkin(db_path, season_id, player_id, "2026-08-05", points=10, net_id=net_id)
+    _checkin(db_path, season_id, player_id, "2026-08-12", points=10, net_id=net_id)
+    _checkin(db_path, season_id, player_id, "2026-08-19", points=15, net_id=net_id)
 
     resp = client.get("/api/account/stats")
 
@@ -281,7 +286,7 @@ def test_stats_reuses_find_for_and_adds_streak_and_nets(client, db_path):
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    expected_streak = checkin_streak(conn, player_id, "mc", "2026-08-19")
+    expected_streak = checkin_streak(conn, player_id, net_id, "2026-08-19")
     conn.close()
     assert expected_streak == 3
     assert mc["checkin_streak"] == expected_streak
@@ -302,9 +307,17 @@ def test_stats_breaks_down_both_boards_independently(client, db_path):
     player_id = _make_player(db_path, account_id=account_id, display_name="TwoBoards", team="RED")
     mc_season_id = _season(db_path, "mc")
     mt_season_id = _season(db_path, "mt")
+    # A real net_id is needed for the mt board's two-in-a-row streak to
+    # compute as 2 -- checkin_streak() scopes by net_id now (see its own
+    # docstring); both dates are Wednesdays (weekday=2), same as this
+    # net. The mc board only ever needs streak=1 here (a single
+    # check-in), which checkin_streak() returns even with no net_id at
+    # all (no history to find either way), so that one is left
+    # unattributed on purpose to also cover that no-net_id path.
+    mt_net_id = _net(db_path, weekday=2, protocol="mt")
     _checkin(db_path, mc_season_id, player_id, "2026-08-05", points=10, protocol="mc")
-    _checkin(db_path, mt_season_id, player_id, "2026-08-05", points=10, protocol="mt")
-    _checkin(db_path, mt_season_id, player_id, "2026-08-12", points=10, protocol="mt")
+    _checkin(db_path, mt_season_id, player_id, "2026-08-05", points=10, protocol="mt", net_id=mt_net_id)
+    _checkin(db_path, mt_season_id, player_id, "2026-08-12", points=10, protocol="mt", net_id=mt_net_id)
 
     body = client.get("/api/account/stats").json()
 

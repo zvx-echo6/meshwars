@@ -846,6 +846,7 @@ CREATE TABLE IF NOT EXISTS mc_checkin_award (
     awarded_at  INTEGER NOT NULL,
     message_ts  INTEGER,            -- when the player actually POSTED, not when the poller saw it; null on rows written before this column existed
     streak      INTEGER,            -- consecutive nets including this one; null on rows written before streaks existed
+    net_id      INTEGER,            -- checkin_net.id that produced this award; null on rows written before this column existed (see MIGRATIONS below and tools/backfill_net_id.py) and on rows written by the admin manual-credit endpoint when the net is ambiguous. checkin_streak() scopes by THIS, not protocol -- see that function's own comment for why protocol-only scoping breaks once two nets share a protocol and their dates interleave.
     PRIMARY KEY (season_id, player_id, net_date)
 );
 CREATE INDEX IF NOT EXISTS idx_mc_checkin_award_season ON mc_checkin_award(season_id);
@@ -2629,6 +2630,20 @@ MIGRATIONS = [
     # which never has `sample` at all) sees a no-op here, same as every
     # other run.
     "DROP TABLE IF EXISTS sample",
+    # Nullable, same reasoning as message_ts/streak above: every award
+    # written before this column existed has no net to backfill from
+    # the row alone (protocol + net_date is ambiguous whenever two nets
+    # share a protocol and weekday -- see checkin_streak's own comment
+    # on why PROTOCOL-only scoping broke multi-net streaks). Recoverable
+    # for most rows by matching protocol + net_date's weekday against
+    # checkin_net -- see tools/backfill_net_id.py, a one-time,
+    # dry-run-by-default script, NOT run automatically here, since it
+    # also recomputes streak/points and those need an operator to review
+    # before committing. app/checkin.py's _award_checkin now threads the
+    # originating checkin_net.id through on every new award, so only
+    # historical rows are ever NULL going forward.
+    "ALTER TABLE mc_checkin_award ADD COLUMN net_id INTEGER",
+    "CREATE INDEX IF NOT EXISTS idx_mc_checkin_award_net ON mc_checkin_award(net_id, player_id, net_date)",
 ]
 
 PRAGMAS = [

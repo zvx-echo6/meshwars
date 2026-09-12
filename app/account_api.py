@@ -1995,8 +1995,24 @@ async def account_stats(session: SessionPrincipal = Depends(require_session)) ->
             # with no check-ins on a protocol never pays for importing
             # app.checkin's heavy chain at all.
             if latest_net_date:
+                # checkin_streak() now scopes by net_id, not protocol
+                # (see that function's own docstring for why protocol-
+                # only scoping broke once two nets could share one
+                # protocol) -- so the net_id that actually produced this
+                # player's most recent award has to come along with it.
+                # (protocol, player_id, net_date) is at most one row,
+                # same assumption the COUNT/MAX query above already
+                # makes (see the module docstring on why two nets
+                # sharing a protocol AND a weekday collide on net_date
+                # by design).
+                net_id_row = conn.execute(
+                    "SELECT net_id FROM mc_checkin_award "
+                    " WHERE protocol = ? AND player_id = ? AND net_date = ?",
+                    (protocol, session.player_id, latest_net_date),
+                ).fetchone()
+                net_id = net_id_row["net_id"] if net_id_row else None
                 from .checkin import checkin_streak
-                streak = checkin_streak(conn, session.player_id, protocol, latest_net_date)
+                streak = checkin_streak(conn, session.player_id, net_id, latest_net_date)
             else:
                 streak = 0
             board["nets_checked_in"] = nets_checked_in
