@@ -394,6 +394,16 @@ body {
 }
 .landing-links a:hover { text-decoration: underline; }
 
+/* A community in the same list that has no site to link to yet (Central
+   Oregon). Same weight, size and accent colour as the anchors above so the
+   list reads as one set of titles -- deliberately NOT an <a>, so there is
+   no pointer cursor or hover underline promising a link that isn't there. */
+.landing-link-name {
+  color: var(--mw-accent);
+  font-weight: 700;
+  font-size: 0.875rem;
+}
+
 .landing-link-desc {
   display: block;
   color: var(--mw-text-5);

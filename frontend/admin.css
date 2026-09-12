@@ -304,27 +304,79 @@ body {
 .adm-body {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
+  /* A plain two-column, ONE-row grid -- .adm-side (admin.html: a single
+     wrapper around .adm-nav and .adm-traffic together) is column 1,
+     .adm-main is column 2. This used to be a two-row grid with .adm-nav
+     and .adm-traffic as separate row-1/row-2 areas and .adm-main
+     spanning both rows to keep filling the whole right-hand column --
+     that shape is what caused the traffic panel to render on top of
+     the section nav in production (see .adm-side's own comment above
+     it in admin.html for the mechanism: a grid item spanning two
+     auto-sized rows forces the track-sizing algorithm to distribute
+     .adm-main's own height across BOTH rows, inflating .adm-nav's row
+     far past .adm-nav's real content -- which in turn gave .adm-nav's
+     position: sticky an enormous, wrong containing block, so it never
+     released while scrolling and .adm-traffic (a plain, non-sticky
+     sibling below it) scrolled up underneath it). A single row sidesteps
+     that whole class of bug: .adm-side and .adm-main are now two
+     ordinary single-row grid items, each sized to its own content,
+     nothing spans anything. */
+  grid-template-areas: "side main";
   gap: 0;
   max-width: 1180px;
   margin: 0 auto;
 }
 
-/* top/max-height: 43px was .adm-topbar's own measured height -- now
-   offset by --mw-nav-h on top of that (the site nav, further up
-   still) the same way .adm-topbar's own top offset is, so this sticks
-   directly under the topbar rather than under the topbar's old
-   pre-nav position. */
+/* The sidebar column as ONE grid item -- see .adm-body's own comment
+   above for why this exists at all (nothing here should ever again let
+   .adm-main's height reach back and inflate .adm-nav's box). align-self:
+   start keeps this sized to its own content (.adm-nav + .adm-traffic
+   stacked) instead of stretching to match .adm-main's height, which is
+   usually taller and would otherwise be the default (grid's align-items:
+   stretch) -- exactly the same failure mode this whole rule exists to
+   avoid, just one level up.
+
+   position: sticky lives HERE, on the wrapper, not on .adm-nav alone --
+   that was tried first and still overlapped .adm-traffic, for a
+   different reason than the grid-row bug above: a stickily positioned
+   element only offsets itself, it does not reserve space for or move
+   any sibling. With .adm-nav sticky and .adm-traffic a plain sibling
+   below it in normal flow, .adm-traffic kept its own static position
+   and scrolled up the page at the ordinary rate the moment ANY
+   scrolling happened, while .adm-nav stayed pinned near the top of the
+   viewport -- so .adm-traffic slid in underneath the still-visible nav
+   within the first ~100px of scroll, overlapping it exactly like the
+   grid-row bug did, just sooner. Making .adm-side itself the sticky
+   element instead means .adm-nav and .adm-traffic move as ONE rigid
+   unit -- .adm-traffic can never be anywhere but directly below
+   .adm-nav, at any scroll position, because there is no longer a
+   sticky/non-sticky pair that can drift apart. top/max-height/
+   overflow-y are unchanged from .adm-nav's old copy of these three
+   (43px is .adm-topbar's own measured height, offset by --mw-nav-h,
+   the site nav further up, the same way .adm-topbar's own top offset
+   is) -- this still sticks directly under the topbar and is still
+   bounded to the visible viewport, with its own scrollbar if
+   .adm-nav's section list ever grows past that, but now that bound
+   applies to the nav+traffic unit together rather than to .adm-nav
+   alone. */
+.adm-side {
+  grid-area: side;
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+  min-width: 0;
+  position: sticky;
+  top: calc(var(--mw-nav-h) + 43px);
+  max-height: calc(100vh - var(--mw-nav-h) - 43px);
+  overflow-y: auto;
+}
+
 .adm-nav {
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 18px 10px 40px;
   border-right: 1px solid var(--mw-line);
-  position: sticky;
-  top: calc(var(--mw-nav-h) + 43px);
-  align-self: start;
-  max-height: calc(100vh - var(--mw-nav-h) - 43px);
-  overflow-y: auto;
 }
 
 .adm-nav-item {
@@ -361,7 +413,147 @@ body {
 .adm-nav-item.active .adm-nav-badge { color: var(--mw-gold); }
 .adm-nav-badge.adm-nav-badge-bad { color: var(--adm-bad-text); }
 
-.adm-main { padding: 18px 22px 80px; }
+/* ---- traffic (sidebar) -------------------------------------------------
+   A small persistent stat block directly under the section nav -- not a
+   section itself, so it carries none of .adm-h2/.adm-nav-item's
+   trappings. See admin.js's loadTraffic()/renderTraffic()/trafficChart()
+   for what fills it in, and this stylesheet's own top-of-file rule
+   (colours only ever come from a --mw-*/--adm-* token, never a literal
+   hex) for why every colour below is one of those, unchanged, so every
+   skin -- including neon -- restyles this the same way it restyles
+   everything else on the page. */
+.adm-traffic {
+  padding: 14px 10px 20px;
+  border-right: 1px solid var(--mw-line);
+}
+
+/* Deliberately quieter than .adm-h2/.adm-h3 -- this is not a section
+   heading, and should not read as one next to Overview/Players/etc. in
+   the nav just above it. */
+.adm-traffic-h {
+  margin: 0 0 8px;
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mw-text-6);
+}
+
+.adm-traffic-hero {
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: var(--mw-text-1);
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.adm-traffic-sub {
+  font-size: 0.75rem;
+  color: var(--mw-text-6);
+  margin: 2px 0 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.adm-traffic-chart-wrap {
+  position: relative;
+  width: 100%;
+}
+
+/* width:100% + a fixed pixel height is what preserveAspectRatio="none"
+   (set on the element itself in trafficChart()) stretches to -- the
+   viewBox's 300x44 units then map onto whatever width this sidebar
+   column actually has. */
+.adm-traffic-chart {
+  display: block;
+  width: 100%;
+  height: 44px;
+}
+
+/* stroke-width is drawn in the SAME non-uniformly-scaled coordinate
+   space preserveAspectRatio="none" stretches (see .adm-traffic-chart
+   just above and trafficChart()'s own comment in admin.js) unless told
+   otherwise -- vector-effect="non-scaling-stroke", set on the <path>
+   itself in admin.js, is what keeps this a true 2px regardless of that
+   stretch. This rule only sets the parts vector-effect does not:
+   colour, join/cap style, no fill. */
+.adm-traffic-line {
+  fill: none;
+  stroke: var(--mw-accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* Recessive on purpose -- the only thing drawn behind the line itself;
+   no gridlines, no axis ticks. Also non-scaling-stroke'd in admin.js,
+   same reason as the line above. */
+.adm-traffic-baseline { stroke: var(--mw-line); stroke-width: 1; }
+
+.adm-traffic-hoverline { stroke: var(--mw-line-strong); stroke-width: 1; }
+
+/* The single point marker -- both the static one-day dot and the
+   hover dot reuse this class. A plain CSS circle, not an SVG one; see
+   trafficChart()'s own comment in admin.js for why an SVG <circle>
+   would render as an ellipse here. Centred on its own (left, top) via
+   the negative margin, since trafficChart() sets those as a plain
+   top-left position, not a transform. pointer-events: none so the
+   dot -- which visually sits on top of the SVG's own hit-test rect --
+   never itself becomes the mousemove target and stalls the hover
+   tracking underneath it. */
+.adm-traffic-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: var(--mw-accent);
+  border: 1px solid var(--mw-ink);
+  pointer-events: none;
+}
+
+/* A reserved row, not a floating box -- see renderTraffic()'s own
+   comment in admin.js for why: a tooltip anchored to the hovered
+   point's x-position used to sit on top of adm-traffic-sub and could
+   run past this 180px column's own edge at the first/last day.
+   visibility: hidden (not display: none, not hidden the attribute) is
+   the load-bearing part -- it keeps this element's box, border and
+   padding included, in the layout whether or not anything is
+   hovered, so nothing above or below it ever shifts when a hover
+   starts or ends; only its paint toggles, via .is-active below.
+   white-space/overflow/text-overflow keep it to exactly one line and
+   truncate gracefully if a date/count combination is ever too wide
+   for the column, rather than wrapping and quietly outgrowing the
+   reserved height above. */
+.adm-traffic-tip {
+  margin: 4px 0 8px;
+  padding: 3px 6px;
+  background: var(--mw-raised);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  color: var(--mw-text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  visibility: hidden;
+}
+.adm-traffic-tip.is-active { visibility: visible; }
+
+.adm-traffic-note {
+  margin: 8px 0 0;
+  font-size: 0.6875rem;
+  color: var(--mw-text-6);
+  line-height: 1.4;
+}
+
+/* The date substring only -- "Bots excluded · since" is free to wrap
+   at this column's width, but a date must never split mid-string (it
+   did, rendering "2026-08-" on one line and "09" on the next before
+   this existed). */
+.adm-traffic-date { white-space: nowrap; }
+
+.adm-main { grid-area: main; padding: 18px 22px 80px; }
 
 .adm-h2 {
   font-size: 1.25rem;
@@ -447,16 +639,29 @@ body {
      mobile width, so an unwrappable string anywhere in main was
      stretching the whole column, and the sidebar along with it, past
      the viewport on Nets/Paint/Players. */
-  .adm-body { grid-template-columns: minmax(0, 1fr); }
+  .adm-body {
+    grid-template-columns: minmax(0, 1fr);
+    /* One column now, so the desktop "side main" shape no longer
+       applies -- restacked single-file: .adm-side (nav, then the
+       traffic block, in that order inside it), then main. */
+    grid-template-areas: "side" "main";
+  }
+  /* position/max-height live on .adm-side itself now (see its own
+     comment in the desktop rules above), so cancelling them at mobile
+     width happens here instead of on .adm-nav. */
+  .adm-side {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+  }
   .adm-nav {
     flex-direction: row;
     flex-wrap: wrap;
     border-right: 0;
     border-bottom: 1px solid var(--mw-line);
-    position: static;
-    max-height: none;
     padding: 10px;
   }
+  .adm-traffic { border-right: 0; border-bottom: 1px solid var(--mw-line); }
   .adm-main { padding: 16px 14px 60px; }
 }
 
@@ -765,7 +970,8 @@ body {
    weekday captions that width was sized for, and 9rem cut both mid-
    word. This modifier widens just those two fields instead of loosening
    .adm-field-label itself, which stays right everywhere else it's used. */
-.adm-field-label-wide input { width: 20rem; }
+.adm-field-label-wide input,
+.adm-field-label-wide select { width: 20rem; }
 
 /* Add-net's first row pairs a captioned .adm-field-label (Protocol)
    with a bare, uncaptioned label input -- .adm-form's default

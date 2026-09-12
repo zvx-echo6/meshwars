@@ -185,11 +185,13 @@ def _season_id(conn) -> int:
 def _event(verification_id: str, node_ref: str = "0a0a0a0a") -> dict:
     from datetime import datetime, timezone
     return {
+        "event_id": f"verified_tx:{verification_id}",
+        "event_type": "verified_tx",
         "verification_id": verification_id,
         "radio_node_id": "!" + node_ref,
         "latitude": LAT,
         "longitude": LON,
-        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

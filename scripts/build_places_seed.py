@@ -13,14 +13,16 @@ inputs live, then `merge` wherever it is convenient:
                           the SOTA summits list.
   2. fetch-pota       -- anywhere with internet. Pulls and bbox+active-
                           filters the POTA parks list.
-  3. extract-landmarks -- on navi (zvx@100.64.0.27), which has osmium-tool
-                          and read access to pi-nas's OSM extract. Needs
-                          pyosmium (python3 -c "import osmium").
-  4. match-parks      -- on navi, which has GDAL/OGR and the local PAD-US
-                          File Geodatabase. Takes fetch-pota's output and
+  3. extract-landmarks -- on the GIS extract host: whatever machine has
+                          osmium-tool and read access to a regional OSM
+                          extract (see SOURCES below). Needs pyosmium
+                          (python3 -c "import osmium").
+  4. match-parks      -- on the GIS extract host, which has GDAL/OGR and
+                          the local PAD-US File Geodatabase (path set via
+                          PADUS_GDB below). Takes fetch-pota's output and
                           finds each park's boundary polygon.
-  4b. fetch-padus-parks -- on navi, same GDAL/PAD-US dependency as
-                          match-parks. ADDED 2026-08-24: pulls PAD-US's
+  4b. fetch-padus-parks -- on the GIS extract host, same GDAL/PAD-US
+                          dependency as match-parks. ADDED 2026-08-24: pulls PAD-US's
                           own local/city/county park units directly, as
                           a second park source alongside POTA -- see
                           "PARK SOURCES" below. Also takes fetch-pota's
@@ -54,25 +56,26 @@ threshold change below re-pulled the same day):
                    POTA has itself designated a reference for) -- see
                    "PARK SOURCES" below for why this is not the only
                    park source any more.
-  OSM landmarks -- /mnt/nas/nav/planet-latest.osm.pbf on pi-nas
-                   (read-only source storage -- never write there),
-                   reachable from navi. CHANGED 2026-09-07: was
-                   western-us-11states.osm.pbf until the worldwide
-                   expansion below switched the source to the full
-                   planet extract.
-  OSM parks     -- ADDED 2026-09-07, same planet extract as OSM
-                   landmarks: every named leisure=park or
-                   boundary=protected_area way/relation on Earth
+  OSM landmarks -- an OSM .pbf extract (read-only source data -- never
+                   write there); path is given on the extract-landmarks
+                   command line, not hardcoded here (see its docstring
+                   below for an example osmium tags-filter invocation).
+                   A planet extract is what the worldwide expansion of
+                   2026-09-07 reads; a regional extract also works and
+                   simply yields a regional board.
+  OSM parks     -- ADDED 2026-09-07: every named leisure=park or
+                   boundary=protected_area way/relation in the extract
                    (osmium tags-filter `wr/leisure=park`,
                    `wr/boundary=protected_area`), pre-exported to a
                    GeoJSONSeq with equal-area area_m2 already computed
-                   per feature -- extract_osm_parks() reads that
-                   extract directly rather than the planet PBF itself.
-                   See "PARK SOURCES" below for why this exists
-                   alongside PAD-US rather than instead of it, and how
-                   it avoids double-counting a park PAD-US or POTA
-                   already carries.
-  PAD-US        -- /data/nav/padus/PADUS4_0_Geodatabase.gdb on navi,
+                   per feature -- extract_osm_parks() reads that export
+                   rather than the PBF itself. Its path is likewise a
+                   command-line argument. See "PARK SOURCES" below for
+                   why this exists alongside PAD-US rather than instead
+                   of it, and how it avoids double-counting a park
+                   PAD-US or POTA already carries.
+  PAD-US        -- the PAD-US File Geodatabase, path set via PADUS_GDB
+                   below (or the MW_PADUS_GDB env var),
                    layer PADUS4_0Combined_Proclamation_Marine_Fee_
                    Designation_Easement (all protected-area types in one
                    layer, so a park does not go unmatched just because
@@ -602,7 +605,7 @@ def fetch_pota(out_path: str) -> None:
 
 
 # --------------------------------------------------------------------
-# Stage 3: OSM landmarks -- run on navi
+# Stage 3: OSM landmarks -- run on the GIS extract host
 # --------------------------------------------------------------------
 # A 300 m game-grid square is 90,000 m^2 -- same cell app/places_seed.py
 # scores a park against. Used below only as the "small area" gate for
@@ -668,10 +671,10 @@ def _bbox_area_m2(lats: list, lons: list) -> float:
 
 
 def extract_landmarks(pbf_path: str, out_path: str) -> None:
-    """Run on navi against the tags-filter output, e.g.:
+    """Run on the GIS extract host against the tags-filter output, e.g.:
 
         osmium tags-filter -o filtered.pbf --overwrite \\
-            /mnt/nas/nav/planet-latest.osm.pbf \\
+            /path/to/western-us-11states.osm.pbf \\
             amenity=townhall,courthouse,library \\
             tourism=museum,viewpoint,attraction,information,alpine_hut,wilderness_hut \\
             historic=memorial,monument,marker,mine,ruins,fort,battlefield,wreck \\
@@ -781,10 +784,20 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
 
 
 # --------------------------------------------------------------------
-# Stage 4: match POTA parks to PAD-US boundaries -- run on navi
+# Stage 4: match POTA parks to PAD-US boundaries -- run on the GIS extract host
 # --------------------------------------------------------------------
-PADUS_GDB = "/data/nav/padus/PADUS4_0_Geodatabase.gdb"
+PADUS_GDB = os.environ.get("MW_PADUS_GDB", "")
 PADUS_LAYER = "PADUS4_0Combined_Proclamation_Marine_Fee_Designation_Easement"
+
+
+def _require_padus_gdb() -> str:
+    if not PADUS_GDB:
+        raise SystemExit(
+            "No PAD-US geodatabase path set. Point MW_PADUS_GDB at the "
+            "PAD-US File Geodatabase (PADUS4_0_Geodatabase.gdb or newer), "
+            "or edit the PADUS_GDB constant above."
+        )
+    return PADUS_GDB
 
 # A 300 m game-grid square is 90,000 m^2.
 SQUARE_AREA_M2 = 300.0 * 300.0
@@ -1418,7 +1431,7 @@ _PARK_GEOM_SIMPLIFY_DEG = 0.0008
 
 
 def match_parks(pota_csv: str, out_path: str) -> None:
-    """Run on navi:  python3 build_places_seed.py match-parks pota.csv parks_matched.csv
+    """Run on the GIS extract host:  python3 build_places_seed.py match-parks pota.csv parks_matched.csv
 
     Matching rule: among PAD-US polygons whose bounding box comes within
     ~2 km of the POTA centre point, keep the one with the best normalized
@@ -1445,7 +1458,7 @@ def match_parks(pota_csv: str, out_path: str) -> None:
 
     buckets = _load_city_anchors(_DEFAULT_PLACES_CSV)
 
-    ds = ogr.Open(PADUS_GDB)
+    ds = ogr.Open(_require_padus_gdb())
     layer = ds.GetLayerByName(PADUS_LAYER)
     src_srs = layer.GetSpatialRef()
     dst_srs = osr.SpatialReference()
@@ -1614,7 +1627,7 @@ def match_parks(pota_csv: str, out_path: str) -> None:
 
 
 # --------------------------------------------------------------------
-# Stage 4b: PAD-US local/city/county parks -- run on navi
+# Stage 4b: PAD-US local/city/county parks -- run on the GIS extract host
 # --------------------------------------------------------------------
 # ADDED 2026-08-24, "too few parks" -- POTA lists only what hams
 # activate (state and national parks), so a town with real municipal
@@ -1767,7 +1780,7 @@ _DEDUP_QUERY_DEG = 0.02
 
 
 def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
-    """Run on navi:  python3 build_places_seed.py fetch-padus-parks pota.csv padus_parks.csv
+    """Run on the GIS extract host:  python3 build_places_seed.py fetch-padus-parks pota.csv padus_parks.csv
 
     pota_csv is fetch_pota()'s raw output (reference,name,lat,lon), used
     only to deduplicate against -- a PAD-US candidate whose name is a
@@ -1790,7 +1803,7 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
     exclude_re = _compile_exclude_park_name_re()
     buckets = _load_city_anchors(_DEFAULT_PLACES_CSV)
 
-    ds = ogr.Open(PADUS_GDB)
+    ds = ogr.Open(_require_padus_gdb())
     layer = ds.GetLayerByName(PADUS_LAYER)
     src_srs = layer.GetSpatialRef()
     dst_srs = osr.SpatialReference()
@@ -2350,7 +2363,7 @@ _METRES_PER_DEGREE_LAT = 111_320.0
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Same formula as app/grid.py's distance_m, duplicated rather than
     imported: this script is meant to run standalone ("anywhere", per
-    the module docstring, including on navi with no PYTHONPATH pointed
+    the module docstring, including on a bare GIS host with no PYTHONPATH pointed
     at the app package), so it carries no dependency on the app/ tree."""
     r = 6371000.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)

@@ -22,10 +22,10 @@ authoritative inside the US; OSM fills in literally everywhere else.
 
 This is a FOUR-STAGE pipeline, same shape as build_places_csv.py:
 
-  1. classify           -- on navi (zvx@100.64.0.27), which holds the
-                            planet extraction (already run once, ~77
-                            minutes -- see extract-boundaries below; DO
-                            NOT re-run it for an ordinary rebuild).
+  1. classify           -- wherever the OSM extraction output lives
+                            (already run once, ~77 minutes -- see
+                            extract-boundaries below; DO NOT re-run it
+                            for an ordinary rebuild).
                             Reads admin_boundaries.geojsonseq (polygons)
                             + place_points.csv (points) and classifies
                             each polygon as a populated place or not.

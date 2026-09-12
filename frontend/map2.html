@@ -141,7 +141,7 @@
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
   <link rel="stylesheet" href="/static/coverage.css?v=20260904-4" />
   <link rel="stylesheet" href="/static/mc.css?v=20260825-1" />
-  <link rel="stylesheet" href="/static/map2.css?v=26" />
+  <link rel="stylesheet" href="/static/map2.css?v=20260910-3" />
 </head>
 <body>
 
@@ -186,6 +186,28 @@
 
   <div id="map"></div>
 
+  <!-- Center-and-follow (map2.js's setupFollowControl/engageFollow/
+       disengageFollow, feature: map-center-follow). Lower-right corner
+       on every viewport, sized as a button rather than a checkbox row
+       so it is a comfortable tap target on a phone (see .mw-follow-btn
+       in map2.css). Engaging it turns on My Location too if it is off
+       -- following without a position fix is meaningless -- and the two
+       controls are kept from ever disagreeing about state (see
+       setupMyLocationControl's unchecked branch and onGeoError's fatal
+       branch, both of which call disengageFollow). aria-pressed is the
+       actual state; the icon is a plain crosshair (not an arrow) since
+       this feature never rotates the map to heading-up. -->
+  <button type="button" id="mw-follow-btn" class="mw-follow-btn"
+          aria-pressed="false" aria-label="Follow my location" title="Follow my location">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/>
+      <line x1="12" y1="2" x2="12" y2="6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <line x1="12" y1="17.5" x2="12" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <line x1="2" y1="12" x2="6.5" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <line x1="17.5" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </button>
+
   <div id="loading-overlay">
     <div class="loading-inner">
       <div class="loading-spinner"></div>
@@ -217,10 +239,35 @@
        says what pressing it does, not which way an arrow points. -->
   <div id="mw-layers" class="mw-layers">
     <div class="mw-layers-panel" id="mw-layers-panel">
+      <!-- Light/dark basemap (map2.js's setupBasemapModeToggle/
+           applyBasemapTheme, feature: map-light-mode). Deliberately a
+           two-button switch ABOVE the "LAYERS" list rather than another
+           checkbox row inside it: this picks which of the two CARTO
+           basemap SOURCES is visible under the hillshade/board, it is
+           not one more thing painted on top of the map the way
+           Hillshade/Public lands/etc are, so it reads as its own
+           control rather than a seventh layer checkbox. A SEPARATE axis
+           from the gold/neon skin toggle in the nav bar, and remembered
+           in its own localStorage key the same way the opacity slider
+           below remembers its own. Styled on the same
+           surface/border/active-state language as the board switch
+           (.mc-switch-row/.mc-switch-btn in mc.css, top-right panel) so
+           the two read as the same kind of control, just narrower to
+           fit this panel -- see .mw-basemap-switch-row/-btn in
+           map2.css. The pressed button at load comes from the stored
+           choice (map2.js's readLightBasemapPref, read at module scope
+           before this markup is even wired up), not whichever
+           aria-pressed value is written here -- same reasoning as every
+           checkbox below defaulting unchecked in markup regardless of
+           what setupLayerSwitcher does once it runs. -->
+      <div class="mw-basemap-switch-row" id="mw-basemap-switch-row">
+        <button type="button" id="mw-basemap-toggle-light" class="mw-basemap-switch-btn" aria-pressed="false">Light</button>
+        <button type="button" id="mw-basemap-toggle-dark" class="mw-basemap-switch-btn" aria-pressed="false">Dark</button>
+      </div>
       <div class="mw-layers-title">Layers</div>
       <ul class="mw-layers-list">
         <li>
-          <label><input type="checkbox" id="mw-layer-hillshade" checked> Hillshade</label>
+          <label><input type="checkbox" id="mw-layer-hillshade"> Hillshade</label>
         </li>
         <li>
           <label><input type="checkbox" id="mw-layer-public-lands"> Public lands</label>
@@ -232,7 +279,36 @@
           <label><input type="checkbox" id="mw-layer-usfs-trails"> USFS trails</label>
         </li>
         <li>
-          <label><input type="checkbox" id="mw-layer-places" checked> Places</label>
+          <label><input type="checkbox" id="mw-layer-places"> Places</label>
+        </li>
+        <!-- Claimed-squares opacity slider (map2.js's setupOpacitySlider/
+             applyBoardFillOpacity). Applies live via setPaintProperty on
+             every 'input' event, no apply button; the shown percentage
+             and the slider's starting position both come from
+             localStorage (map2.js's readBoardFillOpacityPct), not this
+             markup's value="" -- that attribute is only what a reader
+             with JavaScript disabled would see, same reasoning as every
+             checkbox above defaulting unchecked in markup regardless of
+             what setupLayerSwitcher does once it runs. -->
+        <li class="mw-layers-opacity-row">
+          <div class="mw-layers-opacity-label-row">
+            <label for="mw-layer-opacity">Claimed squares</label>
+            <span id="mw-layer-opacity-value" class="mw-layers-opacity-value">85%</span>
+          </div>
+          <input type="range" id="mw-layer-opacity" class="mw-layers-opacity-slider"
+                 min="0" max="100" step="1" value="85"
+                 aria-label="Claimed squares opacity">
+        </li>
+        <!-- My Location (map2.js's setupMyLocationControl). Off by
+             default; checking it starts navigator.geolocation.
+             watchPosition and never sends the position anywhere but
+             this tab -- see that function's own PRIVACY comment. The
+             status line directly below reports the cell id (the actual
+             point of this feature) or a readable failure message
+             instead of failing silently in the console. -->
+        <li>
+          <label><input type="checkbox" id="mw-layer-mylocation"> My location</label>
+          <div id="mw-mylocation-status" class="mw-mylocation-status" hidden></div>
         </li>
       </ul>
     </div>
@@ -258,7 +334,7 @@
   <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"
           crossorigin="anonymous"></script>
 
-  <script src="/static/map2.js?v=57" type="module"></script>
+  <script src="/static/map2.js?v=20260910-3" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

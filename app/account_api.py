@@ -79,6 +79,7 @@ too would be redundant with (1)/(2), not additional protection.
 """
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 
@@ -94,9 +95,11 @@ from .email_login import (
     EmailSendError,
     PURPOSE_VERIFY_CONTACT,
     email_login_enabled,
+    format_notice_timestamp,
     looks_like_email,
     normalize_email,
     send_magic_link_email,
+    send_security_notice,
 )
 from .oauth import PROVIDER_LABELS
 from .totp import totp_encryption_available
@@ -143,6 +146,8 @@ from .sessions import (
 # this one, and it does not import this module back, so there is no
 # cycle to avoid by deferring it.
 from .totp_api import verify_and_consume_recovery_code, verify_and_consume_totp_code
+
+log = logging.getLogger("account_api")
 
 router = APIRouter()
 
@@ -396,6 +401,94 @@ def _contact_email_out(conn, account_id: int) -> dict | None:
         "email": _mask_email(row["contact_email"]),
         "verified": row["contact_email_verified_at"] is not None,
     }
+
+
+# ---- security notices (Stage 2) ------------------------------------------
+#
+# Nine account-security events -- a password change, TOTP toggled, a
+# sign-in method unlinked, a key rotation, an account deletion, a player
+# claim (all in this file), plus three more in app/totp_api.py and
+# app/admin_api.py -- each mail app/email_login.py's send_security_notice()
+# with the SAME two rules: (1) it can only ever go to a CONFIRMED contact
+# address, never an unverified one or anything typed into a request body,
+# and (2) a mail failure must never break, delay, or roll back the action
+# that triggered it. _verified_contact_email() and _notify_security()
+# below are the one place both rules are enforced, reused by every call
+# site in this file and (via import) app/admin_api.py's own -- see that
+# module's own docstring for why app/totp_api.py keeps a small duplicate
+# of both instead of importing them (this file already imports FROM
+# totp_api.py above; the reverse would be a cycle).
+
+_SECURITY_NOTICE_FOOTER = (
+    "You're getting this because this address is confirmed on a MeshWars "
+    "account. Security notices can't be turned off."
+)
+
+
+def _verified_contact_email(conn, account_id: int) -> str | None:
+    """The one address a security notice may ever be sent to for this
+    account -- see app/db.py's account.contact_email_verified_at
+    MIGRATIONS comment. Requires BOTH columns: contact_email can sit
+    unverified indefinitely (see set_contact_email()'s own "always
+    stored unverified" comment below), and a notice must never reach
+    an address nobody has proven they control. Returns None -- never
+    raises -- when there is no confirmed address; every call site
+    treats that as "skip the notice, log at INFO", never as an error
+    (see _notify_security() just below).
+    """
+    row = conn.execute(
+        "SELECT contact_email FROM account "
+        "WHERE account_id = ? AND contact_email_verified_at IS NOT NULL",
+        (account_id,),
+    ).fetchone()
+    return row["contact_email"] if row else None
+
+
+async def _notify_security(
+    account_id: int,
+    contact_email: str | None,
+    *,
+    subject: str,
+    heading: str,
+    lines: tuple[str, str, str],
+    cta_label: str = "Review your account",
+    footer: str = _SECURITY_NOTICE_FOOTER,
+) -> None:
+    """Fire-and-forget security notice for one of this file's own
+    account-security events -- see app/email_login.py's
+    send_security_notice() for the mail itself.
+
+    `contact_email` is whatever the caller already resolved via
+    _verified_contact_email() -- taken as a parameter, not resolved in
+    here, because DELETE /api/account must capture it BEFORE its own
+    transaction deletes the `account` row out from under that query
+    (see that route's own call site). Skips silently (INFO, never a
+    warning) when it is None -- no verified address means no notice,
+    full stop.
+
+    Never raises: a mail failure here must never surface to the caller
+    or undo the action that already committed -- see EmailSendError's
+    own docstring in app/email_login.py and send_security_notice()'s
+    own docstring for why the stakes on this side are higher than on
+    a magic-link send failure, not lower.
+    """
+    if contact_email is None:
+        log.info(
+            "security notice skipped for account %d: no verified contact email", account_id
+        )
+        return
+    try:
+        await send_security_notice(
+            contact_email,
+            subject=subject,
+            heading=heading,
+            lines=lines,
+            cta_label=cta_label,
+            cta_url=f"{settings.oauth_public_base_url.rstrip('/')}/account",
+            footer=footer,
+        )
+    except Exception:
+        log.exception("failed to send security notice to account %d", account_id)
 
 
 def _totp_out(conn, account_id: int) -> dict:
@@ -679,12 +772,31 @@ async def link_key(
             "VALUES (?, 'player_linked', ?, 'user', ?)",
             (session.account_id, f"player_id={player_id}", now),
         )
+        contact_email = _verified_contact_email(conn, session.account_id)
 
     conn = connect()
     try:
         player = _player_out(conn, player_id)
     finally:
         conn.close()
+
+    # Security notice (Stage 2, event 6) -- see _notify_security()'s own
+    # docstring for why a send failure here can never surface to this
+    # response or undo the link just committed above.
+    display_name = player["display_name"] if player else f"player {player_id}"
+    when = format_notice_timestamp(now)
+    await _notify_security(
+        session.account_id, contact_email,
+        subject="A player was claimed on your MeshWars account",
+        heading="A player was claimed",
+        lines=(
+            f"The player {display_name} was claimed on your MeshWars account on {when}.",
+            "If that was you, there is nothing to do.",
+            "If it wasn't, someone else has access. Sign in, rotate your API key, and "
+            "check which sign-in methods are attached to the account.",
+        ),
+    )
+
     return JSONResponse({"player": player}, status_code=200)
 
 
@@ -780,12 +892,29 @@ async def rotate_key(
             "VALUES (?, 'key_rotated', ?, 'user', ?)",
             (session.account_id, f"player_id={session.player_id} revoked={revoked_count}", now),
         )
+        contact_email = _verified_contact_email(conn, session.account_id)
 
     # See this route's own docstring -- same cache-staleness fix
     # admin_player_reissue applies, called the same way (after commit,
     # covering every key just revoked above, not only the newest one).
     ingestor = request.app.state.mc_ingestor
     ingestor.invalidate_player(session.player_id)
+
+    # Security notice (Stage 2, event 4) -- see _notify_security()'s own
+    # docstring for why a send failure here can never surface to this
+    # response or undo the rotation just committed above.
+    await _notify_security(
+        session.account_id, contact_email,
+        subject="Your MeshWars API key was rotated",
+        heading="Your API key was rotated",
+        lines=(
+            f"Your MeshWars API key was rotated on {format_notice_timestamp(now)}. "
+            "Every previous key stopped working.",
+            "If that was you, there is nothing to do.",
+            "If it wasn't, someone else has access. Sign in, rotate your API key, and "
+            "check which sign-in methods are attached to the account.",
+        ),
+    )
 
     return JSONResponse(
         {
@@ -914,6 +1043,26 @@ async def set_password(
             "VALUES (?, 'password_set', ?, 'user', ?)",
             (session.account_id, kind_detail, now),
         )
+        contact_email = _verified_contact_email(conn, session.account_id)
+
+    # Security notice (Stage 2, event 1) -- see _notify_security()'s own
+    # docstring for why a send failure here can never surface to this
+    # response or undo the write just committed above. kind_detail is
+    # "set" the first time an account gets a password, "changed" every
+    # time after -- the subject/heading/line1 verb tracks which one this
+    # request actually was.
+    when = format_notice_timestamp(now)
+    await _notify_security(
+        session.account_id, contact_email,
+        subject=f"Your MeshWars password was {kind_detail}",
+        heading=f"Your password was {kind_detail}",
+        lines=(
+            f"The password on your MeshWars account was {kind_detail} on {when}.",
+            "If that was you, there is nothing to do.",
+            "If it wasn't, someone else has access. Sign in, rotate your API key, and "
+            "check which sign-in methods are attached to the account.",
+        ),
+    )
 
     return JSONResponse({"ok": True}, status_code=200)
 
@@ -949,6 +1098,22 @@ async def delete_password(
             "VALUES (?, 'password_removed', NULL, 'user', ?)",
             (session.account_id, now),
         )
+        contact_email = _verified_contact_email(conn, session.account_id)
+
+    # Security notice (Stage 2, event 1) -- see _notify_security()'s own
+    # docstring for why a send failure here can never surface to this
+    # response or undo the removal just committed above.
+    await _notify_security(
+        session.account_id, contact_email,
+        subject="Your MeshWars password was removed",
+        heading="Your password was removed",
+        lines=(
+            f"The password on your MeshWars account was removed on {format_notice_timestamp(now)}.",
+            "If that was you, there is nothing to do.",
+            "If it wasn't, someone else has access. Sign in, rotate your API key, and "
+            "check which sign-in methods are attached to the account.",
+        ),
+    )
 
     return JSONResponse(
         {"ok": True, "remaining_doors": remaining, "warning_last_door": remaining == 1},
@@ -1014,6 +1179,23 @@ async def unlink_identity(
             "VALUES (?, 'identity_unlinked', ?, 'user', ?)",
             (session.account_id, f"provider={provider}", now),
         )
+        contact_email = _verified_contact_email(conn, session.account_id)
+
+    # Security notice (Stage 2, event 3) -- see _notify_security()'s own
+    # docstring for why a send failure here can never surface to this
+    # response or undo the removal just committed above.
+    await _notify_security(
+        session.account_id, contact_email,
+        subject="A sign-in method was removed from your MeshWars account",
+        heading="A sign-in method was removed",
+        lines=(
+            f"The {provider} sign-in method was removed from your MeshWars account on "
+            f"{format_notice_timestamp(now)}.",
+            "If that was you, there is nothing to do.",
+            "If it wasn't, someone else has access. Sign in, rotate your API key, and "
+            "check which sign-in methods are attached to the account.",
+        ),
+    )
 
     return JSONResponse(
         {"ok": True, "remaining_doors": remaining, "warning_last_door": remaining == 1},
@@ -1603,6 +1785,14 @@ async def delete_account(
     now = int(time.time())
 
     async with WriteSession() as conn:
+        # Captured FIRST, before anything below deletes account.contact_email
+        # out from under it -- see this route's own docstring, "security
+        # notice" section just above, and _notify_security()'s own
+        # docstring on why this is a parameter there rather than something
+        # it resolves itself: by the time this transaction commits, the
+        # `account` row this would otherwise read is gone.
+        contact_email = _verified_contact_email(conn, session.account_id)
+
         player_row = None
         if session.player_id is not None:
             player_row = conn.execute(
@@ -1697,6 +1887,25 @@ async def delete_account(
     if player_row is not None:
         ingestor = request.app.state.mc_ingestor
         ingestor.invalidate_player(player_row["player_id"])
+
+    # Security notice (Stage 2, event 5) -- deliberately AFTER the
+    # deletion above already committed, using the `contact_email`
+    # captured before it ran (see this block's own comment). Note
+    # line 3 here departs from every other self-initiated event's
+    # shared "rotate your API key" wording: there is no account left
+    # to sign into or rotate a key on, so the contract for this one
+    # event is just "reply to this message" instead.
+    await _notify_security(
+        session.account_id, contact_email,
+        subject="Your MeshWars account was deleted",
+        heading="Your account was deleted",
+        lines=(
+            f"Your MeshWars account was deleted on {format_notice_timestamp(now)}. "
+            "This cannot be undone.",
+            "If that was you, there is nothing to do.",
+            "If it wasn't you, reply to this message.",
+        ),
+    )
 
     response = JSONResponse({"ok": True}, status_code=200)
     clear_session_cookie(response)

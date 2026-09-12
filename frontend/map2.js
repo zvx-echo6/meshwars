@@ -6,11 +6,15 @@
  *
  * Also carries: the site's theme system (theme.css + theme-toggle.js,
  * same as every other page, but defaulting to the neon/dark theme here
- * specifically -- see the boot snippet in map2.html), a single dark
- * basemap shared by both themes (gold used to sit on a light OSM
+ * specifically -- see the boot snippet in map2.html), a dark basemap
+ * shared by both gold/neon SKINS (gold used to sit on a light OSM
  * raster, which washed the baked hillshade out under a dark interface
  * -- gold is now the colour of the chrome and the pins, not of the
- * ground; see BASEMAP_ID), three self-hosted
+ * ground; see BASEMAP_ID), plus a separate light/dark BASEMAP MODE
+ * toggle (feature: map-light-mode, see BASEMAP_LIGHT_ID) a viewer picks
+ * for themselves in the Layers panel -- that axis is independent of the
+ * gold/neon skin and exists purely so the baked hillshade can be judged
+ * against a light ground, three self-hosted
  * PMTiles overlays (public lands, USFS roads/trails), all behind a small
  * layer-switcher panel (also visibility-toggled, so flipping a checkbox
  * never refetches a source), Places Worth Going markers and a slide-out
@@ -342,20 +346,22 @@ function teamName(name, team) {
 // All three overlay archives -- public lands, USFS roads/trails, and
 // the hillshade below -- now ship with the game itself (same-origin
 // /tiles/, see app/api.py's tiles_dir mount) rather than being fetched
-// from navi at runtime -- navi's archives got rebuilt in place, keeping
-// the same filename, and a browser that already held byte ranges of
-// the previous file would happily keep serving them against a file
+// cross-origin from the build host at runtime -- that host's archives
+// got rebuilt in place, keeping the same filename, and a browser that
+// already held byte ranges of the previous file would happily keep
+// serving them against a file
 // that had since changed shape underneath it. That showed up as a
 // region silently missing rather than as an error. Bump TILE_REV
 // whenever a served archive changes, so the URL changes and nothing
 // stale can survive.
 //
 // The hillshade source used to be planet-dem.pmtiles, the one archive
-// still on navi: a raw elevation DEM shaded in the browser at ~11.3MB
-// per view, ninety-five percent of the page's weight. It is now
-// meshwars-hillshade-alpha-v4.pmtiles -- finished imagery, pre-rendered
-// once across the play area at the dark theme's exaggeration -- so
-// navi is out of the runtime path entirely. This is the second bake:
+// still fetched from the build host: a raw elevation DEM shaded in the
+// browser at ~11.3MB per view, ninety-five percent of the page's
+// weight. It is now meshwars-hillshade-alpha-v4.pmtiles -- finished
+// imagery, pre-rendered once across the play area at the dark theme's
+// exaggeration -- so the build host is out of the runtime path
+// entirely. This is the second bake:
 // the first (meshwars-hillshade.pmtiles, kept on disk as a rollback)
 // stored opaque greyscale, which painted flat ground the same opaque
 // grey as a shadowed ridge and washed out the whole map. This archive
@@ -367,15 +373,28 @@ const DEM_URL = `/tiles/na-hillshade-alpha2.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
-// Both themes now share ONE dark basemap (CARTO dark_all) -- gold used
-// to point at the stock light OSM raster, which put a bright white map
-// under a dark interface and washed the baked hillshade out. Gold is
-// now the colour of the chrome and the place pins (PLACE_COLORS), not
-// of the ground, so there is nothing left for a second basemap source
-// to differ on; the old basemap-gold/basemap-neon pair (two sources,
-// two layers, toggled by visibility in applyBasemapTheme) collapsed to
-// this single always-visible source/layer.
+// Both SKINS (gold/neon) now share ONE dark basemap (CARTO dark_all) --
+// gold used to point at the stock light OSM raster, which put a bright
+// white map under a dark interface and washed the baked hillshade out.
+// Gold is now the colour of the chrome and the place pins
+// (PLACE_COLORS), not of the ground, so there is nothing left for a
+// second basemap source to differ on BY SKIN; the old
+// basemap-gold/basemap-neon pair (two sources, two layers, toggled by
+// visibility in applyBasemapTheme, keyed to currentTheme()) collapsed
+// to this single source/layer.
+//
+// BASEMAP_LIGHT_ID below is a second basemap source/layer again, but on
+// a DIFFERENT axis: a viewer's own light/dark choice (feature:
+// map-light-mode, the Light/Dark buttons at the top of the Layers
+// panel), not the gold/neon skin. It exists so the baked hillshade (DEM_URL
+// above) can actually be judged against a light ground -- that was the
+// entire point of the request this shipped for -- and is deliberately
+// NOT coupled to currentTheme(): a viewer can run neon skin with the
+// light basemap on, or gold with dark, any combination. See
+// currentBasemapMode()/applyBasemapTheme below for how the two axes
+// stay independent while both still repaint through one function.
 const BASEMAP_ID = 'basemap';
+const BASEMAP_LIGHT_ID = 'basemap-light';
 const HILLSHADE_ID = 'hillshade';
 
 // Team territory washes into the dark basemap/hillshade -- both themes
@@ -420,12 +439,137 @@ const BOARD_SEP_WIDTH_ZOOM = ['interpolate', ['linear'], ['zoom'], 11, 0, 12, 0.
 // competing for the same handful of pixels at low zoom.
 const BOARD_LINE_WIDTH_ZOOM = ['interpolate', ['linear'], ['zoom'], 11, 1.5, 13, 2, 14, 2.5, 15, 3, 16, 3];
 
+// ===== Claimed-squares opacity slider (feature: map-controls) =====
+//
+// The slider in the Layers panel (map2.html's #mw-layer-opacity) drives
+// 'board-fill''s fill-opacity directly, replacing BOARD_FILL_OPACITY_ZOOM
+// above as that layer's paint source once the panel wires up -- see
+// applyBoardFillOpacity()/setupOpacitySlider() near setupLayerSwitcher
+// below, and applyBasemapTheme's own board-fill line, which now calls
+// applyBoardFillOpacity() instead of setting BOARD_FILL_OPACITY_ZOOM[theme]
+// directly so a theme flip can never silently override the viewer's
+// chosen value.
+//
+// Default matches BOARD_FILL_OPACITY.gold/.neon above (both 0.85) -- read
+// off that constant rather than a second hardcoded number, so the two
+// can never drift apart.
+const BOARD_FILL_OPACITY_DEFAULT_PCT = Math.round(BOARD_FILL_OPACITY.gold * 100);
+
+// The DEFAULT this slider opens at when the light basemap (feature:
+// map-light-mode, see BASEMAP_LIGHT_ID above) is on and the viewer has
+// never touched the slider. Not a new number invented for this feature
+// -- it is gold's own old BOARD_FILL_OPACITY value from before "Both
+// themes go dark" collapsed the two source basemaps into one (see that
+// commit): a light basemap already carries its own contrast against
+// the team colours, so DEFAULT_PCT's full weight above (tuned for the
+// dark basemap) is more than a light ground needs. This only ever
+// supplies the STARTING value -- an explicit slider choice
+// (BOARD_FILL_OPACITY_STORAGE_KEY) always wins over it, on either
+// basemap, once one exists; see readBoardFillOpacityPct/
+// boardFillOpacityDefaultPct below.
+const BOARD_FILL_OPACITY_DEFAULT_PCT_LIGHT = 45;
+
+// The z10->z13 lift BOARD_FILL_OPACITY_ZOOM bakes in (0.92 vs 0.85, see
+// its own comment: board-line's team rim is hidden below z13, and this
+// makes up a little of the lost saturation). Kept as a ratio, not a
+// second absolute value, so the same proportional lift applies at
+// whatever opacity the viewer actually picks, not just the original 85%.
+const BOARD_FILL_OPACITY_RAMP_RATIO = 0.92 / BOARD_FILL_OPACITY.gold;
+
+const BOARD_FILL_OPACITY_STORAGE_KEY = 'mwBoardFillOpacityPct';
+
 // The baked hillshade archive carries real alpha -- transparent on flat
-// ground, black/white toward shadow/highlight. Both themes sit on the
+// ground, black/white toward shadow/highlight. Both SKINS sit on the
 // same dark basemap now, so both get the full-strength value that used
 // to be neon-only; gold's old 0.7 existed only to keep a light basemap
-// from washing out, which no longer applies.
+// from washing out, which no longer applied once the basemap itself
+// went dark on both skins.
 const HILLSHADE_OPACITY = { gold: 1.0, neon: 1.0 };
+
+// That old 0.7 is back, though -- not as a skin value, but as the
+// BASEMAP MODE factor (feature: map-light-mode): it multiplies on top
+// of HILLSHADE_OPACITY[theme] above rather than replacing it, so the
+// two axes (gold/neon skin, light/dark basemap) stay independent. At
+// full strength (1.0) on the dark basemap the imagery is unchanged from
+// today; at 0.7 on the light basemap it holds back exactly as much as
+// it used to when gold's basemap itself was light. See
+// applyBasemapTheme below for where this is applied.
+// How much colour to put back into the light basemap. raster-saturation
+// runs -1 (grey) to 1 (fully saturated); Voyager stock sits low enough
+// that parks and water read as tints rather than colours. A small
+// contrast lift stops the extra saturation from flattening the tone.
+// Saturation only. A contrast lift was tried here and made things
+// visibly WORSE: raster-contrast separates around mid-grey, and on an
+// already-light raster that pushes the pale tones toward white, so the
+// ground bleached to cream and took the greens with it. Colour is the
+// thing that was missing, so raise colour and leave tone alone.
+// The team-coloured dot has to survive the case a player is in most of
+// the time: standing on a square their OWN team owns, where the dot's
+// fill is exactly the ground colour and the rings are doing all the
+// work. At the original radius 7/11 that read as a small target rather
+// than something that catches the eye, so both go up substantially.
+// Sized between the two things that failed: radius 7/11 vanished on a
+// player's own territory, 13/22 read as a bulky blob. The rings do the
+// work through CRISPNESS, not bulk -- thin bright ring, thin dark
+// outline, tight against the fill -- so this stays small and sharp.
+// How far the halo's tint is lifted from the team colour: enough to
+// read as a different shade against both the dot and same-team
+// ground, not so far that it turns white and loses the team read.
+const MY_LOCATION_HALO_TINT = 0.55;
+const MY_LOCATION_TEAM_DOT_RADIUS = 8;
+const MY_LOCATION_HALO_RADIUS = 13;
+
+// ...and a slow pulse on the halo, which is what actually draws the eye
+// on a flat field of one colour -- size alone still has to be FOUND.
+// Deliberately slow and shallow: this marks where you are, it is not an
+// alert. Honours prefers-reduced-motion by simply never starting, in
+// which case the larger static rings above still carry the job.
+const MY_LOCATION_PULSE_PERIOD_MS = 2400;
+const MY_LOCATION_PULSE_MIN = 0.94;
+const MY_LOCATION_PULSE_MAX = 1.16;
+let myLocationPulseRaf = null;
+
+function stopMyLocationPulse() {
+  if (myLocationPulseRaf !== null) {
+    cancelAnimationFrame(myLocationPulseRaf);
+    myLocationPulseRaf = null;
+  }
+}
+
+function startMyLocationPulse(map) {
+  stopMyLocationPulse();
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const started = performance.now();
+  const step = (now) => {
+    if (!map.getLayer('my-location-halo')) { myLocationPulseRaf = null; return; }
+    // Sine over the period, mapped into the min..max scale band.
+    const phase = ((now - started) % MY_LOCATION_PULSE_PERIOD_MS) / MY_LOCATION_PULSE_PERIOD_MS;
+    const eased = (Math.sin(phase * Math.PI * 2) + 1) / 2;
+    const scale = MY_LOCATION_PULSE_MIN + eased * (MY_LOCATION_PULSE_MAX - MY_LOCATION_PULSE_MIN);
+    map.setPaintProperty('my-location-halo', 'circle-radius', MY_LOCATION_HALO_RADIUS * scale);
+    // Fade the ring slightly as it grows so the pulse reads as a breath
+    // rather than a hard ring changing size.
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.5 - (scale - MY_LOCATION_PULSE_MIN) * 0.32);
+    myLocationPulseRaf = requestAnimationFrame(step);
+  };
+  myLocationPulseRaf = requestAnimationFrame(step);
+}
+
+const BASEMAP_LIGHT_SATURATION = 0;
+const BASEMAP_LIGHT_CONTRAST = 0;
+
+const HILLSHADE_OPACITY_MODE_FACTOR = { dark: 1.0, light: 0.4 };
+
+// The hillshade archive is grayscale imagery whose HIGHLIGHTS are near
+// white. Over the dark basemap those highlights are what makes terrain
+// legible at all, so nothing is clamped there. Over a light basemap the
+// same highlights have nothing to contrast against and the whole basin
+// blows out to glare -- sun-facing slopes turn to white paper and the
+// coloured ground underneath disappears. Pulling raster-brightness-max
+// down keeps the shadowed side of every ridge (which is what actually
+// draws the relief) while stopping the lit side from washing the map
+// out. Paired with the much lower light-mode opacity above.
+const HILLSHADE_BRIGHTNESS_MAX = { dark: 1.0, light: 0.72 };
 
 // Each checkbox id -> the style layer id(s) it toggles, and the
 // minimum zoom its underlying data starts at (measured from the tile
@@ -1805,6 +1949,13 @@ function setBoardMode(newMode, map) {
   // otherwise switching boards leaves the other board's colours on them.
   loadPlacesViewport(map);
   loadPlacesPanel(map);
+  // loadBoardData above only replaces board-fill's DATA (setData on the
+  // 'board' source) -- it never touches board-fill's paint properties,
+  // so the slider's chosen opacity is never actually at risk here today.
+  // Reapplied anyway, defensively: this is exactly the kind of call that
+  // is easy to add above this line later (an addLayer, a style swap)
+  // without remembering it would silently reset a viewer's own choice.
+  applyBoardFillOpacity(map);
 }
 
 // ===== First-visit board choice =====
@@ -2493,6 +2644,71 @@ function buildRepeaterSectionHtml(detail, c) {
   `;
 }
 
+// Reception/verification evidence behind one capture (app/mc_api.py's
+// cell_detail_for(): recent_captures[].evidence_type/watcher_count/
+// watcher_corroborated, joined from player_cell_ping). '' when
+// evidence_type is null -- an older capture, a pruned ping, or a
+// meshview/MeshCore paint, none of which write these fields -- so the
+// capture line renders exactly as it always has, no placeholder text
+// standing in for data that was never collected. See Matt's original
+// ask: "how do i know its an rx square or rx cap by the lines in the
+// popup box?". Kept in sync with frontend/mc.js's copy of the same
+// function -- see that file's buildCellPopupHtml for why this whole
+// popup builder is duplicated rather than shared.
+//
+// watcher_corroborated is a tri-state (true / false / null), and null
+// means UNKNOWN, not false -- a paint made before the capture-signal
+// columns existed has evidence_type set but watcher_corroborated and
+// watcher_count both NULL, because that evidence was simply never
+// recorded, not because it was recorded as absent. Treating that NULL
+// as false would assert "not corroborated" about a reception that may
+// in fact have had thirty watchers -- a fact we don't have, stated as
+// though we did. So this is a strict three-way branch, never a truthy
+// check on watcher_corroborated:
+//   - true AND a positive watcher_count  -> the actual count
+//   - false, explicitly recorded         -> "not corroborated"
+//   - anything else (null/absent, or true with no count on record)
+//                                         -> bare "RX", no claim either way
+// Same principle for verified_tx: a null watcher_count renders "Verified
+// TX" alone, never "Verified TX, 0 watchers" -- 0 is a real recorded
+// count and would be shown as itself; null is not 0.
+function buildCaptureEvidenceNote(cap) {
+  if (cap.evidence_type === 'passive_rx') {
+    if (cap.watcher_corroborated === true && typeof cap.watcher_count === 'number' && cap.watcher_count > 0) {
+      const n = cap.watcher_count;
+      return ` &mdash; RX corroborated with ${n} watcher${n === 1 ? '' : 's'}`;
+    }
+    if (cap.watcher_corroborated === false) {
+      return ' &mdash; RX, not corroborated';
+    }
+    return ' &mdash; RX';
+  }
+  if (cap.evidence_type === 'verified_tx') {
+    if (typeof cap.watcher_count === 'number') {
+      const n = cap.watcher_count;
+      return ` &mdash; Verified TX, ${n} watcher${n === 1 ? '' : 's'}`;
+    }
+    return ' &mdash; Verified TX';
+  }
+  return '';
+}
+
+// One plain-English line summarizing this cell's paint evidence (app/
+// mc_api.py's _cell_evidence_summary()). '' when there's nothing to
+// summarize -- a MeshCore cell (every paint's evidence_type is NULL)
+// or a cell with no player_cell_ping rows at all -- so the line simply
+// does not appear rather than reporting "0 receptions and 0 verified
+// transmissions".
+function buildEvidenceSummaryHtml(detail) {
+  const s = detail.evidence_summary;
+  if (!s) return '';
+  const parts = [];
+  if (s.passive_rx_count) parts.push(`${s.passive_rx_count} reception${s.passive_rx_count === 1 ? '' : 's'}`);
+  if (s.verified_tx_count) parts.push(`${s.verified_tx_count} verified transmission${s.verified_tx_count === 1 ? '' : 's'}`);
+  if (parts.length === 0) return '';
+  return `<div class="mc-popup-row mc-popup-empty">Painted by ${parts.join(' and ')}</div>`;
+}
+
 function buildCellPopupHtml(cellId, detail, c) {
   const scoreRows = TEAM_ORDER.map((team) => {
     const score = detail.scores && detail.scores[team] !== undefined ? detail.scores[team] : 0;
@@ -2514,7 +2730,7 @@ function buildCellPopupHtml(cellId, detail, c) {
         : escapeHtml(cap.by_team);
       const fromNote = cap.from_team ? ` (from ${escapeHtml(cap.from_team)})` : '';
       return `<div class="mc-popup-capture-row">
-          ${escapeHtml(formatTs(cap.ts))} &mdash; ${attribution}${fromNote}
+          ${escapeHtml(formatTs(cap.ts))} &mdash; ${attribution}${fromNote}${buildCaptureEvidenceNote(cap)}
         </div>`;
     }).join('')
     : '<div class="mc-popup-capture-row mc-popup-empty">No capture history.</div>';
@@ -2547,6 +2763,7 @@ function buildCellPopupHtml(cellId, detail, c) {
       ${scoreRows}
       <div class="mc-popup-section-title">Recent captures</div>
       ${captureRows}
+      ${buildEvidenceSummaryHtml(detail)}
       ${buildRepeaterSectionHtml(detail, c)}
     </div>
   `;
@@ -2998,20 +3215,101 @@ function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === 'neon' ? 'neon' : 'gold';
 }
 
-// No basemap layer left to flip visibility on -- both themes share the
-// one dark BASEMAP_ID layer now (see its comment above). Never touches
-// the board's team-colour expression -- that stays constant across
-// themes on purpose (gameplay, not branding). The hillshade layer used
-// to get a per-theme exaggeration re-tune here too; that was a
-// raster-dem paint property computed in the browser, and the
-// pre-rendered hillshade imagery has its exaggeration baked in at
-// build time with no such property left to set. raster-opacity is a
-// different paint property that survives the switch to baked imagery
-// (see HILLSHADE_OPACITY), so it's still tuned here per theme.
+// ===== Basemap mode: light/dark (feature: map-light-mode) =====
+//
+// A SEPARATE axis from currentTheme() above. currentTheme() is the
+// site-wide gold/neon skin, written to <html data-theme> by
+// theme-toggle.js and shared with every other page. This is a
+// map2-only choice -- which of the two basemap sources (BASEMAP_ID,
+// dark, vs BASEMAP_LIGHT_ID, light) is visible -- made in this page's
+// own Layers panel and remembered in this page's own localStorage key,
+// same pattern as the opacity slider (BOARD_FILL_OPACITY_STORAGE_KEY)
+// and every other "remembered choice" on this page: read once here at
+// module scope so it is available the instant applyBasemapTheme first
+// runs, no async gap where the wrong basemap would flash on screen.
+const BASEMAP_MODE_STORAGE_KEY = 'mwLightBasemap';
+
+function readLightBasemapPref() {
+  try {
+    return localStorage.getItem(BASEMAP_MODE_STORAGE_KEY) === '1';
+  } catch {
+    // Storage unavailable (private browsing, quota) -- default to dark,
+    // same as a first-time visitor with no stored choice at all.
+    return false;
+  }
+}
+
+function rememberLightBasemapPref(isLight) {
+  try {
+    localStorage.setItem(BASEMAP_MODE_STORAGE_KEY, isLight ? '1' : '0');
+  } catch {
+    // Swallowed, same as every other localStorage write on this page --
+    // the toggle still works for the rest of this visit, it just does
+    // not survive a reload.
+  }
+}
+
+let basemapModeIsLight = readLightBasemapPref();
+
+function currentBasemapMode() {
+  return basemapModeIsLight ? 'light' : 'dark';
+}
+
+// Grid lines and My Location (both feature: map-controls) read their
+// colours off gold/neon theme TOKENS via themeColor() -- --mw-text-6,
+// --mw-accent, --mw-gold-light -- every one of which was picked to read
+// against a dark ground, because until this feature every ground was
+// dark. Measured against CARTO light_all during this feature's own
+// screenshot verification pass: --mw-text-6 (gold #888 / neon #5F7183)
+// all but disappears on the light basemap's near-white ground, and the
+// pale --mw-gold-light/--mw-accent tones washed-out the same way. These
+// are literal colours rather than a third set of theme tokens because
+// they exist for the basemap-mode axis only -- neither gold nor neon's
+// palette, just "dark enough to hold a line on a light ground" -- see
+// applyBasemapTheme below for where they replace the token reads.
+const GRID_LINE_COLOR_LIGHT = '#3a3a3a';
+const MY_LOCATION_STROKE_LIGHT = 'rgba(15, 15, 15, 0.75)';
+
+// The team-coloured dot's own outline (feature: team-coloured
+// location, see applyMyLocationColors) -- fixed across both basemap
+// modes and every skin, unlike MY_LOCATION_STROKE_LIGHT above. It sits
+// on top of my-location-halo's white ring, never directly on the
+// basemap or a claimed square, so it does not need a mode-dependent
+// pair: a dark ring against a white ring reads the same regardless of
+// what is under both of them.
+const MY_LOCATION_TEAM_DOT_STROKE = 'rgba(10, 10, 10, 0.85)';
+
+// Flips which of the two basemap sources is visible (BASEMAP_ID dark /
+// BASEMAP_LIGHT_ID light -- see their own comment above for why this is
+// a second source/layer pair again, on a different axis than the old
+// gold/neon one). Never touches the board's team-colour expression --
+// that stays constant across both the skin and the basemap mode, on
+// purpose (gameplay, not branding). The hillshade layer used to get a
+// per-theme exaggeration re-tune here too; that was a raster-dem paint
+// property computed in the browser, and the pre-rendered hillshade
+// imagery has its exaggeration baked in at build time with no such
+// property left to set. raster-opacity is a different paint property
+// that survives the switch to baked imagery (see HILLSHADE_OPACITY /
+// HILLSHADE_OPACITY_MODE_FACTOR), so it's still tuned here, now against
+// BOTH axes at once.
+//
+// Called on every gold/neon skin flip (watchTheme's MutationObserver)
+// AND every light/dark basemap flip (setupBasemapModeToggle's checkbox
+// listener) -- one function repaints for whichever axis just changed,
+// so the two can never fall out of sync with each other.
 function applyBasemapTheme(map) {
   const theme = currentTheme();
-  map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme]);
-  map.setPaintProperty('board-fill', 'fill-opacity', BOARD_FILL_OPACITY_ZOOM[theme]);
+  const mode = currentBasemapMode();
+  map.setLayoutProperty(BASEMAP_ID, 'visibility', mode === 'light' ? 'none' : 'visible');
+  map.setLayoutProperty(BASEMAP_LIGHT_ID, 'visibility', mode === 'light' ? 'visible' : 'none');
+  map.setPaintProperty(HILLSHADE_ID, 'raster-opacity', HILLSHADE_OPACITY[theme] * HILLSHADE_OPACITY_MODE_FACTOR[mode]);
+  map.setPaintProperty(HILLSHADE_ID, 'raster-brightness-max', HILLSHADE_BRIGHTNESS_MAX[mode]);
+  // board-fill's opacity is now owned by the slider (see
+  // BOARD_FILL_OPACITY_DEFAULT_PCT/applyBoardFillOpacity above/below) --
+  // BOARD_FILL_OPACITY_ZOOM[theme] is only the SHAPE that helper scales,
+  // never set on the layer directly, so a theme flip re-paints the
+  // viewer's own chosen opacity instead of silently resetting it.
+  applyBoardFillOpacity(map);
   // Zoom-interpolated, not per-theme (see BOARD_SEP_WIDTH_ZOOM/
   // BOARD_LINE_WIDTH_ZOOM above) -- set here rather than in the
   // addLayer literal because this theme pass runs after those
@@ -3026,6 +3324,84 @@ function applyBasemapTheme(map) {
   map.setPaintProperty('park-boundaries-line', 'line-color', PLACE_COLORS[theme]);
   for (const type of PLACE_TYPES) {
     map.setLayoutProperty(`places-icons-${type}`, 'icon-image', placeIconExpression(type, theme));
+  }
+  // Grid lines (feature: map-controls) and My Location (same) both read
+  // their colours off theme tokens via themeColor() at addLayer time --
+  // re-set here too so a theme flip repaints them instead of leaving
+  // gold's colours on screen under the neon skin. On the light basemap
+  // those tokens are swapped for the literal, basemap-mode-only colours
+  // above instead (GRID_LINE_COLOR_LIGHT/MY_LOCATION_STROKE_LIGHT) --
+  // neither skin's token reads on a light ground, see their own comment.
+  const light = mode === 'light';
+  map.setPaintProperty('cell-grid-lines', 'line-color', light ? GRID_LINE_COLOR_LIGHT : themeColor('--mw-text-6'));
+  applyMyLocationColors(map);
+}
+
+// Paints my-location-accuracy/-dot/-halo from two independent inputs:
+// the basemap light/dark mode (currentBasemapMode, exactly the logic
+// applyBasemapTheme always ran) and the signed-in viewer's team, if
+// any (myLocationTeam -- see fetchViewerTeam's own comment on how/when
+// that gets set). Called from applyBasemapTheme on every theme/
+// basemap-mode flip AND from setupMyLocationControl the moment the
+// account fetch resolves, so whichever of the two changes first, the
+// marker is always repainted from BOTH current values together, never
+// a stale one left over from before a theme flip or before the fetch
+// resolved.
+function applyMyLocationColors(map) {
+  const light = currentBasemapMode() === 'light';
+
+  // Accuracy circle: unchanged by team, on purpose (the ask: "stay
+  // visually subordinate to the dot; adjust it if the team colour
+  // makes it fight" -- it never does, because --mw-accent is gold/neon,
+  // never one of the seven team hues, so it cannot visually merge with
+  // the team-coloured dot drawn on top of it or the team-coloured
+  // square it may be sitting on).
+  map.setPaintProperty('my-location-accuracy', 'circle-color', themeColor('--mw-accent'));
+  map.setPaintProperty('my-location-accuracy', 'circle-stroke-color', light ? MY_LOCATION_STROKE_LIGHT : themeColor('--mw-accent'));
+
+  const teamColor = myLocationTeam ? themeColor(`--mw-team-${myLocationTeam.toLowerCase()}`) : '';
+  if (teamColor) {
+    // Signed in with a linked team: paint a "target" marker -- a fixed
+    // white ring with a dark outline (my-location-halo, added
+    // invisible alongside the dot at map load) sits behind a bigger,
+    // team-coloured dot. Fixed white/near-black rather than the
+    // light/dark-mode stroke pair below, deliberately: this ring has
+    // to hold against FOUR different grounds, not two -- the dark
+    // basemap, the light basemap, and a claimed square in any of the
+    // seven team colours, INCLUDING this viewer's own. That last one
+    // is the hard case the mode-based stroke was never built for: it
+    // was picked to hold against a basemap, not a same-hue solid fill,
+    // so a purple dot with a purple-mode stroke on purple territory
+    // would still wash out. White and near-black are the two colours
+    // guaranteed not to be one of the seven saturated team hues, and a
+    // real square is never near-white AND near-black at once, so at
+    // least one of the halo's two rings holds contrast against
+    // whatever the dot is sitting on.
+    // A lifted tint of the same team colour -- see shadeColor above for
+    // why lighter rather than darker.
+    const haloColor = shadeColor(teamColor, MY_LOCATION_HALO_TINT);
+    map.setPaintProperty('my-location-halo', 'circle-color', haloColor);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-color', haloColor);
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0.5);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-opacity', 0.9);
+    map.setPaintProperty('my-location-halo', 'circle-radius', MY_LOCATION_HALO_RADIUS);
+    map.setPaintProperty('my-location-dot', 'circle-radius', MY_LOCATION_TEAM_DOT_RADIUS);
+    map.setPaintProperty('my-location-dot', 'circle-color', teamColor);
+    map.setPaintProperty('my-location-dot', 'circle-stroke-color', MY_LOCATION_TEAM_DOT_STROKE);
+    map.setPaintProperty('my-location-dot', 'circle-stroke-width', 1.5);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-width', 1);
+    startMyLocationPulse(map);
+  } else {
+    // Not signed in, no linked player, the fetch has not resolved yet,
+    // or it failed -- today's exact appearance: halo fully transparent
+    // so it paints nothing, dot back to the plain accent/mode styling.
+    map.setPaintProperty('my-location-halo', 'circle-opacity', 0);
+    map.setPaintProperty('my-location-halo', 'circle-stroke-opacity', 0);
+    stopMyLocationPulse();
+    map.setPaintProperty('my-location-dot', 'circle-radius', 6);
+    map.setPaintProperty('my-location-dot', 'circle-color', themeColor('--mw-accent'));
+    map.setPaintProperty('my-location-dot', 'circle-stroke-color', light ? MY_LOCATION_STROKE_LIGHT : themeColor('--mw-gold-light'));
+    map.setPaintProperty('my-location-dot', 'circle-stroke-width', 2);
   }
 }
 
@@ -3050,7 +3426,7 @@ function watchTheme(map) {
 //   usfs roads     z6  - z14
 //   usfs trails    z6  - z14
 //   public-lands   z4  - z12
-// These floors are real limits of navi's archives (tippecanoe flags
+// These floors are real limits of the source archives (tippecanoe flags
 // baked in at build time), not a style choice, so each layer below
 // declares an explicit `minzoom` matching them, and LAYER_TOGGLES
 // carries the same numbers so the switcher greys out an entry (with a
@@ -3194,6 +3570,801 @@ function setupOverlayLayers(map) {
 // Hillshade alone carries the terrain now. Do not re-add this without
 // solving the cost, not just the symptom.
 
+// Reads a theme token straight off the document, the same way
+// play-area-map.js's Leaflet rectangle does -- a MapLibre paint property
+// cannot be handed a CSS var() any more than Leaflet's canvas styling
+// can, so this is what "use the theme token, not a literal colour" has
+// to mean for a map layer. Re-read on every call rather than cached, so
+// a theme flip (watchTheme's MutationObserver -> applyBasemapTheme)
+// always gets the current skin's value. No literal-colour fallback on
+// purpose (unlike play-area-map.js's Leaflet copy of this pattern) --
+// theme.css is a regular <link> loaded before this module in map2.html,
+// so an empty read here would mean the stylesheet itself failed, and
+// the map's own load-failure banner (see this file's own header
+// comment on bootCheckpoint) is the honest way to surface that, not a
+// silently invented colour standing in for it.
+function themeColor(varName) {
+  return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+}
+
+// Mix a CSS colour toward white (amount > 0) or toward black (amount <
+// 0) and return an rgb() string. Used for the location halo, which has
+// to be the player's TEAM colour but a visibly different shade from two
+// things at once: the dot at its centre (full team colour) and the
+// ground under it, which is very often that same team's territory.
+// A lighter tint separates from both -- the ground is the team colour
+// darkened by the basemap showing through its fill opacity, so lifting
+// toward white moves away from it rather than toward it.
+//
+// Accepts whatever getComputedStyle hands back for a custom property,
+// which is '#rrggbb' for these tokens today but is allowed to be an
+// rgb()/rgba() string, so both are parsed rather than assuming hex.
+function shadeColor(css, amount) {
+  let r, g, b;
+  const hex = css.trim().match(/^#([0-9a-f]{6})$/i);
+  if (hex) {
+    const n = parseInt(hex[1], 16);
+    r = (n >> 16) & 255; g = (n >> 8) & 255; b = n & 255;
+  } else {
+    const m = css.match(/(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)\s*[, ]\s*(\d+(?:\.\d+)?)/);
+    if (!m) return css;
+    r = +m[1]; g = +m[2]; b = +m[3];
+  }
+  const t = amount >= 0 ? 255 : 0;
+  const k = Math.abs(amount);
+  const mix = (c) => Math.round(c + (t - c) * k);
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+}
+
+// ===== Claimed-squares opacity slider (feature: map-controls) =====
+//
+// Builds the fill-opacity paint expression for a given viewer-chosen
+// percentage (0-100), preserving the SHAPE of BOARD_FILL_OPACITY_ZOOM
+// above (the small z10->z13 lift that makes up for board-line's team
+// rim being hidden below z13) scaled by BOARD_FILL_OPACITY_RAMP_RATIO so
+// that lift is still present at whatever opacity the viewer picks, not
+// just the original hardcoded 85%.
+function boardFillOpacityExpression(pct) {
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const target = clamp01(pct / 100);
+  return ['interpolate', ['linear'], ['zoom'],
+    10, clamp01(target * BOARD_FILL_OPACITY_RAMP_RATIO),
+    13, target,
+  ];
+}
+
+// The DEFAULT this slider opens at (as opposed to a viewer's own stored
+// choice, read below) now depends on the basemap mode -- see
+// BOARD_FILL_OPACITY_DEFAULT_PCT_LIGHT's own comment for why a light
+// basemap gets a lower default than the dark basemap's DEFAULT_PCT.
+function boardFillOpacityDefaultPct() {
+  return currentBasemapMode() === 'light' ? BOARD_FILL_OPACITY_DEFAULT_PCT_LIGHT : BOARD_FILL_OPACITY_DEFAULT_PCT;
+}
+
+// True only once the viewer has actually moved the slider (or a
+// previous visit had), as opposed to still sitting on whichever
+// basemap-mode default applied at load. setupBasemapModeToggle below
+// uses this to decide whether flipping light/dark should re-derive the
+// slider's value from the new mode's default (no explicit pref yet) or
+// leave an explicit choice alone (see its own comment).
+function hasExplicitBoardFillOpacityPref() {
+  try {
+    return localStorage.getItem(BOARD_FILL_OPACITY_STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function readBoardFillOpacityPct() {
+  try {
+    const raw = localStorage.getItem(BOARD_FILL_OPACITY_STORAGE_KEY);
+    if (raw === null) return boardFillOpacityDefaultPct();
+    const n = Number(raw);
+    return (Number.isFinite(n) && n >= 0 && n <= 100) ? n : boardFillOpacityDefaultPct();
+  } catch {
+    // Storage unavailable (private browsing, quota) -- fall back to the
+    // same default a first-time visitor gets.
+    return boardFillOpacityDefaultPct();
+  }
+}
+
+function rememberBoardFillOpacityPct(pct) {
+  try {
+    localStorage.setItem(BOARD_FILL_OPACITY_STORAGE_KEY, String(pct));
+  } catch {
+    // Swallowed, same as every other localStorage write on this page --
+    // the slider still works for the rest of this visit, it just does
+    // not survive a reload.
+  }
+}
+
+// Read once at module scope (like BOARD_MODE_KEY's `mode` and every
+// other "remembered choice" on this page) so the value is available the
+// instant setupOpacitySlider/applyBasemapTheme run, with no async gap
+// where the layer would paint at the wrong opacity for one frame. Runs
+// after basemapModeIsLight is already set (see currentBasemapMode's own
+// section, earlier in the file) so boardFillOpacityDefaultPct above
+// already sees the right starting mode.
+let currentBoardFillOpacityPct = readBoardFillOpacityPct();
+
+// The single place that ever calls setPaintProperty for board-fill's
+// opacity -- applyBasemapTheme (theme flips) and setupOpacitySlider (the
+// slider itself, and its localStorage-restored starting value) both
+// route through this rather than setting the paint property directly,
+// so the two can never disagree about what "the current opacity" is.
+function applyBoardFillOpacity(map) {
+  map.setPaintProperty('board-fill', 'fill-opacity', boardFillOpacityExpression(currentBoardFillOpacityPct));
+}
+
+// Wires the range input in the Layers panel (map2.html's
+// #mw-layer-opacity) to board-fill's opacity. No apply button -- every
+// 'input' event (fired continuously while dragging, unlike 'change'
+// which only fires on release) re-paints live and re-persists the
+// choice.
+//
+// Does NOT gate on opacity 0 breaking cell popups: setupCellClickPopup's
+// map.on('click', 'board-fill', ...) hit-tests against the layer's
+// GEOMETRY (MapLibre's querySourceFeatures/queryRenderedFeatures pick
+// buffer), not its rendered alpha -- fill-opacity 0 makes a square
+// invisible, never unclickable, the same way `opacity: 0` on a DOM
+// element still receives clicks unless paired with
+// `pointer-events: none`, which nothing here sets. Verified by
+// screenshot + a click at opacity 0 during this change's own
+// verification pass (see the deploy notes) rather than assumed.
+// Pushes currentBoardFillOpacityPct into the slider's own DOM (its
+// thumb position and the "NN%" readout beside it) without touching
+// localStorage or the map paint property -- callers that already own
+// those (setupOpacitySlider's 'input' handler, setupBasemapModeToggle's
+// mode-flip re-derivation) do those themselves. Split out so the two
+// call sites can never let the slider's on-screen value drift from
+// currentBoardFillOpacityPct.
+function syncOpacitySliderUI() {
+  const slider = document.getElementById('mw-layer-opacity');
+  const valueLabel = document.getElementById('mw-layer-opacity-value');
+  if (slider) slider.value = String(currentBoardFillOpacityPct);
+  if (valueLabel) valueLabel.textContent = `${currentBoardFillOpacityPct}%`;
+}
+
+function setupOpacitySlider(map) {
+  const slider = document.getElementById('mw-layer-opacity');
+  if (!slider) return;
+
+  syncOpacitySliderUI();
+
+  slider.addEventListener('input', () => {
+    const pct = Number(slider.value);
+    currentBoardFillOpacityPct = Number.isFinite(pct) ? pct : boardFillOpacityDefaultPct();
+    syncOpacitySliderUI();
+    applyBoardFillOpacity(map);
+    rememberBoardFillOpacityPct(currentBoardFillOpacityPct);
+  });
+}
+
+// ===== Light/dark basemap toggle (feature: map-light-mode) =====
+//
+// Wires the Light/Dark button pair at the top of the Layers panel
+// (map2.html's #mw-basemap-toggle-light / #mw-basemap-toggle-dark) to
+// currentBasemapMode() -- see that function's own section, above, for
+// what it drives (BASEMAP_ID vs BASEMAP_LIGHT_ID visibility, hillshade
+// opacity, grid-line/My Location colour) and why it is a separate axis
+// from the gold/neon skin. Was a single "Light basemap" checkbox inside
+// the layer list; replaced with this pair (Matt's ask) because a
+// basemap CHOICE reads better as two mutually-exclusive buttons than a
+// checked/unchecked box, and because it is not itself a layer -- see
+// the markup comment in map2.html for why it now sits above the
+// "LAYERS" list rather than inside it. Storage key, stored values
+// ('1'/'0' via rememberLightBasemapPref/readLightBasemapPref) and the
+// module-scope basemapModeIsLight read that avoids a first-paint flash
+// are all unchanged, so a viewer's existing saved choice still applies.
+//
+// If the viewer has never touched the claimed-squares opacity slider
+// (hasExplicitBoardFillOpacityPref() false), flipping this also
+// re-derives currentBoardFillOpacityPct from the new mode's own default
+// (boardFillOpacityDefaultPct()) and pushes that into the slider's UI --
+// so a first-time visitor who picks Light actually sees the lighter
+// default fill immediately, not just on their next reload. Once an
+// explicit choice exists, this never touches it again: "the ramp still
+// works on top of whatever you choose" applies on either basemap.
+function setupBasemapModeToggle(map) {
+  const lightBtn = document.getElementById('mw-basemap-toggle-light');
+  const darkBtn = document.getElementById('mw-basemap-toggle-dark');
+  if (!lightBtn || !darkBtn) return;
+
+  // Pressed state and the visual .active fill both come from
+  // basemapModeIsLight -- aria-pressed carries the choice to a screen
+  // reader, .active (mc-switch-btn's own convention, see mc.css) is
+  // what paints it, and both are re-derived here so the two can never
+  // disagree with each other or with the map underneath.
+  const syncButtons = () => {
+    lightBtn.classList.toggle('active', basemapModeIsLight);
+    lightBtn.setAttribute('aria-pressed', String(basemapModeIsLight));
+    darkBtn.classList.toggle('active', !basemapModeIsLight);
+    darkBtn.setAttribute('aria-pressed', String(!basemapModeIsLight));
+  };
+  syncButtons();
+
+  const chooseMode = (isLight) => {
+    basemapModeIsLight = isLight;
+    rememberLightBasemapPref(basemapModeIsLight);
+    syncButtons();
+    if (!hasExplicitBoardFillOpacityPref()) {
+      currentBoardFillOpacityPct = boardFillOpacityDefaultPct();
+      syncOpacitySliderUI();
+    }
+    applyBasemapTheme(map);
+  };
+
+  lightBtn.addEventListener('click', () => chooseMode(true));
+  darkBtn.addEventListener('click', () => chooseMode(false));
+}
+
+// ===== Cell grid lines (feature: map-controls) =====
+//
+// A close-zoom-only reference overlay drawing the same lattice
+// app/grid.py works from -- CELL_LAT_DEG/CELL_LON_DEG/cellIndicesFor
+// above are the one definition of that lattice on this side of the
+// wire (see the lattice chunk loader's own comment on why there is only
+// one JS copy), reused here rather than restated.
+//
+// GRID_MIN_ZOOM was picked by rendering, not guessed: at z13 a cell is
+// only ~21px wide (see BOARD_LINE_WIDTH_ZOOM's own per-zoom cell-width
+// measurements above) and a full lattice at that size reads as a fine
+// crosshatch competing with board-line/board-sep, which are already
+// drawing cell edges there. At z14 a cell is ~43px wide and the lattice
+// reads as a distinct, legible reference grid instead of noise. z14 is
+// also one zoom past board-line's own z13 floor, so the grid overlay
+// never appears before the team rim it visually sits alongside does.
+const GRID_MIN_ZOOM = 14;
+
+// One line per lattice boundary crossing the viewport, padded by one
+// cell on every side so a line never visibly stops short at the edge
+// while panning. Regenerated for the current viewport only (see
+// updateGridLines) -- a global grid was never built, deliberately (see
+// this file's own header comment on why a global GeoJSON source is the
+// wrong shape for this data).
+function gridLineFeatures(bounds) {
+  const south = bounds.getSouth();
+  const west = bounds.getWest();
+  const north = bounds.getNorth();
+  const east = bounds.getEast();
+  const [latS, lonW] = cellIndicesFor(south, west);
+  const [latN, lonE] = cellIndicesFor(north, east);
+  const xMin = west - CELL_LON_DEG;
+  const xMax = east + CELL_LON_DEG;
+  const yMin = south - CELL_LAT_DEG;
+  const yMax = north + CELL_LAT_DEG;
+
+  const features = [];
+  for (let i = latS; i <= latN + 1; i++) {
+    const lat = i * CELL_LAT_DEG;
+    features.push({
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'LineString', coordinates: [[xMin, lat], [xMax, lat]] },
+    });
+  }
+  for (let j = lonW; j <= lonE + 1; j++) {
+    const lon = j * CELL_LON_DEG;
+    features.push({
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'LineString', coordinates: [[lon, yMin], [lon, yMax]] },
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+// Below GRID_MIN_ZOOM the layer is hidden and its source is left
+// whatever it last held -- there is nothing on screen to keep current,
+// and the next crossing back above GRID_MIN_ZOOM regenerates it fresh
+// on that moveend. No toggle for this layer (see this feature's own
+// spec): visibility is purely a function of zoom.
+function updateGridLines(map) {
+  if (!map.getLayer('cell-grid-lines')) return;
+  const zoom = map.getZoom();
+  if (zoom < GRID_MIN_ZOOM) {
+    map.setLayoutProperty('cell-grid-lines', 'visibility', 'none');
+    return;
+  }
+  map.setLayoutProperty('cell-grid-lines', 'visibility', 'visible');
+  const src = map.getSource('grid-lines');
+  if (src) src.setData(gridLineFeatures(map.getBounds()));
+}
+
+function setupGridLines(map) {
+  map.on('moveend', () => updateGridLines(map));
+  updateGridLines(map); // in case the opening view already sits past GRID_MIN_ZOOM
+}
+
+// ===== My Location (feature: map-controls) =====
+//
+// PRIVACY, non-negotiable: everything in this section stays in this
+// browser tab. The coordinates navigator.geolocation reports are used
+// ONLY to (a) place a marker + accuracy circle on this MapLibre instance
+// and (b) compute a cell id locally with cellIndicesFor -- the exact
+// same lattice math app/grid.py uses server-side. Nothing below this
+// comment calls fetch(), sendClientLog(), or localStorage with a
+// coordinate in it. A future reader tempted to "also log this for
+// debugging" or wire it into telemetry: don't. The position must never
+// leave this tab. The account fetch added below (fetchViewerTeam) is
+// the one exception to "nothing calls fetch() here" -- it sends no
+// coordinate, only reads GET /api/account, which already exists for
+// nav-auth.js/account.js and carries nothing this feature writes to.
+let myLocationWatchId = null;
+
+// ===== Center-and-follow (feature: map-center-follow) =====
+//
+// Layered on top of My Location rather than a separate watch: follow
+// has no meaning without a live fix, so engaging it just makes sure My
+// Location's own checkbox/watch is on (see engageFollow) and then rides
+// every onGeoPosition callback that watch already produces. Turning My
+// Location off -- by its own checkbox, or its own fatal-error path --
+// always turns follow off too (see setupMyLocationControl/onGeoError).
+//
+// lastGeoFix is the latest fix regardless of whether follow is on, so
+// engaging follow can center immediately on whatever My Location
+// already has rather than waiting for the next watchPosition callback.
+let geoFixCount = 0;
+let geoLastFixAt = null;
+
+// Opt-in diagnostics for the location watch, read once per call rather
+// than cached so it can be flipped by editing the URL without a reload
+// of the module.
+function geoDebugEnabled() {
+  try {
+    return new URLSearchParams(window.location.search).get('debug') === '1';
+  } catch (e) {
+    return false;
+  }
+}
+
+let lastGeoFix = null;
+let followActive = false;
+// The fix last centered on. Reset to null on every engage so the very
+// next fix is always treated as "first" (see applyFollowCenter) --
+// that is what makes engaging apply the zoom bump and skip the
+// movement threshold on that first center.
+let followLastCenter = null;
+
+// Ignore fixes that haven't moved further than this: consumer GPS
+// jitters several metres standing still (the accuracy circle itself is
+// routinely 5-20m), and recentering on every one of those would make
+// the map twitch instead of read as "following". 8m is comfortably
+// above typical stationary jitter but well under a walking pace's
+// stride-to-stride distance, so real movement still recenters promptly.
+const FOLLOW_RECENTER_THRESHOLD_M = 8;
+
+// "target roughly z15-16, but do NOT zoom out if they are already
+// closer in than that" -- below z15 the viewer is too zoomed out for
+// their own dot to be useful, so engaging bumps to 16; at z15 or
+// deeper, zoom is left alone entirely, on every later fix as well as
+// the first.
+const FOLLOW_ENGAGE_MIN_ZOOM = 15;
+const FOLLOW_ENGAGE_TARGET_ZOOM = 16;
+
+// A short eased pan, not a jump -- long enough to read as motion,
+// short enough to keep up with a fix arriving every few seconds.
+const FOLLOW_EASE_MS = 500;
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function setFollowUI(active) {
+  const btn = document.getElementById('mw-follow-btn');
+  if (!btn) return;
+  btn.setAttribute('aria-pressed', String(active));
+  btn.classList.toggle('active', active);
+  btn.title = active ? 'Stop following my location' : 'Follow my location';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+// Centers on (lat, lon) if this is the first fix since follow was
+// (re-)engaged (followLastCenter === null) or the fix has moved past
+// FOLLOW_RECENTER_THRESHOLD_M since the last center. Only the first
+// call after an engage is allowed to touch zoom, and only to bump it
+// up -- see FOLLOW_ENGAGE_MIN_ZOOM/TARGET_ZOOM above.
+// Two things made following look jerky at speed, and they are separate:
+//
+//  1. The camera moved for FOLLOW_EASE_MS and then sat still until the
+//     next fix. With a 500ms ease and fixes about a second apart that is
+//     literally half a second of motion followed by half a second of
+//     nothing, which reads as a stutter rather than as travel. The fix
+//     is to stretch each move to cover the gap until the next fix is
+//     expected, so the camera is always moving, and to use LINEAR
+//     easing -- MapLibre's default ease accelerates and decelerates,
+//     which at one fix per second turns steady travel into a series of
+//     visible lurches.
+//
+//  2. The marker itself jumped. The dot is drawn from the source data,
+//     which was replaced outright on each fix, so at 80mph it teleported
+//     roughly 36 metres at a time. animateMarkerTo below walks it
+//     between the two fixes over the same interval, so the dot glides
+//     and the camera glides with it.
+//
+// followFixIntervalMs is measured rather than assumed: a phone that
+// reports twice a second and one that reports every three seconds both
+// want the animation to last until their own next fix, not some
+// constant picked here.
+let followFixIntervalMs = FOLLOW_EASE_MS;
+let followLastFixAt = null;
+
+function noteFollowFixInterval() {
+  const now = Date.now();
+  if (followLastFixAt !== null) {
+    const gap = now - followLastFixAt;
+    // Ignore absurd gaps (tab was backgrounded, GPS dropped out) so one
+    // stall does not leave every later move crawling over 30 seconds.
+    if (gap > 200 && gap < 5000) {
+      // Light smoothing: follow the trend without chasing one jittery gap.
+      followFixIntervalMs = Math.round(followFixIntervalMs * 0.6 + gap * 0.4);
+    }
+  }
+  followLastFixAt = now;
+}
+
+function applyFollowCenter(map, lat, lon) {
+  const isEngage = followLastCenter === null;
+  if (!isEngage) {
+    const moved = haversineMeters(followLastCenter.lat, followLastCenter.lon, lat, lon);
+    if (moved < FOLLOW_RECENTER_THRESHOLD_M) return;
+  }
+  followLastCenter = { lat, lon };
+  const opts = { center: [lon, lat] };
+  if (isEngage) {
+    // The first move after engaging is a jump to where you are, not
+    // travel -- keep the original short ease and the zoom bump.
+    opts.duration = FOLLOW_EASE_MS;
+    if (map.getZoom() < FOLLOW_ENGAGE_MIN_ZOOM) opts.zoom = FOLLOW_ENGAGE_TARGET_ZOOM;
+  } else {
+    opts.duration = followFixIntervalMs;
+    opts.easing = (t) => t;
+  }
+  map.easeTo(opts);
+}
+
+function engageFollow(map) {
+  if (followActive) return;
+  followActive = true;
+  followLastCenter = null;
+  setFollowUI(true);
+
+  // Reuse the existing checkbox/watch path rather than duplicating it --
+  // following without a position fix is meaningless, so make sure My
+  // Location is (or becomes) on. Dispatching 'change' runs the exact
+  // same handler a click would, including starting watchPosition.
+  const checkbox = document.getElementById('mw-layer-mylocation');
+  if (checkbox && !checkbox.checked) {
+    checkbox.checked = true;
+    checkbox.dispatchEvent(new Event('change'));
+  }
+
+  // Don't wait on the next watchPosition callback if My Location was
+  // already on and already has a fix -- center on it right now.
+  if (lastGeoFix) applyFollowCenter(map, lastGeoFix.lat, lastGeoFix.lon);
+}
+
+function disengageFollow() {
+  if (!followActive) return;
+  followActive = false;
+  followLastCenter = null;
+  setFollowUI(false);
+}
+
+function setupFollowControl(map) {
+  const btn = document.getElementById('mw-follow-btn');
+  if (!btn) return;
+
+  btn.addEventListener('click', () => {
+    if (followActive) {
+      disengageFollow();
+    } else {
+      engageFollow(map);
+    }
+  });
+
+  // The pan-disengage trap: this feature's own recentering calls
+  // map.easeTo(), which fires 'movestart' exactly like a user drag,
+  // scroll-zoom, or pinch does -- so naively disengaging on every
+  // 'movestart' would turn follow off the instant it tried to follow.
+  // MapLibre distinguishes the two on the event object itself: a real
+  // user gesture's 'movestart' carries the DOM event that caused it as
+  // e.originalEvent (mousedown/touchstart/wheel/keydown); a
+  // programmatic move (easeTo/flyTo/jumpTo/fitBounds) fires 'movestart'
+  // with no originalEvent at all. This is the same mechanism already
+  // relied on and documented a few hundred lines up, for the opening
+  // view's own "has the viewer already grabbed the map" check
+  // (mapViewerInteracted, in main()) -- reused here rather than
+  // reinvented. Verified with Playwright: a simulated mouse
+  // down/move/up drag on the canvas disengages follow; two consecutive
+  // fed positions, each triggering this feature's own easeTo, do not.
+  map.on('movestart', (e) => {
+    if (followActive && e && e.originalEvent) {
+      disengageFollow();
+    }
+  });
+}
+
+// The signed-in viewer's team ('RED' | 'GREEN' | ... , see
+// app/account_api.py's _player_out -- player.team, upper case, the
+// same casing TEAM_COLORS above already keys on) once fetchViewerTeam
+// resolves, or null when the viewer is signed out, has no linked
+// player, or the fetch failed -- every one of those collapses to this
+// same null so the dot degrades identically for all of them. Read by
+// applyMyLocationColors, which is the only place this drives a paint
+// property.
+let myLocationTeam = null;
+
+// Cached across the whole page session (see the ask: "fetch once,
+// lazily, when My Location is first switched on, not on every page
+// load") -- the first call to fetchViewerTeam() starts the request and
+// stores the PROMISE here so a second call (checkbox switched off and
+// back on) gets the same settled promise instead of firing a second
+// request.
+let myLocationTeamPromise = null;
+
+// GET /api/account is the same endpoint nav-auth.js/account.js already
+// call for this signed-in-or-not read (see applySignedInState in
+// nav-auth.js for the identical !res.ok-means-signed-out pattern) --
+// carries no coordinate, so it stays inside the privacy comment above
+// without violating it. Every failure mode -- signed out (401), no
+// linked player (player: null), a network error, a malformed body --
+// resolves to null rather than rejecting, because the caller (My
+// Location's checkbox handler) must never let this feature's own dot
+// colour break the location fix or surface an error to a logged-out
+// viewer.
+function fetchViewerTeam() {
+  if (!myLocationTeamPromise) {
+    myLocationTeamPromise = fetch('/api/account')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => (data && data.player && data.player.team) || null)
+      .catch(() => null);
+  }
+  return myLocationTeamPromise;
+}
+
+// Converts a geolocation accuracy radius (metres, isotropic -- a real
+// ground distance in every direction) into a MapLibre circle-radius
+// expression. This is the standard formula from Mapbox GL JS's own
+// "show accuracy circle" example: metres -> pixels AT ZOOM 20, then an
+// exponential-base-2 zoom interpolation scales it for every other zoom,
+// because each zoom level halves/doubles the ground distance a screen
+// pixel covers. Latitude enters because a fixed span of LONGITUDE covers
+// fewer real metres the further from the equator it is, while the
+// accuracy radius itself is a real-world (isotropic) distance.
+function metersToPixelsAtMaxZoom(meters, latitude) {
+  return meters / 0.075 / Math.cos((latitude * Math.PI) / 180);
+}
+
+function setGeoStatus(msg, isError) {
+  const el = document.getElementById('mw-mylocation-status');
+  if (!el) return;
+  if (!msg) {
+    el.hidden = true;
+    el.textContent = '';
+    el.classList.remove('mw-mylocation-status-error');
+    return;
+  }
+  el.hidden = false;
+  el.textContent = msg;
+  el.classList.toggle('mw-mylocation-status-error', !!isError);
+}
+
+function stopMyLocationWatch() {
+  if (myLocationWatchId !== null && navigator.geolocation) {
+    navigator.geolocation.clearWatch(myLocationWatchId);
+  }
+  myLocationWatchId = null;
+}
+
+// Writes the marker's source data. Kept as one place so the animation
+// below and the direct callers cannot drift apart on the feature shape.
+function writeMyLocationPoint(map, lat, lon, accuracy) {
+  const src = map.getSource('my-location');
+  if (!src) return;
+  src.setData({
+    type: 'FeatureCollection',
+    features: [{
+      type: 'Feature',
+      properties: { accuracyRadiusPx: metersToPixelsAtMaxZoom(accuracy, lat) },
+      geometry: { type: 'Point', coordinates: [lon, lat] },
+    }],
+  });
+}
+
+let markerAnimRaf = null;
+
+function stopMarkerAnimation() {
+  if (markerAnimRaf !== null) {
+    cancelAnimationFrame(markerAnimRaf);
+    markerAnimRaf = null;
+  }
+}
+
+// Walks the dot from wherever it currently is to the new fix over the
+// interval we expect the next fix to arrive in, so travel reads as
+// motion instead of a series of jumps. Straight linear interpolation:
+// between two consecutive GPS fixes a couple of seconds apart, a
+// straight line is as good a guess as anything, and easing here would
+// re-introduce the stop-start feel the camera change just removed.
+function setMyLocationPoint(map, lat, lon, accuracy) {
+  stopMarkerAnimation();
+  const from = lastGeoFix;
+  // No previous fix, a huge jump (first fix, or GPS relocating after a
+  // dropout), or reduced motion: place it directly.
+  const far = from ? haversineMeters(from.lat, from.lon, lat, lon) > 400 : true;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!from || far || reduce) {
+    writeMyLocationPoint(map, lat, lon, accuracy);
+    return;
+  }
+  const startAt = performance.now();
+  const dur = Math.max(200, followFixIntervalMs);
+  const step = (now) => {
+    const t = Math.min(1, (now - startAt) / dur);
+    writeMyLocationPoint(
+      map,
+      from.lat + (lat - from.lat) * t,
+      from.lon + (lon - from.lon) * t,
+      accuracy,
+    );
+    markerAnimRaf = t < 1 ? requestAnimationFrame(step) : null;
+  };
+  markerAnimRaf = requestAnimationFrame(step);
+}
+
+function clearMyLocationMarker(map) {
+  stopMarkerAnimation();
+  const src = map.getSource('my-location');
+  if (src) src.setData({ type: 'FeatureCollection', features: [] });
+}
+
+// The actual point of this feature (see the ask this shipped from): not
+// just a dot on the map, but the cell id the viewer is standing in,
+// computed with the exact same floor-based lattice math as
+// app/grid.py's cell_id() -- see cellIndicesFor's own comment on why
+// that has to stay floor, not a truncating int().
+function onGeoPosition(map, pos) {
+  const lat = pos.coords.latitude;
+  const lon = pos.coords.longitude;
+  const accuracy = Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : 0;
+
+  // Glide the marker to the new fix rather than replacing the source
+  // outright: at 80mph a once-a-second fix moves the dot about 36
+  // metres, and setting it directly teleports it that far every time.
+  // Order matters here. The interval estimate feeds the marker
+  // animation's duration, the marker animation reads lastGeoFix as its
+  // STARTING point, and lastGeoFix is only overwritten afterwards --
+  // updating it first would make every glide start from where the dot
+  // already is and animate nothing.
+  const ageMs = Date.now() - (pos.timestamp || Date.now());
+  const gapMs = geoLastFixAt ? Date.now() - geoLastFixAt : 0;
+  geoFixCount += 1;
+  geoLastFixAt = Date.now();
+
+  noteFollowFixInterval();
+  setMyLocationPoint(map, lat, lon, accuracy);
+
+  const [latIdx, lonIdx] = cellIndicesFor(lat, lon);
+  // ?debug=1 shows what the watch is actually delivering: how many
+  // fixes have arrived, how old each one is, the gap since the last,
+  // and its accuracy. Without it there is no way to tell "the watch is
+  // not firing" from "the watch is firing with stale positions" from
+  // the passenger seat. It only changes the STATUS TEXT -- everything
+  // else on this path still runs, so turning diagnostics on must never
+  // change the behaviour being diagnosed.
+  if (geoDebugEnabled()) {
+    setGeoStatus(
+      `${latIdx}_${lonIdx} | fix #${geoFixCount} age ${Math.round(ageMs / 100) / 10}s`
+      + ` gap ${Math.round(gapMs / 100) / 10}s acc ${Math.round(accuracy)}m`, false);
+  } else {
+    setGeoStatus(`You are in ${latIdx}_${lonIdx}`, false);
+  }
+
+  if (followActive) applyFollowCenter(map, lat, lon);
+  lastGeoFix = { lat, lon };
+}
+
+// GeolocationPositionError codes: 1 PERMISSION_DENIED, 2
+// POSITION_UNAVAILABLE, 3 TIMEOUT. Denial is fatal -- the browser will
+// never grant this tab permission without the viewer changing a site
+// setting first, so retrying is pointless and the checkbox is switched
+// back off. Unavailable/timeout are transient (a bad fix indoors, a slow
+// GPS lock) -- watchPosition itself keeps retrying those on its own, so
+// the watch stays open and the message is just informational.
+function onGeoError(map, checkbox, err) {
+  let msg;
+  let fatal = false;
+  switch (err && err.code) {
+    case 1:
+      msg = 'Location permission denied.';
+      fatal = true;
+      break;
+    case 2:
+      msg = 'Location unavailable right now.';
+      break;
+    case 3:
+      msg = 'Location request timed out -- still trying.';
+      break;
+    default:
+      msg = 'Could not get your location.';
+      fatal = true;
+      break;
+  }
+  setGeoStatus(msg, true);
+  if (fatal) {
+    stopMyLocationWatch();
+    clearMyLocationMarker(map);
+    if (checkbox) checkbox.checked = false;
+    // This path turns My Location off without going through the
+    // checkbox's own 'change' handler (unchecking it here does not
+    // dispatch one), so follow -- which has no meaning without a live
+    // fix -- is disengaged directly here instead.
+    disengageFollow();
+  }
+}
+
+function setupMyLocationControl(map) {
+  const checkbox = document.getElementById('mw-layer-mylocation');
+  if (!checkbox) return;
+
+  checkbox.addEventListener('change', () => {
+    if (!checkbox.checked) {
+      // "Unchecking clears the watch and removes the marker" -- both,
+      // always, never just one: a stopped watch with a stale marker
+      // still on screen would look like a live fix that stopped moving.
+      stopMyLocationWatch();
+      clearMyLocationMarker(map);
+      setGeoStatus('');
+      // My Location off means follow is meaningless -- keep the two
+      // controls from ever disagreeing about state.
+      disengageFollow();
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setGeoStatus('This browser does not support geolocation.', true);
+      checkbox.checked = false;
+      return;
+    }
+
+    setGeoStatus('Locating...', false);
+    myLocationWatchId = navigator.geolocation.watchPosition(
+      (pos) => onGeoPosition(map, pos),
+      (err) => onGeoError(map, checkbox, err),
+      // maximumAge MUST be 0. At 5000 the browser is explicitly
+      // permitted to satisfy each callback from a cached fix up to five
+      // seconds old, and iOS takes that permission enthusiastically.
+      // Standing still that is invisible; at freeway speed five seconds
+      // is about 180 metres, so follow mode kept re-centring on where
+      // the car had already been and read as "not following". 0 forces
+      // a fresh reading every time, which is the whole point of a watch.
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+    );
+
+    // Fired alongside the watch, never awaited before it -- a slow or
+    // stalled /api/account read must not delay the location fix itself.
+    // First activation starts the request; every later one (box
+    // unchecked and rechecked) gets the same cached, already-settled
+    // promise straight back and repaints immediately. If the box gets
+    // unchecked again before this resolves, myLocationTeam is still set
+    // and applyMyLocationColors still runs -- harmless, since
+    // clearMyLocationMarker already emptied the source and an empty
+    // source paints nothing regardless of colour.
+    fetchViewerTeam().then((team) => {
+      myLocationTeam = team;
+      applyMyLocationColors(map);
+    });
+  });
+}
+
 // A checked box over a layer with no data at the current zoom reads as
 // broken -- there is nothing wrong, the tiles just do not exist below
 // their minzoom (see LAYER_TOGGLES / setupOverlayLayers). So each
@@ -3231,6 +4402,24 @@ function setupLayerSwitcher(map) {
 
     const entry = { checkbox, layerIds, minZoom, row, textNode, baseText, wanted: checkbox.checked };
     entries.push(entry);
+
+    // Every layer this switcher governs is added to the style already
+    // visible (see setupOverlayLayers/setupPlacesLayer/the HILLSHADE_ID
+    // layer in main()'s style object -- none of them set an initial
+    // layout.visibility), so the checkbox's checked/unchecked markup in
+    // map2.html is not actually authoritative on its own until this runs.
+    // applyAvailability() below only touches a layer's visibility when it
+    // detects checkbox.checked !== shouldBeChecked, which is a no-op the
+    // very first time a checkbox already starts unchecked (wanted is false,
+    // shouldBeChecked is false, nothing looks changed) -- leaving an
+    // unticked box next to a layer still drawn on the map. Set the real
+    // layout visibility here, unconditionally, from the checkbox's actual
+    // starting state so an unchecked box always means a hidden layer from
+    // the very first paint.
+    const initialVisibility = checkbox.checked ? 'visible' : 'none';
+    for (const layerId of layerIds) {
+      map.setLayoutProperty(layerId, 'visibility', initialVisibility);
+    }
 
     checkbox.addEventListener('change', () => {
       entry.wanted = checkbox.checked;
@@ -3501,10 +4690,50 @@ const CARTO_TILE_URLS = [
   'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{ratio}.png',
 ];
 
-function cartoTiles(key) {
+// CARTO's light counterpart to dark_all above -- same tile scheme, same
+// three-host round robin, same key/ratio handling, just the light
+// "Positron" style (feature: map-light-mode -- see BASEMAP_LIGHT_ID's
+// own comment for why this basemap exists at all). Declared the exact
+// same way as CARTO_TILE_URLS on purpose, right beside it, rather than
+// folding the style name into a parameter -- two named constants read
+// as two basemaps at a glance; a style-name argument would not.
+// Voyager, not light_all/positron. positron is deliberately desaturated
+// -- near-grayscale -- which makes it a poor ground for a grayscale
+// hillshade: terrain and basemap compete in the same narrow tonal range
+// and parks, water and woodland all read as the same pale grey. Voyager
+// is CARTO's coloured style and carries the OSM-familiar palette (green
+// parks and forest, blue water, tan built-up), so the shaded relief sits
+// on top of colour instead of on top of more grey. Same provider, same
+// attribution, same {key} handling as the dark set above.
+// OpenStreetMap's own standard tiles, not a CARTO light style. Both of
+// CARTO's light styles (positron, voyager) are built as quiet backdrops
+// for someone else's data: their ground is near-white by design, and
+// raster-saturation cannot put colour into a pixel that is already
+// white -- tried, and it goes garish before it goes green. OSM standard
+// has the colour baked in, which is the look being asked for.
+//
+// No {ratio}: OSM does not serve @2x tiles, and no subdomains: a/b/c
+// are deprecated, the single host is what their policy now asks for.
+//
+// USAGE POLICY, read this before pointing anything else at it. These
+// tiles are donated infrastructure run for OSM's own use plus LIGHT use
+// by others. This deployment qualifies today -- the traffic counter put
+// the whole site at 16 unique visitors and 29 page views for a day --
+// and attribution is already displayed. If MeshWars ever grows a real
+// audience, this has to move to a provider we pay for or to tiles we
+// serve ourselves from the planet extract; it must not quietly become
+// a busy app's default basemap.
+const CARTO_LIGHT_TILE_URLS = [
+  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+];
+
+// Takes the URL list (CARTO_TILE_URLS or CARTO_LIGHT_TILE_URLS -- both
+// share the same {key} handling, so this is generic over which one)
+// rather than being hardcoded to the dark set, now that there are two.
+function cartoTiles(urls, key) {
   const k = String(key || '').trim();
-  if (!k) return CARTO_TILE_URLS.slice();
-  return CARTO_TILE_URLS.map((u) => `${u}?key=${encodeURIComponent(k)}`);
+  if (!k) return urls.slice();
+  return urls.map((u) => `${u}?key=${encodeURIComponent(k)}`);
 }
 
 async function fetchBootConfig() {
@@ -3708,10 +4937,30 @@ async function main() {
         sources: {
           [BASEMAP_ID]: {
             type: 'raster',
-            tiles: cartoTiles(cartoKey),
+            tiles: cartoTiles(CARTO_TILE_URLS, cartoKey),
             tileSize: 256,
             attribution: '© OpenStreetMap contributors © CARTO',
             maxzoom: 20,
+          },
+          // Light basemap mode's own source (feature: map-light-mode --
+          // see BASEMAP_LIGHT_ID's own comment above for why this is a
+          // second source/layer pair on a different axis than the
+          // gold/neon skin). Unlike BASEMAP_ID this is OSM's own tile
+          // service, not CARTO, so three things differ deliberately:
+          //   - attribution credits OSM alone. CARTO does not serve
+          //     these tiles and must not be credited for them.
+          //   - maxzoom 19, which is as deep as OSM standard renders.
+          //     CARTO goes to 20; asking OSM for z20 just 404s.
+          //   - the CARTO key is NOT appended. cartoTiles() exists to
+          //     add ?key= for CARTO's paid tier; putting that on an OSM
+          //     URL would send a third party's key to OSM and break the
+          //     request. The raw list is used as-is.
+          [BASEMAP_LIGHT_ID]: {
+            type: 'raster',
+            tiles: CARTO_LIGHT_TILE_URLS.slice(),
+            tileSize: 256,
+            attribution: '© OpenStreetMap contributors',
+            maxzoom: 19,
           },
           // meshwars-hillshade-alpha-v4.pmtiles is finished imagery (WEBP
           // tiles, z0-12, RGBA), not elevation data -- there is nothing
@@ -3732,6 +4981,32 @@ async function main() {
             id: BASEMAP_ID,
             type: 'raster',
             source: BASEMAP_ID,
+            // Set from the persisted choice up front (basemapModeIsLight,
+            // read at module load -- see currentBasemapMode's own
+            // section) rather than left to default-visible and fixed up
+            // once applyBasemapTheme runs after 'load' -- a returning
+            // visitor who picked light mode would otherwise see one
+            // frame of the dark basemap before the swap.
+            layout: { visibility: basemapModeIsLight ? 'none' : 'visible' },
+          },
+          {
+            id: BASEMAP_LIGHT_ID,
+            type: 'raster',
+            source: BASEMAP_LIGHT_ID,
+            layout: { visibility: basemapModeIsLight ? 'visible' : 'none' },
+            // Voyager ships deliberately muted -- it is designed as a
+            // backdrop for someone else's data, so its greens and blues
+            // are dialled well back. On this map it IS the reference
+            // layer a player reads terrain and parks from, and at stock
+            // saturation it reads as grey even with the hillshade off.
+            // Pushed up here rather than by picking a different style:
+            // Voyager's palette is the OSM-familiar one, it is just too
+            // quiet, and raster-saturation fixes exactly that without
+            // changing which colours mean what.
+            paint: {
+              'raster-saturation': BASEMAP_LIGHT_SATURATION,
+              'raster-contrast': BASEMAP_LIGHT_CONTRAST,
+            },
           },
           {
             id: HILLSHADE_ID,
@@ -4110,6 +5385,96 @@ async function main() {
       },
     });
 
+    // Cell grid lines (feature: map-controls -- see GRID_MIN_ZOOM/
+    // setupGridLines above). Source starts empty; setupGridLines below
+    // fills it in for the current viewport once the map is idle enough
+    // to call moveend, and hides the layer below GRID_MIN_ZOOM. Colour
+    // comes from the theme's own least-emphasis line token via
+    // themeColor() (see that function's own comment on why a paint
+    // property has to read the token this way, not with var()) rather
+    // than a literal hex, and applyBasemapTheme re-reads it on every
+    // theme flip below.
+    map.addSource('grid-lines', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+    });
+    map.addLayer({
+      id: 'cell-grid-lines',
+      type: 'line',
+      source: 'grid-lines',
+      layout: { visibility: 'none' },
+      paint: {
+        // --mw-text-6 ("captions, disabled, least emphasis" -- see
+        // theme.css's own comment on it) rather than a border token: a
+        // border colour reads correctly against the panel chrome it was
+        // designed for, but measured too dark to read at all against
+        // this basemap's near-black ground (--mw-ink) once actually
+        // rendered -- caught and switched to this token during this
+        // change's own screenshot verification pass, see the deploy
+        // notes.
+        'line-color': themeColor('--mw-text-6'),
+        'line-width': 0.75,
+        'line-opacity': 0.5,
+      },
+    });
+
+    // "My location" (feature: map-controls -- see the PRIVACY comment on
+    // setupMyLocationControl above). Source starts empty; nothing is
+    // written to it until the viewer checks the box and a real
+    // watchPosition fix comes back.
+    map.addSource('my-location', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+    });
+    map.addLayer({
+      id: 'my-location-accuracy',
+      type: 'circle',
+      source: 'my-location',
+      paint: {
+        // See metersToPixelsAtMaxZoom's own comment for this expression
+        // shape -- exponential-base-2 zoom interpolation from a pixel
+        // radius computed at zoom 20.
+        'circle-radius': ['interpolate', ['exponential', 2], ['zoom'], 0, 0, 20, ['get', 'accuracyRadiusPx']],
+        'circle-color': themeColor('--mw-accent'),
+        'circle-opacity': 0.15,
+        'circle-stroke-color': themeColor('--mw-accent'),
+        'circle-stroke-width': 1,
+        'circle-stroke-opacity': 0.6,
+      },
+    });
+    // The team-colour "target" ring (feature: team-coloured location --
+    // see applyMyLocationColors' own comment on why a fixed white/dark
+    // halo, not a themed one). Added between accuracy and the dot so
+    // draw order puts it under the dot and over the accuracy fill, but
+    // fully transparent here: it paints nothing until a signed-in
+    // viewer with a linked team is confirmed (applyMyLocationColors
+    // raises the opacities then), so a logged-out viewer's first paint
+    // is pixel-identical to before this feature existed.
+    map.addLayer({
+      id: 'my-location-halo',
+      type: 'circle',
+      source: 'my-location',
+      paint: {
+        'circle-radius': 11,
+        'circle-color': '#ffffff',
+        'circle-opacity': 0,
+        'circle-stroke-color': MY_LOCATION_TEAM_DOT_STROKE,
+        'circle-stroke-width': 1,
+        'circle-stroke-opacity': 0,
+      },
+    });
+    map.addLayer({
+      id: 'my-location-dot',
+      type: 'circle',
+      source: 'my-location',
+      paint: {
+        'circle-radius': 6,
+        'circle-color': themeColor('--mw-accent'),
+        'circle-stroke-color': themeColor('--mw-gold-light'),
+        'circle-stroke-width': 2,
+      },
+    });
+
     setupOverlayLayers(map);
     // Wrapped on its own, separate from the try/catch already around
     // setBoardMode/loadPlacesViewport/loadPlacesPanel below: icon
@@ -4130,6 +5495,11 @@ async function main() {
     setupPlacesLayer(map);
     setupCellClickPopup(map);
     setupLayerSwitcher(map);
+    setupOpacitySlider(map);
+    setupBasemapModeToggle(map);
+    setupGridLines(map);
+    setupMyLocationControl(map);
+    setupFollowControl(map);
     watchTheme(map);
     applyBasemapTheme(map);
 

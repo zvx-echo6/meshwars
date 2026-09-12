@@ -285,13 +285,108 @@ CREATE TABLE IF NOT EXISTS player_last_fix (
 -- already happened (or didn't) in app/ingest.py before this row was
 -- written. NULL for every MeshCore row (no such concept) and for any
 -- Meshtastic row from before this column existed.
+-- evidence_type: added for app/freqmapper_ingest.py's passive_rx
+-- painting (see that module's module docstring, "Passive RX scoring").
+-- The smallest honest addition that makes an RX-sourced paint
+-- DISTINGUISHABLE from a verified-TX-sourced one after the fact --
+-- FreqMapper's own documentation is explicit that passive RX must never
+-- be presented or treated as verified TX proof, and this deployment
+-- needs to be able to tell the two apart later even though, per Matt's
+-- explicit decision, they currently earn identical points (see
+-- freqmapper_config.passive_rx_points_per_event's own comment below for
+-- why equal credit and distinguishable provenance are two separate
+-- questions, not one). Set to the feed's own event_type string
+-- ("verified_tx" / "passive_rx") by app/freqmapper_ingest.py's
+-- _process_one_event for every FreqMapper-sourced row; NULL for every
+-- row written by app/ingest.py (meshview) or app/mc_ingest.py
+-- (MeshCore) -- neither of those paths has more than one evidence
+-- source to distinguish, so there is nothing for this column to record
+-- there, same reasoning precision_bits above stays NULL for a MeshCore
+-- row. Purely an audit/provenance column, same as precision_bits:
+-- nothing reads it back for scoring, and it plays no part in the
+-- exact-duplicate PRIMARY KEY.
+-- watcher_count / same_region_watcher_count / cross_region_watcher_count
+-- / watcher_corroborated / quality / rssi_dbm / snr_db / hop_count /
+-- path_classification / last_relay_node / packet_type / portnum /
+-- location_accuracy_meters: added for FreqMapper's combined-feed
+-- "capture signal" fields -- see app/freqmapper_ingest.py's module
+-- docstring for the full coverage-mapper reasoning. Matt's own words on
+-- what this whole column group is for -- first on watcher_count/
+-- quality, then widened to every measurement the feed reports: "we can
+-- use the watcher count and the quality. in fact we should enter it in
+-- the capture, but what we should NOT do is change the scoring weight.
+-- at its core, meshwars is a coverage mapper, so we should honor that."
+-- and then, extending the same principle to the rest of the feed's
+-- fields: "lets store it all, its not that heavy." So: RECORD, never
+-- SCORE, for EVERY measurement FreqMapper hands this deployment, not
+-- just the two Matt named first.
+--
+-- Two of these (watcher_count, and its breakdown
+-- same_region_watcher_count/cross_region_watcher_count, plus
+-- watcher_corroborated) are reported on BOTH verified_tx and passive_rx
+-- events -- how many independent Watchers verified or corroborated the
+-- event, split by whether they were in the same FreqMapper region as
+-- the reporting radio or a different one, and whether at least one
+-- corroborating Watcher observation exists at all. The rest
+-- (quality, rssi_dbm, snr_db, hop_count, path_classification,
+-- last_relay_node, packet_type, portnum, location_accuracy_meters) are
+-- passive_rx-ONLY fields -- the verified_tx feed carries none of them
+-- at all, so every verified_tx row's copies of these nine columns are
+-- unconditionally NULL, never a guess at what they might have been.
+-- quality is "strong"/"fair"/"weak"; rssi_dbm and snr_db are the
+-- receiving radio's own signal-strength/noise readings for this
+-- specific reception (snr_db can legitimately be null even ON a
+-- passive_rx event, per FreqMapper's own API docs -- some hardware
+-- cannot report it); hop_count is FreqMapper's own estimate of how many
+-- relays the packet crossed before this radio heard it, null when the
+-- packet's header gives no basis for an estimate; path_classification
+-- is FreqMapper's own "direct"/"relayed"/"unknown" summary of that;
+-- last_relay_node is a ONE-BYTE HINT of the last relay's node id
+-- fragment (Meshtastic's own on-air packet format only ever carries the
+-- low byte of a relaying node's id, not its full identity) -- this is
+-- NOT a usable node identity on its own and must never be treated as
+-- one; packet_type/portnum describe what kind of Meshtastic packet was
+-- overheard (app/config.py's position_app_portnum is the same concept,
+-- unrelated numbering space); location_accuracy_meters is FreqMapper's
+-- own confidence radius for the receiving radio's own reported
+-- position, not the transmitter's.
+--
+-- All thirteen are nullable and populated verbatim by
+-- app/freqmapper_ingest.py's _process_one_event -- a field the payload
+-- omits, or sends null, is recorded as NULL here, never 0, never
+-- False, and never a placeholder string like "unknown": these are raw
+-- measurements being kept for later reference, not scoring inputs that
+-- need a safe fallback. NULL for every row written by app/ingest.py
+-- (meshview) or app/mc_ingest.py (MeshCore), same reasoning
+-- evidence_type stays NULL for those paths above -- neither carries any
+-- of these fields at all. Nothing in this codebase reads any of these
+-- thirteen columns back for scoring, ever -- see freqmapper_config's
+-- own comment below (watcher_weight_*) for the operator-flippable
+-- scoring switch that USED to exist for watcher_count and was
+-- deliberately removed, not merely left unused, so that "record the
+-- measurement" could never quietly become "score the measurement"
+-- again by an admin flipping one setting.
 CREATE TABLE IF NOT EXISTS player_cell_ping (
-    player_id       INTEGER NOT NULL,
-    protocol        TEXT NOT NULL,
-    cell_id         TEXT NOT NULL,
-    ts              INTEGER NOT NULL,
-    seen_at         INTEGER NOT NULL,
-    precision_bits  INTEGER,
+    player_id                   INTEGER NOT NULL,
+    protocol                    TEXT NOT NULL,
+    cell_id                     TEXT NOT NULL,
+    ts                          INTEGER NOT NULL,
+    seen_at                     INTEGER NOT NULL,
+    precision_bits              INTEGER,
+    evidence_type               TEXT,
+    watcher_count               INTEGER,
+    same_region_watcher_count   INTEGER,
+    cross_region_watcher_count  INTEGER,
+    watcher_corroborated        INTEGER,
+    quality                     TEXT,
+    rssi_dbm                    REAL,
+    snr_db                      REAL,
+    hop_count                   INTEGER,
+    path_classification         TEXT,
+    last_relay_node             INTEGER,
+    packet_type                 TEXT,
+    portnum                     INTEGER,
+    location_accuracy_meters    REAL,
     PRIMARY KEY (player_id, protocol, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_ping_seen ON player_cell_ping(seen_at);
@@ -364,24 +459,45 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     PRIMARY KEY (player_id, protocol, day)
 );
 
--- One row per FreqMapper verified-coverage event ever processed
+-- One row per FreqMapper coverage event ever processed
 -- (app/freqmapper_ingest.py). verification_id is that event's whole
--- identity -- a stable UUID FreqMapper itself assigns, one per event,
--- never reused -- so this is a pure dedup table: INSERT OR IGNORE on the
--- primary key means an event already seen (a page re-fetched after a
--- restart before the cursor was persisted, a retry, an overlapping
--- page) is a no-op rather than a re-processed, re-scored event. Recorded
--- for EVERY event that reaches this check, regardless of whether the
--- radio turns out to be registered or in bounds, or which source is
--- currently painting the Meshtastic board (settings.mt_paint_source) --
--- this table's only job is "have we ever looked at this specific event
--- before," not "did it score." Pruned well past FreqMapper's own paging
--- window by app/freqmapper_ingest.py's own housekeeping, the same
--- reasoning app/mc_ingest.py's retention windows use, so this cannot
--- grow without bound on a long-running deployment.
+-- identity -- for a verified_tx event, the event's own `verification_id`
+-- field, a stable UUID FreqMapper itself assigns, one per event, never
+-- reused; for a passive_rx event, its own `reception_id` field instead
+-- (a separate, independently-assigned UUID space -- see below); for any
+-- event_type this code does not recognize, the feed's generic top-level
+-- `event_id` field, purely as a best-effort fallback since a future
+-- event type carries no field name this code can know in advance. So
+-- this is a pure dedup table: INSERT OR IGNORE on the primary key means
+-- an event already seen (a page re-fetched after a restart before the
+-- cursor was persisted, a retry, an overlapping page) is a no-op rather
+-- than a re-processed, re-scored event. Recorded for EVERY event that
+-- reaches this check, regardless of whether the radio turns out to be
+-- registered or in bounds, or which source is currently painting the
+-- Meshtastic board (settings.mt_paint_source) -- this table's only job
+-- is "have we ever looked at this specific event before," not "did it
+-- score." Pruned well past FreqMapper's own paging window by
+-- app/freqmapper_ingest.py's own housekeeping, the same reasoning
+-- app/mc_ingest.py's retention windows use, so this cannot grow without
+-- bound on a long-running deployment.
+--
+-- History: briefly renamed to `event_id` and prefixed ("verified_tx:
+-- <uuid>" / "passive_rx:<uuid>") by commit d114a5a's combined-feed
+-- cutover, which believed the combined feed's own dedup key needed that
+-- prefixed form. It did not -- verified against the live API, a
+-- verified_tx event's `verification_id` field already carries the exact
+-- same UUID as the bare half of its `event_id`, so no schema change was
+-- ever required, and the actual production incident that migration was
+-- meant to guard against had a different cause entirely (see
+-- app/freqmapper_ingest.py's module docstring -- the incident was a
+-- cursor-cutover backfill, not a dedupe-key mismatch). See
+-- _migrate_freqmapper_verification_verification_id below for the
+-- one-time, idempotent migration that converges every deployment --
+-- including preview and any operator who ran d114a5a even briefly --
+-- back onto this original `verification_id` shape.
 CREATE TABLE IF NOT EXISTS freqmapper_verification (
     verification_id TEXT PRIMARY KEY,
-    seen_at          INTEGER NOT NULL
+    seen_at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verification(seen_at);
 
@@ -424,6 +540,78 @@ CREATE INDEX IF NOT EXISTS idx_freqmapper_verification_seen ON freqmapper_verifi
 -- deliberately left OUT of freqmapper_verification below (unlike every
 -- other skip reason, which IS recorded there) so that moving this date
 -- earlier and clearing the cursor can still pick the event back up.
+-- watcher_weight_* (added in MIGRATIONS below, after this table already
+-- shipped): RETAINED, DELIBERATELY UNREAD. These four columns used to
+-- back an optional, operator-flippable scaling of a verified_tx event's
+-- points by the combined feed's watcher_count field -- OFF by default,
+-- but a live switch nonetheless. That scaling path
+-- (app/freqmapper_ingest.py's old _verified_tx_points()) has been
+-- removed entirely, not just left disabled: Matt's explicit decision is
+-- "we can use the watcher count and the quality... but what we should
+-- NOT do is change the scoring weight. at its core, meshwars is a
+-- coverage mapper, so we should honor that." A neutral-by-default
+-- switch that contradicts a stated design principle is a landmine, not
+-- a safety net -- leaving it reachable through the admin config only
+-- means someone flips it on months from now, with no code review of
+-- the decision it re-opens, and MeshWars quietly stops scoring coverage
+-- as coverage. Every verified_tx paint is worth points_per_event above,
+-- always, with no code path left anywhere that reads watcher_count back
+-- for scoring purposes (see player_cell_ping.watcher_count's own
+-- comment above for where that field is now actually recorded --
+-- capture, not credit). These four columns are kept, unread, purely
+-- because dropping a column is a disruptive SQLite migration
+-- (CREATE TABLE ... AS SELECT, swap, DROP) for zero benefit once
+-- nothing references them -- see this table's own MIGRATIONS entry for
+-- the same note at the point they were added.
+-- allow_backfill (added in MIGRATIONS below, after this table already
+-- shipped, in response to the incident this whole migration file
+-- exists to fix -- see app/freqmapper_ingest.py's module docstring):
+-- the operator opt-in for the high-water-mark backfill guard in
+-- _process_one_event. OFF by default, the safe direction -- a fresh or
+-- freshly upgraded deployment keeps the guard active and never paints
+-- historical events just because they happen to be new to this
+-- deployment (a cleared cursor, a first-ever backfill, a switched
+-- feed) -- exactly the failure mode that produced the incident this
+-- column exists to let an operator deliberately re-enable, not repeat
+-- by accident. When set, the guard is bypassed entirely: an event
+-- older than the stored high-water mark paints exactly as if it were
+-- current, for an operator who has a real, deliberate reason to want
+-- history painted (e.g. onboarding this deployment against a
+-- FreqMapper account with pre-existing coverage history).
+-- passive_rx_* (added in MIGRATIONS below, after this table already
+-- shipped): scoring config for FreqMapper's passive_rx event type --
+-- see app/freqmapper_ingest.py's module docstring ("Passive RX
+-- painting") for the semantics of what a passive_rx event actually
+-- proves (the RECEIVING wardriving radio's own position, not the
+-- sender's) and _process_one_event for exactly where these are read.
+-- passive_rx_enabled defaults to 1 (ON): this is the feature the
+-- deployment was built to ship, not an opt-in an operator has to
+-- discover -- unlike allow_backfill and watcher_weight_enabled above,
+-- there is no "deploying this must change nothing" constraint here to
+-- protect, since passive RX never painted anything before this feature
+-- existed at all; ON-by-default is what makes it actually work the
+-- moment this migration runs, with no database edit required.
+-- passive_rx_points_per_event and passive_rx_unique_painter_bonus
+-- default to 0.5 each -- IDENTICAL to points_per_event/
+-- unique_painter_bonus's own defaults above, by Matt's explicit
+-- decision ("coverage is coverage"): a passive_rx event proves the
+-- wardriving radio genuinely heard traffic at that location, which is
+-- coverage at that location exactly as much as an independently-
+-- Watcher-verified transmission is. These are kept as their OWN
+-- columns, never a read of points_per_event/unique_painter_bonus
+-- themselves, purely so the two evidence types stay independently
+-- tunable later -- the equal starting value is a deliberate choice
+-- about what this deployment currently believes RX and TX are worth,
+-- not a structural inability to tell them apart; see player_cell_ping.
+-- evidence_type's own comment above for the mechanism that keeps the
+-- two DISTINGUISHABLE after the fact regardless of what either is
+-- currently worth: equal points, distinct labels. Points/bonus are
+-- never weighted by quality/rssi/snr/hop_count/path_classification
+-- here -- deliberately deferred, an open question still being
+-- discussed with FreqMapper, not a decision this deployment makes on
+-- its own -- see app/freqmapper_ingest.py's _passive_rx_points() for
+-- where that plumbing already exists, unused, ready for that decision
+-- once it is made.
 CREATE TABLE IF NOT EXISTS freqmapper_config (
     id                     INTEGER PRIMARY KEY CHECK (id = 1),
     mt_paint_source        TEXT NOT NULL DEFAULT 'both',
@@ -437,7 +625,15 @@ CREATE TABLE IF NOT EXISTS freqmapper_config (
     paint_from             TEXT NOT NULL DEFAULT '',
     last_poll_at           INTEGER,
     last_poll_error        TEXT,
-    updated_at             INTEGER NOT NULL DEFAULT 0
+    updated_at             INTEGER NOT NULL DEFAULT 0,
+    allow_backfill         INTEGER NOT NULL DEFAULT 0,
+    watcher_weight_enabled   INTEGER NOT NULL DEFAULT 0,
+    watcher_weight_base      REAL NOT NULL DEFAULT 0.5,
+    watcher_weight_increment REAL NOT NULL DEFAULT 0.1,
+    watcher_weight_cap       REAL NOT NULL DEFAULT 1.0,
+    passive_rx_enabled              INTEGER NOT NULL DEFAULT 1,
+    passive_rx_points_per_event     REAL NOT NULL DEFAULT 0.5,
+    passive_rx_unique_painter_bonus REAL NOT NULL DEFAULT 0.5
 );
 
 -- ---------------------------------------------------------------------
@@ -1843,6 +2039,101 @@ CREATE TABLE IF NOT EXISTS account_totp_challenge (
     expires_at   INTEGER NOT NULL,
     consumed_at  INTEGER
 );
+
+-- ---------------------------------------------------------------------
+-- Server-side traffic analytics (app/traffic.py): page views, unique
+-- visitors, and new-visitor counts for the admin panel's traffic tab,
+-- counted from inside this app itself rather than a third-party
+-- analytics script -- nothing about a visit is ever sent to an outside
+-- service, and nothing here can be blocked by a browser extension the
+-- way a client-side tracker can be.
+--
+-- Every table below is keyed on `day`, a UTC calendar date string
+-- ('YYYY-MM-DD') -- NOT settings.checkin_net_timezone/local time (the
+-- convention app/checkin.py's own net_date_for_ts() uses for a weekly
+-- net scoped to one region's clock), and NOT an epoch timestamp. UTC
+-- because this is a public website with visitors in every timezone,
+-- so there is no single "local" that would mean anything for a global
+-- page-view count. A plain string rather than an epoch keeps every
+-- query below (BETWEEN, ORDER BY, GROUP BY) a simple string comparison
+-- that already sorts and ranges correctly for ISO 8601 dates, with no
+-- need to call SQLite's own date() function on every row.
+--
+-- No visitor is ever identified by their real IP address or their raw
+-- User-Agent string -- see settings.traffic_salt's own comment in
+-- app/config.py for the full hashing scheme
+-- (sha256(salt + ip + user_agent), truncated to 16 hex characters) and
+-- why the salt is what makes that irreversible rather than merely
+-- obscured.
+CREATE TABLE IF NOT EXISTS site_visitor (
+    visitor_hash    TEXT PRIMARY KEY,             -- app/traffic.py's _hash_visitor()
+    first_seen      TEXT NOT NULL,                -- UTC day string of this visitor's first-ever hit
+    last_seen       TEXT NOT NULL,                -- UTC day string of this visitor's most recent hit
+    hits            INTEGER NOT NULL DEFAULT 0,   -- lifetime page-view count, all days combined
+    is_bot          INTEGER NOT NULL DEFAULT 0    -- app/traffic.py's _is_bot_user_agent()
+);
+
+-- Retention (app/traffic.py's prune_stale_traffic(), riding along on
+-- ordinary request traffic at most once a day) deletes by last_seen, so
+-- this is the one query pattern that benefits from an index beyond the
+-- primary key.
+CREATE INDEX IF NOT EXISTS idx_site_visitor_first_seen ON site_visitor(first_seen);
+
+-- One row per (day, visitor) -- this is what makes "unique visitors
+-- today" and "new visitors today" EXACT, computed directly from this
+-- table's own rows, with no nightly rollup job needed to derive them
+-- from a raw hit log: uniques-for-a-day is just COUNT(*) of rows for
+-- that day, and new-visitors-for-a-day is COUNT(*) of rows for that day
+-- whose visitor_hash has no earlier row in this same table (see
+-- app/traffic.py's build_traffic_report() for the exact query, joined
+-- to site_visitor.is_bot so a bot's presence never counts toward either
+-- HUMAN figure).
+--
+-- `views` carries a per-day, per-visitor hit count -- the one field
+-- beyond what a bare (day, visitor_hash) presence table would need,
+-- added so a day's TOTAL page views (not just its unique visitor
+-- count), split into human and bot totals by joining to
+-- site_visitor.is_bot, can both be read straight out of this one table.
+-- Without it, this table could only ever answer "how many distinct
+-- people," never "how many page loads" -- the same role site_visitor's
+-- own `hits` column already plays for a visitor's LIFETIME total,
+-- scoped down here to one day.
+CREATE TABLE IF NOT EXISTS site_visit_day (
+    day             TEXT NOT NULL,
+    visitor_hash    TEXT NOT NULL,
+    views           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, visitor_hash)
+);
+
+-- Per-path daily view counts, for the admin panel's "top pages" list.
+-- HUMAN HITS ONLY -- a crawler methodically walking every page on the
+-- site would otherwise dominate this ranking and make it useless for
+-- the thing it exists to answer ("what are real visitors actually
+-- looking at"). Bot traffic is still fully recorded (site_visitor's
+-- own is_bot flag, and rolled into site_visit_day.views for the
+-- bot_views total), just never broken down by path here.
+CREATE TABLE IF NOT EXISTS site_path_daily (
+    day             TEXT NOT NULL,
+    path            TEXT NOT NULL,
+    views           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, path)
+);
+
+-- Per-referrer daily view counts, for the admin panel's "where visitors
+-- came from" list. Same human-only reasoning as site_path_daily above.
+-- Only ever scheme+host (e.g. "https://old-rival-site.com"), never a
+-- full URL -- a full referrer URL can carry a path and query string
+-- that leak what a visitor was doing on the SENDING site, which is
+-- somebody else's visitor to protect, not just noise to strip. A
+-- self-referral (this deployment linking to itself) is dropped entirely
+-- rather than recorded, since "meshwars.com referred a visitor to
+-- meshwars.com" is not information anyone asked this feature for.
+CREATE TABLE IF NOT EXISTS site_referrer_daily (
+    day             TEXT NOT NULL,
+    referrer        TEXT NOT NULL,
+    views           INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, referrer)
+);
 """
 
 
@@ -2059,6 +2350,38 @@ MIGRATIONS = [
     # 0, correct for every day already tallied since neither gate was
     # checking anything yet.
     "ALTER TABLE player_cell_ping ADD COLUMN precision_bits INTEGER",
+    # evidence_type added after player_cell_ping already shipped -- see
+    # that column's own comment on the CREATE TABLE above. NULL for
+    # every existing row: correct for 100% of them, since FreqMapper's
+    # passive_rx event type did not paint anything before this column
+    # existed, and this column's whole job is distinguishing FreqMapper's
+    # two evidence types from each other, not meshview/MeshCore rows from
+    # FreqMapper ones.
+    "ALTER TABLE player_cell_ping ADD COLUMN evidence_type TEXT",
+    # The full FreqMapper "capture signal" column group added after
+    # player_cell_ping already shipped -- see that column group's own
+    # comment on the CREATE TABLE above. NULL for every existing row:
+    # correct for 100% of them, since every one of these thirteen
+    # columns is a FreqMapper feed field (how many Watchers verified/
+    # corroborated an event, and -- for passive_rx -- how strong the
+    # reception was) that no ingest path recorded before this migration
+    # -- there is nothing to backfill any of them from. Recorded for
+    # reference only; see freqmapper_config's own comment below
+    # (watcher_weight_*) for the scoring switch these fields explicitly
+    # do NOT drive.
+    "ALTER TABLE player_cell_ping ADD COLUMN watcher_count INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN same_region_watcher_count INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN cross_region_watcher_count INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN watcher_corroborated INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN quality TEXT",
+    "ALTER TABLE player_cell_ping ADD COLUMN rssi_dbm REAL",
+    "ALTER TABLE player_cell_ping ADD COLUMN snr_db REAL",
+    "ALTER TABLE player_cell_ping ADD COLUMN hop_count INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN path_classification TEXT",
+    "ALTER TABLE player_cell_ping ADD COLUMN last_relay_node INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN packet_type TEXT",
+    "ALTER TABLE player_cell_ping ADD COLUMN portnum INTEGER",
+    "ALTER TABLE player_cell_ping ADD COLUMN location_accuracy_meters REAL",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_low_precision INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_implausible_speed INTEGER NOT NULL DEFAULT 0",
     # Net check-ins move to checkin_seen_message (connector, packet_id),
@@ -2162,6 +2485,50 @@ MIGRATIONS = [
     # deployment upgrading into this migration keeps painting exactly
     # nothing extra until an operator explicitly sets a date.
     "ALTER TABLE freqmapper_config ADD COLUMN paint_from TEXT NOT NULL DEFAULT ''",
+    # watcher_weight_* added after freqmapper_config already shipped --
+    # see that column group's own comment on the CREATE TABLE above,
+    # which is now the operative one: the scoring path these columns
+    # once fed (app/freqmapper_ingest.py's old _verified_tx_points())
+    # has since been removed outright, by Matt's explicit decision that
+    # MeshWars scores coverage as coverage and must not be re-weighted
+    # by watcher_count or quality. These four ALTERs stay exactly as
+    # they always were -- still safe, still a no-op on every existing
+    # row's score, now simply the last place in this codebase these
+    # columns are ever written at all, kept only so a database that
+    # already ran this migration does not need a destructive column
+    # drop.
+    "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_base REAL NOT NULL DEFAULT 0.5",
+    "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_increment REAL NOT NULL DEFAULT 0.1",
+    "ALTER TABLE freqmapper_config ADD COLUMN watcher_weight_cap REAL NOT NULL DEFAULT 1.0",
+    # allow_backfill added after freqmapper_config already shipped --
+    # see that column's own comment on the CREATE TABLE above. Defaults
+    # to 0 (guard active), the same safe-by-default value a fresh
+    # install's CREATE TABLE already gives it, so an existing deployment
+    # upgrading into this migration keeps the backfill guard on and
+    # changes NO painting behavior until an operator explicitly opts in.
+    "ALTER TABLE freqmapper_config ADD COLUMN allow_backfill INTEGER NOT NULL DEFAULT 0",
+    # passive_rx_* added after freqmapper_config already shipped -- see
+    # that column group's own comment on the CREATE TABLE above.
+    # passive_rx_enabled defaults to 1 (ON) rather than the safe-off
+    # default every other feature toggle above uses: passive RX never
+    # painted anything before this migration exists to enable it, so
+    # there is no "an existing deployment's scores must not change"
+    # invariant to protect here the way allow_backfill/
+    # watcher_weight_enabled's off-by-default choices protect one --
+    # this IS the feature this deployment was built to ship, and it has
+    # to work immediately after the migration runs, with no follow-up
+    # database edit, for an operator who never touches
+    # freqmapper_config by hand to actually get RX-sourced painting.
+    # points_per_event/unique_painter_bonus default to 0.5 each,
+    # matching verified_tx's own defaults -- Matt's explicit decision:
+    # coverage is coverage, an RX reception is not weaker evidence for
+    # scoring purposes even though it is provenance-distinct (see
+    # player_cell_ping.evidence_type's own comment) and never presented
+    # to FreqMapper as verified-TX proof.
+    "ALTER TABLE freqmapper_config ADD COLUMN passive_rx_enabled INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE freqmapper_config ADD COLUMN passive_rx_points_per_event REAL NOT NULL DEFAULT 0.5",
+    "ALTER TABLE freqmapper_config ADD COLUMN passive_rx_unique_painter_bonus REAL NOT NULL DEFAULT 0.5",
     # The account layer's link to the existing player model (see the
     # "Account layer" section in SCHEMA above for the full story) --
     # `player` is a pre-existing table with rows already in it on every
@@ -2361,6 +2728,108 @@ def _migrate_session_privacy(conn: sqlite3.Connection) -> None:
     log.info("account_session privacy migration: complete (%d row(s) reduced, ip column dropped)", len(rows))
 
 
+def _migrate_freqmapper_verification_verification_id(conn: sqlite3.Connection) -> None:
+    """One-time, idempotent migration: freqmapper_verification.event_id
+    (the prefixed dedupe key -- "verified_tx:<uuid>" / "passive_rx:
+    <uuid>" -- commit d114a5a's combined-feed cutover briefly shipped)
+    reverts to .verification_id, the table's original shape, holding
+    each event's own type-appropriate id UNPREFIXED -- see
+    freqmapper_verification's own comment on the CREATE TABLE above and
+    app/freqmapper_ingest.py's module docstring for the full incident
+    story this undoes.
+
+    WHY THIS EXISTS: d114a5a believed the combined feed's dedup key had
+    to change shape, and migrated this table to match. It did not --
+    verified against the live API, a verified_tx event's own
+    `verification_id` field already holds the exact same UUID as the
+    bare half of its `event_id`, so this table never needed to change
+    at all, and the incident that migration was meant to prevent had an
+    entirely different, unrelated cause (a cursor cutover that
+    legitimately started reading FreqMapper history this deployment had
+    genuinely never ingested before -- see this module's docstring, not
+    a dedupe-key mismatch). d114a5a was rolled back in production
+    (eb15040) before ever running this migration there for real, but it
+    DID run against preview, and would have run against any operator's
+    database that deployed d114a5a even briefly -- so every deployment
+    is not guaranteed to be in the same shape, and this migration exists
+    purely to converge all of them back onto one, not to fix the
+    incident (see app/freqmapper_ingest.py's high-water-mark guard for
+    the actual fix).
+
+    Two starting shapes this has to handle:
+
+      1. Never ran d114a5a's migration at all (never deployed that
+         commit, or deploys this revert first): already has
+         `verification_id`. Nothing to do.
+      2. DID run d114a5a's migration (preview right now; any operator
+         who deployed d114a5a even briefly): has `event_id`, holding a
+         mix of "verified_tx:<uuid>" and "passive_rx:<uuid>" rows.
+
+    For shape 2: every "verified_tx:" row is unprefixed back to its bare
+    UUID and KEPT -- per the reasoning above, that bare UUID is exactly
+    what `verification_id` would already hold, and losing this dedup
+    history would risk re-painting that event the next time the
+    combined feed's cursor happens to revisit it, exactly the failure
+    this whole table exists to prevent. Every "passive_rx:" row is
+    DELETED outright rather than unprefixed and kept -- at the time
+    d114a5a ran (and at the time this migration was written), passive
+    RX had never painted anything yet (RX painting is a later addition
+    -- see app/freqmapper_ingest.py's module docstring, "Passive RX
+    painting"), so there was nothing for its dedup history to protect,
+    and keeping it would put a value from
+    `reception_id`'s own separate UUID space into a column that is once
+    again named, and reasoned about everywhere else in this codebase, as
+    pure verification_id space -- a latent, silent way for an old RX
+    observation to mask a genuinely new verified_tx event that happens
+    to land on the same value. Deleting is strictly safer than
+    converting here, unlike the verified_tx case just above. A row
+    matching neither prefix (an unrecognized-event-type row -- see
+    _process_one_event's own fallback dedup for that case) is left
+    exactly as it was; this migration has no more specific field name to
+    convert it to than the one it already holds.
+
+    Gate: PRAGMA table_info, the same shape-based gate
+    _migrate_session_privacy above and d114a5a's own (now-removed)
+    migration both used, for the same reason: a plain ALTER TABLE ...
+    RENAME COLUMN is not safe to blindly re-run every boot the way the
+    plain-SQL MIGRATIONS list below is (a second run would fail with
+    "no such column: event_id", which is not one of the "already
+    applied" errors that loop knows how to swallow -- see init_db's own
+    comment on that loop). A fresh install's SCHEMA above already
+    creates the table with `verification_id` directly, so PRAGMA
+    table_info never finds `event_id` there and this is a true no-op
+    for it too, same as for a database that has already run this
+    migration once.
+    """
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(freqmapper_verification)")}
+    if "event_id" not in cols:
+        return  # never ran d114a5a's migration, or already reverted
+
+    log.info(
+        "freqmapper_verification migration: reverting event_id -> verification_id "
+        "(stripping verified_tx: prefixes, dropping passive_rx: rows)"
+    )
+
+    # Drop passive_rx rows BEFORE the unprefix/rename below -- see this
+    # function's own docstring for why these are deleted rather than
+    # converted. WHERE guard (LIKE, not a bare equality) makes this
+    # idempotent on its own, belt and braces alongside the column-shape
+    # gate above: a hypothetical second pass over a not-yet-renamed
+    # table would simply find nothing left to delete.
+    conn.execute("DELETE FROM freqmapper_verification WHERE event_id LIKE 'passive_rx:%'")
+    # substr(...) rather than a second LIKE-guarded UPDATE loop: every
+    # remaining "verified_tx:" row is stripped back to its bare UUID in
+    # one pass. WHERE guard makes this idempotent too, same reasoning as
+    # the DELETE just above.
+    conn.execute(
+        "UPDATE freqmapper_verification SET event_id = substr(event_id, length('verified_tx:') + 1)"
+        " WHERE event_id LIKE 'verified_tx:%'"
+    )
+    conn.execute("ALTER TABLE freqmapper_verification RENAME COLUMN event_id TO verification_id")
+
+    log.info("freqmapper_verification migration: revert complete")
+
+
 def init_db() -> None:
     """Create schema and apply pragmas. Idempotent."""
     _ensure_parent_dir(settings.db_path)
@@ -2408,6 +2877,15 @@ def init_db() -> None:
         # must stop boot loudly rather than let the app start up
         # against a schema app/sessions.py does not expect.
         _migrate_session_privacy(conn)
+
+        # freqmapper_verification's event_id -> verification_id revert
+        # (see that function's own docstring for the full story of why
+        # d114a5a's migration is being undone here) -- unguarded by
+        # try/except for the same reason _migrate_session_privacy is
+        # just above: this changes the table's actual columns and its
+        # dedup keys, and a failure here must stop boot loudly rather
+        # than let the app start up against a half-migrated table.
+        _migrate_freqmapper_verification_verification_id(conn)
 
         # Places Worth Going seed (app/places_seed.py): reference data
         # shipped with the code, same as app/reference/places.csv, but

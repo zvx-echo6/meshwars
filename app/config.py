@@ -409,6 +409,45 @@ class Settings(BaseSettings):
     # join_invite_code_public above, not a stale placeholder.
     join_meshtastic_enabled: bool = False
 
+    # ---- Site traffic analytics (app/traffic.py) --------------------------
+    # Visitors are identified by sha256(salt + client_ip + user_agent),
+    # truncated to 16 hex characters -- never the raw address or the raw
+    # browser string, neither of which is stored anywhere. The salt is
+    # what keeps that hash from being reversible back to a real person:
+    # without it, a fixed 16-character hash space is small enough that
+    # anyone could precompute the hash for every plausible (ip,
+    # user_agent) pair and match a stored hash straight back to whoever
+    # sent it.
+    #
+    # Empty here means "generate one and remember it," NOT "off" -- a
+    # deliberate departure from every other empty-means-off setting in
+    # this file. This app is public AGPL software other operators
+    # self-host from a bare `git clone`, and traffic counting has to
+    # work out of the box with zero configuration, the same as any other
+    # feature that ships on by default -- but the salt itself must never
+    # live in this public repository (a shared, published salt would let
+    # anyone precompute the exact rainbow table the salt exists to
+    # prevent). So when this is left blank, app/traffic.py generates
+    # secrets.token_hex(32) the first time it is needed and persists it
+    # in the `cursor` table (the same generic key-value store
+    # app/ingest.py's own polling cursor already uses), then reuses that
+    # stored value forever after -- see app/traffic.py's _get_salt() for
+    # the exact read-generate-persist sequence, including the race-safe
+    # INSERT ... ON CONFLICT DO NOTHING that keeps two workers racing
+    # against a fresh database from minting two different salts.
+    #
+    # The salt is DELIBERATELY STABLE over time -- never rotated on a
+    # schedule the way a secret normally would be. Recognising that the
+    # SAME visitor came back on a later day is the entire mechanism
+    # behind the "new visitors" metric (app/db.py's site_visit_day, one
+    # row per visitor per day): rotate the salt and every visitor hashes
+    # to a brand-new value, which would make every single day look like
+    # 100% new visitors, forever. Setting this explicitly is only useful
+    # for an operator who wants their own salt -- e.g. to keep visitor
+    # identity continuous across a migration to a fresh database -- not
+    # something a normal deployment needs to touch.
+    traffic_salt: str = ""
+
     # Admin door (/admin, /api/admin/*): lists players and keys, and can
     # revoke a key or disable a player. Empty must mean off, never open,
     # same reasoning as join_invite_code above.
@@ -808,6 +847,15 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_from_address: str = "admin@meshwars.com"
+
+    # Display name shown alongside smtp_from_address in the mailed
+    # link's From header (rendered as "Display Name <address>" -- see
+    # app/email_login.py's _send_sync()). Purely cosmetic: the SMTP
+    # envelope sender used for delivery and DKIM signing stays the bare
+    # smtp_from_address, never this name. Defaults to "MeshWars" since
+    # this is public AGPL software other operators run under their own
+    # domain -- override per deployment via SMTP_FROM_NAME.
+    smtp_from_name: str = "MeshWars"
 
     # "starttls" (default -- connect on the plain-text port, typically
     # 587, then upgrade the connection via STARTTLS before sending

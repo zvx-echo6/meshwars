@@ -31,6 +31,16 @@ let allAccounts = [];       // GET /api/admin/accounts -- every account, not jus
 // api()'s own comment for why the response body cannot.
 let panelLoaded = false;
 
+// True for as long as the pointer is inside the traffic chart -- set by
+// trafficChart()'s own mouseenter/mouseleave. pollTraffic() (below
+// loadTraffic()) checks this before every tick: the chart's crosshair
+// and tooltip live only in that SVG's in-memory state, not CSS, so
+// re-running renderTraffic() out from under a mid-hover pointer would
+// silently drop them even though the pointer never moved. Skipping the
+// tick is enough -- the next one, 30s later, picks it up once the
+// operator has moved on.
+let trafficHovering = false;
+
 // Same seven teams settings.teams_list serves and the join page's own
 // team-picker offers (frontend/join.js's TEAM_ORDER) -- duplicated
 // rather than imported, same reasoning as everywhere else on this site
@@ -366,6 +376,342 @@ function renderSeasons(boards) {
     host.appendChild(row);
   });
 }
+
+// ---- traffic (sidebar) -------------------------------------------------
+// A small persistent stat block under the section nav, not a section of
+// its own -- Matt was explicit: no new nav entry, visible regardless of
+// which section is open. Loaded once alongside everything else in
+// refreshAll() below, same as loadOverview()/loadPlayers()/etc.
+//
+// See app/traffic.py's own module docstring for what GET
+// /api/admin/traffic counts (salted-hash identity, the content-type
+// rule for what is a page view, bot hits walled off from every human
+// figure) -- this file only renders the aggregate that route already
+// computed server-side.
+
+async function loadTraffic() {
+  const host = document.getElementById('traffic-body');
+  try {
+    const d = await api('/api/admin/traffic?days=30');
+    renderTraffic(host, d);
+  } catch (e) {
+    // A stat panel with nothing to show is not the kind of failure
+    // that should steal the status line from whatever the operator is
+    // actually doing, or take the rest of the panel down with it --
+    // see api()'s own comment on why 401/403 already routed elsewhere
+    // above this catch ever runs. One quiet line, nothing thrown.
+    host.replaceChildren(el('p', { className: 'adm-hint', text: 'Traffic unavailable' }));
+  }
+}
+
+function renderTraffic(host, d) {
+  host.replaceChildren();
+
+  const daily = d.daily || [];
+  // build_traffic_report() always zero-fills one entry per day in the
+  // window (app/traffic.py), so this is never actually an empty array
+  // for the fixed ?days=30 above -- it is here as a floor under a
+  // response shape this file does not control, not a case expected to
+  // fire in practice.
+  if (!daily.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No data yet' }));
+    return;
+  }
+
+  // The case that WILL fire, right after this ships: every zero-filled
+  // day is genuinely zero because there is no recorded traffic at all
+  // yet. Distinct from a flat but nonzero trend (a steady few visitors
+  // a day for a month), which is real data and gets the chart, just
+  // drawn flat -- see trafficChart()'s own `range === 0` handling.
+  const totalRecorded = daily.reduce((sum, r) => sum + r.views + r.bot_views, 0);
+  if (totalRecorded === 0) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No data yet' }));
+    return;
+  }
+
+  const today = d.today || { uniques: 0, new_visitors: 0, views: 0 };
+  host.appendChild(el('div', { className: 'adm-traffic-hero', text: String(today.uniques) }));
+  host.appendChild(el('div', {
+    className: 'adm-traffic-sub',
+    text: today.new_visitors + ' new · ' + today.views + ' views',
+  }));
+
+  // A reserved-height row for the hover readout, ABOVE the chart and
+  // BELOW the resting "N new / M views" line -- its own space, not a
+  // box floated over either one. An earlier version anchored the
+  // tooltip to the hovered point's x-position, directly above the
+  // chart, which put it exactly on top of adm-traffic-sub (losing that
+  // stat while reading this one) and risked spilling outside this
+  // 180px column at the first/last day where the anchor point sits
+  // right at the column's own edge. A fixed row can't do either: it
+  // never overlaps another stat because a full row is reserved for it
+  // whether or not anything is hovered (see .adm-traffic-tip's
+  // visibility:hidden in admin.css -- hidden, not display:none, so it
+  // keeps its box and nothing else shifts when it appears), and its
+  // text sits inside the row's own width instead of being anchored to
+  // a point that can sit anywhere from one edge of the chart to the
+  // other.
+  const tip = el('div', { className: 'adm-traffic-tip' });
+  host.appendChild(tip);
+
+  host.appendChild(trafficChart(daily, tip));
+
+  const note = el('p', { className: 'adm-traffic-note' });
+  note.appendChild(document.createTextNode('Bots excluded · since '));
+  // A separate nowrap span for just the date -- "Bots excluded · since"
+  // is free to wrap onto its own line at this column's width, but the
+  // date itself (2026-08-09) must never split across the wrap point,
+  // which is exactly what happened when the whole line was one plain
+  // text node: the browser wrapped wherever there was space, including
+  // mid-date, and rendered "2026-08-" / "09" on two lines.
+  note.appendChild(el('span', { className: 'adm-traffic-date', text: d.since }));
+  host.appendChild(note);
+}
+
+// Hand-written inline SVG, no chart library -- one series (unique
+// visitors/day) so no legend either; the heading above already names
+// it. Coordinates are drawn in a fixed viewBox and stretched to the
+// sidebar's actual width by preserveAspectRatio="none" on the <svg>
+// itself (set in CSS via width:100%), so the hit-test math below works
+// entirely in viewBox units and never has to read the element's
+// rendered size except once, in getBoundingClientRect(), to convert a
+// mouse position back into that same space.
+//
+// `tipEl`, if given, is the reserved-row element (built in
+// renderTraffic() above) this chart's hover state writes its readout
+// into -- kept outside this function rather than built in here so it
+// can live in the DOM between adm-traffic-sub and this chart, never on
+// top of either.
+//
+// Density note: at 30 points across a ~160-180px column the line is
+// inherently a lot of short zigzagging segments -- that is real data,
+// not rendering noise, and neither the data window nor the values
+// themselves are touched here to soften it (Matt was explicit: don't
+// smooth the data). What IS deliberate: stroke-linejoin/linecap: round
+// (admin.css) already takes the harshest edge off each angle, and the
+// straight point-to-point segments below are kept straight rather than
+// curve-fit through a spline -- a curve would overshoot between real
+// samples and read as data between days that was never recorded, which
+// is the same misrepresentation smoothing the values would cause, just
+// moved into the rendering step instead of the data step. So: no
+// further change beyond the two real defects (stroke width, hover
+// placement) fixed elsewhere in this function.
+function trafficChart(daily, tipEl) {
+  const W = 300, H = 44, PAD_X = 4, PAD_Y = 5;
+  const NS = 'http://www.w3.org/2000/svg';
+
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('class', 'adm-traffic-chart');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label',
+    'Daily unique visitors, last ' + daily.length + ' days');
+
+  const values = daily.map((r) => r.uniques);
+  const min = Math.min.apply(null, values);
+  const max = Math.max.apply(null, values);
+  // A flat series -- every day the same count -- has no range to
+  // normalise a y-position against; dividing by (max - min) would
+  // divide by zero. Drawn as a flat line at mid-height instead of
+  // collapsing onto the baseline, which would otherwise misread a
+  // healthy, steady site as "zero all month".
+  const range = max - min;
+
+  const points = daily.map((r, i) => ({
+    x: daily.length === 1 ? W / 2 : PAD_X + (i / (daily.length - 1)) * (W - PAD_X * 2),
+    y: range === 0 ? H / 2 : PAD_Y + (1 - (r.uniques - min) / range) * (H - PAD_Y * 2),
+    row: r,
+  }));
+
+  // Baseline -- a single recessive rule, nothing else drawn behind the
+  // line (no gridlines, no axes, per the project's chart standard).
+  const base = document.createElementNS(NS, 'line');
+  base.setAttribute('x1', '0');
+  base.setAttribute('x2', String(W));
+  base.setAttribute('y1', String(H - 1));
+  base.setAttribute('y2', String(H - 1));
+  base.setAttribute('class', 'adm-traffic-baseline');
+  // See the path's own vector-effect comment below -- the same
+  // non-uniform-scale hairline problem applies to every stroked line
+  // in this chart, this one included.
+  base.setAttribute('vector-effect', 'non-scaling-stroke');
+  svg.appendChild(base);
+
+  if (points.length > 1) {
+    const path = document.createElementNS(NS, 'path');
+    const dAttr = points
+      .map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(2) + ',' + p.y.toFixed(2))
+      .join(' ');
+    path.setAttribute('d', dAttr);
+    path.setAttribute('class', 'adm-traffic-line');
+    // The viewBox is 300x44 but CSS stretches the <svg> to roughly
+    // 160-180px wide with preserveAspectRatio="none" (~0.55-0.6x
+    // horizontally, 1x vertically, since the element's CSS height
+    // matches the viewBox height exactly). A plain stroke-width is
+    // drawn IN that coordinate space and then scaled along with
+    // everything else, so a "2px" stroke comes out thinner on
+    // near-vertical segments than near-horizontal ones -- squashed
+    // by the larger of the two scale factors -- which is what made
+    // the whole line read as a wispy hairline rather than a clean,
+    // consistent 2px one. vector-effect="non-scaling-stroke" draws the
+    // stroke AFTER the coordinate transform instead of before it, so
+    // it stays a true 2 device pixels everywhere along the path
+    // regardless of how the viewBox itself is stretched.
+    path.setAttribute('vector-effect', 'non-scaling-stroke');
+    svg.appendChild(path);
+  }
+
+  // The crosshair -- built once here and toggled in showAt()/hide()
+  // below, rather than created and torn down on every move.
+  const hoverLine = document.createElementNS(NS, 'line');
+  hoverLine.setAttribute('y1', '0');
+  hoverLine.setAttribute('y2', String(H));
+  hoverLine.setAttribute('class', 'adm-traffic-hoverline');
+  hoverLine.setAttribute('vector-effect', 'non-scaling-stroke');
+  hoverLine.style.display = 'none';
+  svg.appendChild(hoverLine);
+
+  // The hit target is the full SVG height, not the 2px line -- a
+  // transparent rect covering the whole viewBox carries the listener so
+  // the pointer never has to land on the line itself.
+  const hit = document.createElementNS(NS, 'rect');
+  hit.setAttribute('x', '0');
+  hit.setAttribute('y', '0');
+  hit.setAttribute('width', String(W));
+  hit.setAttribute('height', String(H));
+  hit.setAttribute('fill', 'transparent');
+  svg.appendChild(hit);
+
+  const wrap = el('div', { className: 'adm-traffic-chart-wrap' });
+  wrap.appendChild(svg);
+
+  // The point marker (both the single-day static dot and the hover
+  // dot) is a plain CSS-positioned <div>, not an SVG <circle> -- an SVG
+  // circle lives in the same non-uniformly-scaled coordinate space the
+  // path's vector-effect comment above describes, and vector-effect
+  // only fixes STROKE width under that scale, not fill geometry: a
+  // `<circle r="3.5">` would still render as a narrow ellipse, not a
+  // dot. A CSS div sized in real pixels sidesteps the scale entirely --
+  // vertical position maps 1:1 (the viewBox height and the rendered
+  // height are equal by construction, see H/.adm-traffic-chart's own
+  // height in admin.css), and horizontal position is a percentage of
+  // the wrap's own width -- so it is a true circle at every width the
+  // sidebar ever renders at, not just the one this was eyeballed in.
+  const dot = el('div', { className: 'adm-traffic-dot' });
+  dot.style.display = 'none';
+  wrap.appendChild(dot);
+
+  function placeDot(i) {
+    const p = points[i];
+    dot.style.left = ((p.x / W) * 100) + '%';
+    dot.style.top = p.y + 'px';
+    dot.style.display = '';
+  }
+
+  if (points.length === 1) {
+    // One day of data -- a line needs two points, so this is a single
+    // dot, shown permanently, rather than a degenerate/invisible path.
+    // Nothing to hover into that a static dot does not already show.
+    placeDot(0);
+    return wrap;
+  }
+
+  function showAt(i) {
+    const p = points[i];
+    hoverLine.setAttribute('x1', String(p.x));
+    hoverLine.setAttribute('x2', String(p.x));
+    hoverLine.style.display = '';
+    placeDot(i);
+    if (tipEl) {
+      // MM-DD, not the full YYYY-MM-DD -- the year is redundant this
+      // close to today (the footnote below already anchors the window
+      // with a full "since YYYY-MM-DD"), and dropping it is what keeps
+      // "unique"/"new" as whole words instead of ellipsis-truncated in
+      // this 180px column, at every day in the range including the
+      // widest values (11 unique, 8 new -- checked against this exact
+      // stub data during the fix for this defect).
+      tipEl.textContent = p.row.day.slice(5) + ' — ' + p.row.uniques + ' unique, ' + p.row.new_visitors + ' new';
+      tipEl.classList.add('is-active');
+    }
+  }
+
+  function hide() {
+    hoverLine.style.display = 'none';
+    dot.style.display = 'none';
+    if (tipEl) tipEl.classList.remove('is-active');
+  }
+
+  svg.addEventListener('mousemove', (ev) => {
+    trafficHovering = true;
+    const rect = svg.getBoundingClientRect();
+    const frac = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
+    const idx = Math.round(frac * (points.length - 1));
+    showAt(Math.max(0, Math.min(points.length - 1, idx)));
+  });
+  svg.addEventListener('mouseleave', () => {
+    trafficHovering = false;
+    hide();
+  });
+
+  return wrap;
+}
+
+// ---- traffic auto-refresh ----------------------------------------------
+// The panel above loads once in refreshAll() like everything else; this
+// keeps it current after that without an operator-triggered reload, by
+// polling the exact same route and re-running the exact same
+// renderTraffic() on a timer -- no separate live-update path (no SSE, no
+// websocket) for one stat block.
+const TRAFFIC_POLL_MS = 30000;
+let trafficTimer = null;
+
+async function pollTraffic() {
+  // Nothing to poll for before sign-in, and no point -- api() would
+  // just 401 through its own showNoAccess() handling for every tick
+  // until the operator signs in, which is wasted traffic for a panel
+  // nobody can see yet. showApp()/showNoAccess() start and stop this
+  // timer, so myRole tracks the panel's own visibility already; this
+  // check only guards the one tick that can land in between (the
+  // immediate visibilitychange refresh, below).
+  if (!myRole || trafficHovering) return;
+  try {
+    const d = await api('/api/admin/traffic?days=30');
+    renderTraffic(document.getElementById('traffic-body'), d);
+  } catch (e) {
+    // Unlike loadTraffic()'s own catch above (the first paint, with
+    // nothing on screen yet to protect), a failed background refresh
+    // leaves whatever numbers are already showing exactly as they are.
+    // A transient network blip is not a reason to blank a panel that
+    // was working a moment ago, and the timer keeps ticking regardless
+    // -- the next poll gets its own try, nothing here stops it.
+  }
+}
+
+function startTrafficPolling() {
+  if (trafficTimer) return; // already running -- e.g. a second showApp()
+  trafficTimer = setInterval(pollTraffic, TRAFFIC_POLL_MS);
+}
+
+function stopTrafficPolling() {
+  clearInterval(trafficTimer);
+  trafficTimer = null;
+}
+
+// Page Visibility API: a panel left open in a background tab has no
+// operator watching it, so there is no reason to hit the server every
+// 30s -- paused on hidden, and given one immediate refresh on becoming
+// visible again (rather than waiting up to another 30s for the next
+// tick) so the operator never comes back to numbers that are already
+// stale by the time they look.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopTrafficPolling();
+  } else {
+    pollTraffic();
+    startTrafficPolling();
+  }
+});
 
 // ---- players ----------------------------------------------------------
 
@@ -1020,6 +1366,32 @@ const NET_CONNECTOR_URL_EXAMPLES = {
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
+// nf-timezone is a curated <select>, not free text, so a stored value
+// outside the curated list (e.g. someone posted a valid IANA zone like
+// Europe/Helsinki straight to the API before this picker existed, or
+// ever will again via direct API use) can't just be assigned -- the
+// browser silently leaves an unmatched <select>.value at whatever was
+// already selected, which here would be the first/default option. That
+// would make merely opening this net for edit -- without even touching
+// the field -- rewrite its timezone to that default on next save. So
+// if the value isn't one of the curated options, inject it as an extra
+// option and select that instead of falling back.
+const NF_TIMEZONE_CUSTOM_OPTION_ID = 'nf-timezone-custom-option';
+function setNetTimezoneValue(tz) {
+  const select = document.getElementById('nf-timezone');
+  const existingCustom = document.getElementById(NF_TIMEZONE_CUSTOM_OPTION_ID);
+  if (existingCustom) existingCustom.remove();
+  select.value = tz;
+  if (select.value !== tz) {
+    const opt = document.createElement('option');
+    opt.id = NF_TIMEZONE_CUSTOM_OPTION_ID;
+    opt.value = tz;
+    opt.textContent = tz + ' (current value, not in list)';
+    select.appendChild(opt);
+    select.value = tz;
+  }
+}
+
 // end_hour is inclusive through :59:59 (see app/db.py's checkin_net
 // comment), so displaying it as HH:59 rather than HH:00 is what
 // actually matches the window a message gets judged against.
@@ -1409,7 +1781,7 @@ function resetNetForm() {
   document.getElementById('nf-weekday').value = '2';
   document.getElementById('nf-start-hour').value = '17';
   document.getElementById('nf-end-hour').value = '23';
-  document.getElementById('nf-timezone').value = 'America/Boise';
+  setNetTimezoneValue('America/Boise');
   document.getElementById('nf-start-date').value = '';
   document.getElementById('nf-enabled').checked = true;
   document.getElementById('nf-topic-root').value = '';
@@ -1443,7 +1815,7 @@ function startEditNet(n) {
   document.getElementById('nf-weekday').value = String(n.weekday);
   document.getElementById('nf-start-hour').value = String(n.start_hour);
   document.getElementById('nf-end-hour').value = String(n.end_hour);
-  document.getElementById('nf-timezone').value = n.timezone;
+  setNetTimezoneValue(n.timezone);
   document.getElementById('nf-start-date').value = n.start_date || '';
   document.getElementById('nf-enabled').checked = !!n.enabled;
   document.getElementById('nf-topic-root').value = n.topic_root || '';
@@ -1709,6 +2081,7 @@ function badge(id, value, bad) {
 async function refreshAll() {
   const loads = [
     loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
+    loadTraffic(),
   ];
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
@@ -1723,6 +2096,7 @@ async function refreshAll() {
 function showNoAccess(message) {
   myRole = null;
   panelLoaded = false;
+  stopTrafficPolling(); // no panel on screen for it to update any more
   document.getElementById('app').hidden = true;
   document.getElementById('login').hidden = false;
   document.getElementById('login-err').textContent = message || '';
@@ -1735,6 +2109,10 @@ async function showApp() {
   const wanted = location.hash.slice(1);
   show(document.querySelector('.adm-section[data-section="' + wanted + '"]') ? wanted : 'overview');
   await refreshAll();
+  // refreshAll() above just did the equivalent of one poll tick (its
+  // own loadTraffic() call) -- start the recurring timer from here
+  // rather than double-fetching immediately.
+  startTrafficPolling();
 }
 
 // Asks whether the CURRENT session (if any) can use this panel at all --

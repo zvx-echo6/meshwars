@@ -183,6 +183,132 @@
   }
 }
 
+/* Center-and-follow (map2.js's setupFollowControl, feature:
+ * map-center-follow) -- the lower-right counterpart to the layers
+ * panel's lower-left. Same surface/border/shadow language as
+ * .mw-layers-toggle above (the other floating on-map control this app
+ * already has, rather than the unpkg-default white NavigationControl
+ * top-left, which carries no theme hook of its own to match) so it
+ * reads as the same family of control. 44x44 is the minimum comfortable
+ * touch target the ask calls for -- deliberately sized in CSS px, not
+ * left to the SVG's own 22x22 -- at every viewport, not just narrow
+ * ones, since this is a primary map control on both mobile and desktop.
+ */
+.mw-follow-btn {
+  position: absolute;
+  right: 12px;
+  /* Unlike the layers panel (bottom-left), this control sits in the
+     SAME corner MapLibre's own attribution control occupies by
+     default -- that strip is right-anchored on every viewport, not
+     just narrow ones (see the layers panel's own mobile-only comment
+     just above: "Desktop is unaffected -- there the strip only reaches
+     the right-hand third", which is exactly the zone this button lives
+     in). Verified by screenshot: at 12px this button sat on top of the
+     "MapLibre" credit even at 1280px wide. 40px clears the ~24px strip
+     plus a gutter at every width tried (desktop and the 600px
+     breakpoint below), so the base rule fixes it everywhere instead of
+     only under the mobile media query. */
+  bottom: 40px;
+  z-index: 5;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--mw-raised);
+  color: var(--mw-text-3);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+.mw-follow-btn:hover {
+  background: var(--mw-accent-active);
+  color: var(--mw-gold-light);
+}
+
+.mw-follow-btn:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 2px;
+}
+
+/* Engaged state -- aria-pressed is the actual state; this class is kept
+ * in step with it by setFollowUI rather than driven off the attribute
+ * selector, same reasoning as .mw-basemap-switch-btn.active nearby. */
+.mw-follow-btn.active {
+  background: var(--mw-accent-active);
+  color: var(--mw-accent);
+  border-color: var(--mw-accent);
+}
+
+.mw-follow-btn svg {
+  display: block;
+}
+
+/* The base rule's 40px already clears the strip; this narrow-viewport
+ * bump only matches the layers panel's own 44px so the two floating
+ * controls sit on the same baseline once the panel lifts for its
+ * mobile-only reason (see that rule above -- the strip getting wider
+ * on mobile does not push this button any further, it was already
+ * clear of it). */
+@media (max-width: 600px) {
+  .mw-follow-btn {
+    bottom: 44px;
+  }
+}
+
+/* Light/dark basemap switch (map2.js's setupBasemapModeToggle, feature:
+ * map-light-mode) -- the Layers panel's own row above the "LAYERS"
+ * list. Same surface/border/active-state language as the board switch
+ * (mc.css's .mc-switch-row/.mc-switch-btn, top-right panel) so the two
+ * read as the same kind of control, just narrower to fit this panel
+ * (min-width 150px here vs. the scoreboard card's own width) --
+ * deliberately not the mc.css classes themselves, since this row's
+ * bottom border also has to double as the panel's own quiet separator
+ * ahead of .mw-layers-title, a job .mc-switch-row never has to do. */
+.mw-basemap-switch-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--mw-line);
+}
+
+.mw-basemap-switch-btn {
+  flex: 1 1 0;
+  background: var(--mw-raised);
+  color: var(--mw-text-2);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.mw-basemap-switch-btn:hover {
+  background: var(--mw-line);
+}
+
+/* Keyboard focus -- the board switch this is styled after has no
+ * explicit :focus-visible rule of its own (it relies on the browser
+ * default outline), which is invisible against .mc-switch-btn's own
+ * near-black --mw-raised fill in the gold skin. Given a visible ring
+ * here rather than repeating that gap. */
+.mw-basemap-switch-btn:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 1px;
+}
+
+.mw-basemap-switch-btn.active {
+  background: var(--mw-accent-active);
+  color: var(--mw-accent);
+  border-color: var(--mw-accent);
+}
+
 .mw-layers-title {
   font-weight: 600;
   margin-bottom: 6px;
@@ -221,6 +347,57 @@
 
 .mw-layers-list li.unavailable label {
   cursor: default;
+}
+
+/* Claimed-squares opacity slider (map2.js's setupOpacitySlider). A
+ * little extra vertical breathing room top and bottom marks it as a
+ * different kind of control from the checkbox rows around it, without a
+ * divider line heavy enough to read as a separate section of the panel.
+ */
+.mw-layers-opacity-row {
+  padding: 6px 0 4px;
+}
+
+.mw-layers-opacity-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+/* Same caption token as the unavailable-row note above -- this is a
+ * live readout, not the control itself, so it stays one step quieter
+ * than the "Claimed squares" label beside it. Tabular numerals so the
+ * percentage does not shift the label's width as it counts. */
+.mw-layers-opacity-value {
+  color: var(--mw-text-6);
+  font-variant-numeric: tabular-nums;
+}
+
+/* accent-color is the one styling hook a plain <input type="range">
+ * exposes without a full cross-browser thumb/track rebuild, and it
+ * takes the same --mw-accent token every other selected/active control
+ * in this panel already uses (.mw-layers-toggle:hover, etc). */
+.mw-layers-opacity-slider {
+  width: 100%;
+  accent-color: var(--mw-accent);
+  cursor: pointer;
+}
+
+/* "My location" status line (map2.js's setupMyLocationControl) -- the
+ * cell id readout in the normal case, a failure message in the error
+ * one. Indented to roughly clear the checkbox above it rather than
+ * sitting flush left under the whole row. */
+.mw-mylocation-status {
+  margin: 2px 0 2px 22px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--mw-text-6);
+}
+
+.mw-mylocation-status-error {
+  color: var(--mw-hostile);
 }
 
 /* Places Worth Going (docs/features/places.md): NOT a floating panel of

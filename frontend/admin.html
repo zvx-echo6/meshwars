@@ -26,7 +26,7 @@
        admin.css (admin.css's own layout now shifts down by nav.css's
        --mw-nav-h). -->
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260905-5" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260909-1" />
 </head>
 <body>
 
@@ -87,35 +87,69 @@
     </header>
 
     <div class="adm-body">
-      <nav class="adm-nav" aria-label="Sections">
-        <button type="button" class="adm-nav-item active" data-section="overview">
-          Overview <span class="adm-nav-badge" id="nav-attention"></span>
-        </button>
-        <button type="button" class="adm-nav-item" data-section="players">
-          Players <span class="adm-nav-badge" id="nav-players"></span>
-        </button>
-        <!-- Account-shaped, not player-shaped: everything else in this
-             nav is reached through a player. This section is the one
-             door onto an account with NO linked player at all (released
-             by "Release account link" above, or never claimed) -- see
-             admin.js's loadAccounts()/renderAccounts() for the full
-             reasoning. The badge counts accounts with no linked player,
-             not the total, the same "surface a problem, not a size"
-             role nav-attention's own badge plays on Overview -- this is
-             the one nav item on the whole page whose number is a count
-             of orphans, not a count of everything in the section. -->
-        <button type="button" class="adm-nav-item" data-section="accounts">
-          Accounts <span class="adm-nav-badge" id="nav-accounts"></span>
-        </button>
-        <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
-        <button type="button" class="adm-nav-item" data-section="nets">Nets</button>
-        <button type="button" class="adm-nav-item" data-section="paint">Paint</button>
-        <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
-        <button type="button" class="adm-nav-item" data-section="months">Months</button>
-        <button type="button" class="adm-nav-item" data-section="places">Places</button>
-        <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
-        <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
-      </nav>
+      <!-- .adm-side wraps the section nav and the traffic block as ONE
+           grid item (grid-area "side" in admin.css) so .adm-main -- the
+           other grid item, on the right -- never spans back across
+           .adm-nav's own row the way it briefly did. That two-row shape
+           is what let .adm-main's height inflate .adm-nav's row via
+           CSS Grid's own spanning-item track sizing, which in turn gave
+           .adm-nav's position: sticky a containing block far taller
+           than .adm-nav's real content -- so it never released while
+           scrolling, and .adm-traffic (non-sticky, directly below it)
+           scrolled up underneath the still-stuck nav: TRAFFIC drawn
+           straight through the Nets/Paint/Seasons/Months/Places/Notice/
+           API keys nav items in production. Wrapping nav+traffic in one
+           flex column removes the multi-row span entirely -- see
+           .adm-side's and .adm-nav's own comments in admin.css. -->
+      <div class="adm-side">
+        <nav class="adm-nav" aria-label="Sections">
+          <button type="button" class="adm-nav-item active" data-section="overview">
+            Overview <span class="adm-nav-badge" id="nav-attention"></span>
+          </button>
+          <button type="button" class="adm-nav-item" data-section="players">
+            Players <span class="adm-nav-badge" id="nav-players"></span>
+          </button>
+          <!-- Account-shaped, not player-shaped: everything else in this
+               nav is reached through a player. This section is the one
+               door onto an account with NO linked player at all (released
+               by "Release account link" above, or never claimed) -- see
+               admin.js's loadAccounts()/renderAccounts() for the full
+               reasoning. The badge counts accounts with no linked player,
+               not the total, the same "surface a problem, not a size"
+               role nav-attention's own badge plays on Overview -- this is
+               the one nav item on the whole page whose number is a count
+               of orphans, not a count of everything in the section. -->
+          <button type="button" class="adm-nav-item" data-section="accounts">
+            Accounts <span class="adm-nav-badge" id="nav-accounts"></span>
+          </button>
+          <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
+          <button type="button" class="adm-nav-item" data-section="nets">Nets</button>
+          <button type="button" class="adm-nav-item" data-section="paint">Paint</button>
+          <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
+          <button type="button" class="adm-nav-item" data-section="months">Months</button>
+          <button type="button" class="adm-nav-item" data-section="places">Places</button>
+          <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
+          <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
+        </nav>
+
+        <!-- Compact, persistent traffic summary -- NOT a section: no
+             data-section attribute, no nav-item, no nav-badge. Matt was
+             explicit that this stays a small sidebar block, visible under
+             the section nav regardless of which section is open, not a
+             new admin surface. Sits directly below .adm-nav inside
+             .adm-side (see that wrapper's own comment just above), sized
+             to its own content, not stretched by .adm-main. Populated by
+             admin.js's loadTraffic() / renderTraffic() / trafficChart() --
+             see those for the trend chart and its zero/one-day/flat-data
+             handling, and app/traffic.py for what GET /api/admin/traffic
+             counts. -->
+        <div class="adm-traffic" id="traffic-panel">
+          <h3 class="adm-traffic-h">Traffic</h3>
+          <div id="traffic-body">
+            <p class="adm-hint">Loading&hellip;</p>
+          </div>
+        </div>
+      </div>
 
       <main class="adm-main">
 
@@ -251,7 +285,19 @@
             </label>
             <label class="adm-field-label">Start hour<input type="number" id="nf-start-hour" min="0" max="23" value="17" /></label>
             <label class="adm-field-label">End hour<input type="number" id="nf-end-hour" min="0" max="23" value="23" /></label>
-            <label class="adm-field-label">Timezone<input type="text" id="nf-timezone" autocomplete="off" value="America/Boise" /></label>
+            <label class="adm-field-label adm-field-label-wide">Timezone
+              <select id="nf-timezone">
+                <option value="America/Los_Angeles">Pacific - America/Los_Angeles</option>
+                <option value="America/Denver">Mountain - America/Denver</option>
+                <option value="America/Phoenix">Arizona, no DST - America/Phoenix</option>
+                <option value="America/Boise" selected>Mountain (Idaho) - America/Boise</option>
+                <option value="America/Chicago">Central - America/Chicago</option>
+                <option value="America/New_York">Eastern - America/New_York</option>
+                <option value="America/Anchorage">Alaska - America/Anchorage</option>
+                <option value="Pacific/Honolulu">Hawaii - Pacific/Honolulu</option>
+                <option value="UTC">UTC</option>
+              </select>
+            </label>
           </div>
           <div class="adm-form">
             <label class="adm-field-label">Start date<input type="date" id="nf-start-date" /></label>
@@ -408,7 +454,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260905-11"></script>
+  <script src="/static/admin.js?v=20260909-1"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>
