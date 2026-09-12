@@ -313,11 +313,12 @@ def net_id_for_protocol_weekday(conn, protocol: str, net_date: str) -> int | Non
     return None
 
 
-def most_recent_mc_net_date(conn, now: int | None = None) -> str | None:
+def most_recent_net_date(conn, protocol: str, now: int | None = None) -> str | None:
     """The most recent local net date (YYYY-MM-DD) that any currently
-    enabled MeshCore-family net (checkin_net, protocol='mc' -- both
-    KIND_CORESCOPE and KIND_BEACON) has already reached the end of, as
-    of `now` (real current time if omitted).
+    enabled net of `protocol` (checkin_net) has already reached the end
+    of, as of `now` (real current time if omitted). Protocol-general:
+    for MC_PROTOCOL this covers both KIND_CORESCOPE and KIND_BEACON
+    nets; for MT_PROTOCOL, the Meshtastic broadcast-code nets.
 
     Deliberately computed from checkin_net's own schedule columns
     (weekday/start_hour/end_hour/timezone/start_date) rather than from
@@ -341,14 +342,14 @@ def most_recent_mc_net_date(conn, now: int | None = None) -> str | None:
     window" moment net_date_for_net itself credits a message against).
     Across every enabled net, the LATEST such date wins (plain string
     comparison, since YYYY-MM-DD sorts correctly) -- a deployment with
-    more than one MeshCore net on different weekdays reports on
+    more than one net of this protocol on different weekdays reports on
     whichever one most recently closed its window, not a fixed one of
     them. A net whose start_date blocks `now`'s local date entirely
     (see net_date_for_net's own docstring for what an empty start_date
     means) is skipped for that comparison the same way it would refuse
     to award on it.
 
-    None if no enabled MeshCore-family net exists at all, or every one
+    None if no enabled net of this protocol exists at all, or every one
     of them is start_date-blocked as of `now`.
     """
     if now is None:
@@ -356,7 +357,7 @@ def most_recent_mc_net_date(conn, now: int | None = None) -> str | None:
     rows = conn.execute(
         "SELECT weekday, start_hour, end_hour, timezone, start_date FROM checkin_net "
         " WHERE enabled = 1 AND protocol = ?",
-        (MC_PROTOCOL,),
+        (protocol,),
     ).fetchall()
 
     best: str | None = None
@@ -377,6 +378,15 @@ def most_recent_mc_net_date(conn, now: int | None = None) -> str | None:
         if best is None or candidate > best:
             best = candidate
     return best
+
+
+def most_recent_mc_net_date(conn, now: int | None = None) -> str | None:
+    """Thin MC_PROTOCOL-scoped wrapper around most_recent_net_date(),
+    kept for existing callers that only ever cared about the MeshCore
+    board (see most_recent_net_date()'s own docstring for the general
+    algorithm and reasoning -- unchanged here, just parameterized).
+    """
+    return most_recent_net_date(conn, MC_PROTOCOL, now)
 
 
 def load_checkin_config(conn) -> dict:

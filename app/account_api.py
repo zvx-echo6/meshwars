@@ -82,8 +82,6 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
@@ -2370,52 +2368,6 @@ def _diagnose_checkin_health(
     )
 
 
-def _most_recent_net_date(conn, protocol: str, now: int | None = None) -> str | None:
-    """Protocol-general twin of checkin.most_recent_mc_net_date() --
-    same walk-the-schedule-backward algorithm, same reasoning for why
-    it has to read checkin_net's own weekday/start_hour/end_hour/
-    timezone/start_date columns rather than MAX(net_date) off
-    mc_checkin_award (see that function's own docstring: award data
-    answers "when did someone last get credited," which is exactly the
-    question that goes silently wrong on the one night that matters --
-    a net that ran and credited nobody at all), just parameterized by
-    `protocol` instead of hardcoding MC_PROTOCOL.
-
-    Duplicated here rather than generalizing checkin.py's own version
-    in place: this endpoint lives in app/account_api.py and is not
-    allowed to edit app/checkin.py (owned by concurrent work on the
-    poller itself) -- see this file's own module boundary. If
-    checkin.py ever grows a protocol-general equivalent, this should be
-    deleted in favor of it.
-    """
-    if now is None:
-        now = int(time.time())
-    rows = conn.execute(
-        "SELECT weekday, start_hour, end_hour, timezone, start_date FROM checkin_net "
-        " WHERE enabled = 1 AND protocol = ?",
-        (protocol,),
-    ).fetchall()
-
-    best: str | None = None
-    for net in rows:
-        start_date = net["start_date"]
-        if not start_date:
-            continue  # blocks all, same convention checkin.net_date_for_net uses
-        local_now = datetime.fromtimestamp(now, tz=ZoneInfo(net["timezone"]))
-        days_back = (local_now.weekday() - net["weekday"]) % 7
-        if days_back == 0 and local_now.hour < net["start_hour"]:
-            # Today IS the right weekday, but the window has not opened
-            # yet -- the most recently COMPLETED occurrence is a full
-            # week earlier, not today (today hasn't happened yet).
-            days_back = 7
-        candidate = (local_now - timedelta(days=days_back)).date().isoformat()
-        if candidate < start_date:
-            continue
-        if best is None or candidate > best:
-            best = candidate
-    return best
-
-
 @router.get("/api/account/checkin-health")
 async def account_checkin_health(
     request: Request, session: SessionPrincipal = Depends(require_session),
@@ -2442,8 +2394,8 @@ async def account_checkin_health(
     necessary for a check-in to land, but it is not sufficient, and an
     earlier version of this endpoint conflated the two, reporting a
     player as fine while every one of their check-ins credited nobody.
-    _most_recent_net_date() answers "when did this board's net most
-    recently run" straight off checkin_net's own schedule, not off
+    checkin.most_recent_net_date() answers "when did this board's net
+    most recently run" straight off checkin_net's own schedule, not off
     mc_checkin_award -- see that function's own docstring for why
     asking the award table "when was the most recent net" would hide
     exactly the failure this endpoint exists to catch (a net that ran
@@ -2486,6 +2438,15 @@ async def account_checkin_health(
 
     conn = connect()
     try:
+        # Imported here, not at module level -- same "don't pay for
+        # app.checkin's heavy chain unless this endpoint is actually
+        # hit" reasoning as this module's other local .checkin imports
+        # (e.g. checkin_streak above). Aliased to match this file's
+        # existing call-site name; it's the same protocol-general
+        # schedule walk that used to be duplicated here as a private
+        # copy -- see most_recent_net_date()'s own docstring.
+        from .checkin import most_recent_net_date as _most_recent_net_date
+
         boards: dict[str, dict] = {}
         for protocol in (MC_PROTOCOL, MT_PROTOCOL):
             contacts = _checkin_contacts_status(conn, session.player_id, directory, protocol)
