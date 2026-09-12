@@ -60,6 +60,15 @@ router = APIRouter()
 
 MT_PROTOCOL = "mt"
 _STALE_DAYS = 14
+# Display label for a protocol code, used only as a fallback when an
+# award row has no attributable net (net_id NULL -- a row written
+# before that column existed, or an admin manual-credit for a protocol
+# with more than one same-weekday net) -- see GET /api/admin/checkin/
+# awards below. A net WITH an id always shows its own checkin_net.label
+# instead; this dict exists so that fallback text has exactly one
+# source rather than being retyped at every call site that needs it.
+_PROTOCOL_LABELS = {MC_PROTOCOL: "MeshCore", MT_PROTOCOL: "Meshtastic"}
+_DEFAULT_AWARD_DATES = 8
 # The admin-chosen field a net's connector actually is -- protocol
 # ('mc'/'mt') is derived FROM this on every write (see
 # _validate_net_fields and app/checkin.py's KIND_PROTOCOL), never
@@ -554,6 +563,77 @@ async def admin_checkin_award(request: Request):
                          "points": points, "streak": streak})
 
 
+@router.get("/api/admin/checkin/awards")
+async def admin_checkin_awards(request: Request, dates: int = _DEFAULT_AWARD_DATES):
+    """Every mc_checkin_award row for the most recent `dates` net dates
+    (default 8) that have ANY award at all, across every net and both
+    boards -- the read this admin panel has never had: an operator
+    could always CREDIT a check-in (POST /api/admin/checkin/award
+    above) but never SEE what actually got recorded, so a healthy net
+    and a dead one looked identical here.
+
+    `dates` counts distinct net_date values, not rows -- a Wednesday
+    with two nets and thirty check-ins is still one date toward the
+    limit, which is what an operator scrolling by week actually wants.
+    Clamped to a sane range so a bad query value can't turn this into
+    an unbounded table scan.
+
+    net_label comes from the row's own checkin_net.label when net_id
+    resolves one, and falls back to _PROTOCOL_LABELS[protocol]
+    otherwise (net_id NULL: a row written before that column existed,
+    or an admin manual-credit for a protocol with more than one
+    same-weekday net -- see mc_checkin_award's own comment in
+    app/db.py). Never dropped either way -- a legacy row missing its
+    net is exactly the kind of history an operator still needs to see.
+
+    source is 'admin' when message_id is the literal string the manual-
+    credit endpoint above writes, 'poller' otherwise -- there is no
+    separate column for this, so it is derived from that one already-
+    existing marker rather than adding a new one.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    n_dates = max(1, min(dates, 52))
+    conn = connect()
+    try:
+        date_rows = conn.execute(
+            "SELECT DISTINCT net_date FROM mc_checkin_award "
+            " ORDER BY net_date DESC LIMIT ?",
+            (n_dates,),
+        ).fetchall()
+        net_dates = [r["net_date"] for r in date_rows]
+        awards = []
+        if net_dates:
+            placeholders = ",".join("?" * len(net_dates))
+            rows = conn.execute(
+                "SELECT a.net_date, a.protocol, a.player_id, a.points, a.streak, "
+                "       a.message_id, p.display_name AS player_name, n.label AS net_label "
+                "  FROM mc_checkin_award a "
+                "  JOIN player p ON p.player_id = a.player_id "
+                "  LEFT JOIN checkin_net n ON n.id = a.net_id "
+                f" WHERE a.net_date IN ({placeholders}) "
+                " ORDER BY a.net_date DESC, COALESCE(n.label, a.protocol), p.display_name",
+                net_dates,
+            ).fetchall()
+            for r in rows:
+                net_label = r["net_label"] or _PROTOCOL_LABELS.get(r["protocol"], r["protocol"])
+                awards.append({
+                    "net_date": r["net_date"],
+                    "net_label": net_label,
+                    "protocol": r["protocol"],
+                    "player_id": r["player_id"],
+                    "player_name": r["player_name"],
+                    "points": r["points"],
+                    "streak": r["streak"],
+                    "source": "admin" if r["message_id"] == "admin" else "poller",
+                })
+    finally:
+        conn.close()
+    return JSONResponse({"awards": awards, "dates": n_dates})
+
+
 # The fallback check-in name feature (POST /api/admin/checkin/binding,
 # which used to INSERT/DELETE mc_checkin_binding rows) was retired --
 # players now prove a radio via node confirmation on their account page
@@ -784,6 +864,35 @@ def _unresolved_by_net(conn) -> dict[int, dict]:
     return out
 
 
+def _checkin_counts_by_net(conn) -> dict[int, dict]:
+    """net_id -> {"net_date", "count"} for each net's own MOST RECENT
+    net_date carrying any mc_checkin_award row attributed to it --
+    feeds admin_checkin_nets' per-net check-in count, the other half of
+    _unresolved_by_net's "is this net actually working" visibility:
+    that one shows messages that came in but couldn't be credited, this
+    one shows how many actually got credited, so a dead net (0 either
+    way) doesn't look identical to a healthy one.
+
+    Scoped by net_id, not protocol+weekday -- a legacy or ambiguous
+    manual-credit row with net_id NULL (see mc_checkin_award's own
+    comment in app/db.py) is deliberately EXCLUDED here rather than
+    guessed at, so a net's count never borrows history it cannot
+    actually claim; GET /api/admin/checkin/awards is where those rows
+    still surface, with their protocol-label fallback. Same "latest
+    date only, one bulk join, not N+1" shape as _unresolved_by_net.
+    """
+    rows = conn.execute(
+        "SELECT a.net_id, a.net_date, COUNT(*) AS cnt "
+        "  FROM mc_checkin_award a "
+        "  JOIN (SELECT net_id, max(net_date) AS net_date "
+        "          FROM mc_checkin_award WHERE net_id IS NOT NULL GROUP BY net_id) latest "
+        "    ON latest.net_id = a.net_id AND latest.net_date = a.net_date "
+        " WHERE a.net_id IS NOT NULL "
+        " GROUP BY a.net_id, a.net_date"
+    ).fetchall()
+    return {r["net_id"]: {"net_date": r["net_date"], "count": r["cnt"]} for r in rows}
+
+
 @router.get("/api/admin/checkin/nets")
 async def admin_checkin_nets(request: Request):
     """Every net (enabled or not) plus the global config singleton, for
@@ -802,6 +911,12 @@ async def admin_checkin_nets(request: Request):
     rows (_unresolved_by_net above); a net with none gets count 0 and an
     empty list, same shape either way so the frontend never has to
     branch on the key being absent.
+
+    last_checkin_net_date/last_checkin_count are the same shape again,
+    for the count of awards actually credited (_checkin_counts_by_net
+    above) -- a net with none gets count 0 and a null date, always
+    present so a healthy net reporting zero for a bad week is exactly
+    as visible as one that has never fired at all.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -814,11 +929,15 @@ async def admin_checkin_nets(request: Request):
         for n in nets:
             n["enabled"] = bool(n["enabled"])
         unresolved = _unresolved_by_net(conn)
+        checkin_counts = _checkin_counts_by_net(conn)
         for n in nets:
             entry = unresolved.get(n["id"])
             n["unresolved_net_date"] = entry["net_date"] if entry else None
             n["unresolved_count"] = entry["count"] if entry else 0
             n["unresolved_senders"] = entry["senders"] if entry else []
+            count_entry = checkin_counts.get(n["id"])
+            n["last_checkin_net_date"] = count_entry["net_date"] if count_entry else None
+            n["last_checkin_count"] = count_entry["count"] if count_entry else 0
         row = conn.execute("SELECT * FROM checkin_config WHERE id = 1").fetchone()
         config = dict(row) if row is not None else {}
         if config:

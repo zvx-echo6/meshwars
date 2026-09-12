@@ -1037,6 +1037,32 @@ body {
 }
 .adm-net-health.adm-status-bad { color: var(--adm-bad-text); }
 
+/* Check-in history table (Check-ins section, above the manual-credit
+   form) -- the first genuinely tabular data in this panel, everything
+   else here is built from flex rows instead. A real <table> rather
+   than another flex-row list because the whole point is columns lining
+   up down a scrolling history; wrapped in its own scroll container so
+   a narrow viewport scrolls the table instead of the page. */
+.adm-table-wrap { overflow-x: auto; }
+.adm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+.adm-table th, .adm-table td {
+  text-align: left;
+  padding: 5px 10px 5px 0;
+  border-bottom: 1px solid var(--mw-line);
+  white-space: nowrap;
+}
+.adm-table th {
+  color: var(--mw-text-6);
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+.adm-table tbody tr:last-child td { border-bottom: 0; }
+
 @media (max-width: 620px) {
   /* flex-wrap on the row too -- width: 100% alone does not drop a flex
      item onto its own line, only flex-wrap on the row does that; the

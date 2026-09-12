@@ -1285,6 +1285,55 @@ async function loadAccounts() {
 
 // ---- check-ins --------------------------------------------------------
 
+let allCheckinAwards = []; // GET /api/admin/checkin/awards -- most recent net dates only
+
+// net_label already carries the protocol-label fallback for a legacy
+// net_id-NULL row (see app/admin_ops.py's admin_checkin_awards) -- this
+// only turns a flat award list into the "grouped by net date, newest
+// first" table the checkins section asks for, same "one <table>, build
+// it with el()" shape as everything else in this file builds its rows.
+function renderCheckinAwards() {
+  const host = document.getElementById('ci-awards');
+  host.replaceChildren();
+  if (!allCheckinAwards.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No check-ins recorded yet.' }));
+    return;
+  }
+  const table = el('table', { className: 'adm-table' });
+  const thead = el('thead');
+  const headRow = el('tr');
+  ['Date', 'Net', 'Player', 'Points', 'Streak', 'Source'].forEach((h) => {
+    headRow.appendChild(el('th', { text: h }));
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = el('tbody');
+  allCheckinAwards.forEach((a) => {
+    const tr = el('tr');
+    tr.appendChild(el('td', { text: a.net_date }));
+    tr.appendChild(el('td', { text: a.net_label }));
+    tr.appendChild(el('td', { text: a.player_name }));
+    tr.appendChild(el('td', { text: String(a.points) }));
+    tr.appendChild(el('td', { text: a.streak === null || a.streak === undefined ? '—' : String(a.streak) }));
+    tr.appendChild(el('td', { text: a.source === 'admin' ? 'admin' : 'poller' }));
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  const wrap = el('div', { className: 'adm-table-wrap' });
+  wrap.appendChild(table);
+  host.appendChild(wrap);
+}
+
+async function loadCheckinAwards() {
+  try {
+    const d = await api('/api/admin/checkin/awards');
+    allCheckinAwards = d.awards || [];
+    renderCheckinAwards();
+  } catch (e) {
+    setStatus('Check-in history load failed: ' + e.message, true);
+  }
+}
+
 async function awardCheckin(b) {
   const name = document.getElementById('ci-player').value.trim().toLowerCase();
   const date = document.getElementById('ci-date').value.trim();
@@ -1300,6 +1349,7 @@ async function awardCheckin(b) {
       { player_id: p.player_id, net_date: date, protocol: proto });
     out.textContent = 'Credited ' + p.display_name + ' ' + r.points +
       ' points for ' + r.net_date + ' (streak ' + r.streak + ').';
+    await loadCheckinAwards();
   } catch (e) {
     out.textContent = 'Failed: ' + e.message;
   }
@@ -1489,6 +1539,16 @@ function renderNetRow(n) {
     className: 'adm-net-health' + (n.last_poll_error ? ' adm-status-bad' : ''),
   });
   healthP.appendChild(el('span', { text: netHealthText(n) }));
+  // Always rendered, zero included -- "0 check-ins" for a net's most
+  // recent net_date is exactly the signal an operator needs (a net
+  // that polls cleanly and has unresolved_count 0 can still be dead:
+  // nobody checked in at all), so this can never be the one line that
+  // silently omits itself on the good-looking case.
+  healthP.appendChild(el('span', {
+    text: '  ·  ' + n.last_checkin_count +
+      (n.last_checkin_count === 1 ? ' check-in' : ' check-ins') +
+      (n.last_checkin_net_date ? ' (' + n.last_checkin_net_date + ')' : ''),
+  }));
   if (n.unresolved_count > 0) {
     healthP.appendChild(el('span', {
       className: 'adm-status-warn',
@@ -2081,7 +2141,7 @@ function badge(id, value, bad) {
 async function refreshAll() {
   const loads = [
     loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
-    loadTraffic(),
+    loadTraffic(), loadCheckinAwards(),
   ];
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
