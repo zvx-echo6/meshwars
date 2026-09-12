@@ -402,17 +402,28 @@ def test_checkins_empty_when_player_has_none(client, db_path):
 
 # ---- GET /api/account/checkin-health ---------------------------------------
 #
-# The headline (`state`/`summary`/`resolved`) is now derived from
-# whether this player was actually CREDITED for the most recent
-# MeshCore net (mc_checkin_award, matched against
-# checkin.most_recent_mc_net_date()'s schedule-derived date) -- not
-# from whether a contact merely resolves in the directory. That is
-# exactly the distinction test_checkin_health_resolving_but_uncredited_
-# reports_state_2 below exists to pin down: it is the regression Matt
-# hit (hundreds of check-ins, nobody credited, page said everything was
-# fine) and the one state the OLD binding-based "resolved" computation
-# could never express. `contacts` (per-contact detail) is unchanged in
-# shape from before and still exercised the same way as always.
+# The response is now per-board: body["boards"]["mc"] and
+# body["boards"]["mt"] are always both present (same "boards always
+# lists both" convention GET /api/account/stats uses -- see that
+# route's own docstring), each carrying its own `state`/`summary`/
+# `resolved`/`most_recent_net_date`/`contacts`, computed completely
+# independently against that board's own checkin_net schedule and its
+# own mc_checkin_award rows.
+#
+# Each board's headline is derived from whether this player was
+# actually CREDITED for THAT board's most recent net (mc_checkin_award,
+# matched against a schedule-derived date, never from mc_checkin_
+# award's own MAX(net_date)) -- not from whether a contact merely
+# resolves in the directory. That is exactly the distinction
+# test_checkin_health_resolving_but_uncredited_reports_state_2 below
+# exists to pin down: it is the regression Matt hit (hundreds of
+# check-ins, nobody credited, page said everything was fine) and the
+# one state the OLD binding-based "resolved" computation could never
+# express. This endpoint used to hardcode MeshCore throughout, so the
+# exact same regression existed silently for the Meshtastic board too
+# -- test_checkin_health_mc_credited_mt_uncredited_are_independent
+# below is the real-world case that produced: MeshCore fine, Meshtastic
+# silently stopped, panel still green.
 #
 # The retired last-resort fallback-name feature (mc_checkin_binding,
 # `binding` in the old response) is gone -- see app/checkin_api.py's
@@ -430,12 +441,17 @@ def test_checkin_health_credited_recently_reports_state_1(client, db_path):
     client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
 
     body = client.get("/api/account/checkin-health").json()
+    mc = body["boards"]["mc"]
 
-    assert body["state"] == "credited"
+    assert mc["state"] == "credited"
+    assert mc["resolved"] is True
+    assert mc["most_recent_net_date"] == today
+    assert today in mc["summary"]
+    assert "25" in mc["summary"]
+    # No MT radio was ever bound -- an honest "nothing to report" state,
+    # not a false green and not something that drags the MC result down.
+    assert body["boards"]["mt"]["state"] == "nothing_bound"
     assert body["resolved"] is True
-    assert body["most_recent_net_date"] == today
-    assert today in body["summary"]
-    assert "25" in body["summary"]
 
 
 def test_checkin_health_resolving_but_uncredited_reports_state_2(client, db_path):
@@ -456,12 +472,14 @@ def test_checkin_health_resolving_but_uncredited_reports_state_2(client, db_path
     client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
 
     body = client.get("/api/account/checkin-health").json()
+    mc = body["boards"]["mc"]
 
-    assert body["state"] == "resolving_uncredited"
+    assert mc["state"] == "resolving_uncredited"
+    assert mc["resolved"] is False
+    assert "Clean Radio" in mc["summary"]
+    assert today in mc["summary"]
+    assert mc["contacts"][0]["status"] == "resolved"
     assert body["resolved"] is False
-    assert "Clean Radio" in body["summary"]
-    assert today in body["summary"]
-    assert body["contacts"][0]["status"] == "resolved"
 
 
 def test_checkin_health_contact_absent_reports_state_3_names_node_ref(client, db_path):
@@ -471,13 +489,14 @@ def test_checkin_health_contact_absent_reports_state_3_names_node_ref(client, db
     client.app.state.checkin_poller = FakePoller([])  # empty directory
 
     body = client.get("/api/account/checkin-health").json()
+    mc = body["boards"]["mc"]
 
-    contact = body["contacts"][0]
+    contact = mc["contacts"][0]
     assert contact["status"] == "not_in_directory"
     assert contact["resolved_name"] is None
-    assert body["state"] == "not_in_directory"
-    assert body["resolved"] is False
-    assert "deadbeef" in body["summary"]
+    assert mc["state"] == "not_in_directory"
+    assert mc["resolved"] is False
+    assert "deadbeef" in mc["summary"]
 
 
 def test_checkin_health_contact_key_ambiguous(client, db_path):
@@ -491,14 +510,15 @@ def test_checkin_health_contact_key_ambiguous(client, db_path):
     ])
 
     body = client.get("/api/account/checkin-health").json()
+    mc = body["boards"]["mc"]
 
-    contact = body["contacts"][0]
+    contact = mc["contacts"][0]
     assert contact["status"] == "key_ambiguous"
     assert contact["match_count"] == 2
     assert contact["resolved_name"] is None
-    assert body["state"] == "key_ambiguous"
-    assert body["resolved"] is False
-    assert "operator" in body["summary"].lower()
+    assert mc["state"] == "key_ambiguous"
+    assert mc["resolved"] is False
+    assert "operator" in mc["summary"].lower()
 
 
 def test_checkin_health_contact_name_ambiguous(client, db_path):
@@ -513,13 +533,14 @@ def test_checkin_health_contact_name_ambiguous(client, db_path):
     ])
 
     body = client.get("/api/account/checkin-health").json()
+    mc = body["boards"]["mc"]
 
-    contact = body["contacts"][0]
+    contact = mc["contacts"][0]
     assert contact["status"] == "name_ambiguous"
     assert contact["resolved_name"] == "Repeater"
     assert contact["match_count"] == 1
-    assert body["state"] == "name_ambiguous"
-    assert body["resolved"] is False
+    assert mc["state"] == "name_ambiguous"
+    assert mc["resolved"] is False
 
 
 def test_checkin_health_nothing_bound_reports_state_6(client, db_path):
@@ -528,13 +549,107 @@ def test_checkin_health_nothing_bound_reports_state_6(client, db_path):
     client.app.state.checkin_poller = FakePoller([])
 
     body = client.get("/api/account/checkin-health").json()
+    mc = body["boards"]["mc"]
 
-    assert body["contacts"] == []
-    assert body["state"] == "nothing_bound"
-    assert body["resolved"] is False
-    assert "no meshcore contact" in body["summary"].lower()
-    assert "confirm my node" in body["summary"].lower()
+    assert mc["contacts"] == []
+    assert mc["state"] == "nothing_bound"
+    assert mc["resolved"] is False
+    assert "no meshcore radio" in mc["summary"].lower()
+    assert "confirm my node" in mc["summary"].lower()
+    assert body["boards"]["mt"]["state"] == "nothing_bound"
     assert "binding" not in body
+
+
+def test_checkin_health_reports_both_boards_independently(client, db_path):
+    # (a) Independence: two different point values on two different
+    # boards for the same player prove each board's headline comes from
+    # its own query, not a shared/aliased computation.
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    weekday, today = _today_mc_net_date()
+
+    _bind_node(db_path, player_id, "aaaa1111", protocol="mc")
+    _net(db_path, weekday=weekday, protocol="mc")
+    season_mc = _season(db_path, "mc")
+    _checkin(db_path, season_mc, player_id, today, points=10.0, protocol="mc")
+
+    _bind_node(db_path, player_id, "cafefeed", protocol="mt")
+    _net(db_path, weekday=weekday, protocol="mt", kind="meshview")
+    season_mt = _season(db_path, "mt")
+    _checkin(db_path, season_mt, player_id, today, points=30.0, protocol="mt")
+
+    client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
+
+    body = client.get("/api/account/checkin-health").json()
+
+    assert set(body["boards"].keys()) == {"mc", "mt"}
+    assert body["boards"]["mc"]["state"] == "credited"
+    assert "10" in body["boards"]["mc"]["summary"]
+    assert body["boards"]["mt"]["state"] == "credited"
+    assert "30" in body["boards"]["mt"]["summary"]
+    assert body["resolved"] is True
+
+
+def test_checkin_health_mc_credited_mt_uncredited_are_independent(client, db_path):
+    # (b) THE real-world case that was silently green: MeshCore
+    # credits fine every week, Meshtastic stopped crediting -- and the
+    # old MC-only endpoint had no way to say so.
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    weekday, today = _today_mc_net_date()
+
+    _bind_node(db_path, player_id, "aaaa1111", protocol="mc")
+    _net(db_path, weekday=weekday, protocol="mc")
+    season_mc = _season(db_path, "mc")
+    _checkin(db_path, season_mc, player_id, today, points=15.0, protocol="mc")
+    client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
+
+    _bind_node(db_path, player_id, "cafefeed", protocol="mt")
+    _net(db_path, weekday=weekday, protocol="mt", kind="meshview")
+    season_mt = _season(db_path, "mt")
+    # Only an OLDER mt award exists -- this player's Meshtastic
+    # check-ins went quiet starting some week after this one.
+    _checkin(db_path, season_mt, player_id, "2020-01-01", points=5.0, protocol="mt")
+
+    body = client.get("/api/account/checkin-health").json()
+    mc = body["boards"]["mc"]
+    mt = body["boards"]["mt"]
+
+    assert mc["state"] == "credited"
+    assert mc["resolved"] is True
+
+    assert mt["state"] == "bound_uncredited"
+    assert mt["resolved"] is False
+    assert "cafefeed" in mt["summary"]
+    assert today in mt["summary"]
+    assert mt["contacts"][0]["status"] == "bound"
+    assert mt["contacts"][0]["node_ref"] == "cafefeed"
+
+    assert body["resolved"] is False
+
+
+def test_checkin_health_mt_nothing_bound_is_not_a_false_green(client, db_path):
+    # (c) A player with no Meshtastic radio bound at all must get the
+    # distinct "no radio bound" state, never "credited" and never a 500.
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    weekday, today = _today_mc_net_date()
+    _bind_node(db_path, player_id, "aaaa1111", protocol="mc")
+    _net(db_path, weekday=weekday, protocol="mc")
+    season_mc = _season(db_path, "mc")
+    _checkin(db_path, season_mc, player_id, today, points=15.0, protocol="mc")
+    client.app.state.checkin_poller = FakePoller([_node("Clean Radio", "aaaa1111ffffffff")])
+
+    resp = client.get("/api/account/checkin-health")
+    body = resp.json()
+    mt = body["boards"]["mt"]
+
+    assert resp.status_code == 200
+    assert mt["state"] == "nothing_bound"
+    assert mt["state"] != "credited"
+    assert mt["resolved"] is False
+    assert mt["contacts"] == []
+    assert "no meshtastic radio" in mt["summary"].lower()
 
 
 def test_checkin_health_never_leaks_another_players_contact_or_name(client, db_path):
@@ -556,8 +671,8 @@ def test_checkin_health_never_leaks_another_players_contact_or_name(client, db_p
 
     body = client.get("/api/account/checkin-health").json()
 
-    assert len(body["contacts"]) == 1
-    assert body["contacts"][0]["node_ref"] == "aaaa1111"
+    assert len(body["boards"]["mc"]["contacts"]) == 1
+    assert body["boards"]["mc"]["contacts"][0]["node_ref"] == "aaaa1111"
     raw = json.dumps(body)
     assert "bbbb2222" not in raw
     assert "Someone Else's Radio" not in raw
@@ -593,4 +708,4 @@ def test_checkin_health_with_no_poller_degrades_to_empty_directory(client, db_pa
     resp = client.get("/api/account/checkin-health")
 
     assert resp.status_code == 200
-    assert resp.json()["contacts"][0]["status"] == "not_in_directory"
+    assert resp.json()["boards"]["mc"]["contacts"][0]["status"] == "not_in_directory"

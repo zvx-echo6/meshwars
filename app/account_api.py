@@ -82,6 +82,8 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
@@ -2118,6 +2120,13 @@ async def account_checkins(
 # app/admin_ops.py's overview, and roughly four in ten bound contacts
 # fail to resolve. Every case a player can hit is covered here; there
 # is no catch-all "unknown" bucket to hide behind.
+#
+# Board display names for this endpoint's generated text live in ONE
+# place -- the same PROTOCOL_LABELS map frontend/account.js already
+# keys its own rendering off of (mt: Meshtastic, mc: MeshCore) -- so a
+# board's name never gets typed out a second, possibly-drifting way.
+_PROTOCOL_LABEL = {MC_PROTOCOL: "MeshCore", MT_PROTOCOL: "Meshtastic"}
+
 _CONTACT_EXPLANATIONS = {
     "resolved": (
         "This contact's key resolves to a name in the check-in "
@@ -2145,23 +2154,61 @@ _CONTACT_EXPLANATIONS = {
         "rather than risk crediting the wrong person. Rename this "
         "companion node to something nobody else's radio is using."
     ),
+    "bound": (
+        "Meshtastic check-ins are matched by node ID directly, not by a "
+        "directory of names, so a bound radio is always eligible to be "
+        "credited -- there is no separate resolution step to check. See "
+        "the headline diagnosis above for whether it actually has been."
+    ),
 }
 
 
-def _checkin_contacts_status(conn, player_id: int, directory: list[dict]) -> list[dict]:
-    """Every one of this player's bound MeshCore contacts (player_node,
-    protocol='mc'), each classified against `directory` by
-    checkin.mc_contact_status() -- the exact same per-contact decision
-    checkin._build_directory_bridge() makes at check-in time, just not
-    thrown away for the cases that don't cleanly resolve.
+def _checkin_contacts_status(
+    conn, player_id: int, directory: list[dict], protocol: str,
+) -> list[dict]:
+    """Every one of this player's bound radios on `protocol` (player_node,
+    protocol=`protocol`), classified per-contact.
+
+    MeshCore (`protocol='mc'`) reuses checkin.mc_contact_status() -- the
+    exact same per-contact decision checkin._build_directory_bridge()
+    makes at check-in time against `directory`, just not thrown away for
+    the cases that don't cleanly resolve.
+
+    Meshtastic (`protocol='mt'`) has no equivalent resolution step to
+    classify against: app/checkin.py's own _process_mt_packet /
+    _process_mqtt_message match a sender straight off player_node's
+    node_ref, never off a name in a directory (see that module's own
+    docstring). So every bound Meshtastic radio gets the single status
+    "bound" -- eligible by construction, with no ambiguity states to
+    report, matching reality rather than inventing MeshCore-shaped
+    states (not_in_directory, name_ambiguous, key_ambiguous) that this
+    protocol has no mechanism to produce.
     """
+    if protocol != MC_PROTOCOL:
+        rows = conn.execute(
+            "SELECT node_ref, bound_at FROM player_node "
+            " WHERE protocol = ? AND player_id = ? ORDER BY bound_at",
+            (protocol, player_id),
+        ).fetchall()
+        return [
+            {
+                "node_ref": r["node_ref"],
+                "bound_at": r["bound_at"],
+                "status": "bound",
+                "resolved_name": None,
+                "match_count": None,
+                "explanation": _CONTACT_EXPLANATIONS["bound"],
+            }
+            for r in rows
+        ]
+
     from .checkin import _index_mc_directory, mc_contact_status
 
     by_prefix, ambiguous_names = _index_mc_directory(directory)
     rows = conn.execute(
         "SELECT node_ref, bound_at FROM player_node "
         " WHERE protocol = ? AND player_id = ? ORDER BY bound_at",
-        (MC_PROTOCOL, player_id),
+        (protocol, player_id),
     ).fetchall()
 
     out = []
@@ -2192,143 +2239,226 @@ def _fmt_points(points) -> str:
 
 
 def _diagnose_checkin_health(
-    contacts: list[dict], most_recent_net_date: str | None, credited_points,
+    protocol: str, contacts: list[dict], most_recent_net_date: str | None, credited_points,
 ) -> tuple[str, str]:
-    """The headline (state, summary) for GET /api/account/checkin-health,
-    computed from REALITY -- whether this player was actually credited
-    -- not from whether something merely LOOKS bindable. See this
-    endpoint's own docstring for why that distinction is the entire
-    point of this function existing: the previous version of this
-    panel inferred "resolved" from contact/binding status alone and
-    could report a player as fine while every one of their check-ins
-    went uncredited.
+    """The headline (state, summary) for one board of
+    GET /api/account/checkin-health, computed from REALITY -- whether
+    this player was actually credited -- not from whether something
+    merely LOOKS bindable. See this endpoint's own docstring for why
+    that distinction is the entire point of this function existing: the
+    previous version of this panel inferred "resolved" from contact/
+    binding status alone, ONLY for MeshCore, and could report a player
+    as fine while every one of their check-ins on either board went
+    uncredited -- MeshCore included, and Meshtastic always, since it
+    never looked at that board at all.
 
     `credited_points` is the player's mc_checkin_award.points for
-    `most_recent_net_date` if that exact row exists, else None -- the
-    caller has already done the one query this decision actually turns
-    on. `contacts` is _checkin_contacts_status()'s output (this
-    player's own bound MeshCore radios only -- never another player's
-    name or contact, see this endpoint's own docstring on that).
+    `most_recent_net_date` on `protocol` if that exact row exists, else
+    None -- the caller has already done the one query this decision
+    actually turns on. `contacts` is _checkin_contacts_status()'s
+    output for `protocol` (this player's own bound radios on that board
+    only -- never another player's name or contact, see this endpoint's
+    own docstring on that).
 
-    Six states, priority order, each ending in one concrete next step
-    that only ever points at something this same page renders (My
-    radios, Confirm my node, both ABOVE this panel in
-    frontend/account.html -- see that file for why):
+    States, priority order, each ending in one concrete next step that
+    only ever points at something this same page renders (My radios,
+    Confirm my node, both ABOVE this panel in frontend/account.html --
+    see that file for why):
 
-    1. credited: an award exists for the most recent net date. Nothing
-       else matters once this is true -- report it and stop.
-    2. resolving_uncredited: no contact is credited yet, at least one
-       resolves in the directory. THE state this function exists to be
-       able to say -- a resolving contact used to read as "fine" no
-       matter what mc_checkin_award said. Directory resolution is
-       necessary for a check-in to land but never sufficient (the
-       radio still has to actually post under that exact name during
-       the window), so this is reported as a real problem, not
-       downgraded to "everything's fine."
-    3. not_in_directory: no contact resolves or is ambiguous, but at
-       least one is bound and simply hasn't shown up in the directory.
-    4. name_ambiguous: a bound contact's display name collides with
-       another radio in the directory.
-    5. key_ambiguous: a bound contact's key prefix collides with
-       another directory entry -- not fixable by the player at all.
-    6. nothing_bound: no MeshCore contact bound at all.
+    1. credited: an award exists for the most recent net date on this
+       board. Nothing else matters once this is true -- report it and
+       stop. Shared by both boards.
+    2. resolving_uncredited (MeshCore only): no contact is credited
+       yet, at least one resolves in the directory. THE state this
+       function exists to be able to say -- a resolving contact used to
+       read as "fine" no matter what mc_checkin_award said. Directory
+       resolution is necessary for a check-in to land but never
+       sufficient (the radio still has to actually post under that
+       exact name during the window), so this is reported as a real
+       problem, not downgraded to "everything's fine."
+    3. not_in_directory (MeshCore only): no contact resolves or is
+       ambiguous, but at least one is bound and simply hasn't shown up
+       in the directory.
+    4. name_ambiguous (MeshCore only): a bound contact's display name
+       collides with another radio in the directory.
+    5. key_ambiguous (MeshCore only): a bound contact's key prefix
+       collides with another directory entry -- not fixable by the
+       player at all.
+    6. bound_uncredited (Meshtastic only): at least one radio is bound
+       -- eligible by construction, see _checkin_contacts_status's own
+       docstring on why Meshtastic has no directory-resolution states
+       to report -- but not credited for the most recent net date. The
+       only remaining explanation is that the radio has not actually
+       posted the net's hashtag inside its window.
+    7. nothing_bound: no radio bound on this board at all. Shared by
+       both boards -- an honest, distinct state rather than a false
+       "credited" or a crash, see this endpoint's own docstring.
 
-    A player can be in more than one of 3/4/5 at once with several
-    bound radios; priority order picks the single most actionable one
-    to lead with, same "refuse rather than guess" spirit as
-    checkin._build_directory_bridge()'s own ambiguity handling -- this
-    just orders outcomes instead of refusing one.
+    A MeshCore player can be in more than one of 3/4/5 at once with
+    several bound radios; priority order picks the single most
+    actionable one to lead with, same "refuse rather than guess" spirit
+    as checkin._build_directory_bridge()'s own ambiguity handling --
+    this just orders outcomes instead of refusing one.
     """
+    board = _PROTOCOL_LABEL[protocol]
+
     if credited_points is not None:
         return "credited", (
             f"You were credited {_fmt_points(credited_points)} point(s) for the "
-            f"{most_recent_net_date} net. No further action needed."
+            f"{most_recent_net_date} {board} net. No further action needed."
         )
 
     date_text = most_recent_net_date or "the most recent net"
 
-    resolved = [c for c in contacts if c["status"] == "resolved"]
-    if resolved:
-        names = sorted({c["resolved_name"] for c in resolved if c["resolved_name"]})
-        names_text = " and ".join(names) if len(names) <= 1 else (
-            ", ".join(names[:-1]) + f", and {names[-1]}"
-        )
-        return "resolving_uncredited", (
-            f"Your radio is in the directory as {names_text}, but you were not "
-            f"credited on {date_text}. Check-ins only count when the radio posts "
-            "under exactly that name -- so either set the radio back to that "
-            "name, or confirm the radio that actually posts, using the Confirm "
-            "my node section above."
-        )
+    if protocol == MC_PROTOCOL:
+        resolved = [c for c in contacts if c["status"] == "resolved"]
+        if resolved:
+            names = sorted({c["resolved_name"] for c in resolved if c["resolved_name"]})
+            names_text = " and ".join(names) if len(names) <= 1 else (
+                ", ".join(names[:-1]) + f", and {names[-1]}"
+            )
+            return "resolving_uncredited", (
+                f"Your radio is in the directory as {names_text}, but you were not "
+                f"credited on {date_text}. Check-ins only count when the radio posts "
+                "under exactly that name -- so either set the radio back to that "
+                "name, or confirm the radio that actually posts, using the Confirm "
+                "my node section above."
+            )
 
-    not_in_directory = [c for c in contacts if c["status"] == "not_in_directory"]
-    if not_in_directory:
-        refs = ", ".join(c["node_ref"] for c in not_in_directory)
-        return "not_in_directory", (
-            f"Your bound radio(s) ({refs}) have not shown up in the check-in "
-            "directory yet, so they cannot be matched to a name -- advertising "
-            "is what puts a radio in the directory. If one of these isn't the "
-            "radio you actually use, remove it in My radios above; otherwise, "
-            "wardrive it, or use the Confirm my node section above to prove "
-            "which one is yours right now."
-        )
+        not_in_directory = [c for c in contacts if c["status"] == "not_in_directory"]
+        if not_in_directory:
+            refs = ", ".join(c["node_ref"] for c in not_in_directory)
+            return "not_in_directory", (
+                f"Your bound radio(s) ({refs}) have not shown up in the check-in "
+                "directory yet, so they cannot be matched to a name -- advertising "
+                "is what puts a radio in the directory. If one of these isn't the "
+                "radio you actually use, remove it in My radios above; otherwise, "
+                "wardrive it, or use the Confirm my node section above to prove "
+                "which one is yours right now."
+            )
 
-    name_ambiguous = [c for c in contacts if c["status"] == "name_ambiguous"]
-    if name_ambiguous:
-        return "name_ambiguous", (
-            "Your radio's display name in the check-in directory is currently "
-            "shared by another radio, so check-ins under it are refused rather "
-            "than risk crediting the wrong person. Rename the companion node to "
-            "something nobody else's radio is using."
-        )
+        name_ambiguous = [c for c in contacts if c["status"] == "name_ambiguous"]
+        if name_ambiguous:
+            return "name_ambiguous", (
+                "Your radio's display name in the check-in directory is currently "
+                "shared by another radio, so check-ins under it are refused rather "
+                "than risk crediting the wrong person. Rename the companion node to "
+                "something nobody else's radio is using."
+            )
 
-    key_ambiguous = [c for c in contacts if c["status"] == "key_ambiguous"]
-    if key_ambiguous:
-        return "key_ambiguous", (
-            "Your radio's key currently matches more than one entry in the "
-            "check-in directory. This is not something you can fix yourself -- "
-            "flag it to an operator."
-        )
+        key_ambiguous = [c for c in contacts if c["status"] == "key_ambiguous"]
+        if key_ambiguous:
+            return "key_ambiguous", (
+                "Your radio's key currently matches more than one entry in the "
+                "check-in directory. This is not something you can fix yourself -- "
+                "flag it to an operator."
+            )
+    else:
+        bound = [c for c in contacts if c["status"] == "bound"]
+        if bound:
+            refs = ", ".join(c["node_ref"] for c in bound)
+            return "bound_uncredited", (
+                f"Your bound radio(s) ({refs}) are eligible, but you were not "
+                f"credited on {date_text}. Check-ins only count when the radio "
+                "actually posts the net's hashtag inside its window -- confirm "
+                "it was on and transmitting during that net."
+            )
 
     return "nothing_bound", (
-        "You have no MeshCore contact bound, so you cannot earn MeshCore net "
+        f"You have no {board} radio bound, so you cannot earn {board} net "
         "check-ins yet. Use the Confirm my node section above to get started."
     )
+
+
+def _most_recent_net_date(conn, protocol: str, now: int | None = None) -> str | None:
+    """Protocol-general twin of checkin.most_recent_mc_net_date() --
+    same walk-the-schedule-backward algorithm, same reasoning for why
+    it has to read checkin_net's own weekday/start_hour/end_hour/
+    timezone/start_date columns rather than MAX(net_date) off
+    mc_checkin_award (see that function's own docstring: award data
+    answers "when did someone last get credited," which is exactly the
+    question that goes silently wrong on the one night that matters --
+    a net that ran and credited nobody at all), just parameterized by
+    `protocol` instead of hardcoding MC_PROTOCOL.
+
+    Duplicated here rather than generalizing checkin.py's own version
+    in place: this endpoint lives in app/account_api.py and is not
+    allowed to edit app/checkin.py (owned by concurrent work on the
+    poller itself) -- see this file's own module boundary. If
+    checkin.py ever grows a protocol-general equivalent, this should be
+    deleted in favor of it.
+    """
+    if now is None:
+        now = int(time.time())
+    rows = conn.execute(
+        "SELECT weekday, start_hour, end_hour, timezone, start_date FROM checkin_net "
+        " WHERE enabled = 1 AND protocol = ?",
+        (protocol,),
+    ).fetchall()
+
+    best: str | None = None
+    for net in rows:
+        start_date = net["start_date"]
+        if not start_date:
+            continue  # blocks all, same convention checkin.net_date_for_net uses
+        local_now = datetime.fromtimestamp(now, tz=ZoneInfo(net["timezone"]))
+        days_back = (local_now.weekday() - net["weekday"]) % 7
+        if days_back == 0 and local_now.hour < net["start_hour"]:
+            # Today IS the right weekday, but the window has not opened
+            # yet -- the most recently COMPLETED occurrence is a full
+            # week earlier, not today (today hasn't happened yet).
+            days_back = 7
+        candidate = (local_now - timedelta(days=days_back)).date().isoformat()
+        if candidate < start_date:
+            continue
+        if best is None or candidate > best:
+            best = candidate
+    return best
 
 
 @router.get("/api/account/checkin-health")
 async def account_checkin_health(
     request: Request, session: SessionPrincipal = Depends(require_session),
 ) -> JSONResponse:
-    """Why my check-ins may not be counting.
+    """Why my check-ins may not be counting -- per board.
 
     Gives a player the same diagnosis app/admin_ops.py's overview
     already gives an operator about them (checkin_unreachable,
-    checkin_name_changed) -- but self-serve.
+    checkin_name_changed) -- but self-serve, and for BOTH boards a
+    player could be on, not MeshCore only. The previous version of
+    this endpoint hardcoded MC_PROTOCOL throughout: it could tell a
+    player their MeshCore check-ins were fine while their Meshtastic
+    check-ins had silently stopped crediting, and the panel would still
+    read green. `boards` below always carries both "mc" and "mt" keys
+    (mirroring GET /api/account/stats's own "boards always lists both"
+    convention -- see that endpoint's own docstring) so a client never
+    has to special-case a missing key.
 
-    The headline (`state`/`summary`) is derived from whether this
-    player was actually CREDITED for the most recent MeshCore net, not
-    from whether a contact merely looks bindable -- see
+    Each board's headline (`state`/`summary`) is derived from whether
+    this player was actually CREDITED for that board's own most recent
+    net, not from whether a contact merely looks bindable -- see
     _diagnose_checkin_health()'s own docstring for exactly why that
     distinction matters: a bound contact resolving in the directory is
-    necessary for a check-in to land, but it is not sufficient, and the
-    previous version of this endpoint conflated the two, reporting a
+    necessary for a check-in to land, but it is not sufficient, and an
+    earlier version of this endpoint conflated the two, reporting a
     player as fine while every one of their check-ins credited nobody.
-    checkin.most_recent_mc_net_date() answers "when did a MeshCore net
-    most recently run" straight off checkin_net's own schedule, not off
+    _most_recent_net_date() answers "when did this board's net most
+    recently run" straight off checkin_net's own schedule, not off
     mc_checkin_award -- see that function's own docstring for why
     asking the award table "when was the most recent net" would hide
     exactly the failure this endpoint exists to catch (a net that ran
     and credited nobody at all).
 
-    `contacts` (per-contact detail, unchanged shape from before) is
-    kept alongside the headline because it's still useful once a player
-    knows THAT something's wrong -- it's just no longer what decides
-    whether something's wrong. It can never contain anyone else's
-    contact or sender name: `_checkin_contacts_status` reads only
-    player_node rows already bound to THIS player_id, and nothing here
-    reads the operator-only unresolved-sender log a name any bound or
-    unbound caller could later claim -- that stays admin-only, see
+    Each board's `contacts` (per-contact detail, unchanged shape from
+    before for MeshCore; see _checkin_contacts_status()'s own docstring
+    for what Meshtastic's version of this looks like) is kept alongside
+    the headline because it's still useful once a player knows THAT
+    something's wrong -- it's just no longer what decides whether
+    something's wrong. It can never contain anyone else's contact or
+    sender name: `_checkin_contacts_status` reads only player_node rows
+    already bound to THIS player_id, and nothing here reads the
+    operator-only unresolved-sender log a name any bound or unbound
+    caller could later claim -- that stays admin-only, see
     app/admin_ops.py.
 
     Reads the check-in poller's own cached directory
@@ -2337,42 +2467,56 @@ async def account_checkin_health(
     app/admin_ops.py's _attention() and app/checkin_api.py's node
     picker already read from, and never a fresh upstream fetch for a
     page load. With no poller running (or nothing cached yet), the
-    directory is empty and every contact reports "not_in_directory" --
-    an honest answer, not a 500: there is genuinely nothing to resolve
-    against right now.
+    directory is empty and every MeshCore contact reports
+    "not_in_directory" -- an honest answer, not a 500: there is
+    genuinely nothing to resolve against right now. (The directory is
+    unused for the Meshtastic board -- see _checkin_contacts_status.)
+
+    Top-level `resolved` is true only if every board this player has at
+    least one radio bound on is itself credited -- a board with nothing
+    bound (`state == "nothing_bound"`) never counts against it, since a
+    player who has simply never touched one board has nothing wrong
+    with it to report.
     """
     if session.player_id is None:
         return _no_linked_player_error()
-
-    from .checkin import most_recent_mc_net_date
 
     poller = getattr(request.app.state, "checkin_poller", None)
     directory = poller.directory_snapshot() if poller is not None else []
 
     conn = connect()
     try:
-        contacts = _checkin_contacts_status(conn, session.player_id, directory)
-        most_recent_net_date = most_recent_mc_net_date(conn)
-        credited_points = None
-        if most_recent_net_date is not None:
-            row = conn.execute(
-                "SELECT points FROM mc_checkin_award "
-                " WHERE player_id = ? AND protocol = ? AND net_date = ?",
-                (session.player_id, MC_PROTOCOL, most_recent_net_date),
-            ).fetchone()
-            credited_points = row["points"] if row is not None else None
+        boards: dict[str, dict] = {}
+        for protocol in (MC_PROTOCOL, MT_PROTOCOL):
+            contacts = _checkin_contacts_status(conn, session.player_id, directory, protocol)
+            most_recent_net_date = _most_recent_net_date(conn, protocol)
+            credited_points = None
+            if most_recent_net_date is not None:
+                row = conn.execute(
+                    "SELECT points FROM mc_checkin_award "
+                    " WHERE player_id = ? AND protocol = ? AND net_date = ?",
+                    (session.player_id, protocol, most_recent_net_date),
+                ).fetchone()
+                credited_points = row["points"] if row is not None else None
+
+            state, summary = _diagnose_checkin_health(
+                protocol, contacts, most_recent_net_date, credited_points,
+            )
+            boards[protocol] = {
+                "resolved": state == "credited",
+                "state": state,
+                "summary": summary,
+                "most_recent_net_date": most_recent_net_date,
+                "contacts": contacts,
+            }
     finally:
         conn.close()
 
-    state, summary = _diagnose_checkin_health(contacts, most_recent_net_date, credited_points)
+    overall_resolved = all(
+        b["state"] in ("credited", "nothing_bound") for b in boards.values()
+    )
 
     return JSONResponse(
-        {
-            "resolved": state == "credited",
-            "state": state,
-            "summary": summary,
-            "most_recent_net_date": most_recent_net_date,
-            "contacts": contacts,
-        },
+        {"resolved": overall_resolved, "boards": boards},
         status_code=200,
     )

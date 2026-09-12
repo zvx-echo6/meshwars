@@ -1785,65 +1785,95 @@ const CONTACT_STATUS_LABELS = {
   not_in_directory: 'Not in directory',
   key_ambiguous: 'Key matches more than one entry',
   name_ambiguous: 'Name shared by more than one radio',
+  bound: 'Bound',
 };
 
-// data.state is the headline app/account_api.py's _diagnose_checkin_health()
-// computed: 'credited' (an award actually exists for the most recent net --
-// the ONLY state that's really "fine") plus five attention states, each
-// with data.summary already written as one concrete next step. This
-// function's job is just to lay that headline out and, underneath it,
-// list this player's own bound contacts (data.contacts, unchanged shape)
-// for anyone who wants the per-radio detail behind the headline -- it does
-// not re-derive "is this okay," that decision already happened server-side
-// against real award data, not against anything this function could infer
-// from contacts alone (see this endpoint's own docstring for why that
-// used to be the bug).
+// Which contact statuses read as "ok" (green) at the per-radio level --
+// one place, reused below instead of re-deriving the same check twice.
+// 'bound' (Meshtastic) is the equivalent of 'resolved' (MeshCore): both
+// mean "eligible by construction," not "already credited" -- see
+// app/account_api.py's _checkin_contacts_status() docstring.
+const CONTACT_STATUS_OK = new Set(['resolved', 'bound']);
+
+// The order boards render in -- same order GET /api/account/stats and
+// this endpoint's own boards dict use everywhere else on this page.
+const CHECKIN_HEALTH_BOARD_ORDER = ['mc', 'mt'];
+
+// data.boards[protocol].state is the headline
+// app/account_api.py's _diagnose_checkin_health() computed for that
+// board: 'credited' (an award actually exists for the most recent net
+// -- the ONLY state that's really "fine") plus several attention
+// states, each with .summary already written as one concrete next
+// step. This function's job is just to lay each board's headline out
+// and, underneath it, list this player's own bound contacts for that
+// board (unchanged shape) for anyone who wants the per-radio detail
+// behind the headline -- it does not re-derive "is this okay," that
+// decision already happened server-side against real award data, not
+// against anything this function could infer from contacts alone (see
+// this endpoint's own docstring for why that used to be the bug, and
+// why it used to be MeshCore-only).
 function renderCheckinHealth(data) {
   const panel = document.getElementById('account-checkin-health-result');
   panel.replaceChildren();
   panel.hidden = false;
 
-  const summary = document.createElement('div');
-  summary.className = 'account-diagnosis ' + (data.state === 'credited' ? 'account-diagnosis-ok' : 'account-diagnosis-attention');
-  summary.textContent = data.summary || '';
-  panel.appendChild(summary);
+  const boards = data.boards || {};
+  let renderedAny = false;
 
-  if (data.contacts && data.contacts.length > 0) {
-    panel.appendChild(buildLabel('Your bound MeshCore contacts'));
-    const list = document.createElement('ul');
-    list.className = 'account-contacts-list';
-    data.contacts.forEach((c) => {
-      const li = document.createElement('li');
-      li.className = 'account-contacts-item';
+  CHECKIN_HEALTH_BOARD_ORDER.forEach((protocol) => {
+    const board = boards[protocol];
+    if (!board) return;
 
-      const top = document.createElement('div');
-      top.className = 'account-contacts-item-top';
-      const ref = document.createElement('span');
-      ref.className = 'account-mono';
-      ref.textContent = c.node_ref;
-      top.appendChild(ref);
-      const status = document.createElement('span');
-      status.className = 'account-contact-status ' + (c.status === 'resolved' ? 'account-contact-status-ok' : 'account-contact-status-attention');
-      status.textContent = CONTACT_STATUS_LABELS[c.status] || c.status;
-      top.appendChild(status);
-      li.appendChild(top);
+    if (renderedAny) {
+      const divider = document.createElement('hr');
+      divider.className = 'account-divider';
+      panel.appendChild(divider);
+    }
+    renderedAny = true;
 
-      if (c.resolved_name) {
-        const nameLine = document.createElement('div');
-        nameLine.className = 'account-hint';
-        nameLine.textContent = `Resolves as: ${c.resolved_name}`;
-        li.appendChild(nameLine);
-      }
+    const summary = document.createElement('div');
+    summary.className = 'account-diagnosis ' + (board.state === 'credited' ? 'account-diagnosis-ok' : 'account-diagnosis-attention');
+    summary.textContent = board.summary || '';
+    panel.appendChild(summary);
 
-      const explanation = document.createElement('p');
-      explanation.className = 'account-hint';
-      explanation.textContent = c.explanation;
-      li.appendChild(explanation);
+    panel.appendChild(buildLabel(PROTOCOL_LABELS[protocol] || protocol));
 
-      list.appendChild(li);
-    });
-    panel.appendChild(list);
-  }
+    if (board.contacts && board.contacts.length > 0) {
+      const list = document.createElement('ul');
+      list.className = 'account-contacts-list';
+      board.contacts.forEach((c) => {
+        const li = document.createElement('li');
+        li.className = 'account-contacts-item';
+
+        const top = document.createElement('div');
+        top.className = 'account-contacts-item-top';
+        const ref = document.createElement('span');
+        ref.className = 'account-mono';
+        ref.textContent = c.node_ref;
+        top.appendChild(ref);
+        const status = document.createElement('span');
+        status.className = 'account-contact-status ' + (CONTACT_STATUS_OK.has(c.status) ? 'account-contact-status-ok' : 'account-contact-status-attention');
+        status.textContent = CONTACT_STATUS_LABELS[c.status] || c.status;
+        top.appendChild(status);
+        li.appendChild(top);
+
+        if (c.resolved_name) {
+          const nameLine = document.createElement('div');
+          nameLine.className = 'account-hint';
+          nameLine.textContent = `Resolves as: ${c.resolved_name}`;
+          li.appendChild(nameLine);
+        }
+
+        const explanation = document.createElement('p');
+        explanation.className = 'account-hint';
+        explanation.textContent = c.explanation;
+        li.appendChild(explanation);
+
+        list.appendChild(li);
+      });
+      panel.appendChild(list);
+    }
+  });
 }
 
 function showCheckinHealthError(message) {
