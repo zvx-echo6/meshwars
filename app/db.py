@@ -456,6 +456,21 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     -- by_air, and MeshCore has no equivalent precision_bits concept at all.
     pings_low_precision     INTEGER NOT NULL DEFAULT 0,
     pings_implausible_speed INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only (app/mc_ingest.py's parse_repeaters()): a ping whose
+    -- `type` field is PRESENT but not one of the four recognized values
+    -- (TX/RX/DISC/TRACE) -- e.g. a future MeshMapper build's "DEFER".
+    -- Never rejected: the ping is still accepted and still writes a
+    -- position row exactly as before, it just cannot be told apart from
+    -- a legitimate ping that heard no repeaters without this counter, so
+    -- it also still counts toward pings_no_repeaters (parse_repeaters()
+    -- falls through to an empty list either way) -- this is additive
+    -- observability, not a new rejection path. A MISSING/None `type` is
+    -- deliberately NOT counted here: that's an absent field, not an
+    -- unrecognized one, and is already indistinguishable from a
+    -- legitimate empty read the same way it always was. Always 0 for
+    -- protocol='mt': app/ingest.py's packets carry no `type` field of
+    -- this kind at all.
+    pings_unknown_type INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player_id, protocol, day)
 );
 
@@ -2630,6 +2645,17 @@ MIGRATIONS = [
     # which never has `sample` at all) sees a no-op here, same as every
     # other run.
     "DROP TABLE IF EXISTS sample",
+    # pings_unknown_type added after player_ingest_stat already shipped --
+    # see that column's own comment on the CREATE TABLE above for the
+    # full story (a MeshCore ping whose `type` is present but not one of
+    # TX/RX/DISC/TRACE, e.g. "DEFER"). ADD COLUMN ... DEFAULT 0 backfills
+    # every existing row in the same statement SQLite runs the ALTER in
+    # -- correct for 100% of them, since nothing before this column
+    # existed could have counted toward it, and it does not change what
+    # any of those rows' other counters (in particular pings_no_repeaters,
+    # which a ping like this always also incremented, and still does)
+    # already mean.
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_unknown_type INTEGER NOT NULL DEFAULT 0",
 ]
 
 PRAGMAS = [

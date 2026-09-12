@@ -82,6 +82,7 @@ const MC_COUNTER_LABELS = [
   ['bad_coord', 'Bad coordinates'],
   ['out_of_area', 'Outside play area'],
   ['no_repeaters', 'No repeaters heard'],
+  ['unknown_type', 'Unknown ping type'],
 ];
 const MC_COUNTER_ZERO_ROW = MC_COUNTER_LABELS.reduce((acc, [key]) => {
   acc[key] = 0;

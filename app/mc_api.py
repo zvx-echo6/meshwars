@@ -1604,12 +1604,12 @@ async def mc_cell(cell_id: str, session: SessionPrincipal | None = Depends(optio
 _STAT_COLUMNS = (
     "batches, pings_accepted, pings_no_contact, pings_wrong_owner, "
     "pings_duplicate, pings_bad_coord, pings_out_of_area, pings_no_repeaters, "
-    "pings_low_precision, pings_implausible_speed"
+    "pings_low_precision, pings_implausible_speed, pings_unknown_type"
 )
 _STAT_ZERO_ROW = {
     "batches": 0, "pings_accepted": 0, "pings_no_contact": 0,
     "pings_wrong_owner": 0, "pings_duplicate": 0, "pings_bad_coord": 0,
-    "pings_out_of_area": 0, "pings_no_repeaters": 0,
+    "pings_out_of_area": 0, "pings_no_repeaters": 0, "pings_unknown_type": 0,
 }
 
 
@@ -1623,6 +1623,12 @@ def _counters_out(row) -> dict:
         "bad_coord": row["pings_bad_coord"],
         "out_of_area": row["pings_out_of_area"],
         "no_repeaters": row["pings_no_repeaters"],
+        # MeshCore-only (app/mc_ingest.py's is_unknown_ping_type()) --
+        # not surfaced by _counters_out_mt() below, same reasoning as
+        # batches/no_contact/wrong_owner being left out of THAT shape:
+        # Meshtastic packets carry no `type` field of this kind at all,
+        # so the column is structurally always 0 for protocol='mt'.
+        "unknown_type": row["pings_unknown_type"],
     }
 
 
@@ -1732,7 +1738,8 @@ async def mc_status(
             "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
             "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
             "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
-            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters, "
+            "       COALESCE(SUM(pings_unknown_type),0) AS pings_unknown_type "
             "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ? "
             "    AND day BETWEEN ? AND ?",
             (player_id, MC_PROTOCOL, week_start, today),
@@ -1746,7 +1753,8 @@ async def mc_status(
             "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
             "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
             "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
-            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters, "
+            "       COALESCE(SUM(pings_unknown_type),0) AS pings_unknown_type "
             "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ?",
             (player_id, MC_PROTOCOL),
         ).fetchone()
