@@ -5012,14 +5012,20 @@ async function main() {
             id: HILLSHADE_ID,
             type: 'raster',
             source: 'hillshade-source',
-            // Fix for the visible grid lines along every hillshade tile
-            // boundary once the archive switched to real alpha=0 on flat
-            // ground: MapLibre's default linear resampling blends an opaque
-            // texel against a transparent (RGB=0, i.e. BLACK) one across the
-            // tile edge, producing a dark fringe. Nearest-neighbour sampling
-            // never blends across that boundary.
+            // raster-resampling is deliberately left at MapLibre's default
+            // (linear). 'nearest' was set here 2026-09-06 to kill a reported
+            // dark fringe along hillshade tile boundaries -- the theory being
+            // that linear blends an opaque texel against a transparent
+            // (RGB=0, i.e. BLACK) one across the edge. That fix was never
+            // confirmed: it could not be reproduced in software rendering,
+            // and it was reverted 2026-09-12 because nearest has a real and
+            // very visible cost. The archive stops at z12 while the map zooms
+            // to 17, so past z12 the last tile is stretched up to 32x --
+            // nearest makes that stretch read as hard square blocks rather
+            // than a soft blur. If the boundary fringe genuinely returns,
+            // prefer a zoom-gated expression (nearest at low zoom, linear
+            // past z12) over paying the overzoom cost everywhere.
             paint: {
-              'raster-resampling': 'nearest',
               'raster-fade-duration': 0,
             },
             // No `maxzoom` here (see the overzoom comment near
