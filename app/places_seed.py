@@ -1172,6 +1172,39 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # place's INSERT reaches the database, or a delete flushed late
     # would erase cells an earlier-flushed insert had already written.
     _CELL_BATCH_ROWS = 20_000
+
+    # COMMIT BOUNDARY (added 2026-09-13). The load used to run as ONE
+    # transaction from BEGIN to COMMIT. That is the obvious shape --
+    # atomic, and it made dropping place_cell's secondary index safe,
+    # since nothing outside an uncommitted transaction can see the index
+    # missing. It also made a seed change unusable for the site: on
+    # production's hardware the worldwide load takes about an hour, and
+    # for that hour the write lock is held, so ingest and check-ins fail
+    # outright while reads crawl behind a write-ahead log that grows to
+    # most of a gigabyte. Measured on 2026-09-12: /health went from 14 ms
+    # to 19.6 s and the site looked down.
+    #
+    # So the load commits every _COMMIT_BATCH_PLACES places and opens a
+    # fresh transaction. Between batches the write lock is free, the WAL
+    # checkpoints, and everything else gets a turn.
+    #
+    # What that costs, stated plainly rather than buried:
+    #   - Atomicity. A load that dies halfway leaves the places it had
+    #     already committed. The next startup reloads from scratch (the
+    #     fingerprint only records a COMPLETED load), so this is
+    #     self-healing, not corruption -- but the board is briefly a
+    #     mixture of old and new rather than flipping at one instant.
+    #   - The index drop. It can no longer be dropped for the run, since
+    #     readers now see between-batch states and a missing
+    #     idx_place_cell_cell would turn every credit lookup into a scan
+    #     of eighteen million rows. It stays, and inserts pay to maintain
+    #     it. That is the slower option, chosen deliberately: this runs
+    #     only when the seed file itself changes, and a load that takes
+    #     longer while the site stays up beats a faster one that takes
+    #     the site down.
+    _COMMIT_BATCH_PLACES = 50_000
+    places_since_commit = 0
+
     cell_delete_buffer: list[tuple[int]] = []
     cell_insert_buffer: list[tuple[int, str]] = []
     rows_since_flush = 0
@@ -1189,18 +1222,16 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        # idx_place_cell_cell is place_cell's one SECONDARY index (its
-        # PRIMARY KEY (place_id, cell_id) can't be dropped, and is cheap
-        # to maintain anyway since these inserts already arrive grouped
-        # by place_id). Dropping the secondary index for the run and
-        # rebuilding it once at the end -- standard bulk-load practice --
-        # means SQLite is not maintaining a cell_id-ordered B-tree across
-        # ~2.17M essentially-random-order inserts one row at a time; it
-        # pays that cost once, as a single sorted build, at the end
-        # instead. Safe inside this transaction: nothing outside it can
-        # see the index missing, since nothing outside it can see this
-        # transaction's writes at all until COMMIT.
-        conn.execute("DROP INDEX IF EXISTS idx_place_cell_cell")
+        # idx_place_cell_cell is NOT dropped for the run any more (see
+        # the COMMIT BOUNDARY note above). It used to be: dropping it and
+        # rebuilding once at the end is standard bulk-load practice, and
+        # it was safe while the whole load was one transaction, because
+        # nothing outside an uncommitted transaction can see an index
+        # missing. Now that the load commits every batch, readers DO see
+        # between-batch states, and without this index every credit
+        # lookup would scan eighteen million place_cell rows. Keeping it
+        # makes the inserts slower and the load longer; that is the
+        # trade, and availability wins it.
 
         with _open_csv(seed_path, encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
@@ -1373,6 +1404,18 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                 if rows_since_flush >= _CELL_BATCH_ROWS:
                     _flush_cell_buffers()
                     rows_since_flush = 0
+
+                places_since_commit += 1
+                if places_since_commit >= _COMMIT_BATCH_PLACES:
+                    # Flush first: the buffers hold this batch's pending
+                    # DELETE/INSERT pairs, and committing without them
+                    # would strand a place's delete on one side of the
+                    # boundary and its insert on the other.
+                    _flush_cell_buffers()
+                    rows_since_flush = 0
+                    conn.execute("COMMIT")
+                    conn.execute("BEGIN IMMEDIATE")
+                    places_since_commit = 0
 
         _flush_cell_buffers()  # remainder: fewer than _CELL_BATCH_ROWS rows since the last flush
 
