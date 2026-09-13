@@ -1416,6 +1416,30 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         # forever over a load that has actually stopped trying.
         LOADING = False
 
+    # ANALYZE, every time the seed actually loads. Without statistics
+    # SQLite's planner guesses, and on a board this size it guesses
+    # badly: it picked idx_place_active -- which matches all two million
+    # rows -- over idx_place_latlon for /api/places/near's bounding-box
+    # query, scanning the whole table instead of reading a few hundred
+    # rows. That measured 0.549s against 0.007s, and because the read is
+    # synchronous on the event loop, every other request on a page load
+    # queued behind it (a 15-second page load, blamed on the wrong
+    # endpoint for some time).
+    #
+    # It belongs HERE rather than in a cron or a runbook step because it
+    # has exactly one correct moment: right after the row counts change.
+    # This block only runs on a real load -- an unchanged seed short-
+    # circuits on its fingerprint long before this point -- so the cost
+    # is paid once per seed change, alongside a load that already took
+    # minutes, and never on an ordinary restart.
+    try:
+        t_analyze = time.monotonic()
+        conn.execute("ANALYZE")
+        log.info("places_seed: ANALYZE in %.1fs", time.monotonic() - t_analyze)
+    except Exception as e:  # noqa: BLE001 -- never fail a good load over stats
+        log.warning("places_seed: ANALYZE failed (%s) -- the seed is loaded and "
+                    "correct, but query plans may be poor until it is run by hand", e)
+
     elapsed = time.monotonic() - t0
     log.info(
         "places_seed: loaded summit=%d park=%d landmark=%d (excluded non-US: summit=%d park=%d landmark=%d) "
