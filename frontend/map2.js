@@ -358,18 +358,29 @@ function teamName(name, team) {
 // The hillshade source used to be planet-dem.pmtiles, the one archive
 // still fetched from the build host: a raw elevation DEM shaded in the
 // browser at ~11.3MB per view, ninety-five percent of the page's
-// weight. It is now meshwars-hillshade-alpha-v4.pmtiles -- finished
-// imagery, pre-rendered once across the play area at the dark theme's
-// exaggeration -- so the build host is out of the runtime path
-// entirely. This is the second bake:
-// the first (meshwars-hillshade.pmtiles, kept on disk as a rollback)
-// stored opaque greyscale, which painted flat ground the same opaque
-// grey as a shadowed ridge and washed out the whole map. This archive
-// carries a real alpha channel -- converted losslessly from the same
-// greyscale pixels, no DEM work re-run -- so flat ground is
-// transparent again and only the relief itself darkens or lightens.
-const TILE_REV = 'na-alpha2-20260906';
-const DEM_URL = `/tiles/na-hillshade-alpha2.pmtiles?r=${TILE_REV}`;
+// weight. It is now finished imagery, pre-rendered once and served
+// flat, so the build host is out of the runtime path entirely. The
+// archive carries a real alpha channel, so flat ground is transparent
+// and only the relief itself darkens or lightens -- an earlier opaque
+// greyscale bake painted flat ground the same grey as a shadowed ridge
+// and washed out the whole map.
+//
+// global-hillshade-alpha-capped.pmtiles (2026-09-12) replaces the
+// North-America-only na-hillshade-alpha2.pmtiles. Two things changed
+// besides the extent:
+//   - Every zoom is shaded from its OWN downsampled elevation, rather
+//     than by averaging the finished z12 shading downward. Averaging a
+//     hillshade cancels lit slopes against shaded ones, so the old
+//     archive faded to nothing as you zoomed out -- 3.5% of pixels
+//     carried any alpha at z3, against 16.6% here on the same tile.
+//     That is why the world view used to look empty.
+//   - z12 is kept only inside North America (tile x 125-1922,
+//     y 125-1887); the rest of the world stops at z11. Uncapped, this
+//     archive was ~111 GB, which does not fit the box. Capped it is
+//     21.5 GB. Outside North America the map overzooms past z11, which
+//     is soft but still well beyond the zooms play happens at.
+const TILE_REV = 'global-alpha-capped-20260912';
+const DEM_URL = `/tiles/global-hillshade-alpha-capped.pmtiles?r=${TILE_REV}`;
 const PUBLIC_LANDS_URL = `/tiles/public-lands.pmtiles?r=${TILE_REV}`;
 const USFS_TRAILS_ROADS_URL = `/tiles/usfs-trails-roads.pmtiles?r=${TILE_REV}`;
 
