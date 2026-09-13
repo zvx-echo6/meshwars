@@ -28,6 +28,19 @@ inputs live, then `merge` wherever it is convenient:
                           "PARK SOURCES" below. Also takes fetch-pota's
                           output, but only to dedup against, not to seed
                           from.
+  4c. extract-osm-parks -- on navi, needs the OSM planet's leisure=park
+                          and boundary=protected_area ways/relations
+                          already extracted to a GeoJSONSeq (osmium
+                          export), plus extract-landmarks' and
+                          fetch-padus-parks'/fetch-pota's own outputs to
+                          dedup against. ADDED 2026-09-07, worldwide
+                          expansion: PAD-US (4b) is deliberately US-only
+                          (a US government dataset with no global
+                          equivalent), so outside the US "local park"
+                          coverage was zero -- this is OSM's answer to
+                          the same "Twin Falls has no parks" complaint
+                          that motivated 4b, everywhere PAD-US cannot
+                          reach. See "PARK SOURCES" below.
   5. merge            -- anywhere. Combines the stage outputs into the
                           final seed CSV in the `place` table's shape.
 
@@ -43,11 +56,24 @@ threshold change below re-pulled the same day):
                    POTA has itself designated a reference for) -- see
                    "PARK SOURCES" below for why this is not the only
                    park source any more.
-  OSM landmarks -- a regional OSM .pbf extract (read-only source data --
-                   never write there); path is given on the
-                   extract-landmarks command line, not hardcoded here
-                   (see its docstring below for an example osmium
-                   tags-filter invocation).
+  OSM landmarks -- an OSM .pbf extract (read-only source data -- never
+                   write there); path is given on the extract-landmarks
+                   command line, not hardcoded here (see its docstring
+                   below for an example osmium tags-filter invocation).
+                   A planet extract is what the worldwide expansion of
+                   2026-09-07 reads; a regional extract also works and
+                   simply yields a regional board.
+  OSM parks     -- ADDED 2026-09-07: every named leisure=park or
+                   boundary=protected_area way/relation in the extract
+                   (osmium tags-filter `wr/leisure=park`,
+                   `wr/boundary=protected_area`), pre-exported to a
+                   GeoJSONSeq with equal-area area_m2 already computed
+                   per feature -- extract_osm_parks() reads that export
+                   rather than the PBF itself. Its path is likewise a
+                   command-line argument. See "PARK SOURCES" below for
+                   why this exists alongside PAD-US rather than instead
+                   of it, and how it avoids double-counting a park
+                   PAD-US or POTA already carries.
   PAD-US        -- the PAD-US File Geodatabase, path set via PADUS_GDB
                    below (or the MW_PADUS_GDB env var),
                    layer PADUS4_0Combined_Proclamation_Marine_Fee_
@@ -89,9 +115,113 @@ value as already US-only (see that module's docstring) rather than
 running it through POTA's "US-"-prefix check, which their "PADUS-<fid>"
 ref_code would fail.
 
+OSM PARKS (extract_osm_parks() added 2026-09-07, worldwide expansion):
+PAD-US is deliberately US-only (a US government dataset with no global
+equivalent -- see WORLDWIDE EXPANSION below), so fetch_padus_parks()'s
+local/city/county park density above never reached anywhere outside
+the US: the exact "Twin Falls has no parks" complaint, unsolved for
+every non-US town. OpenStreetMap tags ordinary municipal parks
+(leisure=park) and protected areas (boundary=protected_area) worldwide,
+so extract_osm_parks() pulls those as a third, independent park source
+-- the global answer to what fetch_padus_parks() already is for the
+US. Three things keep it from double-counting a park one of the other
+two sources -- or itself -- already carries:
+
+  - leisure=nature_reserve overlap with the landmark tier: a nature
+    reserve small enough to clear extract_landmarks()'s own
+    SQUARE_AREA_M2 gate is already written there (see LANDMARK_TAGS'
+    own comment on that tag); the OSM tags-filter that produced this
+    stage's GeoJSONSeq input has no size gate at all, so the identical
+    way/relation (same osm_type+osm_id) shows up in both extracts for
+    every small reserve. extract_osm_parks() reads extract_landmarks()'s
+    own output CSV first and skips any osm_type+osm_id already claimed
+    there, so a small reserve stays a landmark (its correct tier) and
+    only a reserve too large for that tier ever becomes a park.
+  - Overlap with POTA/PAD-US: every candidate is checked by name +
+    proximity against both fetch_pota()'s and fetch_padus_parks()'s own
+    output (the same Jaccard name-overlap technique fetch_padus_parks()
+    already uses to dedup against POTA, extended to test containment
+    against the candidate's own full geometry rather than a fixed
+    distance -- see the "BUG FOUND AND FIXED" comment at this stage's
+    own dedup call site for why) before being kept -- "Ann Morrison
+    Park" mapped in both OSM and PAD-US must not become two rows. RUN
+    GLOBALLY, not gated to the US play-area bbox: PAD-US really is
+    US-only, so a bbox gate is harmless for that half, but POTA is
+    WORLDWIDE (see this module's own "WORLDWIDE EXPANSION" note) --
+    fetch_pota() lists national parks and reserves on every continent.
+    A first cut of this stage gated the whole check to the US bbox on
+    the mistaken assumption that "no POTA or PAD-US row exists outside
+    the US" -- true for PAD-US, false for POTA -- and shipped 10,752
+    same-name-within-50km OSM/POTA collisions worldwide (Serengeti,
+    Kakadu, Fiordland, and thousands more) before this was caught and
+    fixed to run everywhere.
+  - OSM-against-ITSELF (added 2026-09-08): neither rule above ever
+    compares one OSM candidate to another. A same-exact-name-within-2km
+    proximity measurement over the finished worldwide park set, run
+    after the worldwide rebuild above had already passed every
+    correctness gate, found 32,085 such pairs total -- 31,052 of them
+    OSM-against-OSM (541 PAD-US-against-itself, 369 cross-source,
+    the last of those being the "Overlap with POTA/PAD-US" rule above
+    doing its job, not a defect). OSM commonly maps the same real park
+    twice: once as a way and once as a relation, or as two overlapping
+    way fragments of one boundary. _osm_self_dedup_key()/
+    _dedup_osm_self_group() (defined just above extract_osm_parks())
+    group surviving candidates by EXACT normalized name -- deliberately
+    not fuzzy/substring matching; see _osm_self_dedup_key()'s own
+    comment for why -- and within each name group keep only the
+    largest-by-area candidate(s) more than 2 km apart, greedy
+    largest-first, the same strategy build_places_osm_anchors.py already
+    uses to dedup city anchors. A feature with no name never reaches
+    this pass at all (dropped earlier, at the no_name filter below), so
+    unlike the bug caught mid-flight on the anchor build, there is no
+    blank-name bucket for it to wrongly collapse.
+
+Kept a named destination the same way OSM landmarks are (a feature with
+no `name` tag is not a place to send anyone to). No acreage floor and
+no separate utility-parcel/school exclusion list of its own --
+_compile_exclude_park_name_re() (the same predicate
+fetch_padus_parks() uses) is reused as-is, since OSM's own leisure=park
+tagging sweeps in the identical false positives PAD-US's LP designation
+does (school playgrounds tagged as a park, community gardens) and the
+fix for one dataset is the fix for the other.
+
+A geometry this large a source can range from a city block to
+Papahānaumokuākea Marine National Monument (1.5 million km^2,
+confirmed the single largest feature in the raw extract) --
+app/places_seed.py's _park_cells() walks a stored geometry's own
+bounding box at 300m grid resolution with no size guard of its own, so
+shipping that boundary unclipped would try to materialize on the order
+of ten billion grid cells for one row. extract_osm_parks() clips every
+matched boundary to a ~6km buffer around its own centroid before
+storage, exactly like match_parks()'s own clip and for the identical
+reason (see that clip's own comment) -- computed AFTER
+_frac_area_outside_city() has already measured the real, full,
+pre-clip shape, so the clip cannot affect which rate the park scores.
+
 PLAY AREA (from the running service's /config, NOT app/config.py's
 narrower Idaho-only defaults -- production overrides those via .env):
   north 49.29  south 25.8  west -125.0  east -93.5
+  NORTH/SOUTH/WEST/EAST below are this rectangle -- still used to scope
+  the PAD-US stages (match_parks, fetch_padus_parks), which stay
+  US-only on purpose (see WORLDWIDE EXPANSION just below). No longer
+  used to gate SOTA, POTA, or OSM landmarks.
+
+WORLDWIDE EXPANSION (2026-09-07, Matt approved): fetch_sota(),
+fetch_pota(), and extract_landmarks() no longer bbox-filter to the play
+area above -- each source's own quality filter (SUMMIT_MIN_SOTA_POINTS,
+POTA's active flag, LANDMARK_TAGS + the name requirement) is
+unchanged and is the only gate left. app/places_seed.py's loader lost
+its matching country filters (the US_SOTA_ASSOCIATIONS allowlist for
+summits, the "ref_code prefix must be US-" check for POTA parks) in the
+same change -- see that module's docstring. PAD-US (match_parks,
+fetch_padus_parks) is deliberately UNCHANGED and stays US-only: it is a
+US government dataset with no global equivalent, so it keeps
+contributing US parks exactly as before, just alongside POTA/OSM
+sources that are worldwide now rather than being the only park source
+outside the US. "City limits" scoring (score_points() below) needed its
+own worldwide fix on the anchors side -- see app/reference/places.csv
+and the GeoNames-derived global anchors file assembled alongside it,
+not part of this script.
 
 OSM TAG LIST -- the approved narrowed list (docs/features/places.md),
 BROADENED 2026-08-24 with outdoor/natural destinations. fire_station
@@ -158,6 +288,19 @@ scoring path need no new logic at all -- they already just read
 make a scoring decision; `points` is still the only number that
 matters at runtime.
 
+A PARK WITH A MATCHED BOUNDARY does not use that point test at all
+(added 2026-09-07, "Yosemite pays the same as a pocket park" -- see
+PARK_REMOTE_AREA_FRAC's own comment above match_parks()): one point
+cannot speak for a polygon that can be thousands of times the area of
+the circle it happens to land in or out of. match_parks() and
+fetch_padus_parks() instead measure what fraction of the park's own
+FULL boundary (before match_parks()'s 6 km storage clip) lies outside
+every nearby anchor's circle, and score_points() reads that fraction
+straight off the row (`area_frac_outside`) -- more than half outside is
+`remote_by_area`, otherwise `in_city_by_area`. A park match_parks() left
+unmatched has no boundary to measure and falls back to the point test
+above, same as every landmark (which never has a boundary at all).
+
 The weekly per-person cap is unchanged at 100 -- see
 docs/features/places.md.
 
@@ -196,11 +339,30 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime
+import gzip
 import io
+import json
 import math
 import os
+import re
 import sys
+import unicodedata
 import urllib.request
+
+# Python's csv module defaults to a 131072-byte field-size limit --
+# fine for every column here except `geom` (a simplified WKT string),
+# which can still exceed that for a large, multi-part OSM relation
+# (a marine protected area's MultiPolygon spanning many islands) even
+# after extract_osm_parks()'s own storage clip and simplify(). merge()
+# is the only stage that ever reads a previously-written `geom` column
+# back in (every other stage only writes one), and it is the first
+# stage to read the real, worldwide OSM-parks output -- this raised
+# _csv.Error: field larger than field limit (131072) partway through a
+# real merge() run against it. 10,000,000 chars is generously above
+# anything this pipeline produces (a fixed value, not sys.maxsize,
+# which can raise OverflowError against the csv module's underlying C
+# long on some platforms).
+csv.field_size_limit(10_000_000)
 
 NORTH, SOUTH, WEST, EAST = 49.29, 25.8, -125.0, -93.5
 
@@ -295,7 +457,7 @@ SUMMIT_MIN_SOTA_POINTS = 8
 
 SEED_FIELDS = [
     "ref_type", "ref_code", "name", "lat", "lon", "points", "source",
-    "area_m2", "geom", "elevation_ft",
+    "area_m2", "geom", "elevation_ft", "area_frac_outside",
 ]
 
 # elevation_ft (added 2026-08-25, "scaling summit points by elevation")
@@ -307,9 +469,22 @@ SEED_FIELDS = [
 # stage; merge() carries it straight through from whichever row it
 # came from, same as area_m2/geom.
 #
+# area_frac_outside (added 2026-09-07, see PARK_REMOTE_AREA_FRAC above
+# match_parks()) is the fraction (0.0-1.0) of a matched park's own true,
+# pre-clip boundary area that lies outside every nearby Census place's
+# circle -- populated only by match_parks() and fetch_padus_parks(),
+# the two stages that ever attach a boundary to a park, both computed
+# BEFORE any storage clip so the number reflects the park's real shape.
+# score_points() uses it in place of the point-based _in_city_limits
+# test for any park that has one; every other stage (fetch_sota,
+# fetch_pota, extract_landmarks) and any park match_parks() left
+# unmatched write "" for it, same convention as elevation_ft, and
+# score_points() falls back to the point test for those.
+#
 # The merged, final seed adds one column beyond SEED_FIELDS:
-# points_reason ("in_city" / "remote" / "remote_scaled") records WHY a
-# row got the points value it did -- not read by app/places_seed.py's
+# points_reason ("in_city" / "remote" / "remote_scaled" / "in_city_by_
+# area" / "remote_by_area") records WHY a row got the points value it
+# did -- not read by app/places_seed.py's
 # loader (which only ever reads `points` itself), but carried through
 # to the `place` table for the admin panel and future re-tuning to see.
 # Only merge()'s output (the actual app/reference/places_worth_going.csv)
@@ -358,8 +533,15 @@ def fetch_sota(out_path: str) -> None:
             if sota_points < SUMMIT_MIN_SOTA_POINTS:
                 skipped_low_points += 1
                 continue
-            if not in_bbox(lat, lon):
-                continue
+            # WORLDWIDE (2026-09-07): the bbox check that used to sit here
+            # (in_bbox(lat, lon)) restricted this pull to the play area's
+            # old North-America-only rectangle. Matt approved expanding
+            # "Places Worth Going" worldwide -- SUMMIT_MIN_SOTA_POINTS
+            # (the quality bar) stays exactly as-is; only the geography
+            # gate is gone. app/places_seed.py's loader dropped the
+            # matching US_SOTA_ASSOCIATIONS allowlist in the same change,
+            # so a summit kept here is no longer re-filtered by country
+            # at load time either.
             code = row["SummitCode"].strip()
             name = row["SummitName"].strip()
             if not code or not name:
@@ -380,7 +562,7 @@ def fetch_sota(out_path: str) -> None:
                 skipped_no_altft += 1
                 continue
             w.writerow(["summit", code, name, f"{lat:.6f}", f"{lon:.6f}",
-                        POINTS["summit"], "SOTA", "", "", elevation_ft])
+                        POINTS["summit"], "SOTA", "", "", elevation_ft, ""])
             kept += 1
     print(f"sota: wrote {kept} summits (SOTA Points >= {SUMMIT_MIN_SOTA_POINTS}; "
           f"{skipped_low_points} below threshold worldwide, {skipped_no_altft} "
@@ -408,15 +590,18 @@ def fetch_pota(out_path: str) -> None:
                 lon = float(row["longitude"])
             except (KeyError, ValueError):
                 continue
-            if not in_bbox(lat, lon):
-                continue
+            # WORLDWIDE (2026-09-07): bbox gate removed, same reasoning as
+            # fetch_sota() above -- the active-parks filter (the check
+            # just above) is the quality bar and is unchanged; only
+            # geography opened up. app/places_seed.py's loader dropped
+            # its POTA "prefix must be US-" check in the same change.
             ref = row["reference"].strip()
             name = row["name"].strip()
             if not ref or not name:
                 continue
             w.writerow([ref, name, f"{lat:.6f}", f"{lon:.6f}"])
             kept += 1
-    print(f"pota: wrote {kept} active in-bbox parks -> {out_path}", file=sys.stderr)
+    print(f"pota: wrote {kept} active parks worldwide -> {out_path}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------
@@ -535,8 +720,12 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
                 self.seen_names_skipped += 1
                 return
             lat, lon = n.location.lat, n.location.lon
-            if not in_bbox(lat, lon):
-                return
+            # WORLDWIDE (2026-09-07): in_bbox(lat, lon) removed here --
+            # this handler now runs against the planet PBF, not the
+            # western-US extract, and every named match is kept
+            # regardless of where on Earth it falls. See the module
+            # docstring's fetch_sota/fetch_pota notes for the same
+            # change on the other two sources.
             self.rows.append(("n", n.id, name, lat, lon))
             self.tag_counts[matched] += 1
 
@@ -562,8 +751,7 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
                     return
             lat = sum(lats) / len(lats)
             lon = sum(lons) / len(lons)
-            if not in_bbox(lat, lon):
-                return
+            # WORLDWIDE (2026-09-07): same in_bbox removal as node() above.
             self.rows.append(("w", w.id, name, lat, lon))
             self.tag_counts[matched] += 1
 
@@ -584,7 +772,7 @@ def extract_landmarks(pbf_path: str, out_path: str) -> None:
                 continue
             seen.add(code)
             w.writerow(["landmark", code, name, f"{lat:.6f}", f"{lon:.6f}",
-                        POINTS["landmark"], "OSM", "", "", ""])
+                        POINTS["landmark"], "OSM", "", "", "", ""])
             kept += 1
     print(f"landmarks: wrote {kept} named landmarks ({h.seen_names_skipped} "
           f"unnamed matches skipped, {h.large_reserves_skipped} large nature "
@@ -636,6 +824,612 @@ def _name_score(a: str, b: str) -> float:
     return len(wa & wb) / len(wa | wb)
 
 
+# --------------------------------------------------------------------
+# PARK-SIZE SCORING (added 2026-09-07, "Yosemite pays the same as a
+# pocket park"): a park's matched boundary can be enormous (a national
+# park or forest) or tiny (a city block), and the in-city test used to
+# ask only whether ONE point -- the row's own lat/lon -- fell inside a
+# nearby Census place's circle (see _in_city_limits below). For a
+# point-sized landmark that is the whole test there is to make. For a
+# large polygon it is meaningless: one arbitrary interior point decided
+# the rate for the WHOLE park, so a park whose centre point happened to
+# land inside some small nearby town's circle scored the flat in-city
+# rate no matter how much of the rest of it was nowhere near a town at
+# all. Real damage this did in the shipped seed: Yosemite National Park
+# (3,006.6 km^2), Flathead National Forest (13,613.9 km^2), Humboldt-
+# Toiyabe National Forest (12,976.0 km^2), Payette National Forest
+# (9,256.2 km^2), and Sequoia National Forest (4,512.0 km^2) all scored
+# the in-city rate this way, while Rocky Flats National Wildlife Refuge
+# next door to Rocky Mountain Arsenal scored the full remote rate only
+# because its centre point happened to miss a circle.
+#
+# The fix below asks about the WHOLE park instead of one point: for a
+# park with a matched boundary, compute what fraction of its own true
+# area (the full PAD-US polygon, BEFORE match_parks()'s 6 km storage
+# clip further down -- see that clip's own comment for why the stored
+# `geom` cannot be used for this) lies outside every nearby Census
+# place's circle. This is deliberately NOT a size threshold -- Matt was
+# explicit that a park is not worth more for being big, only for being
+# hard to reach, which is exactly why a large park that sits entirely
+# inside a city (Golden Gate Park, Central Park) must still score the
+# in-city rate. It is a truer version of the same in-city test the
+# point version was already trying to do, extended to ask it of the
+# park's whole shape rather than one arbitrary point on it.
+#
+# PARK_REMOTE_AREA_FRAC = 0.5: "more than half of the park's own area
+# lies outside every nearby town's circle" is the plain reading of
+# "substantially outside", and the obvious starting point. It was not
+# tuned against the named cases above to force a particular answer --
+# none of them needed tuning: the five national forests/park are all
+# measured well past 90% outside (each is many times the area of the
+# small town whose circle happened to brush their old centre point),
+# a large park entirely inside a city measures close to 0% outside,
+# and Rocky Mountain Arsenal National Wildlife Refuge -- genuinely
+# up against the edge of Denver's circle -- is reported with its own
+# measured fraction wherever that lands, not adjusted to land anywhere
+# in particular. See this change's own commit message for that number.
+PARK_REMOTE_AREA_FRAC = 0.5
+
+# Diagnostic counters only -- never read by scoring logic itself, just
+# by callers (the recompute pass, tests) that want to know how often
+# _frac_area_outside_city had to repair an invalid geometry or, worse,
+# still hit a GEOSException after repairing -- see that function's own
+# "INVALID GEOMETRY" comment. Single-element lists so a caller that
+# imports these by name still sees future mutations (a plain int would
+# be re-bound, not shared).
+GEOS_REPAIR_COUNT = [0]
+GEOS_FALLBACK_COUNT = [0]
+
+
+# CLIPPED-GEOMETRY GUARD (added 2026-09-07, "Humboldt-Toiyabe National
+# Forest went 25 -> 5 on a re-rate pass"): match_parks() stores geom
+# clipped to a ~6km buffer around the park's own point (see that clip's
+# own comment) -- fine for the geometry's original purpose (map
+# display near where someone actually stood), fatal if fed back into
+# _frac_area_outside_city as if it were the whole park. A park's own
+# `area_m2` column is untouched by the clip (it comes straight from
+# PAD-US's GIS_Acres, not from the stored geometry), so a clipped row
+# is caught by comparing the two: if the row's real area is far bigger
+# than what its stored geometry's own bounding box could possibly
+# contain, that geometry cannot be the whole park and must not be
+# trusted for this test. Ratio 1.5x is deliberately loose (a real,
+# unclipped, irregularly-shaped park's bbox is often 1.2-1.4x its own
+# area already, from the bbox padding around a non-rectangular shape)
+# -- this is a clipped/not-clipped gate, not a shape-tightness
+# measurement. The 20 km^2 floor exists so an honestly small, honestly
+# irregular park's bbox padding alone can't trip it.
+CLIPPED_GEOM_AREA_RATIO = 1.5
+CLIPPED_GEOM_MIN_AREA_M2 = 20e6  # 20 km^2
+
+
+class ClippedGeometryError(ValueError):
+    """Raised by _frac_area_outside_city when true_area_m2 says the
+    geometry it was handed cannot be the whole park -- see
+    CLIPPED_GEOM_AREA_RATIO's own comment above."""
+
+
+def _anchors_near_bbox(minlon: float, minlat: float, maxlon: float, maxlat: float,
+                        buckets: dict) -> list:
+    """All (lat, lon, radius_m) anchors from _load_city_anchors's bucket
+    index whose bucket could possibly reach into [minlon,minlat,maxlon,
+    maxlat] -- every bucket the bbox touches, expanded by one bucket in
+    each direction (the same margin _in_city_limits's 3x3 neighbourhood
+    uses around a single point, generalized to a bbox that can itself
+    span several buckets for a large park). _ANCHOR_BUCKET_DEG (1.0
+    degree) is sized bigger than the largest anchor radius (~0.35
+    degrees at this play area's latitudes -- see that constant's own
+    comment), so this one-bucket margin cannot miss a real anchor whose
+    circle reaches the bbox."""
+    lat_lo = math.floor(minlat / _ANCHOR_BUCKET_DEG) - 1
+    lat_hi = math.floor(maxlat / _ANCHOR_BUCKET_DEG) + 1
+    lon_lo = math.floor(minlon / _ANCHOR_BUCKET_DEG) - 1
+    lon_hi = math.floor(maxlon / _ANCHOR_BUCKET_DEG) + 1
+    out = []
+    for la in range(lat_lo, lat_hi + 1):
+        for lo in range(lon_lo, lon_hi + 1):
+            out.extend(buckets.get((la, lo), ()))
+    return out
+
+
+def _local_aeqd_transform(lon0: float, lat0: float):
+    """An azimuthal-equidistant projection centred on (lon0, lat0),
+    transforming WGS84 lon/lat into local metres -- true circles in
+    real metres around a town anchor, not the fixed-degree-buffer
+    approximation the rest of this pipeline uses for short distances
+    (e.g. match_parks()'s own 6 km clip below). A park's area can span
+    tens of kilometres across latitudes from the Pacific coast to the
+    Rockies, so a single flat degrees-to-metres factor is not accurate
+    enough here the way it is for a small fixed buffer."""
+    from osgeo import osr
+
+    src = osr.SpatialReference()
+    src.ImportFromEPSG(4326)
+    src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    local = osr.SpatialReference()
+    local.ImportFromProj4(
+        f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +datum=WGS84 +units=m +no_defs"
+    )
+    return osr.CoordinateTransformation(src, local)
+
+
+def _bbox_anchor_shortcut(minlon: float, minlat: float, maxlon: float, maxlat: float,
+                           anchors: list) -> float | None:
+    """Cheap pre-check against a park's plain lon/lat bounding box,
+    before _frac_area_outside_city pays for a real AEQD projection plus
+    a shapely union/intersection over its (sometimes very large,
+    sometimes just plain invalid -- see that function's own comment)
+    polygon. Two cases need no geometry work at all to answer
+    correctly, using nothing but haversine distance:
+
+      - The bbox is entirely within a SINGLE anchor's circle (every
+        corner within its radius) -- the polygon it bounds is a subset
+        of the bbox, so it is entirely inside that circle too. Fully
+        covered, fraction 0.0.
+      - EVERY anchor's circle falls short of the bbox entirely (not
+        even the nearest point on the bbox to that anchor is within
+        its radius) -- the polygon cannot touch any of them either.
+        Fully outside, fraction 1.0.
+
+    Anything else -- some anchor's circle clips the bbox but does not
+    swallow it whole -- is genuinely ambiguous without looking at the
+    real shape, so this returns None and the caller falls through to
+    the full computation. Corner/nearest-point distances use plain
+    haversine on the lon/lat box, not a geodesically exact rectangle
+    distance -- an approximation, like the rest of this pipeline's
+    short-range distance math, but a safe one here: it only ever
+    short-circuits the two unambiguous cases above, never invents a
+    fraction in between."""
+    corners = [(minlat, minlon), (minlat, maxlon), (maxlat, minlon), (maxlat, maxlon)]
+    any_anchor_reaches = False
+    for a_lat, a_lon, radius_m in anchors:
+        farthest = max(_haversine_m(a_lat, a_lon, clat, clon) for clat, clon in corners)
+        if farthest <= radius_m:
+            return 0.0
+        near_lat = min(max(a_lat, minlat), maxlat)
+        near_lon = min(max(a_lon, minlon), maxlon)
+        if _haversine_m(a_lat, a_lon, near_lat, near_lon) <= radius_m:
+            any_anchor_reaches = True
+    return None if any_anchor_reaches else 1.0
+
+
+def _frac_area_outside_city(geom, buckets: dict, true_area_m2: float | None = None) -> float:
+    """Fraction (0.0-1.0) of geom's own area that lies outside every
+    nearby Census-place circle from app/reference/places.csv -- see
+    PARK_REMOTE_AREA_FRAC above for what this feeds into. geom must be
+    the park's real, full boundary (pre-clip) -- see match_parks()'s
+    own 6 km clip comment for why a clipped geometry cannot be used
+    here.
+
+    true_area_m2 (optional -- match_parks()/fetch_padus_parks() never
+    need to pass it, since they call this on the full polygon before
+    it is ever clipped) is the row's own independently-known real area
+    (PAD-US's GIS_Acres, unaffected by any storage clip). When given,
+    this refuses to answer at all -- raising ClippedGeometryError
+    rather than a confident, wrong fraction -- if geom's own bounding
+    box could not possibly contain an area that large: see
+    CLIPPED_GEOM_AREA_RATIO's own comment for why and the exact test.
+    This is what stands between a caller that (against this function's
+    own advice above) feeds it a clipped `geom` column read back out of
+    the shipped CSV, and a repeat of the Humboldt-Toiyabe National
+    Forest failure -- a 12,976 km^2 forest whose clipped ~80 km^2
+    storage window happened to sit inside a nearby city's circle,
+    scoring the whole forest in-city on nothing but that fragment.
+
+    _bbox_anchor_shortcut above answers most rows for the cost of a
+    few haversine calls -- deep backcountry (no anchor in reach at
+    all) and a park that sits nowhere near a circle's edge both need
+    no real geometry work. Only a park whose bbox genuinely straddles
+    an anchor circle's boundary falls through to the rest of this
+    function: project geom and every candidate anchor into a local
+    azimuthal-equidistant plane centred on geom's own centroid (see
+    _local_aeqd_transform) so each anchor's circle is a true circle in
+    real metres, then measure how much of geom's area that union of
+    circles fails to cover. No nearby anchor at all (deep backcountry,
+    nothing in reach) counts as the whole park being outside -- same as
+    _in_city_limits returning False when it finds nothing in range.
+
+    INVALID GEOMETRY (added 2026-09-07, "one malformed PAD-US polygon
+    killed a 77,000-row re-rate pass at row 30,000"): a park's stored
+    boundary can be self-intersecting -- either inherited from PAD-US
+    itself, or introduced by match_parks()'s own simplify() despite
+    preserve_topology=True, which does not guarantee validity, only
+    that it tries to preserve it. The reprojection into local AEQD
+    coordinates can carry that invalidity (or introduce fresh
+    self-intersections of its own from floating-point drift) into
+    geom_local, and shapely's intersection() raises GEOSException
+    ("side location conflict") rather than returning a wrong answer
+    when it hits one. shapely.make_valid() repairs both operands
+    before the intersection runs; on the rare case where GEOS still
+    can't resolve it, this falls back to the same point-in-circle test
+    _in_city_limits uses everywhere else, applied to geom's own
+    centroid -- fully in (0.0) or fully out (1.0), never a real
+    fraction, since there is no reliable area left to measure. That
+    fallback is logged by score_points()'s own caller in the recompute
+    pass, keyed by ref_code -- this function has no ref_code to name."""
+    import shapely
+    from shapely.errors import GEOSException
+    from shapely.ops import transform as shapely_transform
+
+    minlon, minlat, maxlon, maxlat = geom.bounds
+
+    if true_area_m2 is not None and true_area_m2 > CLIPPED_GEOM_MIN_AREA_M2:
+        bbox_area_m2 = _bbox_area_m2([minlat, maxlat], [minlon, maxlon])
+        if true_area_m2 > CLIPPED_GEOM_AREA_RATIO * bbox_area_m2:
+            raise ClippedGeometryError(
+                f"geom bbox ({bbox_area_m2/1e6:.1f} km^2) cannot hold a "
+                f"{true_area_m2/1e6:.1f} km^2 park -- this geometry is a "
+                "storage clip, not the whole boundary"
+            )
+
+    anchors = _anchors_near_bbox(minlon, minlat, maxlon, maxlat, buckets)
+    if not anchors:
+        return 1.0
+
+    shortcut = _bbox_anchor_shortcut(minlon, minlat, maxlon, maxlat, anchors)
+    if shortcut is not None:
+        return shortcut
+
+    centroid = geom.centroid
+    xform = _local_aeqd_transform(centroid.x, centroid.y)
+
+    def _proj(x, y, z=None):
+        px, py, _ = xform.TransformPoint(x, y)
+        return (px, py)
+
+    geom_local = shapely_transform(_proj, geom)
+    if not geom_local.is_valid:
+        geom_local = shapely.make_valid(geom_local)
+        GEOS_REPAIR_COUNT[0] += 1
+    area = geom_local.area
+    if area <= 0:
+        return 0.0
+
+    circles = [shapely.Point(_proj(lon, lat)).buffer(radius_m, quad_segs=32)
+               for lat, lon, radius_m in anchors]
+    covered = shapely.unary_union(circles)
+    if not covered.is_valid:
+        covered = shapely.make_valid(covered)
+        GEOS_REPAIR_COUNT[0] += 1
+
+    try:
+        inside = geom_local.intersection(covered).area
+    except GEOSException:
+        GEOS_FALLBACK_COUNT[0] += 1
+        for a_lat, a_lon, radius_m in anchors:
+            if _haversine_m(centroid.y, centroid.x, a_lat, a_lon) <= radius_m:
+                return 0.0
+        return 1.0
+    return max(0.0, min(1.0, 1.0 - inside / area))
+
+
+# --------------------------------------------------------------------
+# BOUNDARY SANITY CHECK (added 2026-09-07, "a roadside museum does not
+# have a 21,000 km^2 boundary"): match_parks()'s accept rule below
+# takes ANY shared name token as enough to win, as long as the
+# candidate polygon CONTAINS the POTA point -- deliberately lenient, so
+# a park would rather get an approximate boundary than none at all.
+# That lets a park's centre point, purely by chance, land inside some
+# huge, genuinely-named PAD-US polygon (a big multi-county wildlife
+# management area, say) that happens to share one common word with the
+# POTA park's own name and nothing more. Confirmed against the shipped
+# seed: "Oklahoma Route 66 Museum State Historic Site" (US-8644) and
+# "Cherokee Hills Scenic Byway Scenic Site" (US-11864) both picked up
+# 18,000-21,000 km^2 boundaries this way -- the latter matched to the
+# exact same polygon as a real, correctly-matched "Cherokee Wildlife
+# Management Area" (US-6344, identical area_m2), and scores only 0.25
+# on the very same name-token test match_parks() itself uses right
+# below -- "cherokee" is the only word its own four tokens
+# (hills/scenic/byway are not stopwords) share with that polygon's.
+#
+# The gate below rejects a match only when BOTH the area is implausible
+# for a real boundary AND the name evidence behind it was weak -- never
+# area alone, which would risk rejecting a genuinely enormous,
+# well-named match (Flathead National Forest's own 13,613.9 km^2
+# boundary, or a Wetland Management District's real multi-parcel bundle
+# covering an entire state, scores 1.0 on this same test and clears
+# MATCH_AREA_SANITY_MIN_SCORE by a wide margin regardless of size).
+# MATCH_AREA_SANITY_CEILING_M2 (15,000 km^2) sits with headroom above
+# the largest legitimate strongly-named match measured in the shipped
+# seed (Flathead, 13,613.9 km^2) and below both confirmed bad matches
+# (18,034.7 / 21,176.2 km^2) -- a backstop, not the primary signal,
+# since the score requirement alone already protects every legitimate
+# large match seen in this data.
+MATCH_AREA_SANITY_CEILING_M2 = 1.5e10  # 15,000 km^2
+MATCH_AREA_SANITY_MIN_SCORE = 0.5
+
+
+def _match_passes_sanity_check(area_m2: float, name_score: float) -> bool:
+    """False if a match should be rejected as wildly out of scale for
+    how weak its name evidence was -- see MATCH_AREA_SANITY_CEILING_M2's
+    own comment above. A pulled-out function so this gate is testable on
+    its own, without needing PAD-US/GDAL to reach it."""
+    return not (area_m2 > MATCH_AREA_SANITY_CEILING_M2 and name_score < MATCH_AREA_SANITY_MIN_SCORE)
+
+
+# --------------------------------------------------------------------
+# BOUNDARY CLEANUP, PASS 2 (added 2026-09-07, continuing the sanity
+# check above): _match_passes_sanity_check only ever sees ONE candidate
+# at a time, so it cannot catch the dominant failure mode -- a small,
+# specifically-named feature (a fish hatchery, a natural bridge) whose
+# accepted match is actually the CONTAINING unit's own boundary
+# (a national forest, a wildlife refuge complex), byte-identical to
+# whatever legitimate row separately matched the very same polygon
+# under its own name. Confirmed shipped-seed case: "Tonto State Fish
+# Hatchery" and "Tonto Natural Bridge State Park" both carry Tonto
+# National Forest's own 11,601.6 km^2 -- neither is a national forest,
+# and neither is anywhere near that size in reality (a hatchery is a
+# building complex; the natural bridge park is well under 10 km^2).
+#
+# Three checks run over the WHOLE set of matched rows, after
+# match_parks()'s per-candidate loop and per-candidate sanity check --
+# see _clean_matched_park_boundaries() below for how they combine:
+#
+#   1. DUPLICATE GEOMETRY (_resolve_duplicate_boundary_group): when two
+#      or more matched parks carry the identical PAD-US area (to the
+#      nearest m^2 -- area_m2 comes straight from PAD-US's own
+#      GIS_Acres field, so an exact match this precise is not
+#      coincidence -- it is the same polygon), at most one of them can
+#      really own it. Ranked by _is_big_scale_designation(): a name
+#      carrying an unmistakably large-format designation (National
+#      Forest/Park/Monument/Grassland, Wilderness, National Conservation
+#      or Recreation Area) outranks everything else, and a point-scale
+#      name (_is_point_scale_designation() below) always loses. Exactly
+#      one top-tier member wins the boundary; the rest are stripped.
+#      Zero, or more than one, top-tier member (e.g. Teton Wilderness
+#      Area and Jedediah Smith Wilderness Area sharing one 2,366.3 km^2
+#      polygon -- both are a "Wilderness Area", so neither outranks the
+#      other) -- there is no name evidence here strong enough to award
+#      the boundary to any one of them, so EVERY member of the group
+#      keeps the boundary. That is a deliberate fail-safe, not a guess:
+#      point-in-polygon cannot break these ties either (a matched
+#      park's point IS its boundary's centroid, so it is trivially
+#      inside its own polygon no matter which member truly owns the
+#      ground), and the two failure costs are not symmetric. Keeping
+#      every tied member leaves co-located real places sharing one
+#      credit zone -- minor, and reversible later with a PAD-US-backed
+#      pass. Stripping every tied member would delete real, named
+#      wilderness (or a real national forest, or both units of a real
+#      national monument) from the board outright.
+#
+#   2. DESIGNATION-VS-SCALE (_is_point_scale_designation): reinforces
+#      (1) and also catches a point-scale name that happens to be the
+#      ONLY match on its polygon, with no duplicate to compare against
+#      (nothing else in this seed shares San Bernard National Wildlife
+#      Refuge's bogus 8,323.8 km^2, for instance, but that one is not a
+#      point-scale designation either -- see
+#      _KNOWN_BOGUS_BOUNDARY_MATCHES below for why it needs a named
+#      exception instead). A museum, fish hatchery, natural bridge,
+#      scenic byway/site, historic site, visitor/interpretive center,
+#      picnic area, trailhead, or campground should never own a
+#      boundary in the hundreds of km^2, let alone thousands --
+#      POINT_SCALE_AREA_CEILING_M2 (500 km^2) sits comfortably above
+#      Fort Sill National Historic Site's own legitimate 379.3 km^2
+#      (an entire Army post, not a point at all) and below every
+#      confirmed-bogus case measured in the shipped seed (816 km^2 and
+#      up). This is a keyword-GATED ceiling, not a blanket one -- see
+#      MATCH_AREA_SANITY_CEILING_M2's own comment above for why a
+#      blanket ceiling cannot work in this data (a bogus museum match
+#      can outsize a legitimate national forest).
+#
+#   3. ADMINISTRATIVE ENVELOPE (_is_administrative_envelope_designation):
+#      a "Wetland Management District" boundary is genuine, not
+#      inherited -- but it is a multi-county, sometimes multi-state
+#      administrative footprint of scattered easement parcels, not
+#      contiguous ground anyone walks onto. Crediting it under the
+#      reachable-ring credit model (see app/places_seed.py) would credit
+#      an entire district from one grid square. Stripped unconditionally
+#      regardless of size or duplicate status. Individual "National
+#      Waterfowl Production Area" units are NOT included here even
+#      though the same federal program administers them -- every one of
+#      those in this seed is already parcel-sized (under 30 km^2), so
+#      there is nothing here to strip; the district-level name is what
+#      bundles a whole state's scattered parcels into one polygon.
+#
+# All three passes are scoped to matched boundaries >=
+# DUPLICATE_CLEANUP_MIN_AREA_M2 (100 km^2): below that, a mismatched or
+# duplicate boundary's own credit-zone footprint is not the
+# multi-county-scale problem this cleanup targets, and the dataset has
+# thousands of small, harmless coincidental duplicates (two named
+# features sharing one tiny parking-lot-sized polygon) that are not
+# this failure mode at all -- rewriting all of them is out of scope for
+# this pass. Every example named above already sits three to four
+# orders of magnitude past this floor.
+DUPLICATE_CLEANUP_MIN_AREA_M2 = 1e8  # 100 km^2
+POINT_SCALE_AREA_CEILING_M2 = 5e8  # 500 km^2
+
+_POINT_SCALE_DESIGNATION_RE = re.compile(
+    r"museum|fish hatchery|natural bridge|scenic byway|scenic site|"
+    r"historic site|visitor'?s? center|interpretive site|picnic area|"
+    r"trailhead|campground",
+    re.IGNORECASE,
+)
+
+_BIG_SCALE_DESIGNATION_RE = re.compile(
+    r"national forest|national grassland|national historical park|"
+    r"national park|national monument|wilderness area|\bwilderness\b|"
+    r"national conservation area|national recreation area",
+    re.IGNORECASE,
+)
+
+_ADMIN_ENVELOPE_DESIGNATION_RE = re.compile(
+    r"wetland management district",
+    re.IGNORECASE,
+)
+
+
+def _is_point_scale_designation(name: str) -> bool:
+    """True if `name` carries a designation that should never own a
+    multi-hundred-km^2 boundary -- see POINT_SCALE_AREA_CEILING_M2's own
+    comment above for the "or similar" list and why 500 km^2 is the
+    cutoff."""
+    return bool(_POINT_SCALE_DESIGNATION_RE.search(name))
+
+
+def _is_big_scale_designation(name: str) -> bool:
+    """True if `name` carries a designation that legitimately can own a
+    multi-thousand-km^2 boundary -- see _resolve_duplicate_boundary_group()'s
+    own comment above for how this ranks a duplicate-geometry group."""
+    return bool(_BIG_SCALE_DESIGNATION_RE.search(name))
+
+
+def _is_administrative_envelope_designation(name: str) -> bool:
+    """True if `name` is a multi-county/multi-state administrative
+    footprint (a Wetland Management District) rather than contiguous
+    ground -- see ADMINISTRATIVE ENVELOPE's own comment above."""
+    return bool(_ADMIN_ENVELOPE_DESIGNATION_RE.search(name))
+
+
+def _duplicate_boundary_tier(name: str) -> int:
+    """Ranks one name's plausibility as the true owner of a
+    duplicate-geometry group -- see _resolve_duplicate_boundary_group()'s
+    own comment. 2: an unmistakably large-format designation (National
+    Forest/Park/Monument/Grassland, Wilderness, National Conservation or
+    Recreation Area) that legitimately can own a multi-thousand-km^2
+    boundary. 0: a point-scale designation that never can. 1: everything
+    else (a Wildlife Management Area, a National Wildlife Refuge, a BLM
+    Recreation/Herd Management Area, ...) -- these vary enormously in
+    real size and are neither confirmed-plausible nor confirmed-implausible
+    from the name alone."""
+    if _is_point_scale_designation(name):
+        return 0
+    if _is_big_scale_designation(name):
+        return 2
+    return 1
+
+
+def _resolve_duplicate_boundary_group(names: list) -> list:
+    """Given the names of every matched park row that shares one exact
+    matched-boundary area, return a same-length list of which of them
+    keeps the boundary -- see DUPLICATE GEOMETRY's own comment above for
+    the ranking rule this implements. A pulled-out function so the rule
+    is testable without needing PAD-US/GDAL to reach it.
+
+    The winner is whichever member sits at the highest
+    _duplicate_boundary_tier() in the group, but ONLY if it is alone
+    there -- a tie at any tier (including two point-scale names tied at
+    the bottom) means no member's own name gives enough evidence to
+    award the boundary to any one of them, so EVERY member keeps it.
+    Ties cannot be resolved without ground truth this seed does not
+    carry (point-in-polygon can't help either -- a matched park's point
+    IS its boundary's centroid, so it is trivially inside its own
+    polygon regardless of which member actually owns the ground), and
+    the two failure costs here are not symmetric: keeping every member
+    leaves co-located real places sharing one credit zone, which is
+    minor and reversible later with a PAD-US-backed pass, while
+    stripping every member deletes real, named wilderness (or a real
+    national forest, or both units of a real national monument) from
+    the board outright. This is what keeps a legitimate ambiguous-tier
+    match (a real, correctly-sized "Ruby Lake National Wildlife Refuge")
+    from being dragged down just because ITS duplicate partner is a
+    clearly bogus point-scale name ("Fort Ruby National Historic Site")
+    that isn't itself tier 1 -- the refuge is the only tier-1 name in
+    that group, so it wins outright even though "National Wildlife
+    Refuge" alone is never treated as automatically big-scale."""
+    if len(names) < 2:
+        return [True] * len(names)
+    tiers = [_duplicate_boundary_tier(n) for n in names]
+    top = max(tiers)
+    winners = [t == top for t in tiers]
+    if sum(winners) == 1:
+        return winners
+    return [True] * len(names)
+
+
+# Known-bad matches that neither generic check above can catch: no
+# duplicate partner exists anywhere in this seed to compare against
+# (DUPLICATE GEOMETRY has nothing to rank), and the designation itself
+# is not inherently point-scale (DESIGNATION-VS-SCALE has no keyword to
+# key on -- a "National Wildlife Refuge" legitimately spans thousands of
+# km^2 for Desert, Cabeza Prieta, Charles M. Russell, and Sheldon NWRs,
+# all confirmed present and legitimate in this same seed). Confirmed bad
+# by direct, out-of-band verification against the real refuge, not by
+# any rule this script can run on its own -- keyed by ref_code (POTA
+# reference) rather than name, since that is the stable, unique key
+# match_parks() writes to `ref_code`.
+_KNOWN_BOGUS_BOUNDARY_MATCHES = {
+    "US-0553": "San Bernard National Wildlife Refuge matched an 8,323.8 "
+               "km^2 polygon; the real refuge is ~110 km^2.",
+}
+
+
+def _clean_matched_park_boundaries(matched_rows: list) -> dict:
+    """Mutates `matched_rows` in place, clearing the boundary
+    (area_m2/geom_wkt/area_frac_outside, all reset to "") on any row
+    whose match fails DUPLICATE GEOMETRY, DESIGNATION-VS-SCALE,
+    ADMINISTRATIVE ENVELOPE, or the named-exception list above -- see
+    this section's own module comment for all four. Each row in
+    `matched_rows` must be a dict with "name", "ref_code", "area_m2"
+    (a float in m^2, or "" if unmatched), "geom_wkt", and
+    "area_frac_outside" keys -- this is called both by match_parks()
+    (a full rebuild) and by a standalone patch against the already-built
+    seed (no GDAL/PAD-US needed, since every input here is a plain
+    Python value already sitting in the CSV).
+
+    Returns {ref_code: reason} for every row stripped, for reporting."""
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for i, row in enumerate(matched_rows):
+        area = row["area_m2"]
+        if area != "" and area >= DUPLICATE_CLEANUP_MIN_AREA_M2:
+            groups[round(float(area))].append(i)
+
+    stripped = {}
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        keep_flags = _resolve_duplicate_boundary_group([matched_rows[i]["name"] for i in idxs])
+        for i, keep in zip(idxs, keep_flags):
+            if not keep:
+                stripped[matched_rows[i]["ref_code"]] = "duplicate geometry"
+
+    for row in matched_rows:
+        rc = row["ref_code"]
+        area = row["area_m2"]
+        if rc in stripped or area == "":
+            continue
+        area = float(area)
+        if area >= POINT_SCALE_AREA_CEILING_M2 and _is_point_scale_designation(row["name"]):
+            stripped[rc] = "point-scale designation"
+        elif _is_administrative_envelope_designation(row["name"]):
+            stripped[rc] = "administrative envelope"
+        elif rc in _KNOWN_BOGUS_BOUNDARY_MATCHES:
+            stripped[rc] = "known bad match: " + _KNOWN_BOGUS_BOUNDARY_MATCHES[rc]
+
+    for row in matched_rows:
+        if row["ref_code"] in stripped:
+            row["area_m2"] = ""
+            row["geom_wkt"] = ""
+            row["area_frac_outside"] = ""
+
+    return stripped
+
+
+# Simplification tolerance for every stored park boundary (match_parks(),
+# fetch_padus_parks(), extract_osm_parks() all use this one constant) --
+# in degrees, applied by shapely's own Douglas-Peucker simplify(), which
+# bounds the perpendicular distance any point on the simplified line can
+# move from the original by this amount. 0.0008 deg is ~89m in the
+# north-south direction (111,320 m/deg times the tolerance) everywhere,
+# and no more than that east-west (111,320 * cos(lat) m/deg, always <=
+# the north-south figure) -- comfortably under CELL_LAT_DEG/CELL_LON_DEG's
+# own ~300m grid (app/grid.py), with margin to spare: a real visitor's
+# GPS/trail slop, or a genuine simplification wobble, would need to
+# exceed the ~211m of headroom left before a simplified vertex could
+# cross into a different grid cell than the true boundary would have
+# selected. Precision finer than that headroom is not accuracy this
+# game can ever notice -- no ping is scored more finely than which
+# 300m-ish cell it landed in -- so it is free to give up, and giving it
+# up here is what keeps a national forest's full, unclipped boundary
+# (removed 2026-09-09, see match_parks()'s and extract_osm_parks()'s own
+# "STORAGE CLIP" notes) from writing an unreasonably large WKT string
+# to the seed: every one of this constant's three call sites used to pay
+# this same cost only across an already-6km-clipped fragment, so this is
+# the one knob standing between "unclipped boundaries" and "the seed
+# balloons" now that the clip is gone.
+_PARK_GEOM_SIMPLIFY_DEG = 0.0008
+
+
 def match_parks(pota_csv: str, out_path: str) -> None:
     """Run on the GIS extract host:  python3 build_places_seed.py match-parks pota.csv parks_matched.csv
 
@@ -647,11 +1441,22 @@ def match_parks(pota_csv: str, out_path: str) -> None:
     polygon -- POTA centre points are hand-entered and sometimes fall
     just outside their own park's mapped boundary. Anything short of
     that is left unmatched rather than guessed at.
+
+    Two checks run on top of that accept rule, both against the FULL
+    matched polygon, before it gets clipped down for storage below:
+    MATCH_AREA_SANITY_CEILING_M2/MATCH_AREA_SANITY_MIN_SCORE reject a
+    match that is wildly out of scale for how weak its name evidence
+    was (see that constant's own comment), and PARK_REMOTE_AREA_FRAC
+    decides in-city vs. remote from the matched polygon's whole area
+    rather than the POTA centre point alone (see that constant's own
+    comment).
     """
     from osgeo import ogr, osr
     import shapely
     from shapely import wkb as shapely_wkb
     from shapely.strtree import STRtree
+
+    buckets = _load_city_anchors(_DEFAULT_PLACES_CSV)
 
     ds = ogr.Open(_require_padus_gdb())
     layer = ds.GetLayerByName(PADUS_LAYER)
@@ -700,13 +1505,18 @@ def match_parks(pota_csv: str, out_path: str) -> None:
     tree = STRtree(geoms)
     print(f"padus: {len(geoms)} candidate polygons loaded for matching", file=sys.stderr)
 
-    with open(pota_csv, encoding="utf-8") as fh, \
-         open(out_path, "w", newline="", encoding="utf-8") as out:
+    with open(pota_csv, encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
-        w = csv.writer(out)
-        w.writerow(SEED_FIELDS)
         matched = 0
         total = 0
+        rejected_sanity = []
+        # Buffered here (rather than written straight out row-by-row, as
+        # every other stage does) so _clean_matched_park_boundaries() can
+        # see the WHOLE set of matches at once -- its duplicate-geometry
+        # check needs every row that might share one boundary before it
+        # can tell which of them, if any, really owns it. See that
+        # function's own module comment above _match_passes_sanity_check.
+        out_rows = []
         for row in reader:
             total += 1
             lat = float(row["lat"])
@@ -731,48 +1541,89 @@ def match_parks(pota_csv: str, out_path: str) -> None:
                     best, best_score = i, score
             area_m2 = ""
             geom_wkt = ""
+            frac_outside = ""
             if best is not None:
-                matched += 1
                 g = geoms[best]
                 area_m2 = areas[best] if areas[best] else g.area * (111320.0 ** 2) * abs(
                     __import__("math").cos(__import__("math").radians(lat)))
-                # PAD-US units are frequently multi-part -- a Wetland
-                # Management District or a Refuge can bundle dozens of
-                # parcels scattered across a whole region under one
-                # polygon. The 50%-of-a-square rule only ever gets
-                # evaluated for a square near where someone actually
-                # stood, so the geometry only needs to be right THERE:
-                # clip to a ~6 km buffer around the POTA point before
-                # simplifying. area_m2 above is untouched by this --
-                # it still reflects PAD-US's own whole-unit acreage
-                # (GIS_Acres), so the larger/smaller-than-a-square
-                # classification stays correct even for a park whose
-                # boundary got clipped for storage. A handful of huge,
-                # genuinely single-blob parks (Grand Canyon, Yosemite)
-                # lose their far side this way too, but nobody is
-                # claiming a square several km from where they
-                # activated and calling it that park either -- and the
-                # 6 km radius is still twenty grid squares deep in
-                # every direction.
+                # BOUNDARY SANITY CHECK -- see MATCH_AREA_SANITY_CEILING_M2's
+                # own comment above. Reject the match (fall back to a
+                # point place, same as never having matched at all)
+                # rather than drop the place from the seed.
+                if not _match_passes_sanity_check(area_m2, best_score):
+                    rejected_sanity.append((name, area_m2 / 1e6, best_score))
+                    best = None
+                    area_m2 = ""
+            if best is not None:
+                matched += 1
+                g = geoms[best]
+                # PARK-SIZE SCORING -- see PARK_REMOTE_AREA_FRAC's own
+                # comment above. Computed against the FULL matched
+                # polygon `g`, before the clip just below shrinks it
+                # down for storage -- a clipped geometry cannot answer
+                # this test (see that clip's own comment).
+                frac_outside = _frac_area_outside_city(g, buckets)
+                # STORAGE CLIP REMOVED 2026-09-09 ("the trap") -- this
+                # used to clip to a ~6 km buffer around the POTA point
+                # before storing, on the reasoning that PAD-US units are
+                # frequently multi-part (a Wetland Management District
+                # or a Refuge can bundle dozens of parcels scattered
+                # across a whole region) and the 50%-of-a-square rule
+                # only ever gets evaluated near where someone actually
+                # stood. That reasoning ignored what else reads this
+                # column: app/places_seed.py's loader turns a matched
+                # boundary into the park's own CREDIT ZONE, and a
+                # clipped geometry meant Yosemite (and every other
+                # large, genuinely single-blob park -- Grand Canyon,
+                # Flathead National Forest) only credited within a
+                # ~12 km window around one arbitrary interior point.
+                # Someone at Tioga Pass, 40 km away and unmistakably
+                # inside Yosemite, got nothing. The full boundary now
+                # ships uncapped (still deduplicated/self-intersection-
+                # fixed and simplified below); app/places_seed.py's
+                # `_park_band()` is what keeps a huge boundary cheap to
+                # load, by tracing its edge instead of filling its
+                # interior -- see that function's own module comment.
                 try:
-                    clipped = g.intersection(pt.buffer(0.06))
+                    g_valid = g if g.is_valid else g.buffer(0)
                 except Exception:
                     # PAD-US ships a handful of self-intersecting
                     # polygons; buffer(0) is the standard shapely fixup.
-                    g_fixed = g.buffer(0)
-                    try:
-                        clipped = g_fixed.intersection(pt.buffer(0.06))
-                    except Exception:
-                        clipped = g_fixed
-                if clipped.is_empty:
-                    clipped = g
-                simplified = clipped.simplify(0.0008, preserve_topology=True)
+                    g_valid = g
+                simplified = g_valid.simplify(_PARK_GEOM_SIMPLIFY_DEG, preserve_topology=True)
                 geom_wkt = simplified.wkt
-            w.writerow(["park", row["reference"], name, f"{lat:.6f}", f"{lon:.6f}",
-                        POINTS["park"], "POTA/PAD-US" if best is not None else "POTA",
-                        f"{area_m2:.0f}" if area_m2 != "" else "", geom_wkt, ""])
+            out_rows.append({
+                "ref_code": row["reference"], "name": name, "lat": lat, "lon": lon,
+                "source": "POTA/PAD-US" if best is not None else "POTA",
+                "area_m2": area_m2, "geom_wkt": geom_wkt, "area_frac_outside": frac_outside,
+            })
         print(f"parks: {matched}/{total} matched a PAD-US boundary "
               f"({total - matched} unmatched, kept as points)", file=sys.stderr)
+        if rejected_sanity:
+            print(f"parks: rejected {len(rejected_sanity)} boundary match(es) as "
+                  f"wildly out of scale (area > {MATCH_AREA_SANITY_CEILING_M2/1e6:.0f} km^2, "
+                  f"name score < {MATCH_AREA_SANITY_MIN_SCORE}):", file=sys.stderr)
+            for rname, rarea_km2, rscore in rejected_sanity:
+                print(f"    {rarea_km2:12.1f} km^2  score={rscore:.3f}  {rname}", file=sys.stderr)
+
+        cleaned = _clean_matched_park_boundaries(out_rows)
+        if cleaned:
+            print(f"parks: stripped {len(cleaned)} boundary match(es) in the "
+                  "post-match cleanup pass (duplicate geometry / point-scale "
+                  "designation / administrative envelope / known bad match):",
+                  file=sys.stderr)
+            by_ref = {r["ref_code"]: r for r in out_rows}
+            for ref_code, reason in sorted(cleaned.items()):
+                print(f"    {by_ref[ref_code]['name']} ({ref_code}): {reason}", file=sys.stderr)
+
+    with open(out_path, "w", newline="", encoding="utf-8") as out:
+        w = csv.writer(out)
+        w.writerow(SEED_FIELDS)
+        for r in out_rows:
+            w.writerow(["park", r["ref_code"], r["name"], f"{r['lat']:.6f}", f"{r['lon']:.6f}",
+                        POINTS["park"], r["source"],
+                        f"{r['area_m2']:.0f}" if r["area_m2"] != "" else "", r["geom_wkt"], "",
+                        f"{r['area_frac_outside']:.4f}" if r["area_frac_outside"] != "" else ""])
 
 
 # --------------------------------------------------------------------
@@ -803,7 +1654,11 @@ def match_parks(pota_csv: str, out_path: str) -> None:
 # false positive the acreage floor cannot: community gardens and
 # single-purpose utility parcels (detention/retention basins, water
 # towers, substations, lift/pump stations, rights-of-way) that PAD-US's
-# LP designation also sweeps in even at a normal park's size.
+# LP designation also sweeps in even at a normal park's size -- and
+# (added 2026-09-07) elementary-and-below campuses school districts
+# register as their own local parks; see _ExcludeParkName below for the
+# details and the DROP-before-KEEP ordering that keeps a junior high,
+# senior high, or college on the board while an elementary comes off.
 LOCAL_PARK_DESIGNATIONS = {"LP", "LREC"}
 LOCAL_PARK_MANAGER_TYPES = {"LOC", "DIST"}
 # RAISED 2026-08-24 from an initial 0.1 acre: the 0.1 floor kept every
@@ -818,15 +1673,101 @@ LOCAL_PARK_MANAGER_TYPES = {"LOC", "DIST"}
 MIN_PARK_ACRES = 1.0  # ~43,560 sq ft -- below this is a sliver, not a park
 
 
+_UTILITY_EXCLUDE_RE_SRC = (
+    r"community\s+garden|detention|retention\s*(basin|pond)?|stormwater|"
+    r"water\s+tower|\btank\b|substation|lift\s+station|pump\s+station|"
+    r"right.?of.?way|\beasement\b|parking\s+(lot|structure|garage)|"
+    r"comfort\s+station|maintenance\s+(yard|facility|shop)"
+)
+
+# ELEMENTARY SCHOOL EXCLUSION (added 2026-09-07, Matt's decision;
+# NARROWED same day after the reachable-ring credit change landed --
+# see below) -- school districts register plenty of their own campuses
+# as PAD-US "local parks" (Des_Tp LP/LREC; see the comment above
+# MIN_PARK_ACRES). An elementary-and-below campus is not a destination
+# worth sending a player to stand outside of with an antenna, so
+# elementary, primary, grade-school, K-6/K-8, and pre-K/preschool
+# campuses come off the board.
+#
+# Junior high, middle school, senior high, college, and university
+# campuses STAY -- the original 2026-09-07 cut also dropped junior
+# high/middle school, but Matt reversed that part the same day once
+# the reachable-ring credit change (see app/places_seed.py's
+# REACHABLE-RING CREDIT note) meant a school now credits from the
+# public sidewalk outside its fence, not just from standing on campus.
+# That removed the actual objection (sending a player onto school
+# grounds) for every grade EXCEPT the youngest, where a lone kid-height
+# fence line still isn't a place worth routing a game to. Confirmed
+# case: "West Junior High School" (Boise, PADUS-84489) must survive
+# this filter.
+_SCHOOL_DROP_RE_SRC = (
+    r"\belem(?:entary)?\b|primary\s+school|grade\s+school|"
+    r"\bk-?[68]\b|preschool|pre-?k\b|intermediate\s+school"
+)
+_SCHOOL_KEEP_RE_SRC = (
+    r"junior\s+high|jr\.?\s*high|\bjh\b|middle\s+school|"
+    r"senior\s+high|high\s+school|\buniversity\b|\bcollege\b|"
+    r"\binstitute\b|\bseminary\b"
+)
+
+
+class _ExcludeParkName:
+    """Callable predicate, `.search(name)` (same interface as a
+    compiled `re.Pattern`, so the one call site below does not need to
+    know this isn't a single regex) -- True if a PAD-US local-park name
+    should be dropped from the seed.
+
+    Three buckets, checked in this exact ORDER (order matters -- see
+    below):
+
+      1. DROP: an elementary-and-below school name (_SCHOOL_DROP_RE).
+      2. KEEP: a junior high, middle school, senior high, college,
+         university, institute, or seminary (_SCHOOL_KEEP_RE) --
+         explicit rather than relying on the default below, so the
+         classification is legible and testable as three buckets, not
+         two.
+      3. Everything else falls through to the ORIGINAL utility-parcel
+         exclusion (community garden, detention basin, water tower,
+         substation, lift/pump station, right-of-way, easement, parking
+         structure, maintenance yard) -- unrelated to schools, unchanged
+         since before this addition.
+
+    Anything none of the above classifies -- the common case -- is
+    KEPT by default. That default matters: most names this cannot
+    classify are real parks that merely happen to be NAMED after a
+    school ("Blackwell School National Park", "Elgin School House State
+    Park", "Galloway School Park") rather than being a school campus
+    itself. Deleting a national park to remove an elementary school is a
+    much worse error than the reverse.
+
+    ORDER MATTERS between (1) and (2), even though the DROP and KEEP
+    word lists no longer share an obvious substring the way the
+    original (wider) cut did: a real combined campus can still be named
+    something like "Lincoln Elementary and Middle School", which
+    matches BOTH "elementary" (DROP) and "middle school" (KEEP) as
+    substrings of the same name. DROP is tested first so a campus that
+    is even PARTLY elementary-and-below still comes off the board,
+    rather than a later-grade word in the same name accidentally
+    rescuing it. (tests/test_build_places_seed.py pins this ordering
+    down directly.)
+    """
+
+    def __init__(self):
+        import re
+        self._school_drop_re = re.compile(_SCHOOL_DROP_RE_SRC, re.IGNORECASE)
+        self._school_keep_re = re.compile(_SCHOOL_KEEP_RE_SRC, re.IGNORECASE)
+        self._utility_exclude_re = re.compile(_UTILITY_EXCLUDE_RE_SRC, re.IGNORECASE)
+
+    def search(self, name: str) -> bool:
+        if self._school_drop_re.search(name):
+            return True
+        if self._school_keep_re.search(name):
+            return False
+        return bool(self._utility_exclude_re.search(name))
+
+
 def _compile_exclude_park_name_re():
-    import re
-    return re.compile(
-        r"community\s+garden|detention|retention\s*(basin|pond)?|stormwater|"
-        r"water\s+tower|\btank\b|substation|lift\s+station|pump\s+station|"
-        r"right.?of.?way|\beasement\b|parking\s+(lot|structure|garage)|"
-        r"comfort\s+station|maintenance\s+(yard|facility|shop)",
-        re.IGNORECASE,
-    )
+    return _ExcludeParkName()
 
 
 # ~500 m -- same "hand-entered centre point can land just outside its
@@ -860,6 +1801,7 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
     from shapely.strtree import STRtree
 
     exclude_re = _compile_exclude_park_name_re()
+    buckets = _load_city_anchors(_DEFAULT_PLACES_CSV)
 
     ds = ogr.Open(_require_padus_gdb())
     layer = ds.GetLayerByName(PADUS_LAYER)
@@ -936,6 +1878,11 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
 
             centroid = geom.centroid
             lat, lon = centroid.y, centroid.x
+            # NOT removed by the 2026-09-07 worldwide change -- PAD-US is
+            # a US-government dataset with no global equivalent (see
+            # module docstring "PARK SOURCES"/task notes), so this bbox
+            # check stays: it is what keeps this stage US-only on
+            # purpose, not a leftover of the old play-area restriction.
             if not in_bbox(lat, lon):
                 counts["out_of_bbox"] += 1
                 continue
@@ -986,9 +1933,17 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
             # docs/features/places.md's rotation rule -- so the real
             # (simplified) boundary is kept for every matched park, and
             # the seed CSV is larger for it.
-            simplified = geom.simplify(0.0008, preserve_topology=True)
+            # PARK-SIZE SCORING -- see PARK_REMOTE_AREA_FRAC's own
+            # comment above match_parks(). This stage never clipped its
+            # geometry even before match_parks()'s and extract_osm_parks()'s
+            # own storage clips were removed 2026-09-09 (see those
+            # functions' "STORAGE CLIP" notes), so `geom` here already is
+            # the full boundary the test needs.
+            frac_outside = _frac_area_outside_city(geom, buckets)
+            simplified = geom.simplify(_PARK_GEOM_SIMPLIFY_DEG, preserve_topology=True)
             w.writerow(["park", f"PADUS-{fid}", name, f"{lat:.6f}", f"{lon:.6f}",
-                        POINTS["park"], "PAD-US", f"{area_m2:.0f}", simplified.wkt, ""])
+                        POINTS["park"], "PAD-US", f"{area_m2:.0f}", simplified.wkt, "",
+                        f"{frac_outside:.4f}"])
             kept += 1
             if area_m2 >= SQUARE_AREA_M2:
                 larger += 1
@@ -999,6 +1954,345 @@ def fetch_padus_parks(pota_csv: str, out_path: str) -> None:
           f"(larger-than-cell={larger} permanent, smaller-than-cell={smaller} rotating) "
           f"-> {out_path}", file=sys.stderr)
     print(f"padus-parks: excluded {counts}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------
+# Stage 4c: OSM parks (leisure=park, boundary=protected_area) --
+# worldwide, run on navi -- see module docstring's "OSM PARKS" section
+# for the full rationale, including the three dedup rules below (the
+# self-dedup pass, added 2026-09-08, is the newest of the three).
+# --------------------------------------------------------------------
+
+def _osm_self_dedup_key(name: str) -> str:
+    """Exact-name grouping key for the OSM-vs-OSM self-dedup pass in
+    extract_osm_parks() below (added 2026-09-08: a proximity measurement
+    over the finished worldwide park set found 31,052 same-exact-name
+    park pairs within 2 km, and 31,052 of those -- essentially all of
+    them -- were OSM-against-OSM, not against POTA/PAD-US, which
+    extract_osm_parks() already dedups against above. OSM frequently
+    maps the same park twice: once as a way and once as a relation, or
+    as two overlapping way fragments of one boundary; nothing before
+    this pass ever compared one OSM candidate against another).
+
+    NFKD-strip diacritics, lowercase, collapse punctuation/whitespace --
+    the same normalization build_places_osm_anchors.py's normalize()
+    uses for city anchors (see that function's own comment on why
+    ascii-only would be wrong here too). Deliberately NOT _norm_name()'s
+    token-set/Jaccard scorer a few hundred lines above -- that is a
+    fuzzy "these are probably the same place" test, built for
+    cross-source variants. This pass targets a narrower, higher-
+    confidence case (the literal same object, mapped twice) and stays
+    exact on purpose: the measurement also found 13,579 pairs where one
+    name merely CONTAINS the other ("Kakadu Park" vs "Kakadu National
+    Park World Heritage Site") -- some of those are genuinely distinct
+    sub-units ("Monocacy National Battlefield - Best Farm"), so fuzzy or
+    substring matching would delete real, distinct parks. That is a
+    separate, harder problem, deliberately left alone here.
+    """
+    if not name:
+        return ""
+    n = unicodedata.normalize("NFKD", name)
+    n = "".join(c for c in n if not unicodedata.combining(c))
+    n = n.lower()
+    n = re.sub(r"[^\w\s]", " ", n, flags=re.UNICODE)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
+
+
+# Proximity threshold for the self-dedup pass -- 2 km, the same radius
+# the measurement that found this defect used (31,052 exact-name pairs
+# within 2 km, essentially all OSM-against-OSM). Deliberately much
+# tighter than build_places_osm_anchors.py's 50 km DEDUP_RADIUS_KM for
+# city anchors: a city name can legitimately repeat every few hundred
+# km (a country's admin structure reuses "Springfield"/"Georgetown"
+# sparsely), but two mappings of the SAME park -- one way, one
+# relation, or two overlapping boundary fragments -- sit at the same
+# coordinates or at most a few hundred metres apart (their centroids
+# can drift a little if the fragments don't overlap exactly). A radius
+# anywhere near 50 km would start merging distinct same-named parks in
+# neighbouring towns -- there is more than one real "City Park" or
+# "Riverside Park" in the US alone. 2 km comfortably covers the
+# same-object case without reaching a second town.
+_OSM_SELF_DEDUP_M = 2000.0
+
+
+def _dedup_osm_self_group(rows):
+    """Greedy largest-first within one exact-name group -- identical
+    strategy to build_places_osm_anchors.py's own _dedup_group() (see
+    that function's comment for why), not a transitive union-find over
+    the proximity threshold: two same-named parks far enough apart to
+    both legitimately survive can never get chained together through a
+    third same-named park that happens to sit between them. "Largest"
+    is the untouched props.area_m2 already computed for each candidate
+    (pre storage-clip) -- a relation covering the whole park outranks a
+    way covering one corner of it.
+    """
+    ordered = sorted(rows, key=lambda r: -r["area_m2"])
+    kept = []
+    for r in ordered:
+        if not any(_haversine_m(r["lat"], r["lon"], k["lat"], k["lon"]) <= _OSM_SELF_DEDUP_M
+                   for k in kept):
+            kept.append(r)
+    return kept
+
+
+def extract_osm_parks(geojsonseq_path: str, landmarks_csv: str, pota_csv: str,
+                       padus_csv: str, out_path: str) -> None:
+    """Run on navi:  python3 build_places_seed.py extract-osm-parks \\
+        parks.geojsonseq landmarks.csv pota.csv padus_parks.csv out.csv
+
+    geojsonseq_path is a pre-filtered, pre-exported GeoJSONSeq (osmium
+    tags-filter `wr/leisure=park`,`wr/boundary=protected_area` then
+    `osmium export`) -- this function reads that extract directly, not
+    the planet PBF itself (see module docstring's "OSM parks" SOURCES
+    entry). Each feature's `properties.area_m2` is trusted as given
+    (computed by the export in an equal-area projection) rather than
+    re-derived from the lon/lat geometry the way fetch_padus_parks()
+    has to for PAD-US's integer-acre GIS_Acres column -- there is no
+    equivalent precision problem here to work around.
+
+    landmarks_csv is extract_landmarks()'s own output, read ONLY to
+    build a set of osm_type+osm_id keys already claimed by the landmark
+    tier -- see "leisure=nature_reserve overlap" in the module
+    docstring for why the exact same object can appear in both extracts
+    and why the landmark tier always wins that overlap.
+
+    pota_csv and padus_csv are fetch_pota()'s and fetch_padus_parks()'s
+    own outputs, read ONLY to dedup against -- globally, not gated to
+    the US play-area bbox, since fetch_pota() is worldwide -- see
+    "Overlap with POTA/PAD-US" in the module docstring. Neither is
+    read for its geometry (POTA carries none; PAD-US's own
+    boundary is not needed here) -- name + point is all the dedup check
+    uses, same as fetch_padus_parks()'s own dedup against POTA.
+    """
+    import shapely
+    from shapely.geometry import shape as shapely_shape
+    from shapely.strtree import STRtree
+
+    exclude_re = _compile_exclude_park_name_re()
+    buckets = _load_city_anchors(_DEFAULT_PLACES_CSV)
+
+    landmark_osm_keys = set()
+    with open(landmarks_csv, encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            landmark_osm_keys.add(row["ref_code"])  # "n<id>" / "w<id>"
+
+    dedup_pts = []
+    dedup_names = []
+    for src_csv in (pota_csv, padus_csv):
+        with open(src_csv, encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                try:
+                    lat = float(row["lat"])
+                    lon = float(row["lon"])
+                except (KeyError, ValueError):
+                    continue
+                dedup_pts.append(shapely.Point(lon, lat))
+                dedup_names.append(row["name"])
+    dedup_tree = STRtree(dedup_pts) if dedup_pts else None
+
+    kept = 0
+    larger = 0
+    smaller = 0
+    total = 0
+    counts = {
+        "no_name": 0, "dup_of_landmark": 0, "name_excluded": 0,
+        "dup_of_us_park": 0, "bad_geom": 0, "dup_of_osm_self": 0,
+    }
+
+    # Every candidate that clears the per-row filters below is buffered
+    # here rather than written immediately -- the OSM-vs-OSM self-dedup
+    # pass after this loop (see module docstring's "OSM-against-ITSELF"
+    # section and _dedup_osm_self_group()'s own comment) needs every
+    # surviving candidate's name/location/area before it can decide
+    # which of a same-named cluster to keep, so nothing can be written
+    # until that pass has run. `idx` preserves the geojsonseq's own
+    # ordering so the final CSV comes out in the same relative order it
+    # would have without this pass, not grouped by name. 594,487
+    # candidates survived the per-row filters on the full planet extract
+    # (2026-09 run) -- comfortably bufferable in memory (the written CSV
+    # itself is ~156 MB; navi has tens of GB free).
+    candidates = []
+
+    with open(geojsonseq_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            rec = json.loads(line)
+            props = rec["properties"]
+            name = (props.get("name") or "").strip()
+            if not name:
+                counts["no_name"] += 1
+                continue
+
+            osm_type = props.get("osm_type") or ""
+            osm_id = props.get("osm_id")
+            code = f"{osm_type[:1]}{osm_id}"
+            if code in landmark_osm_keys:
+                counts["dup_of_landmark"] += 1
+                continue
+
+            if exclude_re.search(name):
+                counts["name_excluded"] += 1
+                continue
+
+            try:
+                geom = shapely_shape(rec["geometry"])
+                if not geom.is_valid:
+                    geom = geom.buffer(0)
+            except Exception:
+                counts["bad_geom"] += 1
+                continue
+            if geom.is_empty:
+                counts["bad_geom"] += 1
+                continue
+
+            centroid = geom.centroid
+            lat, lon = centroid.y, centroid.x
+            area_m2 = props.get("area_m2")
+            if not area_m2:
+                area_m2 = geom.area * (111_320.0 ** 2) * math.cos(math.radians(lat))
+
+            # DEDUP AGAINST POTA/PAD-US -- see module docstring's "US
+            # overlap" section. Run GLOBALLY, not bbox-gated: PAD-US
+            # really is US-only, so gating on the US play-area bbox was
+            # harmless for that half, but POTA is WORLDWIDE (see this
+            # module's own "WORLDWIDE EXPANSION" note) -- fetch_pota()
+            # lists national parks and reserves on every continent, not
+            # just the US. Gating this check to the US bbox (the first
+            # cut of this stage did exactly that) silently let every
+            # non-US POTA park duplicate its OSM twin freely: confirmed
+            # 10,752 same-name-within-50km collisions across the raw
+            # extract, the overwhelming majority of them outside the
+            # US -- Serengeti National Park, Kakadu National Park,
+            # Fiordland National Park, and thousands more, none of which
+            # the bbox-gated version ever had a chance to catch.
+            #
+            # BUG FOUND AND FIXED before this ran for real (2026-09-07):
+            # the first cut of this check also queried and distance-
+            # tested against this candidate's own CENTROID only, the
+            # same technique fetch_padus_parks() uses against POTA --
+            # correct for an ordinary city park, where centroid and POTA
+            # point sit metres apart, but wrong for a National Forest-
+            # scale relation: a POTA point is often placed at one
+            # specific activation spot (a trailhead, a visitor centre),
+            # which can be tens of km from the geometric centroid of a
+            # shape that size. Confirmed duplicating Yosemite National
+            # Park, Flathead National Forest, and Sequoia National
+            # Forest -- each shipped as BOTH a POTA/PAD-US row and a
+            # separate OSM row, exactly the double-counting this stage
+            # exists to avoid -- before the fix below caught it. Now
+            # queries and tests containment against the candidate's
+            # real, full, pre-clip GEOMETRY (bbox padded by
+            # _DEDUP_NEAR_DEG so a POTA point sitting just outside its
+            # own park's mapped boundary -- the same hand-entered-point
+            # slop match_parks() itself tolerates -- still counts as a
+            # dup), not a small fixed buffer around one point: a dup is
+            # a strong name match (score >= 0.5) whose US/POTA point
+            # either falls INSIDE this geometry (match_parks()'s own
+            # "contains" test, valid at any size) or within
+            # _DEDUP_NEAR_DEG of the centroid (the original small-park
+            # case, kept for a park whose own centroid sits near its
+            # POTA point but whose true shape is thin/irregular enough
+            # that containment alone might miss it at the boundary).
+            if dedup_tree is not None:
+                pt = shapely.Point(lon, lat)
+                minlon, minlat, maxlon, maxlat = geom.bounds
+                query_box = shapely.box(minlon - _DEDUP_NEAR_DEG, minlat - _DEDUP_NEAR_DEG,
+                                         maxlon + _DEDUP_NEAR_DEG, maxlat + _DEDUP_NEAR_DEG)
+                is_dup = False
+                for i in dedup_tree.query(query_box):
+                    if _name_score(name, dedup_names[i]) < 0.5:
+                        continue
+                    if geom.contains(dedup_pts[i]) or pt.distance(dedup_pts[i]) < _DEDUP_NEAR_DEG:
+                        is_dup = True
+                        break
+                if is_dup:
+                    counts["dup_of_us_park"] += 1
+                    continue
+
+            # PARK-SIZE SCORING, against the real, full, pre-clip shape
+            # -- see PARK_REMOTE_AREA_FRAC's own comment above
+            # match_parks(). true_area_m2 is passed so a self-
+            # intersecting OSM relation that make_valid() cannot fully
+            # resolve is measured, not silently mis-clipped -- see the
+            # CLIPPED-GEOMETRY GUARD comment above _frac_area_outside_city.
+            frac_outside = _frac_area_outside_city(geom, buckets, true_area_m2=area_m2)
+
+            # STORAGE CLIP REMOVED 2026-09-09 ("the trap") -- this used
+            # to clip to a ~6 km buffer around the feature's own point
+            # before storing, on the reasoning that this dataset's
+            # boundary=protected_area side ranges up to
+            # Papahānaumokuākea's 1.5 million km^2 and
+            # app/places_seed.py's _park_cells() has no size guard of
+            # its own against a stored geometry that large. True, but
+            # that reasoning stopped at the build script's own cost and
+            # ignored what the clip did to the CREDIT ZONE on the other
+            # end: every large single-blob park (a national forest, a
+            # marine monument someone can actually reach the edge of)
+            # only credited within a ~12 km window around one arbitrary
+            # point on its own boundary, not anywhere near its real
+            # edge. The full boundary now ships uncapped (simplified
+            # below to bound its stored size); the load-time cost this
+            # clip used to avoid is handled instead by
+            # app/places_seed.py's `_park_band()`, which traces a large
+            # boundary's edge directly rather than ever filling its
+            # interior -- see that function's own module comment -- and
+            # by its own pathological-case cap for the handful of
+            # multi-million-km^2 outliers that still need one. `geom`
+            # is already validity-fixed (buffer(0) above, right after
+            # parsing), so it needs no second fixup here.
+            simplified = geom.simplify(_PARK_GEOM_SIMPLIFY_DEG, preserve_topology=True)
+
+            candidates.append({
+                "idx": total,
+                "row": ["park", f"OSM-{code}", name, f"{lat:.6f}", f"{lon:.6f}",
+                        POINTS["park"], "OSM", f"{area_m2:.0f}", simplified.wkt, "",
+                        f"{frac_outside:.4f}"],
+                "name_key": _osm_self_dedup_key(name),
+                "lat": lat, "lon": lon, "area_m2": area_m2,
+            })
+
+    # OSM-VS-OSM SELF-DEDUP -- see module docstring's "OSM-against-
+    # ITSELF" section, _osm_self_dedup_key()'s comment (why exact-name
+    # only, not fuzzy/substring), and _dedup_osm_self_group()'s comment
+    # (why greedy-largest-first, not transitive union-find). Every
+    # candidate reaching this point already has a non-empty name --
+    # blank-name features were dropped above at the "no_name" filter,
+    # never buffered at all -- so, unlike the bug caught mid-flight on
+    # the anchor build, there is no blank-name bucket for this grouping
+    # to wrongly collapse into one giant group.
+    name_groups: dict[str, list[dict]] = {}
+    for c in candidates:
+        name_groups.setdefault(c["name_key"], []).append(c)
+
+    survivors = []
+    for group in name_groups.values():
+        if len(group) == 1:
+            survivors.extend(group)
+            continue
+        deduped = _dedup_osm_self_group(group)
+        counts["dup_of_osm_self"] += len(group) - len(deduped)
+        survivors.extend(deduped)
+    survivors.sort(key=lambda c: c["idx"])
+
+    with open(out_path, "w", newline="", encoding="utf-8") as out:
+        w = csv.writer(out)
+        w.writerow(SEED_FIELDS)
+        for c in survivors:
+            w.writerow(c["row"])
+            kept += 1
+            if c["area_m2"] >= SQUARE_AREA_M2:
+                larger += 1
+            else:
+                smaller += 1
+
+    print(f"osm-parks: {total} candidates, wrote {kept} OSM parks "
+          f"(larger-than-cell={larger} permanent, smaller-than-cell={smaller} rotating) "
+          f"-> {out_path}", file=sys.stderr)
+    print(f"osm-parks: excluded {counts}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------
@@ -1018,16 +2312,52 @@ _DEFAULT_PLACES_CSV = os.path.join(
 )
 
 # Anchor bucket size for the coarse spatial index _load_city_anchors
-# builds below, in degrees. Must be bigger than the largest possible
-# search radius in EITHER direction so a 3x3-bucket neighbourhood around
-# a place's own bucket can never miss a real match. The largest anchor
-# radius in app/reference/places.csv is ~25.3km; converting that to
-# degrees of longitude (the more demanding direction, since a degree of
-# longitude covers fewer metres than a degree of latitude everywhere
-# except the equator) at this play area's northernmost latitude (49.29N,
-# cos ~0.652) gives ~0.35 degrees -- 1.0 degree buckets leave a wide,
-# deliberate margin over that, not a tight fit.
+# builds below, in degrees -- purely an INDEXING granularity (how far
+# apart two buckets are), not a search-window guarantee (see
+# _in_city_limits below for that, which used to conflate the two). Must
+# be bigger than the largest anchor's own radius converted to degrees of
+# longitude AT THAT ANCHOR'S OWN LATITUDE, so no anchor's circle can
+# reach past its immediate neighbouring bucket. Converting a radius to
+# degrees of longitude depends on latitude (a degree of longitude covers
+# fewer metres than a degree of latitude everywhere except the equator,
+# and covers less the further from the equator you are), so this was
+# checked against every anchor in the actual file rather than assuming
+# the largest radius is also the worst case: 0.81 degrees, from a
+# ~47.2km-radius Alaska anchor at 58.4N (cos ~0.526) -- New York's own
+# anchor is larger in absolute terms (~51.7km) but sits at a low enough
+# latitude (40.7N, cos ~0.758) that it converts to a smaller 0.61
+# degrees. Both, and every other anchor checked, land comfortably under
+# the 1.0 degree bucket size.
+#
+# STALE ASSUMPTION REMOVED (2026-09-07): this comment used to also lean
+# on "this script's own candidate queries never leave the western play
+# area" to justify scanning a fixed 3x3 neighbourhood of buckets around
+# the QUERY point. That is a claim about the QUERY's own latitude --
+# a different question from the anchor-indexing one above -- and it
+# went false the moment fetch_sota()/fetch_pota()/extract_landmarks()
+# stopped bbox-filtering to that play area (see the module's "WORLDWIDE
+# EXPANSION" note): a landmark or park can now be scored anywhere on
+# Earth, including genuinely high-latitude places (Alaska, Scandinavia,
+# northern Canada, Patagonia) where a degree of longitude shrinks well
+# below the ~80km/degree the old fixed +-1-bucket window assumed.
+# _in_city_limits below no longer leans on that assumption at all: it
+# derives its own search window per query from the query's OWN latitude
+# and the largest anchor radius actually loaded (_anchor_reach_m /
+# _anchor_lat_bucket_span / _anchor_lon_bucket_span, plus
+# _wrap_anchor_lon_bucket for the antimeridian) -- the same fix
+# app/places.py already applies to its own, independent copy of this
+# pattern (see that module's _lat_bucket_span/_lon_bucket_span/
+# _wrap_lon_bucket). The real, derived guarantee is: for any query point
+# anywhere on Earth, every anchor whose circle could contain it is
+# found -- not "queries stay where we already checked."
 _ANCHOR_BUCKET_DEG = 1.0
+
+# Metres per degree of latitude -- close enough to constant across the
+# globe (110.57km at the equator to 111.69km at the poles) to treat as
+# one figure everywhere, same reasoning and value as app/places.py's own
+# _METRES_PER_DEGREE_LAT. Longitude buckets convert this further by
+# cos(latitude) -- see _anchor_lon_bucket_span.
+_METRES_PER_DEGREE_LAT = 111_320.0
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1044,14 +2374,29 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
+class _AnchorBuckets(dict):
+    """dict subclass returned by _load_city_anchors, identical in every
+    way to a plain {(lat_bucket, lon_bucket): [(lat, lon, radius_m)]}
+    dict (every existing reader -- _anchors_near_bbox, _in_city_limits --
+    just calls .get()/.values() on it, unaware of the difference) except
+    that it also carries the largest anchor radius among its own entries
+    as `max_radius_m`, computed once at load time rather than re-scanned
+    on every _in_city_limits call. See _anchor_reach_m for the fallback
+    that keeps a plain dict (a test fixture built by hand, bypassing
+    _load_city_anchors entirely) working too."""
+    max_radius_m: float = 0.0
+
+
 def _load_city_anchors(path: str) -> dict[tuple[int, int], list[tuple[float, float, float]]]:
     """Reads app/reference/places.csv (lat,lon,effective_radius_m,
     comment lines starting with '#') and buckets each anchor into a
     coarse (lat_bucket, lon_bucket) grid at _ANCHOR_BUCKET_DEG
     resolution, so _in_city_limits below only has to haversine-check
-    anchors in a place's own 3x3-bucket neighbourhood instead of every
-    anchor in the country."""
-    buckets: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    anchors in a place's own latitude-sized neighbourhood instead of
+    every anchor in the country (see _anchor_lat_bucket_span /
+    _anchor_lon_bucket_span -- no longer a fixed 3x3)."""
+    buckets = _AnchorBuckets()
+    max_radius_m = 0.0
     with open(path, encoding="utf-8", newline="") as fh:
         for line in fh:
             line = line.strip()
@@ -1061,18 +2406,87 @@ def _load_city_anchors(path: str) -> dict[tuple[int, int], list[tuple[float, flo
             lat, lon, radius_m = float(lat_s), float(lon_s), float(radius_s)
             key = (math.floor(lat / _ANCHOR_BUCKET_DEG), math.floor(lon / _ANCHOR_BUCKET_DEG))
             buckets.setdefault(key, []).append((lat, lon, radius_m))
+            if radius_m > max_radius_m:
+                max_radius_m = radius_m
+    buckets.max_radius_m = max_radius_m
     return buckets
+
+
+def _anchor_reach_m(buckets: dict) -> float:
+    """Metres the bucket scan below must guarantee reaching from any
+    query point: the largest anchor radius among `buckets`' own anchors,
+    so an anchor whose circle could contain the query point is never
+    missed regardless of where it sits. Reads the precomputed
+    max_radius_m off a real _AnchorBuckets table (the ~35k-anchor
+    production case, where rescanning every call would be the expensive
+    part); falls back to scanning `buckets` itself for a plain dict
+    handed in directly (test fixtures with a handful of anchors, where
+    that scan costs nothing)."""
+    cached = getattr(buckets, "max_radius_m", None)
+    if cached is not None:
+        return cached
+    return max((r for anchors in buckets.values() for _, _, r in anchors), default=0.0)
+
+
+def _anchor_lat_bucket_span(reach_m: float) -> int:
+    """Latitude buckets to extend above and below the query's own bucket
+    to guarantee `reach_m` metres of north-south coverage -- same
+    derivation as app/places.py's _lat_bucket_span."""
+    return max(1, math.ceil(reach_m / _METRES_PER_DEGREE_LAT))
+
+
+def _anchor_lon_bucket_span(lat: float, reach_m: float) -> int:
+    """Longitude buckets to extend east and west of the query's own
+    bucket to guarantee `reach_m` metres of east-west coverage AT THIS
+    LATITUDE -- same derivation as app/places.py's _lon_bucket_span.
+    Capped at 180: past that the caller scans every longitude bucket
+    instead (see _in_city_limits)."""
+    cos_lat = math.cos(math.radians(lat))
+    if cos_lat < 1e-9:
+        # Within a hair of a pole: a degree of longitude is essentially
+        # a point, so no finite span would do -- scan every bucket.
+        return 180
+    return min(180, math.ceil(reach_m / (_METRES_PER_DEGREE_LAT * cos_lat)))
+
+
+def _wrap_anchor_lon_bucket(bucket: int) -> int:
+    """Normalise a longitude bucket index to the [-180, 179] range
+    _load_city_anchors actually keys buckets with (floor() of a
+    longitude in [-180, 180)), so a scan that walks past +179 or below
+    -180 finds the antimeridian-wrapped bucket instead of an empty one
+    -- same as app/places.py's _wrap_lon_bucket."""
+    return ((bucket + 180) % 360) - 180
 
 
 def _in_city_limits(lat: float, lon: float, buckets: dict) -> bool:
     """True if (lat, lon) falls within ANY anchor's effective_radius_m
     -- see _load_city_anchors and the module docstring's "SCORING BY
-    EFFORT, NOT CATEGORY" for what this radius means."""
+    EFFORT, NOT CATEGORY" for what this radius means.
+
+    The bucket neighbourhood scanned is sized per query (2026-09-07),
+    not a fixed 3x3: enough longitude buckets to cover the largest
+    loaded anchor radius at the QUERY's own latitude, and enough
+    latitude buckets to cover it too. A fixed +-1-bucket window used to
+    rest on "queries never leave the western play area" -- true once,
+    false now that SOTA/POTA/OSM landmarks are worldwide (see
+    _ANCHOR_BUCKET_DEG's own comment). Mirrors app/places.py's
+    distance_to_nearest_town_m exactly, minus the "return the distance"
+    part -- this only needs a yes/no."""
+    reach_m = _anchor_reach_m(buckets)
     lat_b = math.floor(lat / _ANCHOR_BUCKET_DEG)
     lon_b = math.floor(lon / _ANCHOR_BUCKET_DEG)
-    for d_lat in (-1, 0, 1):
-        for d_lon in (-1, 0, 1):
-            for a_lat, a_lon, radius_m in buckets.get((lat_b + d_lat, lon_b + d_lon), ()):
+    lat_span = _anchor_lat_bucket_span(reach_m)
+    lon_span = _anchor_lon_bucket_span(lat, reach_m)
+    full_lon_sweep = lon_span >= 180
+    lon_offsets = range(-180, 180) if full_lon_sweep else range(-lon_span, lon_span + 1)
+    for d_lat in range(-lat_span, lat_span + 1):
+        plat = lat_b + d_lat
+        for dlon in lon_offsets:
+            # In a full sweep dlon IS already a bucket key (-180..179);
+            # otherwise it is an offset from the query's own bucket that
+            # may need wrapping at the antimeridian.
+            plon = dlon if full_lon_sweep else _wrap_anchor_lon_bucket(lon_b + dlon)
+            for a_lat, a_lon, radius_m in buckets.get((plat, plon), ()):
                 if _haversine_m(lat, lon, a_lat, a_lon) <= radius_m:
                     return True
     return False
@@ -1096,15 +2510,42 @@ def score_points(row: dict, buckets: dict) -> tuple[int, str]:
 
     Park and landmark still check in-city first and keep the flat
     REMOTE_POINTS value otherwise -- that rule was only ever wrong for
-    summits, which are the one ref_type with an elevation to score on."""
+    summits, which are the one ref_type with an elevation to score on.
+
+    A park with a matched boundary (row["area_frac_outside"] populated
+    by match_parks()/fetch_padus_parks() -- see PARK_REMOTE_AREA_FRAC's
+    own comment) is scored from that fraction instead of the point-
+    based _in_city_limits test: the centre point alone cannot speak for
+    a polygon that can be orders of magnitude bigger than the circle it
+    happens to sit inside or outside of. A park match_parks() left
+    unmatched has no boundary to ask that question of, so it (and every
+    landmark, which never has one either) still uses the point test."""
     lat, lon = float(row["lat"]), float(row["lon"])
     if row["ref_type"] == "summit":
         elev_s = row.get("elevation_ft")
         elevation_ft = float(elev_s) if elev_s not in (None, "") else None
         return _summit_points(elevation_ft), "remote_scaled"
+    if row["ref_type"] == "park":
+        frac_s = row.get("area_frac_outside")
+        if frac_s not in (None, ""):
+            if float(frac_s) > PARK_REMOTE_AREA_FRAC:
+                return REMOTE_POINTS["park"], "remote_by_area"
+            return IN_CITY_POINTS, "in_city_by_area"
     if _in_city_limits(lat, lon, buckets):
         return IN_CITY_POINTS, "in_city"
     return REMOTE_POINTS[row["ref_type"]], "remote"
+
+
+def _open_out_csv(path: str, **kwargs):
+    """Opens path for text writing, gzip-compressing when the name
+    ends in .gz -- so a rebuild that passes --out ...places_worth_going.csv.gz
+    (the shipped default) writes compressed directly instead of
+    silently recreating the 136MB plain CSV that broke GitHub's push
+    limit (2026-09-07). Plain open() otherwise.
+    """
+    if path.endswith(".gz"):
+        return gzip.open(path, "wt", **kwargs)
+    return open(path, "w", **kwargs)
 
 
 def merge(inputs: list, out_path: str, places_csv: str = _DEFAULT_PLACES_CSV) -> None:
@@ -1113,7 +2554,7 @@ def merge(inputs: list, out_path: str, places_csv: str = _DEFAULT_PLACES_CSV) ->
     total = 0
     counts = {}
     dist = {}  # (ref_type, points, reason) -> count, for the distribution report
-    with open(out_path, "w", newline="", encoding="utf-8") as out:
+    with _open_out_csv(out_path, newline="", encoding="utf-8") as out:
         w = csv.writer(out)
         w.writerow(FINAL_SEED_FIELDS)
         for path in inputs:
@@ -1162,6 +2603,13 @@ def main():
     p.add_argument("pota_csv")
     p.add_argument("out")
 
+    p = sub.add_parser("extract-osm-parks")
+    p.add_argument("geojsonseq")
+    p.add_argument("landmarks_csv")
+    p.add_argument("pota_csv")
+    p.add_argument("padus_csv")
+    p.add_argument("out")
+
     p = sub.add_parser("merge")
     p.add_argument("inputs", nargs="+")
     p.add_argument("--out", required=True)
@@ -1180,6 +2628,9 @@ def main():
         match_parks(args.pota_csv, args.out)
     elif args.cmd == "fetch-padus-parks":
         fetch_padus_parks(args.pota_csv, args.out)
+    elif args.cmd == "extract-osm-parks":
+        extract_osm_parks(args.geojsonseq, args.landmarks_csv, args.pota_csv,
+                           args.padus_csv, args.out)
     elif args.cmd == "merge":
         merge(args.inputs, args.out, args.places_csv)
 

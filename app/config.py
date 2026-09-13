@@ -11,6 +11,30 @@ class Settings(BaseSettings):
     # Storage
     db_path: str = "/data/game.db"
 
+    # Places Worth Going seed (app/places_seed.py): the loader normally
+    # skips its own reconcile pass when the seed's sha256 content hash
+    # matches what the last successful load recorded (see that module's
+    # _RECONCILE_VERSION comment) -- that is what keeps every boot after
+    # the first cheap. Setting this forces a full reload on the next
+    # boot regardless of the fingerprint, without requiring anyone to
+    # hand-edit the `cursor` table. An operator-facing escape hatch, not
+    # something a normal deploy needs to touch.
+    places_force_reseed: bool = False
+
+    # Where the seed CSV itself lives (moved out of the git-tracked
+    # app/reference/ 2026-09-08 -- the file is ~100MB, doubles that on
+    # every rebuild since git cannot diff compressed data, and had
+    # already put 109MB of dead prior copies into history before this
+    # change; see docs/features/places.md). Same convention as db_path
+    # above: a path INSIDE the container, under the ./data bind mount
+    # docker-compose.yml already provides at /data -- no new mount
+    # needed, the seed just lives beside game.db on the host at
+    # ./data/data/places_worth_going.csv.gz. The loader also accepts the
+    # plain, uncompressed .csv form at the same location (see
+    # places_seed._resolve_data_path) so an operator who already
+    # decompressed the file does not also have to edit this setting.
+    places_seed_path: str = "/data/places_worth_going.csv.gz"
+
     # Terrain/overlay PMTiles archives (USFS roads+trails, public lands)
     # served under /tiles -- see mount() in app/api.py. A bind mount
     # rather than the meshwars-data volume: these are large, static, and

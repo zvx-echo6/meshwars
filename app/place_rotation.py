@@ -83,6 +83,60 @@ floor was rejecting mostly in already-thin rural cells (measured: of
 the candidate-slots the old 3-mile rule cost, ~79% were in cells with
 10 or fewer candidates to begin with, not in the dense cells "thinning
 crowded cities" was meant to target).
+
+QUOTA DENSITY SCALING (ADDED 2026-09-07, replacing the flat 15 set on
+2026-08-25 above) -- the flat quota was tuned against the U.S.-only
+board, where density is even enough that one number binds sensibly
+almost everywhere. The board going worldwide broke that assumption:
+measured against the worldwide seed (1.25M rotating candidates across
+56,564 occupied region cells), density is wildly uneven --
+
+    p50      4 candidates/cell        p90       48
+    p75     14                        p95       97
+    p99    289                        max    7,420    mean 22.2
+
+-- so half of all cells have 4 or fewer candidates and the flat 15
+never binds there at all (there is nothing to raise it for), while a
+dense European cell offering 7,420 candidates still only ever shows
+15: a 0.2% sample redrawn every week, where a player can never work
+toward anything specific.
+
+ROTATION_QUOTA_PER_CELL is now a density-scaled function of a cell's
+own candidate count (see region_quota() below) instead of one flat
+number:
+
+    quota(candidates) = clamp(
+        round(ROTATION_QUOTA_FLOOR * (candidates / ROTATION_QUOTA_FLOOR)
+              ** ROTATION_QUOTA_DENSITY_EXPONENT),
+        ROTATION_QUOTA_FLOOR, ROTATION_QUOTA_CAP,
+    )
+
+  ROTATION_QUOTA_FLOOR = 15 -- the same number the flat quota used to
+  be. A cell at or under this many candidates is completely unaffected
+  by density scaling: it gets exactly what the flat quota would have
+  given it (usually all of its candidates, since sparse cells rarely
+  had more candidates than the quota to begin with).
+
+  ROTATION_QUOTA_CAP = 60 -- MIN_SPACING_MILES = 1.0 inside an 18-mile
+  cell cannot physically seat much more than this no matter how the
+  formula is tuned. Left uncapped, sqrt would hand the densest measured
+  cell (7,420 candidates) a quota of 334 that the spacing pass could
+  never fill -- the cap keeps the quota an achievable ceiling rather
+  than a number spacing silently ignores.
+
+  ROTATION_QUOTA_DENSITY_EXPONENT = 0.5 (square root) -- the quota
+  should grow with density, but sublinearly: a cell with 100x another
+  cell's candidates should not get a literal 100x quota (which spacing
+  could not seat regardless), just a bigger "genuine handful to choose
+  from" than a sparse cell gets.
+
+Effect, measured against the same worldwide seed: live rotating places
+system-wide go from 375,908 (flat 15) to about 560,493; a p90-density
+cell's quota rises from 15 to 27; the densest cells are capped at 60
+rather than the 334 an uncapped sqrt would compute. The quota is still
+a ceiling, never a target to pad out to -- MIN_SPACING_MILES is
+unchanged and remains authoritative; if spacing cannot place `quota`
+items in a cell, it places fewer, exactly as it always has.
 """
 from __future__ import annotations
 
@@ -99,8 +153,16 @@ from .grid import distance_m
 MILE_M = 1609.344
 
 ROTATION_CELL_MILES = 18.0
-ROTATION_QUOTA_PER_CELL = 15
 MIN_SPACING_MILES = 1.0
+
+# Density-scaled per-cell quota (2026-09-07) -- see the QUOTA DENSITY
+# SCALING section of the module docstring above for the derivation and
+# the worldwide-seed numbers behind these three constants. Named
+# separately, rather than folded into one magic formula, so each can be
+# retuned later without re-deriving the whole thing:
+ROTATION_QUOTA_FLOOR = 15              # pre-scaling flat quota -- a cell this sparse or sparser is unaffected
+ROTATION_QUOTA_CAP = 60                # ~= what MIN_SPACING_MILES=1.0 can physically seat in one 18-mile cell
+ROTATION_QUOTA_DENSITY_EXPONENT = 0.5  # sqrt -- quota grows with density, but sublinearly
 
 _METERS_PER_DEG_LAT = 111_320.0
 
@@ -176,6 +238,29 @@ def region_cell_key(lat: float, lon: float, lat_deg: float, lon_deg: float) -> t
     return (math.floor(lat / lat_deg), math.floor(lon / lon_deg))
 
 
+def region_quota(candidate_count: int) -> int:
+    """The density-scaled live-place quota for a region cell holding
+    `candidate_count` rotating candidates -- replaces the flat
+    ROTATION_QUOTA_PER_CELL (see the module docstring's QUOTA DENSITY
+    SCALING section for why and what it was measured against).
+
+    Pure function of the candidate count alone: no randomness, no
+    database access, so calling it does not touch the deterministic
+    draw's RNG state and a given cell's quota is the same every time
+    for as long as its candidate count is unchanged.
+
+    A cell with fewer candidates than ROTATION_QUOTA_FLOOR is
+    completely unaffected (the clamp's floor equals the old flat
+    quota); an empty cell (0 candidates) has nothing to place either
+    way, so this returns 0 for that case without going through the
+    formula.
+    """
+    if candidate_count <= 0:
+        return 0
+    scaled = ROTATION_QUOTA_FLOOR * (candidate_count / ROTATION_QUOTA_FLOOR) ** ROTATION_QUOTA_DENSITY_EXPONENT
+    return max(ROTATION_QUOTA_FLOOR, min(ROTATION_QUOTA_CAP, round(scaled)))
+
+
 # ---- 3-mile spacing index ----------------------------------------------
 
 
@@ -231,14 +316,24 @@ def _compute_week(
 
     Algorithm: group every rotates=1 place into its region cell,
     process cells in a deterministic-but-shuffled order, and within each
-    cell fill up to ROTATION_QUOTA_PER_CELL slots from a deterministically
-    shuffled candidate list, skipping any candidate within
-    MIN_SPACING_MILES of one already chosen (in ANY cell, not just this
-    one -- two candidates a short walk apart but on opposite sides of a
-    cell boundary must not both get picked). Last week's picks are
-    sorted to the back of their cell's candidate list (not excluded) so
-    a repeat only happens when nothing else in that cell clears the
-    spacing check.
+    cell fill up to that cell's region_quota(len(candidates)) slots
+    (density-scaled, see that function and the module docstring's QUOTA
+    DENSITY SCALING section) from a deterministically shuffled candidate
+    list, skipping any candidate within MIN_SPACING_MILES of one already
+    chosen (in ANY cell, not just this one -- two candidates a short
+    walk apart but on opposite sides of a cell boundary must not both
+    get picked). Last week's picks are sorted to the back of their
+    cell's candidate list (not excluded) so a repeat only happens when
+    nothing else in that cell clears the spacing check.
+
+    The quota is computed from len(candidates) alone, after the shuffle
+    and the prev-week sort below but before either affects which
+    candidates get tested -- it does not consume any RNG state and does
+    not change the shuffled order, so raising a cell's quota only ever
+    extends how far down that same ordered list picking continues. The
+    places a cell already had live at a lower quota stay live at a
+    higher one; they are never reshuffled or bumped by ones farther down
+    the list.
 
     Pure with respect to the database: reads `place` and, for the anti-
     repeat preference, last week's persisted `place_week` if present.
@@ -273,10 +368,11 @@ def _compute_week(
         # not a preference, and only happens if every fresher candidate
         # in this cell fails the spacing check.
         candidates.sort(key=lambda c: c[0] in prev_chosen)
+        quota = region_quota(len(candidates))
 
         picked = 0
         for place_id, lat, lon in candidates:
-            if picked >= ROTATION_QUOTA_PER_CELL:
+            if picked >= quota:
                 break
             if spacing.too_close(lat, lon):
                 continue

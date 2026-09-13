@@ -1,8 +1,8 @@
-"""Loads app/reference/places_worth_going.csv into the `place` and
-`place_cell` tables. Companion to scripts/build_places_seed.py, which
-builds the CSV from SOTA/POTA/OSM+PAD-US -- this module never touches
-the network or the CSV's own contents, only what gets written to the
-database from it.
+"""Loads the places_worth_going seed CSV (see SEED LOCATION below for
+where that file actually lives) into the `place` and `place_cell`
+tables. Companion to scripts/build_places_seed.py, which builds the CSV
+from SOTA/POTA/OSM+PAD-US -- this module never touches the network or
+the CSV's own contents, only what gets written to the database from it.
 
 Called from app/db.init_db() on every startup, same as SCHEMA/MIGRATIONS
 -- idempotent, so a re-run (a restart, a redeploy with an unchanged CSV)
@@ -11,52 +11,86 @@ app/places.py's in-memory-bucket pattern: that module answers "how far
 is the nearest town" from a flat file with no database involved at all,
 because nothing else needs a `town` row to exist. This feature needs
 `place` rows other tables can foreign-key against (place_activation,
-place_cell), so it loads into SQLite instead -- same CSV-shipped-with-
-the-code precedent (app/reference/, not the gitignored data/ volume),
-different destination.
+place_cell), so it loads into SQLite instead.
 
-COUNTRY FILTER -- the CSV is not pre-filtered to the US. It is built
-from a single bounding box (see scripts/build_places_seed.py's module
-docstring) that, being a rectangle, also sweeps in northern Mexico and
-southern Canada. MeshWars is a US game, so this loader excludes:
+SEED LOCATION -- moved OUT of the repo 2026-09-08 (Matt's decision). The
+CSV used to ship at app/reference/places_worth_going.csv.gz, committed
+to git; being compressed data, git could never diff it, so every
+rebuild stored a complete new copy forever (109MB of dead prior copies
+in history before this change, on a file that was itself headed from
+45MB to ~100MB with the worldwide rebuild). It now lives in the
+docker-compose ./data bind mount instead -- see app/config.py's
+places_seed_path (default /data/places_worth_going.csv.gz, i.e.
+./data/data/places_worth_going.csv.gz on the host, same directory
+game.db already lives in) -- which docker-compose.yml already mounts
+and .gitignore already excludes. See docs/features/places.md and
+README.md for the operator-facing consequence: a fresh clone no longer
+ships with any places data until this file is placed there by hand.
+
+_resolve_seed_path() below falls back to the old app/reference/ copy
+when the configured path has nothing at it AND that legacy file still
+happens to be sitting on disk (an image or checkout built before this
+move, e.g. via `docker build` from a working tree that still carries
+it -- the Dockerfile's `COPY app/ ./app/` bakes in whatever files are
+actually present, tracked or not). That keeps such an image or
+checkout from silently booting to a completely empty board. It is a
+compatibility path, not a second supported home for the seed: every
+load logs at INFO which file it actually used, and the fallback branch
+says plainly that it's a fallback and that the seed belongs at the
+configured path instead.
+
+COUNTRY FILTER -- REMOVED 2026-09-07 (Matt approved, "Places Worth
+Going" going worldwide alongside the rest of the world-open map).
+Until this change, the CSV was built from a single bounding box (see
+scripts/build_places_seed.py's module docstring) that, being a
+rectangle, also swept in northern Mexico and southern Canada, and
+MeshWars being a US-only game at the time, this loader excluded:
 
   - SOTA summits: association code (the part of ref_code before the
-    first "/") not in US_SOTA_ASSOCIATIONS below. Confirmed against
-    SOTA's own /api/associations/ endpoint on 2026-08-24: every code in
-    the CSV maps to dxcc "291" (USA) except XE2 (Mexico - North) and
-    VE5/VE6/VE7 (Saskatchewan/Alberta/British Columbia). K0M looks like
-    an odd one out next to the W-prefixed codes but is genuinely
-    USA - Minnesota, confirmed the same way, not a typo.
+    first "/") not in US_SOTA_ASSOCIATIONS. Confirmed against SOTA's own
+    /api/associations/ endpoint on 2026-08-24: every code in the old
+    bbox-limited CSV mapped to dxcc "291" (USA) except XE2 (Mexico -
+    North) and VE5/VE6/VE7 (Saskatchewan/Alberta/British Columbia). K0M
+    looked like an odd one out next to the W-prefixed codes but was
+    genuinely USA - Minnesota, confirmed the same way, not a typo.
   - POTA parks: reference prefix (the part of ref_code before the
     first "-") not "US". POTA's own reference scheme puts the country
-    right there -- "US-1234" / "CA-1234" / "MX-0001" -- no lookup
-    needed. ADDED 2026-08-24: parks with source "PAD-US" (ref_code
-    "PADUS-<fid>", from build_places_seed.py's fetch_padus_parks() --
-    local/city/county parks POTA never lists at all, since POTA only
-    covers what hams activate) skip this prefix check and are kept
-    unconditionally instead -- they are pulled from a single US-
-    territory PAD-US layer already scoped to the play area's bbox, so
-    there is no CA-/MX- equivalent to filter, and their ref_code does
-    not start with "US-" for the prefix check to even parse correctly.
-  - OSM landmarks: NOT filtered. Verified rather than assumed: every
-    landmark row's lat/lon falls inside 31.33-49.01N, -124.72 to
-    -102.04W -- exactly the western US states extract
-    (western-us-11states.osm.pbf) build_places_seed.py's
-    extract_landmarks() reads from, bounded by the real AZ/CA-Mexico
-    border (~31.33N) and the real US-Canada border (49.00N) rather than
-    the bbox. There is nothing non-US in this file to filter.
+    right there -- "US-1234" / "CA-1234" / "MX-0001".
+
+  Now that scripts/build_places_seed.py pulls SOTA and POTA worldwide
+  (no bbox at all -- see that module's "WORLDWIDE EXPANSION" note),
+  both checks above would have rejected the whole rest of the world, so
+  they are gone: every SOTA summit and POTA park in the CSV that
+  clears its own quality bar (SUMMIT_MIN_SOTA_POINTS, POTA's active
+  flag) is now kept regardless of country. US_SOTA_ASSOCIATIONS is
+  unused dead weight now removed too.
+
+  - Parks with source "PAD-US" (ref_code "PADUS-<fid>", from
+    build_places_seed.py's fetch_padus_parks()) were, and still are,
+    kept unconditionally -- UNCHANGED by this: PAD-US is a US
+    government dataset with no global equivalent and stays US-only on
+    purpose (see that script's "PARK SOURCES"/"WORLDWIDE EXPANSION"
+    notes), it just is no longer the only non-POTA park source outside
+    the US.
+  - OSM landmarks: NOT filtered before, NOT filtered now -- there was
+    never a country check on this ref_type; extract_landmarks() now
+    reads the full planet PBF (see that script) instead of a
+    western-US-only extract, so this row simply carries worldwide
+    coordinates now, same as it always trusted its source file's own
+    extent.
 
 PARK BOUNDARY COVERAGE IS PARTIAL -- of the parks kept after the country
 filter, POTA-to-PAD-US matching (scripts/build_places_seed.py's
 match_parks()) found a boundary for roughly 61%; the rest have
 area_m2/geom NULL. This loader does not treat "unmatched" as "small":
 an unmatched park is loaded with rotates=0 (always active, never
-rotating) and scores its point's own cell like a landmark, exactly the
+rotating) and scores a 3x3 block of cells around its point, exactly the
 same containment rule a genuinely-smaller-than-a-cell matched park gets
--- but for a different reason. A matched park scores by the >50%
-boundary rule instead, but ONLY if its boundary is at least one grid
-cell in area; a matched park smaller than a cell also falls back to
-scoring its point's own cell, same as an unmatched one.
+-- but for a different reason. A matched park scores by the any-
+intersection-plus-one-ring rule instead (see the REACHABLE-RING CREDIT
+note below), but ONLY if its boundary is at least one grid cell in
+area; a matched park smaller than a cell also falls back to the same
+3x3 point block, same as an unmatched one.
 
 Why unmatched parks are permanent rather than rotating: rotates=1 is
 supposed to mean "this is a small, town-scale destination", and a
@@ -73,16 +107,58 @@ import math
 import os
 import re
 import sqlite3
+import gzip
+import hashlib
 import time
 
+import shapely.prepared
 from shapely import wkt as shapely_wkt
 from shapely.geometry import MultiPolygon, Polygon, box as shapely_box
 
-from .grid import CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m
+from .config import settings
+from .grid import (
+    CELL_LAT_DEG, CELL_LON_DEG, cell_bounds, cell_id, distance_m,
+    ring_expand,
+)
 
 log = logging.getLogger("places_seed")
 
-_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv")
+# Found while measuring this module's own load time against the real
+# worldwide seed (2026-09-09): Python's csv module defaults to a
+# 131,072-byte field limit, and this seed's largest park geometries --
+# multi-part, dateline-crossing marine protected areas with hundreds of
+# WKT coordinate pairs -- exceed it, so csv.DictReader raises
+# `_csv.Error: field larger than field limit` partway through a real
+# load. scripts/build_places_seed.py already hit this exact error and
+# raised its own limit to 10,000,000 (see that module's comment) when
+# it started reading worldwide OSM parks back in -- but that fix lives
+# in the CSV-building script's process, not this loader's, and
+# `csv.field_size_limit()` is process-global, not shared between the
+# two. Without this, THIS module -- the one that actually has to read
+# the CSV that fix produced -- crashes on first contact with it. Same
+# value, same reasoning: generously above anything this pipeline
+# produces, and a fixed number rather than sys.maxsize (which can raise
+# OverflowError against the csv module's underlying C long on some
+# platforms).
+csv.field_size_limit(10_000_000)
+
+# True for the duration of a real (non-skip) load -- see app/db.py's
+# init_db(), which now runs that load on a background thread rather
+# than blocking app startup. app/places_api.py's read routes check
+# this to log a clear "still loading" line instead of a silent empty
+# result while the very first (multi-second-to-low-tens-of-seconds,
+# see load_places_seed()'s own batching) load is still in flight. Not
+# a threading.Event/Lock -- a plain module attribute is enough here:
+# CPython's GIL makes a single bool assignment atomic, and the only
+# consumers are read-only status checks from other threads, never a
+# blocking wait on it.
+LOADING = False
+
+_DATA_PATH = settings.places_seed_path
+# Legacy pre-2026-09-08 in-repo location -- see _resolve_seed_path()
+# below and the module docstring's "SEED LOCATION" section. Only ever
+# consulted when nothing exists at _DATA_PATH.
+_LEGACY_DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_going.csv.gz")
 # Summit -> squares, built by scripts/build_summit_cells.py against the
 # planet DEM (see that script's docstring for where it runs). A
 # summit's squares cannot be derived here the way a
@@ -90,6 +166,102 @@ _DATA_PATH = os.path.join(os.path.dirname(__file__), "reference", "places_worth_
 # within 200m of the summit's own elevation, plus the peak's own square), and the app host has no
 # elevation data. So it ships precomputed, same as the seed itself.
 _SUMMIT_CELLS_PATH = os.path.join(os.path.dirname(__file__), "reference", "summit_cells.csv")
+
+
+def _open_csv(path: str, **kwargs):
+    """Opens path for text reading, transparently gunzipping when the
+    name ends in .gz (the operator-supplied places_worth_going.csv.gz --
+    see app/config.py's places_seed_path) and falling back to a plain
+    open() otherwise (test fixtures, summit_cells.csv, or a decompressed
+    places_worth_going.csv). Everything downstream (csv.DictReader) is
+    unaffected either way."""
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", **kwargs)
+    return open(path, **kwargs)
+
+
+def _resolve_data_path(path: str) -> str:
+    """`path` itself if it exists, otherwise its .gz/plain-.csv
+    counterpart if THAT exists instead -- so an operator who places
+    either places_worth_going.csv.gz (the normal, compressed form the
+    build pipeline produces) or an already-decompressed
+    places_worth_going.csv at the configured location is found either
+    way, without also having to flip PLACES_SEED_PATH to match whichever
+    one they happened to drop in. Falls back to returning `path`
+    unchanged when neither exists, so the caller's own missing-file
+    handling still reports the path that was actually configured."""
+    if os.path.exists(path):
+        return path
+    alt = path[: -len(".gz")] if path.endswith(".gz") else path + ".gz"
+    if os.path.exists(alt):
+        return alt
+    return path
+
+
+def _resolve_seed_path(configured_path: str) -> str:
+    """Where load_places_seed() actually reads the seed CSV from, in
+    priority order:
+
+    1. `configured_path` (PLACES_SEED_PATH, normally the ./data bind
+       mount) -- including its .gz/.csv counterpart via
+       _resolve_data_path.
+    2. Failing that, the legacy in-repo location (_LEGACY_DATA_PATH,
+       app/reference/places_worth_going.csv.gz) -- also with its own
+       .gz/.csv flexibility -- for an image or checkout built before
+       the seed moved out of the repo that still happens to carry the
+       file there. A compatibility fallback, not a second supported
+       home for the seed.
+    3. Failing both, `configured_path` unchanged, so
+       load_places_seed()'s own missing-file warning still names the
+       path that was actually configured.
+
+    Order matters: an operator who has placed a fresh seed at the
+    configured path must never be silently served a stale legacy copy
+    instead, so the configured path (with its own .gz/.csv resolution)
+    is checked in full before the legacy path is even looked at.
+
+    Logs at INFO which path is actually live, so an operator reading
+    startup logs can always tell -- and when the legacy fallback is the
+    one taken, says so explicitly and names the move that should
+    happen.
+    """
+    primary = _resolve_data_path(configured_path)
+    if os.path.exists(primary):
+        log.info("places_seed: using seed file at %s", primary)
+        return primary
+
+    legacy = _resolve_data_path(_LEGACY_DATA_PATH)
+    if os.path.exists(legacy):
+        log.info(
+            "places_seed: FALLBACK -- no seed found at configured path %s; "
+            "using legacy in-repo copy at %s instead. This is a "
+            "compatibility fallback for images/checkouts that still carry "
+            "the old file -- move the seed to %s (PLACES_SEED_PATH) so this "
+            "fallback is no longer needed.",
+            configured_path, legacy, configured_path,
+        )
+        return legacy
+
+    return primary
+
+
+def _sha256_file(path: str) -> str:
+    """Content hash of path's raw bytes (the .gz's compressed bytes for
+    the seed -- decompressing first would cost the very thing this
+    fingerprint exists to avoid paying on every boot). Read in 1MB
+    chunks so this never holds the whole file in memory at once, though
+    at up to ~100MB and ~0.5MB for the two files that fingerprint this
+    seed it would hardly matter. Missing file -> a stable constant, same as the
+    old size+mtime fingerprint's OSError fallback, so an absent
+    summit_cells.csv does not re-trigger a load every startup."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return "none"
+    return h.hexdigest()
 
 
 def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
@@ -139,25 +311,111 @@ def _load_summit_cells(path: str = _SUMMIT_CELLS_PATH) -> dict[str, set[str]]:
 
 _METERS_PER_DEG_LAT = 111_320.0
 
-# Pulled from https://api-db2.sota.org.uk/api/associations/ on
-# 2026-08-24 and filtered to dxcc "291" (USA) -- the full US SOTA
-# association list, not just the ones this CSV happens to contain,
-# so a future re-pull with a wider bbox (e.g. reaching Alaska or the
-# Atlantic seaboard) is still classified correctly without touching
-# this file again.
-US_SOTA_ASSOCIATIONS = frozenset({
-    "K0M", "KH6",
-    "W0C", "W0D", "W0I", "W0M", "W0N",
-    "W1", "W2", "W3",
-    "W4A", "W4C", "W4G", "W4K", "W4T", "W4V",
-    "W5A", "W5M", "W5N", "W5O", "W5T",
-    "W6",
-    "W7A", "W7I", "W7M", "W7N", "W7O", "W7U", "W7W", "W7Y",
-    "W8M", "W8O", "W8V",
-    "W9",
-})
+# US_SOTA_ASSOCIATIONS (the full US SOTA association allowlist, pulled
+# from https://api-db2.sota.org.uk/api/associations/ on 2026-08-24) was
+# REMOVED 2026-09-07 along with the country filter it backed -- see the
+# module docstring's "COUNTRY FILTER" note. Every SOTA association is
+# now kept, not just the US ones.
 
-_MIN_OVERLAP_FRACTION = 0.5  # ">50% inside the boundary"
+# REACHABLE-RING CREDIT (changed 2026-09-07, "reward the trip, not the
+# trespass") -- credit zones used to be pure geometry: a point place
+# scored only the single cell its point fell in (uncapturable if that
+# point sits inside a fence -- a school playground, say), and a
+# boundary-matched park scored only cells more than 50% INSIDE the
+# boundary, which for something like Rocky Mountain Arsenal National
+# Wildlife Refuge (60 km^2, mostly closed to the public) excluded the
+# entire reachable perimeter along with the real interior. Matt's
+# framing: "they can't ENTER it but they still WENT to it" -- someone
+# standing at the fence line, the trailhead, or the visitor centre made
+# the trip even where they cannot legally cross the line, and the game
+# should credit that.
+#
+# Every place's credit zone is expanded outward by one ring of cells
+# from its base geometry test, EXCEPT summits -- a SOTA activation
+# requires physically standing on the summit itself, which is the
+# entire point of that game mode, so summits keep their own single
+# square (or terrain-qualified set, see _load_summit_cells) with no
+# ring added.
+#
+# WHERE THE RING IS APPLIED -- MOVED 2026-09-09 ("move the reachable
+# ring from storage time to lookup time"): until then, this module
+# expanded each place's own base cell set by one ring (via a private
+# _ring_expand() that used to live here) and stored every resulting
+# cell as its own place_cell row. With 1,281,030 landmarks alone (9
+# rows each instead of 1) that ballooned place_cell to roughly 80M rows
+# and pushed a full seed load past an hour. `place_cell` now stores
+# ONLY a place's own occupied cell(s) -- exactly the base sets built
+# below, with no expansion -- and app/place_scoring.credit_places()
+# expands the PING's cell by one ring at lookup time instead
+# (app.grid.ring_expand()), gated so a summit's stored cell(s) still
+# credit ONLY on an exact match. This is exactly equivalent for every
+# non-summit place: "is the ping's cell inside the place's 3x3?" and
+# "is the place's cell inside the ping's 3x3?" are the same question,
+# by symmetry of the ring itself, so moving which side does the
+# expanding changes nothing about who gets credited -- only where the
+# 9x-larger set briefly exists (a handful of query parameters per ping,
+# not ~80M permanent rows). See docs/features/places.md's reachable-ring
+# section and credit_places()'s own comment for the full story,
+# including why summits are excluded from the query-side expansion too.
+
+# PARK BAND STORAGE (added 2026-09-09) -- CREDIT IS FOR REACHING A
+# PARK, not for the square footage of its backcountry (Matt's framing,
+# and the design rule this section implements, not a limitation it
+# works around). A park's activation zone is the band of ground around
+# its edge that a real visitor can actually stand on -- the fence line,
+# the trailhead, the pull-off, the shoreline. The interior beyond that
+# band is not a bigger version of the same achievement; it is a
+# different place nobody arriving at the park has reached, so it is not
+# part of what "reaching this park" means. Storing it was never doing
+# useful work: _park_cells() filled every cell a park's boundary
+# touches, including cells deep inside a large park that no fence line
+# or trailhead is anywhere near -- Payette National Forest's own
+# interior, not its edge -- and the ring move just above only ever
+# addressed the OTHER 3.1% of `place_cell` (point-type places); the
+# 96.9% that was park interior needed this, a different fix for a
+# different shape of waste.
+#
+# So: a park at or above _PARK_BAND_THRESHOLD_CELLS stores only its
+# boundary band (_park_band() below) -- the outermost
+# _PARK_BAND_WIDTH_CELLS layers of its own filled set. FIXED 2026-09-09
+# ("the trap"): this used to mean grid-index erosion over the cells
+# _park_cells() already produced, which required that filled set to
+# exist first -- fine while scripts/build_places_seed.py's match_parks()
+# and extract_osm_parks() still clipped every stored boundary to a ~6 km
+# buffer around its own point (see those functions' own comments), but
+# that clip also cut every large park's CREDIT ZONE down to a ~12 km
+# window around one arbitrary interior point -- drive to Tioga Pass, 40
+# km from Yosemite's own stored point but unmistakably inside the park,
+# and it credited nothing. Once that clip is gone so the credit zone can
+# be the whole park, filling first and eroding after would hit the
+# exact disaster the clip used to dodge, one step later and harder to
+# diagnose -- so _park_band() now traces the boundary straight
+# from the geometry instead (see its own docstring and the BAND FROM THE
+# BOUNDARY note above it for the equivalence proof), and never calls
+# _park_cells() on a boundary big enough for that to be unsafe in the
+# first place. A park BELOW the threshold is stored
+# filled, unchanged: it is small enough that "the interior" and "the
+# edge" are not a meaningful distinction (a pocket park a few cells
+# across has no backcountry to exclude in the first place), and banding
+# it would only shrink a set that was never large enough to matter
+# while changing behaviour for the common case -- most matched parks
+# are exactly this small (see the threshold/width rationale in
+# _park_band()'s docstring for the measured distribution). Summits are
+# untouched by any of this: they were never filled by _park_cells() in
+# the first place (see _load_summit_cells() above), and this section
+# does not touch them.
+#
+# By design, someone who travels past the band into a large park's
+# interior does not get a second, bigger credit for going further in --
+# the trip that counts is the one that reaches the park at all, and
+# that trip is fully captured by the band. This is not narrower than
+# what a filled interior used to reward; a filled interior rewarded
+# "anywhere inside the line," which was never about distance travelled
+# either. Falling row count and DB size are a consequence of that
+# correction, not the reason for it -- do not read the band as a
+# storage optimization standing in for "really" wanting the filled
+# interior back; the filled interior was the wrong model, band or no
+# storage pressure.
 
 # SUMMIT/LANDMARK DOUBLE-DIP FILTER (added 2026-08-25) -- some SOTA
 # summits carry a fire lookout, and OSM separately maps that lookout as
@@ -183,16 +441,17 @@ _SUMMIT_COLOCATION_RADIUS_M = 100.0
 
 def _kept_summit_buckets(path: str) -> dict[str, list[tuple[float, float]]]:
     """First pass over the CSV: (lat, lon) of every summit that will
-    actually be KEPT (passes the same US/named-summit test
-    _classify_row applies in the real load), bucketed by grid cell id
-    for a cheap proximity lookup in the main load loop below. A summit
-    that _classify_row would exclude (non-US, or an unnamed placeholder
-    peak) never got the game's 100 points in the first place, so a
+    actually be KEPT (passes the same named-summit test _classify_row
+    applies in the real load), bucketed by grid cell id for a cheap
+    proximity lookup in the main load loop below. A summit that
+    _classify_row would exclude (an unnamed placeholder peak -- the
+    country filter this used to also apply is gone, see module
+    docstring) never got the game's points in the first place, so a
     landmark near IT must not be excluded either -- there would be
     nothing left at that spot to double-dip against.
     """
     buckets: dict[str, list[tuple[float, float]]] = {}
-    with open(path, encoding="utf-8", newline="") as fh:
+    with _open_csv(path, encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             if row["ref_type"] != "summit":
@@ -321,23 +580,32 @@ def _cell_area_m2(lat: float) -> float:
     """Area in m^2 of the grid cell containing latitude `lat`. Longitude
     degrees compress toward the poles (cos(lat)); latitude degrees do
     not -- same model app/grid.py's fixed-degree cell already uses, just
-    converted to an area for the >50%-of-a-cell size test."""
+    converted to an area for the "is this park at least one cell in
+    area" size test."""
     lat_m = CELL_LAT_DEG * _METERS_PER_DEG_LAT
     lon_m = CELL_LON_DEG * _METERS_PER_DEG_LAT * math.cos(math.radians(lat))
     return lat_m * lon_m
 
 
-def _park_cells(geom: Polygon | MultiPolygon, lat: float) -> set[str]:
-    """Cell ids where more than half the CELL's own area lies inside
-    `geom`. Walked per polygon part of a MultiPolygon (a national forest
-    made of scattered units, say) rather than over the union's bounding
-    box, so the empty ground between distant parts is never iterated.
+def _park_cells(geom: Polygon | MultiPolygon) -> set[str]:
+    """Cell ids whose area intersects `geom` AT ALL (changed 2026-09-07
+    from ">50% inside the boundary" -- see the REACHABLE-RING CREDIT
+    note above for why). Walked per polygon part of a MultiPolygon (a
+    national forest made of scattered units, say) rather than over the
+    union's bounding box, so the empty ground between distant parts is
+    never iterated.
 
-    The fraction compares CELL area to CELL area (both in raw degree^2
-    units, never converted to meters) -- a ratio of two areas that share
-    the same local longitude compression cancels it out, so no metric
-    conversion is needed here the way _cell_area_m2 needs one to compare
-    against an absolute size in meters.
+    This is the park's full filled footprint -- `load_places_seed`
+    stores it as-is for a small park, or reduces it to `_park_band()`'s
+    boundary band first for a large one (see the PARK BAND STORAGE note
+    above); either way, no ring expansion happens here or at the caller
+    (moved to lookup time 2026-09-09, see the REACHABLE-RING CREDIT
+    note above and app/place_scoring.credit_places()): the reachable
+    perimeter (anyone standing just outside the boundary) credits via
+    the ping-side ring expansion instead, not by this function widening
+    its own output. No longer needs `lat`: the old area-ratio test
+    compared cell area to cell area at a given latitude, but a plain
+    intersects() test has no area comparison left to make.
     """
     parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
     cells: set[str] = set()
@@ -350,41 +618,323 @@ def _park_cells(geom: Polygon | MultiPolygon, lat: float) -> set[str]:
                 cid = f"{lat_idx}_{lon_idx}"
                 south, west, north, east = cell_bounds(cid)
                 cell_poly = shapely_box(west, south, east, north)
-                inter = cell_poly.intersection(part)
-                if inter.is_empty:
-                    continue
-                if (inter.area / cell_poly.area) > _MIN_OVERLAP_FRACTION:
+                if cell_poly.intersects(part):
                     cells.add(cid)
     return cells
+
+
+# A park's footprint below this many cells is stored filled, unchanged
+# -- see the PARK BAND STORAGE note above. Measured by walking every
+# boundary-matched, larger-than-a-cell park in the current worldwide
+# seed (93,218 of them, matching the production count exactly): 84.6%
+# (78,887) fall under 100 cells -- roughly 9-12 km^2 depending on
+# latitude, a large city park, not backcountry -- and the median
+# matched park is 12 cells. 100 is comfortably inside that bulk -- it
+# costs the small-park common case nothing (nothing this small has an
+# interior worth distinguishing from its edge in the first place) while
+# still catching every park large enough for "the middle of it" to be a
+# real, separate place, not just a rounding artifact of the grid.
+_PARK_BAND_THRESHOLD_CELLS = 100
+
+# Width of the stored boundary band, in grid cells (~300m each), for a
+# park at or above the threshold -- see the PARK BAND STORAGE note
+# above. 1 cell is fragile: a boundary that clips a cell corner
+# diagonally, or a real visitor whose GPS/trail puts them one square
+# further inside than the line on the map, would fall outside a
+# 1-wide band and lose credit for a trip that plainly reached the park.
+# 2 cells absorbs that slop -- roughly 600m of give inside the mapped
+# edge -- while still cutting storage dramatically: measured across
+# every park at or above the threshold in the current seed, the width-2
+# band totals 25% of the filled cell count it replaces, and that
+# fraction keeps shrinking the bigger the park -- Wrangell-Saint Elias
+# Wilderness (635,115 filled cells) bands down to 18,973, three
+# percent, because perimeter grows with the square root of area while
+# the filled interior grows with area itself. Only parks barely over
+# the threshold see a band close to their full size, and those are
+# small in absolute cell count either way. The query-side ring
+# expansion (app/grid.ring_expand(), see the REACHABLE-RING CREDIT note
+# above) still adds one more cell of reach on the OUTSIDE at credit
+# time, on top of this -- this constant is only about how far the
+# stored band reaches back in from the edge.
+_PARK_BAND_WIDTH_CELLS = 2
+
+# BAND FROM THE BOUNDARY, NOT FROM AN EROSION OF THE FILLED SET (fixed
+# 2026-09-09, "the trap") -- _park_band() used to take a park's full
+# _park_cells() footprint and erode it `width` times. That is exactly
+# right in what it computes (see the erosion-vs-tracing equivalence
+# proof in this module's own tests), but it requires the filled
+# footprint to already exist, and _park_cells() builds that by walking
+# every cell in a polygon's own bounding box -- for a large park that IS
+# the ten-billion-cell disaster the 6 km storage clip in
+# scripts/build_places_seed.py used to exist to dodge (see that
+# script's module docstring). Removing the clip without also fixing
+# this would just move the explosion one step later: match_parks() and
+# extract_osm_parks() now ship full, unclipped boundaries, so the first
+# thing that touches one of those boundaries -- this loader, not the
+# build script -- is the thing that has to not blow up.
+#
+# So the band is traced directly from the geometry instead: walk every
+# ring of every polygon part (the exterior AND every interior ring --
+# holes have an edge too) and collect the grid cells the boundary LINE
+# itself passes through (_park_boundary_line_cells() below). That cell
+# count is proportional to the boundary's length in cells (perimeter),
+# never to the area it encloses, so a national forest costs the same
+# order of work per km of edge as a pocket park, and a 1.5 million km^2
+# marine monument costs work proportional to its (very long, but finite
+# and walkable) coastline, not to its enclosed ocean.
+#
+# EQUIVALENCE TO THE OLD EROSION DEFINITION -- this is a refactor, not a
+# behaviour change, and the module's tests hold it to that: let d(c) be
+# the Chebyshev (8-connected) distance from filled cell `c` to the
+# nearest cell NOT in the filled set. `width` erosions strip exactly the
+# cells with d(c) <= width (iterating erosion by the same 3x3
+# structuring element `width` times is exactly one erosion by the
+# Chebyshev-radius-`width` ball -- Chebyshev balls compose additively
+# under Minkowski sum, so this is exact, not an approximation). The
+# cells with d(c) == 1 are precisely the cells the true geometric
+# boundary passes through: any cell the boundary curve enters must
+# border ground on the far side of that curve, and by construction nothing
+# closer than one grid step away can be "outside" a cell the curve never
+# reaches. So _park_boundary_line_cells() recovers exactly the old
+# algorithm's d==1 layer without ever computing the filled set, and
+# dilating that layer outward `width - 1` more steps and re-testing
+# actual intersection against the geometry (not just grid adjacency)
+# reconstructs fill ∩ {d(c) <= width} -- the same band, by the same
+# Minkowski-sum composition, for a cost proportional to the boundary
+# alone. test_park_band_matches_the_old_erosion_definition_on_a_real_
+# shaped_polygon proves the two algorithms agree on a polygon neither
+# axis-aligned nor grid-sized, not just a synthetic square.
+_PARK_BAND_DILATE_PASSES = _PARK_BAND_WIDTH_CELLS - 1
+
+
+def _grid_line_cells(x0: float, y0: float, x1: float, y1: float) -> set[tuple[int, int]]:
+    """Every grid cell (as (lat_idx, lon_idx)-shaped index pairs, here
+    still generic (x, y) grid-index coordinates) a straight segment from
+    (x0, y0) to (x1, y1) passes through, in a coordinate space already
+    divided by each axis' own cell size (so a cell is a unit square in
+    this space, regardless of CELL_LAT_DEG/CELL_LON_DEG not matching
+    each other 1:1). Amanatides-Woo voxel traversal: walks grid-line
+    crossings directly (O(cells crossed), never O(segment length in
+    degrees) or anything tied to how long the segment is in real
+    units), and -- unlike a plain Bresenham line -- visits every cell
+    the segment's own interior touches, including both cells on a
+    near-exact diagonal grid-corner crossing, so a boundary segment
+    that happens to graze a cell corner cannot silently skip it.
+    """
+    ix, iy = math.floor(x0), math.floor(y0)
+    ixe, iye = math.floor(x1), math.floor(y1)
+    cells = {(ix, iy)}
+    dx = x1 - x0
+    dy = y1 - y0
+    if dx == 0.0 and dy == 0.0:
+        return cells
+    step_x = 1 if dx > 0 else (-1 if dx < 0 else 0)
+    step_y = 1 if dy > 0 else (-1 if dy < 0 else 0)
+    if dx != 0.0:
+        t_max_x = ((ix + (1 if dx > 0 else 0)) - x0) / dx
+        t_delta_x = abs(1.0 / dx)
+    else:
+        t_max_x = math.inf
+        t_delta_x = math.inf
+    if dy != 0.0:
+        t_max_y = ((iy + (1 if dy > 0 else 0)) - y0) / dy
+        t_delta_y = abs(1.0 / dy)
+    else:
+        t_max_y = math.inf
+        t_delta_y = math.inf
+    # A segment is walked cell-step by cell-step, not integrated in one
+    # shot, so it needs a hard stop: without one, float drift in
+    # t_max_x/t_max_y could in principle loop past (ixe, iye) forever on
+    # a degenerate (near-zero-length in one axis) segment. The true
+    # walk never takes more steps than the Manhattan distance between
+    # start and end cell plus one (a corner-crossing step advances both
+    # axes at once); a small margin on top absorbs float slop without
+    # masking a real bug turning into a silent infinite loop.
+    max_steps = abs(ixe - ix) + abs(iye - iy) + 4
+    steps = 0
+    while (ix, iy) != (ixe, iye) and steps < max_steps:
+        if t_max_x < t_max_y:
+            ix += step_x
+            t_max_x += t_delta_x
+        elif t_max_y < t_max_x:
+            iy += step_y
+            t_max_y += t_delta_y
+        else:
+            # Exact corner crossing: the segment passes through the
+            # grid point where a vertical and a horizontal line meet.
+            # Stepping both axes and recording the intermediate cell
+            # too means the diagonal neighbour on the other side of
+            # that corner is never silently skipped.
+            cells.add((ix + step_x, iy))
+            ix += step_x
+            iy += step_y
+            t_max_x += t_delta_x
+            t_max_y += t_delta_y
+        cells.add((ix, iy))
+        steps += 1
+    return cells
+
+
+def _park_boundary_line_cells(geom: Polygon | MultiPolygon) -> set[str]:
+    """Cell ids the boundary LINE of `geom` passes through -- the
+    exterior ring and every interior ring (hole) of every polygon part,
+    each walked as its own closed sequence of segments via
+    _grid_line_cells() above. Cost is proportional to the boundary's
+    total length in grid cells, never to the area it encloses -- see
+    the BAND FROM THE BOUNDARY note above for why that distinction is
+    the whole point of this function existing.
+
+    Walked per polygon PART of a MultiPolygon, same reasoning
+    _park_cells() already applies to its own per-part bounding boxes:
+    a park made of scattered units (or, worse, one marine protected
+    area's outline running most of the way around an ocean) must never
+    have its parts' segments treated as spanning the empty water
+    between them -- and here that risk is moot in the first place,
+    since only each ring's OWN consecutive vertex pairs are ever walked,
+    never a straight line from one part's ring to another's.
+    """
+    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    cells: set[str] = set()
+    for part in parts:
+        for ring in (part.exterior, *part.interiors):
+            coords = list(ring.coords)
+            # Indexed [0]/[1], not unpacked as a 2-tuple: a ring built
+            # from a 3D (X/Y/Z) source geometry -- PAD-US/OGR occasionally
+            # carries a Z=0 dimension straight through WKB -- yields
+            # 3-tuples here, and this function only ever needs lon/lat.
+            for p0, p1 in zip(coords, coords[1:]):
+                x0, y0 = p0[0] / CELL_LON_DEG, p0[1] / CELL_LAT_DEG
+                x1, y1 = p1[0] / CELL_LON_DEG, p1[1] / CELL_LAT_DEG
+                for ix, iy in _grid_line_cells(x0, y0, x1, y1):
+                    cells.add(f"{iy}_{ix}")
+    return cells
+
+
+def _park_band(geom: Polygon | MultiPolygon, width: int = _PARK_BAND_WIDTH_CELLS) -> set[str]:
+    """The boundary band a large park stores instead of its filled
+    interior (see the PARK BAND STORAGE note above), computed straight
+    from `geom` -- never from a pre-built `_park_cells()` fill; see the
+    BAND FROM THE BOUNDARY note above for why that used to be the trap
+    here and what makes this equivalent to the old fill-then-erode
+    definition.
+
+    1. Trace the boundary itself (_park_boundary_line_cells()) -- this
+       is exactly the old algorithm's innermost eroded-away layer
+       (Chebyshev distance 1 from the fill set's own edge), reached
+       without ever materializing the fill.
+    2. Dilate that outward `width - 1` more steps (app.grid.ring_expand,
+       one ring per step -- the same 8-connected neighbourhood erosion
+       used, run in reverse) to reach every cell the old algorithm's
+       full `width`-deep band could have included.
+    3. Re-test each of those (still boundary-proportional, not
+       area-proportional, in count) candidate cells against the real
+       geometry and keep only the ones that actually intersect it --
+       this is what turns "cells near the traced line" (which spill
+       slightly outside the park too, since dilation does not know
+       which side is `interior`) back into "cells that are IN the
+       park and near its edge", exactly `_park_cells()`'s own
+       any-intersection test, just run over a small candidate set
+       instead of the whole bounding box.
+
+    Returns an empty set if `geom`'s boundary touches no cell at all (a
+    degenerate sliver) -- the caller already has a point-cell fallback
+    for exactly that case, same as it does for `_park_cells()`.
+    """
+    candidates = _park_boundary_line_cells(geom)
+    if not candidates:
+        return set()
+    for _ in range(max(0, width - 1)):
+        candidates = ring_expand(candidates)
+    prepared = shapely.prepared.prep(geom)
+    band: set[str] = set()
+    for cid in candidates:
+        south, west, north, east = cell_bounds(cid)
+        if prepared.intersects(shapely_box(west, south, east, north)):
+            band.add(cid)
+    return band
+
+
+# Cheap upper bound on the number of cells _park_cells(geom) would ever
+# have to test (never a guarantee on its RESULT size -- a thin diagonal
+# sliver can have a huge bbox and a tiny true footprint -- only on the
+# number of candidate cells it would need to shapely-intersects() to
+# find that footprint), computed from each polygon part's own bounds
+# with no geometry calls at all. Used below to decide, BEFORE calling
+# _park_cells(), whether it is safe to call it at all: a cell only ever
+# makes it into _park_cells()'s result if it lies within its own part's
+# bbox to begin with, so this sum can never be less than the true
+# result -- it is exactly the number of shapely .intersects() calls
+# _park_cells() would make.
+def _bbox_cell_upper_bound(geom: Polygon | MultiPolygon) -> int:
+    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    total = 0
+    for part in parts:
+        minx, miny, maxx, maxy = part.bounds
+        lat_span = math.floor(maxy / CELL_LAT_DEG) - math.floor(miny / CELL_LAT_DEG) + 1
+        lon_span = math.floor(maxx / CELL_LON_DEG) - math.floor(minx / CELL_LON_DEG) + 1
+        total += lat_span * lon_span
+    return total
+
+
+# Safe to fully materialize via _park_cells() (bounded shapely-
+# intersects call count) purely to test it against
+# _PARK_BAND_THRESHOLD_CELLS(100) below this many candidate bbox cells.
+# 5,000 is 50x the threshold itself -- comfortably wide enough that a
+# genuinely small, merely irregularly-shaped park (an L-shaped city
+# park, a thin river-corridor unit) never gets misclassified as "too
+# big to safely test", while remaining cheap in the worst case (5,000
+# shapely .intersects() calls is milliseconds, not the multi-hour
+# territory a real large park's un-clipped bbox can reach -- see the
+# BAND FROM THE BOUNDARY note above). A park whose bbox clears this cap
+# is, in every case seen in this seed, actually large by filled-cell
+# count too (a park cannot have a >5,000-cell bounding box and a
+# <100-cell true footprint without being a sliver so thin it would
+# fail to register as "reachable ground" in any meaningful sense
+# anyway) -- so above the cap this module skips the fill test entirely
+# and goes straight to banding via the geometry, never asking
+# _park_cells() to walk a bounding box that might be the ten-billion-
+# cell case this whole section exists to avoid.
+_PARK_FILL_SAFE_BBOX_CELLS = 5_000
+
+# Hard ceiling on a single park's stored band, applied AFTER banding
+# (so it catches whatever slips past the bbox pre-check above too --
+# some marine protected areas are enormous, and a handful of parks are
+# multipolygons with parts scattered clear across an ocean, both
+# measured in the current worldwide seed at costs still worth capping
+# even at boundary-proportional pricing: Papahānaumokuākea Marine
+# National Monument alone traces to a band north of this ceiling).
+# Hitting it does not fail the build -- the park falls back to its own
+# point cell (same fallback _park_cells() already uses for a sliver
+# that touches no cell at all) and is logged by name so a human can see
+# which row hit it, rather than one pathological row silently inflating
+# every other park's load time or the seed's own size.
+_PARK_BAND_MAX_CELLS = 200_000
 
 
 def _classify_row(row: dict) -> tuple[bool, bool]:
     """(keep, rotates) for one CSV row, before any geometry work."""
     ref_type = row["ref_type"]
     if ref_type == "summit":
-        assoc = row["ref_code"].split("/")[0]
-        if assoc not in US_SOTA_ASSOCIATIONS:
-            return (False, False)
-        # Country filter passed -- now require an actual name (see
-        # _summit_has_real_name's docstring for what this catches and
-        # what it deliberately lets through).
+        # Country filter (an association-code allowlist) REMOVED
+        # 2026-09-07 -- see module docstring's "COUNTRY FILTER". Every
+        # summit that cleared build_places_seed.py's own quality bar
+        # (SUMMIT_MIN_SOTA_POINTS) is kept regardless of country; only
+        # the named-summit check below still excludes anything.
         return (_summit_has_real_name(row.get("name", "")), False)
     if ref_type == "park":
-        # ADDED 2026-08-24: PAD-US-sourced parks (ref_code "PADUS-<fid>")
-        # are pulled directly from a single US-territory PAD-US layer
-        # (scripts/build_places_seed.py's fetch_padus_parks(), run
-        # against the play area's own bbox) -- there is no CA-/MX-
-        # equivalent to filter the way POTA's own reference prefix
-        # requires below, so these are kept unconditionally rather than
-        # run through the POTA-shaped prefix check, which would reject
-        # every one of them (their ref_code does not start with "US-").
+        # PAD-US-sourced parks (ref_code "PADUS-<fid>") are kept
+        # unconditionally, unchanged by the 2026-09-07 worldwide change
+        # -- PAD-US is deliberately US-only (see build_places_seed.py's
+        # "PARK SOURCES"/"WORLDWIDE EXPANSION" notes), so this branch
+        # stays exactly as it was.
         if row.get("source") == "PAD-US":
             return (True, None)  # rotates decided later, once area is known
-        prefix = row["ref_code"].split("-")[0]
-        if prefix != "US":
-            return (False, False)
+        # POTA prefix filter ("must start with US-") REMOVED 2026-09-07
+        # -- see module docstring's "COUNTRY FILTER". Every active POTA
+        # park is kept regardless of country now.
         return (True, None)  # rotates decided later, once area is known
-    # landmark: verified US-only at CSV build time, see module docstring
+    # landmark: never filtered by country, before or after this change
+    # -- see module docstring.
     return (True, True)
 
 
@@ -426,10 +976,21 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         "kept": {"summit": 0, "park": 0, "landmark": 0},
         # Of kept parks: matched a PAD-US boundary at all, vs not.
         "park_matched": 0, "park_unmatched": 0,
-        # Of the MATCHED ones only: at/above one grid cell (scores by
-        # the >50% rule, always active) vs below one cell (scores its
-        # point, rotates like a landmark).
+        # Of the MATCHED ones only: at/above one grid cell (scores any
+        # intersecting cell plus one ring outward, always active) vs
+        # below one cell (scores a 3x3 point block, rotates like a
+        # landmark).
         "park_matched_larger": 0, "park_matched_smaller": 0,
+        # Of the larger-than-a-cell ones only: reduced to a boundary
+        # band (_PARK_BAND_THRESHOLD_CELLS or more) vs stored filled
+        # (below it) -- see the PARK BAND STORAGE note above.
+        "park_banded": 0, "park_filled": 0,
+        # Of the banded ones only: banded but still over
+        # _PARK_BAND_MAX_CELLS -- the pathological guard fell back to
+        # the park's own point cell instead (see that constant's own
+        # comment). Expected to be zero or near it; a nonzero count
+        # names real rows in the log line right above each increment.
+        "park_band_capped": 0,
         # Reconcile outcome: rows flipped active->inactive this pass
         # because they were not present in this load at all (never
         # deleted -- see the reconcile note above).
@@ -443,73 +1004,146 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
         "landmark_colocated_with_summit": 0,
     }
 
-    if not os.path.exists(_DATA_PATH):
-        log.warning("places_seed: %s not found -- places feature will have no data", _DATA_PATH)
+    # Accepts either the .gz the build pipeline produces or an
+    # already-decompressed .csv, at the configured location or (as a
+    # compatibility fallback) the legacy in-repo one -- see
+    # _resolve_seed_path's own docstring.
+    seed_path = _resolve_seed_path(_DATA_PATH)
+    if not os.path.exists(seed_path):
+        # LOUD on purpose: this file is no longer shipped in the repo
+        # (moved out 2026-09-08, see module docstring), so its absence
+        # is a real, easy-to-hit deployment gap -- a fresh clone plus
+        # `docker compose up` now boots a completely empty board rather
+        # than failing to start, which looks exactly like a working
+        # game with nothing in it unless this is impossible to miss in
+        # the logs.
+        log.warning(
+            "places_seed: SEED FILE NOT FOUND at %s -- "
+            "the Places Worth Going feature will start with ZERO places "
+            "(no summits, parks, or landmarks; not a partial/degraded "
+            "state, a completely empty board). This file is no longer "
+            "shipped in the repository -- obtain it by running "
+            "`python3 scripts/build_places_seed.py merge <inputs...> "
+            "--out %s` (its `merge` stage; see docs/features/places.md "
+            "and README.md's \"Where the data and tiles live\") and "
+            "place it at that exact path, or point PLACES_SEED_PATH at "
+            "wherever you already keep it.",
+            _DATA_PATH, _DATA_PATH,
+        )
         return stats
 
-    # Cheap fingerprint (size + mtime, not a content hash -- this file
-    # is 9+MB and hashing it is not what makes a re-run slow; the park
-    # boundary geometry work below is, at roughly a minute for ~3,500
-    # matched parks) so an unchanged CSV across a routine restart skips
-    # the whole pass rather than repeating a minute of shapely work on
-    # every boot. `cursor` is app/db.py's existing generic key/value
-    # table (get_cursor/set_cursor) -- read/written directly here rather
-    # than imported, since importing app.db from a module app.db itself
+    # Fingerprint is a sha256 CONTENT hash (2026-09-07), not size+mtime.
+    # size+mtime looked cheap when this file was 9MB and seemed like the
+    # obviously right choice at the time, but it silently broke the one
+    # thing it exists for: a deploy host typically updates itself by
+    # `git reset --hard`, which stamps a FRESH mtime on every tracked
+    # file on every deploy regardless of whether its bytes moved. That
+    # made "unchanged since last load" false on every single deploy, not
+    # just ones that touched the seed, forcing the full multi-minute
+    # reconcile pass on every boot after every deploy -- observed 205s
+    # for the worldwide 1.4M-row seed, over mw-deploy's 180s health-check
+    # timeout, so a routine unrelated-file deploy could outright fail to
+    # come healthy. A content hash only changes when the bytes actually
+    # do. Hashing the shipped 47MB places_worth_going.csv.gz (compressed,
+    # not the ~136MB decompressed) and the 0.5MB summit_cells.csv is
+    # sub-second either way -- nowhere close to what makes a real reload
+    # slow (the shapely park-boundary work below, ~minutes for the full
+    # worldwide set) -- so trading size+mtime for a hash costs nothing
+    # and fixes the every-deploy-reloads bug outright.
+    #
+    # `cursor` is app/db.py's existing generic key/value table (get_
+    # cursor/set_cursor) -- read/written directly here rather than
+    # imported, since importing app.db from a module app.db itself
     # imports would be circular.
     #
     # _RECONCILE_VERSION rides along in the fingerprint string so a code
-    # upgrade alone -- CSV byte-for-byte unchanged -- still forces one
-    # full pass. Without it, a DB that already recorded this exact CSV's
-    # fingerprint under the OLD insert-only loader (no reconcile at all)
-    # would skip forever after upgrading to this fix: the file never
-    # changes again, so "unchanged since last load" would stay true
-    # indefinitely and the stale rows this fix exists to clean up would
-    # never actually get cleaned up. Bump this whenever the reconcile
-    # mechanics OR the per-row _classify_row rules change in a way that
-    # requires re-running against an already-fingerprinted CSV -- the
-    # named-summits-only filter (2026-08-24) is exactly that case: the
-    # CSV's bytes are unchanged, only which rows get kept changed, so a
-    # DB fingerprinted before this filter landed needs the version bump
-    # to actually deactivate the newly-excluded summits rather than
-    # trusting a fingerprint recorded under the old, looser rule.
+    # upgrade alone -- seed bytes unchanged -- still forces one full
+    # pass. Without it, a DB that already recorded this exact seed's
+    # fingerprint under an older loader would skip forever after
+    # upgrading, and whatever the new version changed (which rows get
+    # kept, how their cells are computed) would never actually apply.
+    # Bump this whenever the reconcile mechanics OR the per-row
+    # _classify_row rules change in a way that requires re-running
+    # against an already-fingerprinted seed -- the named-summits-only
+    # filter (2026-08-24, v2) and the summit/landmark double-dip filter
+    # (2026-08-25, v3) are exactly that case: the seed's bytes were
+    # unchanged, only which rows get kept changed, so a DB fingerprinted
+    # under the previous version needed the bump to actually deactivate
+    # the newly-excluded rows rather than trusting a looser rule's
+    # fingerprint. v4 (2026-08-31) is the same story for summit_cells.csv:
+    # summits stopped being a single square and became their terrain-
+    # qualified set, so a DB fingerprinted under v3 would keep the old
+    # one-square-per-summit mapping forever without the bump.
     #
-    # v3 (2026-08-25): the summit/landmark double-dip filter
-    # (_SUMMIT_COLOCATION_RADIUS_M) is new -- same "CSV bytes unchanged,
-    # which rows get kept changed" situation, so a DB fingerprinted
-    # under v2 needs this bump to actually deactivate the newly-excluded
-    # co-located landmarks.
+    # v5 (2026-09-07): fingerprint algorithm itself changed (size+mtime
+    # -> sha256), per the note above. A v4 fingerprint is a different
+    # STRING SHAPE from a v5 one even where the underlying file is
+    # unchanged, so it can never accidentally compare equal -- this
+    # version bump is really just documentation here, not what forces
+    # the reload (the algorithm change already does that on its own),
+    # but every previous entry in this list bumps the version for a
+    # fingerprint-invalidating change, so this one does too.
     #
-    # v4 (2026-08-31): summits stopped being a single square and became
-    # their terrain-qualified set (reference/summit_cells.csv, see
-    # _load_summit_cells). The seed CSV's own bytes did not move, but
-    # every summit's place_cell rows did, so a DB fingerprinted under v3
-    # would keep the old one-square-per-summit mapping forever without
-    # this bump.
-    _RECONCILE_VERSION = 4
-    st = os.stat(_DATA_PATH)
+    # v6 (2026-09-09, "park band storage"): a large park's place_cell
+    # rows shrank from its filled interior to _park_band()'s boundary
+    # band -- see the PARK BAND STORAGE note above. The CSV itself (and
+    # its hash) is unchanged; without this bump, a database already
+    # fingerprinted under v5 would read as up to date under the new
+    # code and keep every already-loaded park's old FILLED rows
+    # forever, which is the entire multi-gigabyte problem this change
+    # exists to fix. Once, on the deploy that ships this version, every
+    # large park's place_cell rows get deleted and re-inserted as a
+    # band (`_flush_cell_buffers()`'s DELETE-then-INSERT per place,
+    # unchanged) -- after that the fingerprint matches again and
+    # ordinary restarts stay a cheap no-op, same as any other version
+    # bump in this list.
+    _RECONCILE_VERSION = 6
+    seed_hash = _sha256_file(seed_path)
     # summit_cells.csv rides along in the fingerprint too. It decides
     # every summit's place_cell rows but is a SEPARATE file from the seed
     # CSV, so a change to it alone would leave the fingerprint untouched
-    # and the old mapping loaded forever. (Tightening the radius from 5km
-    # to 1.5km only reloaded because the deploy happened to rewrite the
-    # seed CSV and move its mtime -- luck, not design.) Missing file
-    # contributes a constant, so its absence is stable rather than
-    # re-triggering a load every startup.
-    try:
-        sc = os.stat(_SUMMIT_CELLS_PATH)
-        summit_fp = f"{sc.st_size}:{int(sc.st_mtime)}"
-    except OSError:
-        summit_fp = "none"
-    fingerprint = f"{st.st_size}:{int(st.st_mtime)}:v{_RECONCILE_VERSION}:s{summit_fp}"
+    # and the old mapping loaded forever. Missing file contributes a
+    # constant, so its absence is stable rather than re-triggering a
+    # load every startup.
+    summit_hash = _sha256_file(_SUMMIT_CELLS_PATH)
+    fingerprint = f"sha256:{seed_hash}:v{_RECONCILE_VERSION}:s{summit_hash}"
+
+    # Explicit operator override (PLACES_FORCE_RESEED=1 / true / yes /
+    # on -- see .env.example): forces the full reload regardless of the
+    # fingerprint, without requiring anyone to hand-edit the `cursor`
+    # table. Checked here rather than short-circuiting earlier so the
+    # normal fingerprint-mismatch code path below still fires -- forcing
+    # a reseed is "pretend the fingerprint didn't match", not a separate
+    # mechanism.
+    force_reseed = settings.places_force_reseed
+
     row = conn.execute("SELECT v FROM cursor WHERE k = 'places_seed_csv_fingerprint'").fetchone()
-    if row is not None and row[0] == fingerprint:
-        log.info("places_seed: CSV unchanged since last load (%s), skipping", fingerprint)
+    place_count = conn.execute("SELECT COUNT(*) FROM place").fetchone()[0]
+    if force_reseed:
+        log.info("places_seed: PLACES_FORCE_RESEED set, forcing full reload regardless of fingerprint")
+    elif row is not None and row[0] == fingerprint and place_count > 0:
+        # place_count > 0 is a belt-and-suspenders check alongside the
+        # fingerprint match: a `cursor` row recording a completed load
+        # should never coexist with an empty `place` table (the fingerprint
+        # is written in the SAME transaction as the rows it describes, see
+        # the COMMIT below), but trusting that invariant blindly would
+        # turn any future violation of it into a silent, permanent "no
+        # places data" state that nothing would ever self-heal.
         counts = conn.execute(
             "SELECT ref_type, COUNT(*) FROM place WHERE active = 1 GROUP BY ref_type"
         ).fetchall()
         stats["kept"] = {r[0]: r[1] for r in counts}
+        log.info(
+            "places_seed: seed unchanged since last load (%s), skipping full reload -- "
+            "place rows active: summit=%d park=%d landmark=%d (%d total, %d active)",
+            fingerprint,
+            stats["kept"].get("summit", 0), stats["kept"].get("park", 0), stats["kept"].get("landmark", 0),
+            place_count, sum(stats["kept"].values()),
+        )
         return stats
 
+    global LOADING
+    LOADING = True
     now = int(time.time())
     t0 = time.monotonic()
     # Built up front, once, from its own pass over the file -- see
@@ -518,11 +1152,57 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # below reads landmark rows (a landmark can appear before the
     # summit it double-dips with in file order; SOTA/PADUS/OSM rows are
     # not sorted by proximity to each other).
-    summit_buckets = _kept_summit_buckets(_DATA_PATH)
+    summit_buckets = _kept_summit_buckets(seed_path)
     seen_ids: set[int] = set()
+
+    # place_cell writes are BATCHED (2026-09-07), not one DELETE plus
+    # one executemany INSERT per place row. Measured cause of the
+    # worldwide seed's ~200s first load: ~1.39M individual DELETEs (most
+    # of them no-ops on a fresh table -- a place just freshly INSERTed
+    # cannot yet have any place_cell rows to delete) plus ~1.39M tiny
+    # executemany calls (2.17M total place_cell rows) each paying a full
+    # Python/sqlite3-module round trip. Buffered here instead and
+    # flushed every _CELL_BATCH_ROWS place rows via _flush_cell_buffers,
+    # collapsing that into a couple hundred large statements. The two
+    # buffers are flushed TOGETHER, delete-buffer first, every time
+    # either would otherwise be considered -- never independently on
+    # their own fill rate -- because they fill at different rates (one
+    # entry per place row vs. one per cell, and a park can carry many
+    # cells) and a place's DELETE must always execute before that same
+    # place's INSERT reaches the database, or a delete flushed late
+    # would erase cells an earlier-flushed insert had already written.
+    _CELL_BATCH_ROWS = 20_000
+    cell_delete_buffer: list[tuple[int]] = []
+    cell_insert_buffer: list[tuple[int, str]] = []
+    rows_since_flush = 0
+
+    def _flush_cell_buffers() -> None:
+        if cell_delete_buffer:
+            conn.executemany("DELETE FROM place_cell WHERE place_id = ?", cell_delete_buffer)
+            cell_delete_buffer.clear()
+        if cell_insert_buffer:
+            conn.executemany(
+                "INSERT OR IGNORE INTO place_cell(place_id, cell_id) VALUES (?, ?)",
+                cell_insert_buffer,
+            )
+            cell_insert_buffer.clear()
+
     conn.execute("BEGIN IMMEDIATE")
     try:
-        with open(_DATA_PATH, encoding="utf-8", newline="") as fh:
+        # idx_place_cell_cell is place_cell's one SECONDARY index (its
+        # PRIMARY KEY (place_id, cell_id) can't be dropped, and is cheap
+        # to maintain anyway since these inserts already arrive grouped
+        # by place_id). Dropping the secondary index for the run and
+        # rebuilding it once at the end -- standard bulk-load practice --
+        # means SQLite is not maintaining a cell_id-ordered B-tree across
+        # ~2.17M essentially-random-order inserts one row at a time; it
+        # pays that cost once, as a single sorted build, at the end
+        # instead. Safe inside this transaction: nothing outside it can
+        # see the index missing, since nothing outside it can see this
+        # transaction's writes at all until COMMIT.
+        conn.execute("DROP INDEX IF EXISTS idx_place_cell_cell")
+
+        with _open_csv(seed_path, encoding="utf-8", newline="") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
                 ref_type = row["ref_type"]
@@ -558,24 +1238,81 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                 if ref_type == "park":
                     if geom_wkt and area_m2 is not None and area_m2 >= _cell_area_m2(lat):
                         # Matched boundary at or above one grid cell:
-                        # score by the >50%-of-cell rule, always active.
+                        # store any cell the boundary intersects at all
+                        # -- see the REACHABLE-RING CREDIT note above
+                        # for why the outward ring is no longer added
+                        # HERE (it is added at credit time instead, to
+                        # the ping's cell, not stored on this row).
+                        # Always active.
                         geom = shapely_wkt.loads(geom_wkt)
-                        cells = _park_cells(geom, lat)
                         rotates = False
                         stats["park_matched"] += 1
                         stats["park_matched_larger"] += 1
-                        if not cells:
-                            # Boundary matched but no cell clears 50% (a
-                            # sliver, or a simplification artifact) --
-                            # fall back to the point so the park is not
-                            # silently unscoreable.
+                        # THRESHOLD DECISION WITHOUT FILLING A HUGE
+                        # BOUNDARY -- see _PARK_FILL_SAFE_BBOX_CELLS'
+                        # own comment. Below the safe bbox cap it costs
+                        # nothing to just ask _park_cells() for the
+                        # exact answer, same as before this row's
+                        # boundary could ever have been large in the
+                        # first place. At or above it, the park is
+                        # certainly over _PARK_BAND_THRESHOLD_CELLS by
+                        # filled-cell count too -- go straight to
+                        # banding via the geometry and never call
+                        # _park_cells() on a bbox that size at all.
+                        if _bbox_cell_upper_bound(geom) < _PARK_FILL_SAFE_BBOX_CELLS:
+                            cells = _park_cells(geom)
+                            if not cells:
+                                # Boundary matched but the polygon touches
+                                # no cell at all (a sliver, or a
+                                # simplification artifact) -- fall back to
+                                # the point's own cell so the park is not
+                                # silently unscoreable.
+                                cells = {cell_id(lat, lon)}
+                            elif len(cells) >= _PARK_BAND_THRESHOLD_CELLS:
+                                # Large park: store the boundary band, not
+                                # the filled interior -- see the PARK BAND
+                                # STORAGE note above.
+                                cells = _park_band(geom)
+                                stats["park_banded"] += 1
+                            else:
+                                # Small park: filled, unchanged -- below
+                                # the threshold "interior" isn't a
+                                # meaningful idea (see the PARK BAND STORAGE
+                                # note above).
+                                stats["park_filled"] += 1
+                        else:
+                            cells = _park_band(geom)
+                            stats["park_banded"] += 1
+                            if not cells:
+                                cells = {cell_id(lat, lon)}
+                        if len(cells) > _PARK_BAND_MAX_CELLS:
+                            # PATHOLOGICAL GUARD -- see
+                            # _PARK_BAND_MAX_CELLS' own comment. Some
+                            # marine protected areas, and some parks
+                            # made of parts scattered clear across an
+                            # ocean, still band to an unreasonable cell
+                            # count even at boundary-proportional
+                            # pricing. Cap by falling back to the
+                            # park's own point cell (same fallback used
+                            # above for a sliver) rather than letting
+                            # one row's band inflate the seed or load
+                            # time -- and log which park hit it so a
+                            # human can see it, not guess at it later.
+                            log.warning(
+                                "places_seed: park %s (%s) banded to %d cells, "
+                                "over the %d cap -- falling back to its own point cell",
+                                row["ref_code"], row["name"], len(cells), _PARK_BAND_MAX_CELLS,
+                            )
                             cells = {cell_id(lat, lon)}
+                            stats["park_band_capped"] += 1
                     else:
                         # Either unmatched (no boundary at all) or
                         # matched but smaller than one cell -- both
-                        # score their point's own cell. Unmatched stays
-                        # permanent (rotates=False); a genuinely small
-                        # matched park rotates like a landmark.
+                        # store just their own point's cell, same as a
+                        # landmark below (the reachable ring around it is
+                        # added at credit time, not here). Unmatched
+                        # stays permanent (rotates=False); a genuinely
+                        # small matched park rotates like a landmark.
                         cells = {cell_id(lat, lon)}
                         if geom_wkt and area_m2 is not None:
                             stats["park_matched"] += 1
@@ -590,8 +1327,21 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                     # is absent or has no row for this summit -- which is
                     # exactly the behaviour summits had before, so a
                     # missing artifact degrades rather than breaks.
+                    # Deliberately NOT ring-expanded, at storage time or
+                    # credit time (unlike every other ref_type -- see
+                    # the REACHABLE-RING CREDIT note above and
+                    # app/place_scoring.credit_places()): a SOTA
+                    # activation requires physically reaching the
+                    # summit, and that is the point of the game mode.
                     cells = summit_cells.get(row["ref_code"]) or {cell_id(lat, lon)}
                 else:
+                    # Landmark: just the point's own cell -- see the
+                    # REACHABLE-RING CREDIT note above. A landmark's
+                    # point can land inside a fence (a school, private
+                    # property) with no boundary data at all to test
+                    # against, so the ring (added at credit time, not
+                    # stored here) is the only way this game credits the
+                    # sidewalk outside it.
                     cells = {cell_id(lat, lon)}
 
                 stats["kept"][ref_type] += 1
@@ -617,11 +1367,20 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
                 place_id = cur.fetchone()[0]
                 seen_ids.add(place_id)
 
-                conn.execute("DELETE FROM place_cell WHERE place_id = ?", (place_id,))
-                conn.executemany(
-                    "INSERT OR IGNORE INTO place_cell(place_id, cell_id) VALUES (?, ?)",
-                    [(place_id, c) for c in cells],
-                )
+                cell_delete_buffer.append((place_id,))
+                cell_insert_buffer.extend((place_id, c) for c in cells)
+                rows_since_flush += 1
+                if rows_since_flush >= _CELL_BATCH_ROWS:
+                    _flush_cell_buffers()
+                    rows_since_flush = 0
+
+        _flush_cell_buffers()  # remainder: fewer than _CELL_BATCH_ROWS rows since the last flush
+
+        # Rebuild the secondary index dropped above, now that every
+        # place_cell row for this load is in place -- one sorted build
+        # over the final ~2.17M rows instead of maintaining it across
+        # every individual insert above.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_place_cell_cell ON place_cell(cell_id)")
 
         # Reconcile: any place that is currently active but was not
         # touched by this pass has left the seed. Deactivate rather
@@ -651,17 +1410,48 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    finally:
+        # Always cleared, success or failure -- a failed load must not
+        # leave app/places_api.py's read routes logging "still loading"
+        # forever over a load that has actually stopped trying.
+        LOADING = False
+
+    # ANALYZE, every time the seed actually loads. Without statistics
+    # SQLite's planner guesses, and on a board this size it guesses
+    # badly: it picked idx_place_active -- which matches all two million
+    # rows -- over idx_place_latlon for /api/places/near's bounding-box
+    # query, scanning the whole table instead of reading a few hundred
+    # rows. That measured 0.549s against 0.007s, and because the read is
+    # synchronous on the event loop, every other request on a page load
+    # queued behind it (a 15-second page load, blamed on the wrong
+    # endpoint for some time).
+    #
+    # It belongs HERE rather than in a cron or a runbook step because it
+    # has exactly one correct moment: right after the row counts change.
+    # This block only runs on a real load -- an unchanged seed short-
+    # circuits on its fingerprint long before this point -- so the cost
+    # is paid once per seed change, alongside a load that already took
+    # minutes, and never on an ordinary restart.
+    try:
+        t_analyze = time.monotonic()
+        conn.execute("ANALYZE")
+        log.info("places_seed: ANALYZE in %.1fs", time.monotonic() - t_analyze)
+    except Exception as e:  # noqa: BLE001 -- never fail a good load over stats
+        log.warning("places_seed: ANALYZE failed (%s) -- the seed is loaded and "
+                    "correct, but query plans may be poor until it is run by hand", e)
 
     elapsed = time.monotonic() - t0
     log.info(
         "places_seed: loaded summit=%d park=%d landmark=%d (excluded non-US: summit=%d park=%d landmark=%d) "
-        "park boundary matched=%d unmatched=%d (of matched: larger-than-cell=%d smaller-than-cell=%d) "
+        "park boundary matched=%d unmatched=%d (of matched: larger-than-cell=%d smaller-than-cell=%d, "
+        "of larger-than-cell: banded=%d filled=%d capped=%d) "
         "landmark colocated with summit=%d (dropped, within %.0fm) "
         "deactivated=%d (left the seed, kept as history) in %.1fs",
         stats["kept"]["summit"], stats["kept"]["park"], stats["kept"]["landmark"],
         stats["excluded"]["summit"], stats["excluded"]["park"], stats["excluded"]["landmark"],
         stats["park_matched"], stats["park_unmatched"],
         stats["park_matched_larger"], stats["park_matched_smaller"],
+        stats["park_banded"], stats["park_filled"], stats["park_band_capped"],
         stats["landmark_colocated_with_summit"], _SUMMIT_COLOCATION_RADIUS_M,
         stats["deactivated"], elapsed,
     )

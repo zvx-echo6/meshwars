@@ -1356,13 +1356,29 @@ def _repeater_observations(conn, protocol: str, cell_id: str) -> list[dict]:
 
 def _containing_park(conn: sqlite3.Connection, cell_id: str) -> dict | None:
     """The boundary-backed park (if any) that owns this cell under the
-    >50%-of-cell rule (docs/features/places.md), for display in the
-    cell popup -- see frontend/map2.js's setupCellClickPopup. Reuses
+    any-intersection rule (docs/features/places.md, changed 2026-09-07
+    from the original >50%-of-cell test), for display in the cell
+    popup -- see frontend/map2.js's setupCellClickPopup. Reuses
     app/places_seed.py's place_cell table rather than re-deriving
     containment from geometry: place_cell is already exactly this
     relationship, computed once at seed time from the unsimplified
     boundary (app/places_seed.py's _park_cells), so this can never
     disagree with what actually scored the square.
+
+    DELIBERATELY UNCHANGED by the 2026-09-09 "reachable ring moved to
+    lookup time" change (see docs/features/places.md and
+    app/place_scoring.credit_places()'s own comment): this query is a
+    plain `cell_id = ?` match with no ring expansion of its own, same
+    as always, and place_cell for a park now stores ONLY the cells its
+    true boundary touches -- no ring cells mixed in. That is actually a
+    quiet correction, not a new behaviour: between the ring landing
+    (2026-09-07) and this move (2026-09-09), place_cell briefly stored
+    a park's ring-expanded cells too, which would have made a cell just
+    outside a park's real boundary (in that outward ring, credited for
+    SCORING reasons) also report here as "inside" the park for DISPLAY
+    -- confusing for a popup whose whole job is naming the boundary the
+    cell is actually inside. This function's own query never changed
+    across either date; only what place_cell holds did.
 
     ref_type = 'park' AND geom IS NOT NULL AND rotates = 0 is the same
     boundary-backed filter app/places_api.py's
@@ -1374,12 +1390,12 @@ def _containing_park(conn: sqlite3.Connection, cell_id: str) -> dict | None:
     Two designations for the same physical ground both matched to a
     park boundary (a state park and a coincident historic site, a
     refuge and a coincident WMA -- both real in the PAD-US source data,
-    not a hypothetical) can both legitimately clear 50% of one cell at
-    once, since the >50% test is run independently per place against
-    the cell, not against each other's polygon. Points DESC, then the
-    same deterministic hash tiebreak app/places_api.py's viewport
-    queries use for an identical "need one stable order out of an
-    equally-ranked set" problem, picks one consistently rather than
+    not a hypothetical) can both legitimately touch the same cell at
+    once, since the intersection test is run independently per place
+    against the cell, not against each other's polygon. Points DESC,
+    then the same deterministic hash tiebreak app/places_api.py's
+    viewport queries use for an identical "need one stable order out of
+    an equally-ranked set" problem, picks one consistently rather than
     letting sqlite's unspecified row order decide.
     """
     row = conn.execute(
@@ -1588,12 +1604,12 @@ async def mc_cell(cell_id: str, session: SessionPrincipal | None = Depends(optio
 _STAT_COLUMNS = (
     "batches, pings_accepted, pings_no_contact, pings_wrong_owner, "
     "pings_duplicate, pings_bad_coord, pings_out_of_area, pings_no_repeaters, "
-    "pings_low_precision, pings_implausible_speed"
+    "pings_low_precision, pings_implausible_speed, pings_unknown_type"
 )
 _STAT_ZERO_ROW = {
     "batches": 0, "pings_accepted": 0, "pings_no_contact": 0,
     "pings_wrong_owner": 0, "pings_duplicate": 0, "pings_bad_coord": 0,
-    "pings_out_of_area": 0, "pings_no_repeaters": 0,
+    "pings_out_of_area": 0, "pings_no_repeaters": 0, "pings_unknown_type": 0,
 }
 
 
@@ -1607,6 +1623,12 @@ def _counters_out(row) -> dict:
         "bad_coord": row["pings_bad_coord"],
         "out_of_area": row["pings_out_of_area"],
         "no_repeaters": row["pings_no_repeaters"],
+        # MeshCore-only (app/mc_ingest.py's is_unknown_ping_type()) --
+        # not surfaced by _counters_out_mt() below, same reasoning as
+        # batches/no_contact/wrong_owner being left out of THAT shape:
+        # Meshtastic packets carry no `type` field of this kind at all,
+        # so the column is structurally always 0 for protocol='mt'.
+        "unknown_type": row["pings_unknown_type"],
     }
 
 
@@ -1716,7 +1738,8 @@ async def mc_status(
             "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
             "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
             "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
-            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters, "
+            "       COALESCE(SUM(pings_unknown_type),0) AS pings_unknown_type "
             "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ? "
             "    AND day BETWEEN ? AND ?",
             (player_id, MC_PROTOCOL, week_start, today),
@@ -1730,7 +1753,8 @@ async def mc_status(
             "       COALESCE(SUM(pings_duplicate),0) AS pings_duplicate, "
             "       COALESCE(SUM(pings_bad_coord),0) AS pings_bad_coord, "
             "       COALESCE(SUM(pings_out_of_area),0) AS pings_out_of_area, "
-            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters "
+            "       COALESCE(SUM(pings_no_repeaters),0) AS pings_no_repeaters, "
+            "       COALESCE(SUM(pings_unknown_type),0) AS pings_unknown_type "
             "  FROM player_ingest_stat WHERE player_id = ? AND protocol = ?",
             (player_id, MC_PROTOCOL),
         ).fetchone()

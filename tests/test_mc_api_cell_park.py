@@ -1,8 +1,11 @@
 """Tests for cell_detail_for()'s `park` field (app/mc_api.py's
 _containing_park): the cell popup naming the boundary-backed park a
-painted square sits inside, per the same >50%-of-cell rule
+painted square sits inside, per the same any-intersection rule
 place_cell already encodes (docs/features/places.md,
 app/places_seed.py's _park_cells) -- not a re-derived geometry test.
+These insert place_cell rows directly (not via load_places_seed), so
+they are unaffected by the 2026-09-09 "reachable ring moved to lookup
+time" change -- see _containing_park()'s own docstring for why.
 """
 from __future__ import annotations
 
@@ -105,7 +108,7 @@ def test_park_field_ignores_an_inactive_or_rotating_park(conn, monkeypatch):
 def test_park_field_is_deterministic_when_two_designations_overlap_the_same_ground(conn, monkeypatch):
     """PAD-US carries near-duplicate designations for the same physical
     area (e.g. a state park and a coincident historic site) -- both can
-    independently clear 50% of the same cell. Rather than depending on
+    independently touch the same cell. Rather than depending on
     sqlite's unspecified row order, this must pick one consistently
     (points DESC, then the same stable hash tiebreak
     app/places_api.py's viewport queries use).

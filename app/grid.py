@@ -52,6 +52,39 @@ def cell_bounds(cid: str) -> tuple[float, float, float, float]:
     return (south, west, north, east)
 
 
+def ring_expand(cells: set[str]) -> set[str]:
+    """`cells` plus every cell adjacent to one of them, including
+    diagonally -- one ring of cells added outward from the set. A pure
+    index computation over cell ids, not a geometry pass, so it is
+    cheap even for a large set.
+
+    MOVED HERE 2026-09-09 from app/places_seed.py (where it was
+    private, `_ring_expand`, and applied at SEED-BUILD time to every
+    place's stored `place_cell` rows) as part of "move the reachable
+    ring from storage time to lookup time" -- see
+    docs/features/places.md's reachable-ring section and
+    app/place_scoring.credit_places()'s own comment on why. `place_cell`
+    now stores only a place's own occupied cell(s); credit_places()
+    calls `ring_expand({ping_cell})` on the PING's cell instead, which
+    is exactly equivalent by symmetry ("is the ping's cell inside the
+    place's 3x3?" and "is the place's cell inside the ping's 3x3?" are
+    the same question) while cutting `place_cell` storage roughly
+    ninefold for the ~1.28M point-type places that used to carry 9 rows
+    each. Kept fully generic (works over a set of any size, not just
+    one cell) rather than narrowed to a single-cell signature, since
+    that is still the exact operation this function has always done and
+    a future caller working from a multi-cell base set (a park
+    boundary's own footprint, say) can reuse it unchanged.
+    """
+    expanded: set[str] = set(cells)
+    for cid in cells:
+        lat_idx, lon_idx = cell_indices(cid)
+        for d_lat in (-1, 0, 1):
+            for d_lon in (-1, 0, 1):
+                expanded.add(f"{lat_idx + d_lat}_{lon_idx + d_lon}")
+    return expanded
+
+
 def cell_center(cid: str) -> tuple[float, float]:
     """Return (lat, lon) of the center of a cell id."""
     south, west, north, east = cell_bounds(cid)

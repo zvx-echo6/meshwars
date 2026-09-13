@@ -12,7 +12,7 @@ production if the hook between them is missing, mis-called, or its
 try/except silently eats a real bug -- which is exactly what "zero
 rows in place_activation despite tens of thousands of live places and
 an actively-ingesting board" could mean, and what a controlled ingest
-test against a running preview (CT 113) ruled out in practice: a real
+test against a running preview instance ruled out in practice: a real
 POST to /api/mc/ingest for a live, in-bounds place produced a
 place_activation row with the right player/place/week/points, a repeat
 did not double-award, and painting past the 100-point weekly cap
@@ -195,7 +195,7 @@ def test_real_ingest_batch_stops_at_weekly_cap(db_path):
     the same week: the first four sum to exactly 100 (the cap), so the
     fifth must be fully blocked -- no partial credit, no overflow. This
     exercises the cap through the real ingest path end to end, matching
-    the manual test run against the CT 113 preview (which used a mix
+    the manual test run against the preview instance (which used a mix
     of 25- and 10-point places to the same effect: 85, then a 25-point
     place correctly skipped as not fitting the 15 remaining, then a
     10-point place credited to reach 95, then another 10-point place

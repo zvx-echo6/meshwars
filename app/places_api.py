@@ -25,6 +25,8 @@ scoring rule these parks use is computed once at seed time
 """
 from __future__ import annotations
 
+import logging
+import math
 import sqlite3
 
 from fastapi import APIRouter, Query
@@ -32,12 +34,27 @@ from fastapi.responses import JSONResponse
 from shapely import wkt as shapely_wkt
 from shapely.geometry import mapping as shapely_mapping
 
+from . import places_seed
 from .db import connect
 from .grid import distance_m
 from .place_rotation import current_week_start, resolve_week
 from .place_scoring import _stable_tiebreak
 
+log = logging.getLogger("places_api")
 router = APIRouter()
+
+
+def _log_if_still_loading(row_count: int) -> None:
+    """Zero rows back from a live/rotating-places query is completely
+    normal on its own (an empty viewport, week rotation still
+    resolving) -- but if it lines up with places_seed.LOADING (see that
+    module: True only for the duration of app/db.py's now-backgrounded
+    startup seed load), it is worth a clear log line instead of a
+    silent empty response, so "the map has no markers" and "the seed is
+    still loading" are never confused from the logs alone.
+    """
+    if row_count == 0 and places_seed.LOADING:
+        log.info("places_api: seed still loading in the background, returning no places for now")
 
 # A viewport at low zoom over the whole play area could otherwise ask
 # for tens of thousands of markers; MapLibre has no server-side
@@ -55,8 +72,11 @@ DEFAULT_NEAR_RESULTS = 20
 # order -- every SOTA summit is worth the same 100 points (docs/features/
 # places.md), so SQLite falls back to breaking the tie by insertion
 # order, which follows app/reference/places_worth_going.csv, which is
-# sorted by SOTA association code (W0C Colorado ... W7Y Wyoming -- see
-# app/places_seed.py's US_SOTA_ASSOCIATIONS). A zoomed-out viewport
+# sorted by SOTA association code (W0C Colorado ... W7Y Wyoming --
+# app/places_seed.py's country allowlist that produced that ordering
+# was removed 2026-09-07 in the worldwide expansion, but the CSV's
+# insertion order it left behind is the same kind of clustering this
+# tiebreak exists to defeat). A zoomed-out viewport
 # capped at MAX_VIEWPORT_RESULTS then silently kept everything up to
 # about Oregon and dropped the alphabetic tail -- Utah, Washington,
 # Wyoming, most of Nevada -- not because they are less deserving, but
@@ -252,6 +272,7 @@ async def places_in_viewport(
             f" ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT ?",
             (protocol, south, north, west, east, week_start, MAX_VIEWPORT_RESULTS),
         ).fetchall()
+        _log_if_still_loading(len(rows))
         boundary_features = (
             _park_boundaries_in_viewport(conn, north, south, west, east)
             if zoom is not None and zoom >= MIN_BOUNDARY_ZOOM
@@ -277,29 +298,99 @@ async def places_near(
 ) -> JSONResponse:
     """Live places sorted by distance from (lat, lon), for map2's
     slide-out panel -- see that page's module docstring. Distance is
-    computed in Python via app/grid.distance_m over every live place
-    (tens of thousands of rows, well within what a single request can
-    sort in memory) rather than in SQL, matching how the rest of this
-    codebase treats distance (app/places.py, app/grid.py) -- no spatial
-    extension is assumed to be compiled into this build's SQLite.
+    computed in Python via app/grid.distance_m, matching how the rest of
+    this codebase treats distance (app/places.py, app/grid.py) -- no
+    spatial extension is assumed to be compiled into this build's
+    SQLite.
+
+    BOUNDING-BOX PREFILTER (2026-09-12). This used to select EVERY live
+    place and rank the lot in Python, on the reasoning that "tens of
+    thousands of rows" sort fine in memory. That was true of a
+    western-US board. Places Worth Going went worldwide and the live set
+    is now over two million, which took this endpoint to ~4 seconds --
+    and because it is a synchronous read on the event loop, every other
+    request on a page load queued behind it and finished together, which
+    read as a 15-second page load and made /api/mc/scores (11 ms on its
+    own) look like the culprit.
+
+    So: filter by a lat/lon box in SQL first, which is what
+    idx_place_latlon has always been there for, and rank only the
+    survivors. The box starts small and grows until it holds at least
+    `limit` places AND the furthest kept result is inside that box, so
+    the answer is identical to ranking everything. The
+    final unbounded step keeps the old behaviour as a floor for a viewer
+    in genuinely empty country, where scanning everything is both
+    correct and the only option.
     """
     week_start = current_week_start()
     conn = connect()
     try:
         resolve_week(conn, week_start)
-        rows = conn.execute(
-            "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
-            "  FROM place p "
-            f" WHERE {_live_where(week_start)}",
-            (week_start,),
-        ).fetchall()
+        rows: list = []
+        ranked: list = []
+        # Degrees of latitude are ~111 km everywhere; longitude shrinks
+        # by cos(lat), so the box is widened in longitude to stay square
+        # on the ground. None = no box, scan everything.
+        #
+        # STOPPING RULE, and it is not "enough rows". A square box of
+        # half-width R only guarantees completeness out to R: a place
+        # just beyond the edge at R can be nearer than one kept from the
+        # corner, which is R*sqrt(2) away. So a ring is only trusted
+        # when the limit-th result is itself within R -- then nothing
+        # outside can beat it, because everything outside is at least R
+        # away. Otherwise widen and try again.
+        for radius_km in (25.0, 100.0, 400.0, 1500.0, None):
+            if radius_km is None:
+                rows = conn.execute(
+                    "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
+                    "  FROM place p "
+                    f" WHERE {_live_where(week_start)}",
+                    (week_start,),
+                ).fetchall()
+                ranked = sorted(
+                    ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
+                     for r in rows),
+                    key=lambda x: x["distance_m"],
+                )[:limit]
+                break
+            dlat = radius_km / 111.0
+            coslat = max(math.cos(math.radians(lat)), 0.01)
+            dlon = radius_km / (111.320 * coslat)
+            rows = conn.execute(
+                "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
+                "  FROM place p "
+                "  WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
+                f"   AND {_live_where(week_start)}",
+                (lat - dlat, lat + dlat, lon - dlon, lon + dlon, week_start),
+            ).fetchall()
+            ranked = sorted(
+                ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
+                 for r in rows),
+                key=lambda x: x["distance_m"],
+            )[:limit]
+            if len(ranked) >= limit and ranked[-1]["distance_m"] <= radius_km * 1000.0:
+                break
+            if not rows:
+                # Nothing at all in this box: a viewer in open ocean or
+                # empty desert. Stepping the remaining rings would scan
+                # progressively larger empty boxes before falling back
+                # anyway, which measured SLOWER than the full scan it
+                # ends at. Go straight there.
+                rows = conn.execute(
+                    "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
+                    "  FROM place p "
+                    f" WHERE {_live_where(week_start)}",
+                    (week_start,),
+                ).fetchall()
+                ranked = sorted(
+                    ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
+                     for r in rows),
+                    key=lambda x: x["distance_m"],
+                )[:limit]
+                break
+        _log_if_still_loading(len(rows))
     finally:
         conn.close()
-
-    ranked = sorted(
-        ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])} for r in rows),
-        key=lambda x: x["distance_m"],
-    )[:limit]
 
     return JSONResponse({
         "week_start": week_start,

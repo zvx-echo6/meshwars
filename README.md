@@ -1,10 +1,10 @@
-**About this project.** MeshWars was built with [Claude](https://claude.ai). The game is inspired by [MeshMapper](https://meshmapper.net) — the board is deliberately aligned to MeshMapper's own wardriving grid, so a square here and a square there describe the same ground — and by [FREQ51](https://freq51.net) and [Mountain West Mesh](https://mwmesh.com), where it's played.
+**About this project.** MeshWars was built with [Claude](https://claude.ai). The game is inspired by [MeshMapper](https://meshmapper.net) — the board is deliberately aligned to MeshMapper's own wardriving grid, so a square here and a square there describe the same ground — and by the communities where it's played: [FREQ51](https://freq51.net), [Mountain West Mesh](https://mwmesh.com), [Colorado Mesh](https://coloradomesh.org), and Central Oregon MeshCore.
 
 # MeshWars
 
 A territory control game played over mesh radio. Seven teams claim roughly 300 meter squares of ground by reaching the mesh from them.
 
-![MeshCore board](docs/img/map.png)
+![The MeshCore board over the Denver metro — six teams contesting the ground square by square, with places scattered across it](docs/img/map.png)
 
 ## What it is
 
@@ -27,6 +27,26 @@ The first time a given player paints a square for their team, that paint also ea
 An unclaimed square goes to whichever team paints it first. Once a square is captured it cannot be flipped for fifteen minutes, no matter the score — a fresh capture gets a defended window. After that, the square falls to any team that out-scores the current holder, but only the holder: with seven teams in play there is no single rival, so a challenger is only ever measured against whoever holds the square right now, not against every other team's score there.
 
 Scores decay a quarter point a day, so an abandoned square gets easier to take the longer nobody defends it. The same player cannot repaint the exact same square within five minutes, which stops one person sitting still from running the score up by spamming pings.
+
+## Places worth going
+
+Squares are not the only thing on the board. Summits, parks and landmarks are scored separately, as a reason to go somewhere specific rather than simply cover ground. Reaching one earns points toward both a personal Explorer Score and the team total, once per place per week, capped at 100 points a player a week.
+
+**Credit is for reaching a place, not for getting inside it.** A landmark credits from the square it sits in and the ring of squares around it, so a museum counts from the pavement outside and a fenced site counts from its perimeter. A large park stores the band of squares along its boundary rather than its filled interior: arriving at a national park is the achievement, and travelling further into it is not separately rewarded. Summits are the exception — they use an elevation-derived activation zone rather than a flat ring, because reaching the summit is the point of that mode.
+
+Effort decides the value. A park or landmark inside a city is worth 5; out in the country a landmark is 10 and a park 25; a summit scales from 50 to 100 with elevation. Size is deliberately not the axis — a big park near a city is an easy afternoon, and is priced like one.
+
+**The board is worldwide.** It holds a little over two million places, drawn from [SOTA](https://sotadata.org.uk) summits, [POTA](https://pota.app) parks, the US government's PAD-US protected-areas database, and OpenStreetMap. Coverage follows OpenStreetMap's own mapping density rather than anything MeshWars decides, so it is dense across Europe, Japan and North America and thin where OSM itself is thin.
+
+Nowhere shows all of them at once. Places rotate weekly, and how many are live in an area scales with how crowded it is — from 15 in a quiet cell up to 60 in a dense city, spaced at least a mile apart. A player sees a handful worth driving to, not a wall of markers.
+
+![Yosemite's real boundary crossing the map, with summits marked as triangles and landmarks as stars](docs/img/places-park-boundary.png)
+
+*A park is stored as its real boundary, so it credits from any of its entrances — Tioga Pass, Hetch Hetchy and the valley floor are 40 to 60 km apart and all count as Yosemite. Triangles are summits, stars are landmarks.*
+
+![Munich, with German park boundaries and place markers](docs/img/places-worldwide.png)
+
+*The same board in Munich. Coverage outside the US comes from OpenStreetMap, so it is dense wherever OSM itself is dense.*
 
 ## Net check-ins
 
@@ -58,17 +78,17 @@ There is an opt-in raw batch log for diagnosing MeshMapper's payloads while tuni
 
 ## Operating it
 
-The CT 113 preview instance (mesh-territory-preview, on the utility host) is deployed with `/usr/local/bin/mw-deploy` -- the only supported way to deploy it. It fetches, hard-resets to the requested ref (default `origin/feat/places`), rebuilds, recreates the container, waits for `/health`, and verifies the deployed commit matches what was requested, failing loudly on any mismatch. Do not run git commands directly against this checkout via `pct exec` as root: the repo runs as the `zvx` user, and root-written git objects leave `zvx` unable to write to `.git/objects` on the next fetch -- a past incident that silently left the preview several commits behind while reporting success. `mw-deploy` drops to `zvx` for every git and docker operation regardless of who invokes it, which is what makes it safe to run as root via `pct exec 113 -- mw-deploy`.
-
-Production, meshwars.com, is CT 119 on the same host, at the same `/home/zvx/meshwars` path, and carries the same `/usr/local/bin/mw-deploy` (run via `pct exec 119 -- mw-deploy`). The script is not identical: it defaults to `origin/main` rather than `origin/feat/places`, since production tracks main and the preview's default would otherwise ship an in-progress feature branch to the live site. It also refuses to deploy any ref that is not an ancestor of `origin/main` -- a stray or mistyped ref argument can no longer put unmerged work on the live site -- unless `--allow-non-main` is passed explicitly for an intentional hotfix-branch deploy. `--dry-run` resolves the ref and runs every pre-flight check (dirty tree, ref resolution, ancestor-of-main, file ownership) and reports what would happen without touching the working tree, image, or container; worth running before any production deploy that isn't routine. The `/health` poll timeout is 180s on both instances, sized against production's cold-start load of its full places seed (74,397 rows, observed at 91.6s at boot) -- a normal restart is much faster whenever the seed CSV hasn't changed, since the app skips reloading it.
-
 Configuration lives in `.env`. It runs as a single Docker container via `docker compose`, backed by SQLite — no external services required. An administrative interface exists at `/admin`; it is disabled entirely unless `ADMIN_TOKEN` is explicitly configured, since that token is the only authentication this application has anywhere.
 
 From there an operator can revoke a key, disable or delete a player, and add or remove a player's radios directly — fixing someone's setup never requires their key at all. A key is a SHA-256 hash in storage; the raw value is shown exactly once, at issuance, and is never recoverable after that, by anyone, including an admin. There are two separate remedies for that, not one, because "I lost my key" and "someone else has my key" call for opposite responses: issuing an *additional* key leaves every existing key working, for a player who just mislaid theirs and whose MeshMapper config should keep running untouched; reissuing revokes every key the player currently holds and replaces them with one new one, for a key that actually leaked, at the cost of breaking that player's setup until they reconfigure it with the new key.
 
 ## Project status
 
-The MeshCore board is live and in beta with real players. The Meshtastic board now runs the same player model and grid, differing only in how position reaches it: pulled from a public meshview instance and scored only for registered nodes. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
+The MeshCore board is live, out of beta, and played by over a hundred registered players across several mesh communities. The Meshtastic board now runs the same player model and grid, differing only in how position reaches it: pulled from a public meshview instance and scored only for registered nodes. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
+
+![The board across east Idaho — green and yellow tracing the Snake River plain around Idaho Falls](docs/img/board-east-idaho.png)
+
+*The same game in east Idaho, where it started. Each community's board looks different because it is shaped by wherever people actually drive.*
 
 ![About page](docs/img/about.png)
 
@@ -84,7 +104,7 @@ mkdir -p data/data data/tiles
 docker compose up -d --build
 ```
 
-Open `http://localhost:8090`.
+Open `http://localhost:8090`. The board comes up empty of places until you also add the Places Worth Going seed at `./data/data/places_worth_going.csv.gz` — see "Where the data and tiles live" below.
 
 ### Who it runs as
 
@@ -117,8 +137,10 @@ and move them.
 
 | Path | Mounted at | What it is |
 | --- | --- | --- |
-| `./data/data` | `/data` | The SQLite database (`game.db`) and its `-wal`/`-shm` sidecars. Must be writable by `PUID:PGID` — the **directory**, not just the file, because that is where SQLite creates the sidecars. |
+| `./data/data` | `/data` | The SQLite database (`game.db`) and its `-wal`/`-shm` sidecars, **and** the Places Worth Going seed (`places_worth_going.csv.gz`, or a decompressed `.csv`). Must be writable by `PUID:PGID` — the **directory**, not just the file, because that is where SQLite creates the sidecars. |
 | `./data/tiles` | `/tiles-data` (read-only) | Optional PMTiles overlay archives (hillshade, public lands, USFS roads and trails). Read-only, so ownership does not matter. Leave it empty and the map just draws without the overlays. |
+
+**The places seed is not included in this repository.** It is large (tens to well over 100MB) and grows with every rebuild, and git cannot diff compressed data, so it is not tracked here — see `docs/features/places.md`. Without `./data/data/places_worth_going.csv.gz` in place, MeshWars starts and runs normally, but the board has **zero places**: no summits, parks, or landmarks, and no error on startup, just a clear warning in the logs naming the exact path it looked for. (The one exception is an image or checkout built before the seed moved out of the repo that still happens to carry the old `app/reference/places_worth_going.csv.gz` on disk — the loader falls back to that copy rather than booting empty, and says in the logs that it did so. A fresh clone never has that file, so it still comes up with zero places until you supply one.) Build one yourself with `scripts/build_places_seed.py`'s `merge` stage (see that script's own `--help` and `docs/features/places.md`), or obtain a copy from wherever your instance's operator distributes it.
 
 These paths are set in `docker-compose.yml` directly; edit that file if
 you want them somewhere else.

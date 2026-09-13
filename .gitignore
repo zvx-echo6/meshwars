@@ -44,6 +44,15 @@ data/
 *.sqlite
 *.sqlite3
 
+# Places Worth Going seed -- moved out of the repo 2026-09-08 (~100MB,
+# uncompressible-by-git binary-ish data that was doubling the repo's
+# history size on every rebuild). It now lives in the ./data bind mount
+# above (see app/config.py's places_seed_path / docs/features/places.md),
+# but an existing checkout's working copy stays at this path until moved
+# -- ignored here so it can't be re-added to git by accident.
+/app/reference/places_worth_going.csv
+/app/reference/places_worth_going.csv.gz
+
 # Logs
 *.log
 logs/

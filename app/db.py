@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -455,6 +456,21 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     -- by_air, and MeshCore has no equivalent precision_bits concept at all.
     pings_low_precision     INTEGER NOT NULL DEFAULT 0,
     pings_implausible_speed INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only (app/mc_ingest.py's parse_repeaters()): a ping whose
+    -- `type` field is PRESENT but not one of the four recognized values
+    -- (TX/RX/DISC/TRACE) -- e.g. a future MeshMapper build's "DEFER".
+    -- Never rejected: the ping is still accepted and still writes a
+    -- position row exactly as before, it just cannot be told apart from
+    -- a legitimate ping that heard no repeaters without this counter, so
+    -- it also still counts toward pings_no_repeaters (parse_repeaters()
+    -- falls through to an empty list either way) -- this is additive
+    -- observability, not a new rejection path. A MISSING/None `type` is
+    -- deliberately NOT counted here: that's an absent field, not an
+    -- unrecognized one, and is already indistinguishable from a
+    -- legitimate empty read the same way it always was. Always 0 for
+    -- protocol='mt': app/ingest.py's packets carry no `type` field of
+    -- this kind at all.
+    pings_unknown_type INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player_id, protocol, day)
 );
 
@@ -2630,6 +2646,17 @@ MIGRATIONS = [
     # which never has `sample` at all) sees a no-op here, same as every
     # other run.
     "DROP TABLE IF EXISTS sample",
+    # pings_unknown_type added after player_ingest_stat already shipped --
+    # see that column's own comment on the CREATE TABLE above for the
+    # full story (a MeshCore ping whose `type` is present but not one of
+    # TX/RX/DISC/TRACE, e.g. "DEFER"). ADD COLUMN ... DEFAULT 0 backfills
+    # every existing row in the same statement SQLite runs the ALTER in
+    # -- correct for 100% of them, since nothing before this column
+    # existed could have counted toward it, and it does not change what
+    # any of those rows' other counters (in particular pings_no_repeaters,
+    # which a ping like this always also incremented, and still does)
+    # already mean.
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_unknown_type INTEGER NOT NULL DEFAULT 0",
     # Nullable, same reasoning as message_ts/streak above: every award
     # written before this column existed has no net to backfill from
     # the row alone (protocol + net_date is ambiguous whenever two nets
@@ -2649,9 +2676,28 @@ MIGRATIONS = [
 PRAGMAS = [
     "PRAGMA journal_mode=WAL",
     "PRAGMA synchronous=NORMAL",
-    "PRAGMA busy_timeout=5000",
+    "PRAGMA busy_timeout=15000",
     "PRAGMA foreign_keys=ON",
     "PRAGMA temp_store=MEMORY",
+    # SIZED FOR THE WORLDWIDE SEED (2026-09-12). game.db was ~130 MB
+    # until Places Worth Going went worldwide; it is now ~1.8 GB, almost
+    # all of it `place` and `place_cell`. SQLite's default cache_size is
+    # -2000, i.e. 2 MB per connection, which was invisible against a
+    # 130 MB file and is hopeless against 1.8 GB: nearly every query
+    # went to disk, and on a shared-CPU VPS reads piled up behind the
+    # ingest loop's write transactions until they hit busy_timeout. That
+    # is what made a page load take 15 seconds -- five API calls all
+    # completing within 150 ms of each other at ~5.2 s, the signature of
+    # requests serialized behind a lock rather than five slow queries.
+    #
+    # mmap_size does the heavy lifting because it is SHARED: the pages
+    # live in the OS page cache once, however many connections are open.
+    # cache_size is PER CONNECTION and connect() hands every coroutine
+    # its own, so it stays deliberately modest -- 64 MB times a dozen
+    # live connections is affordable on the 4 GB the container now has,
+    # 256 MB times a dozen would not be.
+    "PRAGMA mmap_size=1073741824",   # 1 GiB, shared via the OS page cache
+    "PRAGMA cache_size=-65536",      # 64 MiB per connection
 ]
 
 # In-process write lock. SQLite serializes writes at the file level, but
@@ -2908,15 +2954,41 @@ def init_db() -> None:
         # at module level to avoid a circular import (places_seed does
         # not import this module back, but keeping the import local
         # keeps db.py's own import graph exactly what it was before this
-        # landed). A failure here must not take the whole app down --
+        # landed).
+        #
+        # BACKGROUNDED (2026-09-07), not awaited here: a first load of
+        # the worldwide seed measured ~200s, and this function runs
+        # inside FastAPI's lifespan startup (app/main.py), which blocks
+        # uvicorn from accepting ANY connection -- including /health --
+        # until it returns. A slow load here meant a slow or, past
+        # mw-deploy's 180s health-check timeout, outright FAILED deploy,
+        # for a feature that degrades fine without its data for a few
+        # minutes (app/places_api.py's routes just return no markers
+        # until the load finishes -- nothing crashes on an empty
+        # `place` table). Runs against its own fresh connection, not the
+        # `conn` this function is using: sqlite3 connections are not
+        # safe to hand to another thread while this one keeps using
+        # them, and `connect()` is already how every other request-
+        # serving codepath gets its own (see that function's docstring,
+        # "each coroutine should grab its own"). A failure here must
+        # not take the whole app down --
         # the place tables just stay empty (or stale) and the places
         # feature quietly has no data, logged loudly, rather than the
-        # server failing to boot over a reference-data problem.
-        try:
+        # server failing to boot (or, now, failing to ever finish this
+        # background load) over a reference-data problem.
+        def _load_places_seed_background() -> None:
             from .places_seed import load_places_seed
-            load_places_seed(conn)
-        except Exception:
-            log.exception("places_seed: load failed -- places feature will have no/stale data")
+            seed_conn = connect()
+            try:
+                load_places_seed(seed_conn)
+            except Exception:
+                log.exception("places_seed: background load failed -- places feature will have no/stale data")
+            finally:
+                seed_conn.close()
+
+        threading.Thread(
+            target=_load_places_seed_background, name="places-seed-load", daemon=True
+        ).start()
 
         # Net check-ins (app/checkin.py): one-time bootstrap of
         # checkin_net/checkin_config from settings.py, so a database that

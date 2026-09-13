@@ -1671,6 +1671,7 @@ const MC_COUNTER_LABELS = [
   ['bad_coord', 'Bad coordinates'],
   ['no_contact', 'No contact key'],
   ['wrong_owner', 'Wrong owner'],
+  ['unknown_type', 'Unknown ping type'],
   ['batches', 'Batches'],
 ];
 
