@@ -7,6 +7,10 @@ status: deployed to production (CT 119) since commit 90a0ea2 — schema, seed, r
 
 What follows is the design conversation written down so it does not have to be had again, plus what the build actually does where that differs from the plan.
 
+![Yosemite's boundary on the board, summits as triangles and landmarks as stars](../img/places-park-boundary.png)
+
+*What it looks like in production: a park stored as its real boundary rather than a window around one point, so it credits from any entrance.*
+
 ## The idea
 
 Every square is currently worth the same; the map is graph paper with no features. Named places — summits, parks, landmarks — are destinations worth more than the cell they sit in. None of the lists need inventing: Summits on the Air and Parks on the Air are curated ham-radio programmes, and landmarks come from OpenStreetMap.

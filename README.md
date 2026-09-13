@@ -4,7 +4,7 @@
 
 A territory control game played over mesh radio. Seven teams claim roughly 300 meter squares of ground by reaching the mesh from them.
 
-![MeshCore board](docs/img/map.png)
+![The MeshCore board across southern Idaho — team-coloured squares trace the roads players have driven, over shaded terrain](docs/img/map.png)
 
 ## What it is
 
@@ -39,6 +39,14 @@ Effort decides the value. A park or landmark inside a city is worth 5; out in th
 **The board is worldwide.** It holds a little over two million places, drawn from [SOTA](https://sotadata.org.uk) summits, [POTA](https://pota.app) parks, the US government's PAD-US protected-areas database, and OpenStreetMap. Coverage follows OpenStreetMap's own mapping density rather than anything MeshWars decides, so it is dense across Europe, Japan and North America and thin where OSM itself is thin.
 
 Nowhere shows all of them at once. Places rotate weekly, and how many are live in an area scales with how crowded it is — from 15 in a quiet cell up to 60 in a dense city, spaced at least a mile apart. A player sees a handful worth driving to, not a wall of markers.
+
+![Yosemite's real boundary crossing the map, with summits marked as triangles and landmarks as stars](docs/img/places-park-boundary.png)
+
+*A park is stored as its real boundary, so it credits from any of its entrances — Tioga Pass, Hetch Hetchy and the valley floor are 40 to 60 km apart and all count as Yosemite. Triangles are summits, stars are landmarks.*
+
+![Munich, with German park boundaries and place markers](docs/img/places-worldwide.png)
+
+*The same board in Munich. Coverage outside the US comes from OpenStreetMap, so it is dense wherever OSM itself is dense.*
 
 ## Net check-ins
 
