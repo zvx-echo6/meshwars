@@ -86,6 +86,10 @@ From there an operator can revoke a key, disable or delete a player, and add or 
 
 The MeshCore board is live, out of beta, and played by over a hundred registered players across several mesh communities. The Meshtastic board now runs the same player model and grid, differing only in how position reaches it: pulled from a public meshview instance and scored only for registered nodes. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
 
+![The board across east Idaho — green and yellow tracing the Snake River plain around Idaho Falls](docs/img/board-east-idaho.png)
+
+*The same game in east Idaho, where it started. Each community's board looks different because it is shaped by wherever people actually drive.*
+
 ![About page](docs/img/about.png)
 
 ## Quick start
