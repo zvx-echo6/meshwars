@@ -1,10 +1,10 @@
-**About this project.** MeshWars was built with [Claude](https://claude.ai). The game is inspired by [MeshMapper](https://meshmapper.net) — the board is deliberately aligned to MeshMapper's own wardriving grid, so a square here and a square there describe the same ground — and by [FREQ51](https://freq51.net) and [Mountain West Mesh](https://mwmesh.com), where it's played.
+**About this project.** MeshWars was built with [Claude](https://claude.ai). The game is inspired by [MeshMapper](https://meshmapper.net) — the board is deliberately aligned to MeshMapper's own wardriving grid, so a square here and a square there describe the same ground — and by the communities where it's played: [FREQ51](https://freq51.net), [Mountain West Mesh](https://mwmesh.com), [Colorado Mesh](https://coloradomesh.org), and Central Oregon MeshCore.
 
 # MeshWars
 
 A territory control game played over mesh radio. Seven teams claim roughly 300 meter squares of ground by reaching the mesh from them.
 
-![The MeshCore board across southern Idaho — team-coloured squares trace the roads players have driven, over shaded terrain](docs/img/map.png)
+![The MeshCore board over the Denver metro — six teams contesting the ground square by square, with places scattered across it](docs/img/map.png)
 
 ## What it is
 
@@ -78,17 +78,13 @@ There is an opt-in raw batch log for diagnosing MeshMapper's payloads while tuni
 
 ## Operating it
 
-The CT 113 preview instance (mesh-territory-preview, on the utility host) is deployed with `/usr/local/bin/mw-deploy` -- the only supported way to deploy it. It fetches, hard-resets to the requested ref (default `origin/feat/places`), rebuilds, recreates the container, waits for `/health`, and verifies the deployed commit matches what was requested, failing loudly on any mismatch. Do not run git commands directly against this checkout via `pct exec` as root: the repo runs as the `zvx` user, and root-written git objects leave `zvx` unable to write to `.git/objects` on the next fetch -- a past incident that silently left the preview several commits behind while reporting success. `mw-deploy` drops to `zvx` for every git and docker operation regardless of who invokes it, which is what makes it safe to run as root via `pct exec 113 -- mw-deploy`.
-
-Production, meshwars.com, is CT 119 on the same host, at the same `/home/zvx/meshwars` path, and carries the same `/usr/local/bin/mw-deploy` (run via `pct exec 119 -- mw-deploy`). The script is not identical: it defaults to `origin/main` rather than `origin/feat/places`, since production tracks main and the preview's default would otherwise ship an in-progress feature branch to the live site. It also refuses to deploy any ref that is not an ancestor of `origin/main` -- a stray or mistyped ref argument can no longer put unmerged work on the live site -- unless `--allow-non-main` is passed explicitly for an intentional hotfix-branch deploy. `--dry-run` resolves the ref and runs every pre-flight check (dirty tree, ref resolution, ancestor-of-main, file ownership) and reports what would happen without touching the working tree, image, or container; worth running before any production deploy that isn't routine. The `/health` poll timeout is 180s on both instances. It used to be sized against production's cold-start load of the places seed, back when that ran synchronously at startup and the seed was 74,397 rows; the seed is now over two million rows and takes roughly an hour to load on production's hardware, which no health timeout could ever have covered. The load was moved to a background thread instead, so `/health` answers within a second of boot regardless, and the deploy no longer races it. A restart skips the load entirely whenever the seed file's content hash is unchanged, which is every ordinary deploy -- the full load only runs when the seed itself is replaced, and while it runs the database is under a long write transaction, so expect reads to be slow and writes to fail for its duration. Plan a seed swap for a quiet hour.
-
 Configuration lives in `.env`. It runs as a single Docker container via `docker compose`, backed by SQLite — no external services required. An administrative interface exists at `/admin`; it is disabled entirely unless `ADMIN_TOKEN` is explicitly configured, since that token is the only authentication this application has anywhere.
 
 From there an operator can revoke a key, disable or delete a player, and add or remove a player's radios directly — fixing someone's setup never requires their key at all. A key is a SHA-256 hash in storage; the raw value is shown exactly once, at issuance, and is never recoverable after that, by anyone, including an admin. There are two separate remedies for that, not one, because "I lost my key" and "someone else has my key" call for opposite responses: issuing an *additional* key leaves every existing key working, for a player who just mislaid theirs and whose MeshMapper config should keep running untouched; reissuing revokes every key the player currently holds and replaces them with one new one, for a key that actually leaked, at the cost of breaking that player's setup until they reconfigure it with the new key.
 
 ## Project status
 
-The MeshCore board is live and in beta with real players. The Meshtastic board now runs the same player model and grid, differing only in how position reaches it: pulled from a public meshview instance and scored only for registered nodes. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
+The MeshCore board is live, out of beta, and played by over a hundred registered players across several mesh communities. The Meshtastic board now runs the same player model and grid, differing only in how position reaches it: pulled from a public meshview instance and scored only for registered nodes. There is no automated test suite. The map currently sends the full board to every client on every load, which will not scale as the number of squares grows.
 
 ![About page](docs/img/about.png)
 

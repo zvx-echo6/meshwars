@@ -1035,7 +1035,7 @@ def load_places_seed(conn: sqlite3.Connection) -> dict:
     # Fingerprint is a sha256 CONTENT hash (2026-09-07), not size+mtime.
     # size+mtime looked cheap when this file was 9MB and seemed like the
     # obviously right choice at the time, but it silently broke the one
-    # thing it exists for: CT 113 (and every other host) deploys by
+    # thing it exists for: a deploy host typically updates itself by
     # `git reset --hard`, which stamps a FRESH mtime on every tracked
     # file on every deploy regardless of whether its bytes moved. That
     # made "unchanged since last load" false on every single deploy, not

@@ -1,6 +1,6 @@
 ---
 title: Places Worth Going
-status: deployed to production (CT 119) since commit 90a0ea2 — schema, seed, rotation, scoring, API, map markers and panel, admin preview all live
+status: deployed to production since commit 90a0ea2 — schema, seed, rotation, scoring, API, map markers and panel, admin preview all live
 ---
 
 # Places Worth Going
