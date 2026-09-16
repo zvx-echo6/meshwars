@@ -2199,6 +2199,60 @@ CREATE TABLE IF NOT EXISTS discord_outbox (
     last_error  TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_discord_outbox_key ON discord_outbox(kind, key);
+
+-- Singleton, same upsert-by-fixed-id shape as `checkin_config` and
+-- `freqmapper_config` above -- read FRESH by app/discord_notify.py's
+-- load_discord_config() every time it is needed (enqueue(), the drain
+-- loop, build_month_honors_embed()), never cached in the process, so an
+-- admin edit through app/admin_ops.py's /api/admin/discord takes effect
+-- on the very next freeze or drain cycle, no restart. Before this table
+-- existed, every one of these five values lived only in settings.py
+-- (DISCORD_WEBHOOK_ANNOUNCEMENTS, DISCORD_WEBHOOK_USERNAME,
+-- DISCORD_TEAM_EMOJI) and changing any of them meant editing .env and
+-- redeploying -- the owner's "build everything editable, no black
+-- boxes" rule this table exists to satisfy.
+-- seed_discord_config_from_env (app/discord_notify.py, called from
+-- init_db() below) bootstraps webhook_url/username/team_emoji from
+-- those same settings.py values the first time this row is ever
+-- touched, the exact same guarded-by-updated_at pattern
+-- app/checkin.py's seed_nets_from_env and
+-- app/freqmapper_ingest.py's seed_freqmapper_config_from_env already
+-- use for their own singletons, so deploying this table changes NO
+-- behavior for a deployment that already had a webhook configured via
+-- .env: `enabled` is seeded to 1 whenever that seed finds a non-empty
+-- webhook (settings.py itself never had a separate enabled/disabled
+-- toggle -- "a webhook is configured" WAS the on/off switch, so the
+-- seed reconstructs the same on/off state as a real column instead of
+-- silently defaulting to off underneath an already-live deployment).
+-- webhook_url is a SECRET (see freqmapper_config's own comment on
+-- api_key for the general rule this follows -- a Discord webhook URL
+-- carries its own bearer auth token in the path): never returned by any
+-- route, only a webhook_set boolean plus a last-4-characters hint
+-- (app/admin_ops.py's _scrub_discord_secrets). An ABSENT or blank
+-- webhook_url in a POST /api/admin/discord body leaves the stored value
+-- UNCHANGED rather than wiping it -- the exact same api_key-vs-
+-- clear_api_key contract app/admin_ops.py's POST /api/admin/paint
+-- already applies to freqmapper_config.api_key (see that route's own
+-- docstring); clear_webhook is the explicit way to actually blank it.
+-- announce_month_honors is a SEPARATE toggle from `enabled`, checked
+-- only for the automatic end-of-month announcement
+-- (app/discord_notify.py's enqueue(), kind="month_honors"): an operator
+-- can leave the webhook enabled -- so a manual test announcement
+-- (kind="test", from POST /api/admin/discord/test) still goes out --
+-- while turning off the automatic monthly post on its own. Defaults to
+-- 1 (on): this reproduces exactly the always-on behavior every
+-- deployment already had before this toggle existed, the same
+-- "deploying this changes nothing" contract every other seeded default
+-- in this table follows.
+CREATE TABLE IF NOT EXISTS discord_config (
+    id                    INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled               INTEGER NOT NULL DEFAULT 0,
+    webhook_url           TEXT NOT NULL DEFAULT '',
+    username              TEXT NOT NULL DEFAULT '',
+    team_emoji            TEXT NOT NULL DEFAULT '',
+    announce_month_honors INTEGER NOT NULL DEFAULT 1,
+    updated_at            INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -2720,6 +2774,18 @@ MIGRATIONS = [
     # historical rows are ever NULL going forward.
     "ALTER TABLE mc_checkin_award ADD COLUMN net_id INTEGER",
     "CREATE INDEX IF NOT EXISTS idx_mc_checkin_award_net ON mc_checkin_award(net_id, player_id, net_date)",
+    # Seed the discord_config singleton with the defaults every fresh
+    # column above already carries, so the row exists unconditionally
+    # from the first boot after this migration runs -- same reasoning as
+    # checkin_config's and freqmapper_config's own "INSERT OR
+    # IGNORE...VALUES (1)" migrations above: app/discord_notify.py's
+    # load_discord_config() and app/admin_ops.py's discord routes both
+    # assume it is always there. INSERT OR IGNORE:
+    # seed_discord_config_from_env() (called from init_db() below) is
+    # what actually populates webhook_url/username/team_emoji from
+    # settings.py on a truly fresh install; this migration only has to
+    # guarantee the row EXISTS, not what it holds.
+    "INSERT OR IGNORE INTO discord_config(id) VALUES (1)",
 ]
 
 PRAGMAS = [
@@ -3072,6 +3138,21 @@ def init_db() -> None:
             seed_freqmapper_config_from_env(conn)
         except Exception:
             log.exception("freqmapper: seed_freqmapper_config_from_env failed -- config may be unseeded")
+
+        # Discord announcements (app/discord_notify.py): the same
+        # one-time bootstrap shape as seed_freqmapper_config_from_env
+        # just above, migrating settings.py's discord_webhook_*/
+        # discord_team_emoji values onto the discord_config singleton so
+        # an operator can edit them through app/admin_ops.py's
+        # /api/admin/discord without a restart or an env-var edit. Local
+        # import, same circular-import reason as freqmapper_ingest.py's
+        # own import just above (discord_notify.py imports WriteSession
+        # from this module).
+        try:
+            from .discord_notify import seed_discord_config_from_env
+            seed_discord_config_from_env(conn)
+        except Exception:
+            log.exception("discord: seed_discord_config_from_env failed -- config may be unseeded")
     finally:
         conn.close()
 

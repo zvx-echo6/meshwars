@@ -26,7 +26,7 @@
        admin.css (admin.css's own layout now shifts down by nav.css's
        --mw-nav-h). -->
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260913-1" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260916-1" />
 </head>
 <body>
 
@@ -129,6 +129,7 @@
           <button type="button" class="adm-nav-item" data-section="months">Months</button>
           <button type="button" class="adm-nav-item" data-section="places">Places</button>
           <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
+          <button type="button" class="adm-nav-item" data-section="discord">Discord</button>
           <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
         </nav>
 
@@ -440,6 +441,39 @@
           <div id="nt-result" class="adm-result"></div>
         </section>
 
+        <section class="adm-section" data-section="discord" hidden>
+          <h2 class="adm-h2">Discord</h2>
+          <details class="adm-about">
+            <summary>About Discord announcements</summary>
+            <p class="adm-hint">Posts end-of-month honors -- and, on request, a one-off test message -- to a Discord channel via a webhook. The webhook URL is a secret and is never shown here once saved; leave it blank when saving other fields to keep the one already configured. "Announce month honors" only gates the automatic end-of-month post -- it can be turned off while leaving the webhook enabled, so the test button below still works.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-check-label"><input type="checkbox" id="dc-month-honors" class="adm-check" /> Announce month honors</label>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label adm-field-label-wide">Webhook URL
+              <input type="password" id="dc-webhook-url" autocomplete="off" placeholder="leave blank to keep current" />
+            </label>
+            <label class="adm-check-label"><input type="checkbox" id="dc-clear-webhook" class="adm-check" /> Clear</label>
+            <span class="adm-hint" id="dc-webhook-hint"></span>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Username<input type="text" id="dc-username" autocomplete="off" placeholder="MeshWars" /></label>
+            <label class="adm-field-label adm-field-label-wide">Team emoji<input type="text" id="dc-team-emoji" autocomplete="off" placeholder="RED=<:mw_red:123456789>,GREEN=<:mw_green:987654321>" /></label>
+          </div>
+          <p class="adm-hint">Team emoji: comma-separated TEAM=token entries, one per team, using exactly the token Discord itself echoes back for a custom emoji (e.g. &lt;:mw_red:123456789&gt;). A team left out of this list renders with no dot, exactly as if none were configured.</p>
+          <div class="adm-form">
+            <button type="button" id="dc-save" class="adm-btn">Save</button>
+            <button type="button" id="dc-test" class="adm-btn adm-btn-quiet">Send test announcement</button>
+          </div>
+          <div id="dc-result" class="adm-result"></div>
+
+          <h3 class="adm-h3">Outbox health</h3>
+          <div id="dc-outbox-summary"></div>
+          <div id="dc-outbox"></div>
+        </section>
+
         <section class="adm-section" data-section="keys" hidden>
           <h2 class="adm-h2">API keys</h2>
           <details class="adm-about">
@@ -459,7 +493,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260913-1"></script>
+  <script src="/static/admin.js?v=20260916-1"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

@@ -1,0 +1,477 @@
+"""Tests for the admin-editable Discord announcement config surface:
+app/admin_ops.py's GET/POST /api/admin/discord, POST
+/api/admin/discord/test, POST /api/admin/discord/outbox/retry, and the
+supporting pieces in app/discord_notify.py (load_discord_config(),
+seed_discord_config_from_env(), announcements_enabled()) that make the
+whole thing DB-backed rather than settings.py-only.
+
+Same "FastAPI-around-one-router, TestClient, session cookie via
+app/sessions.create_session" shape tests/test_paint_source_both.py's
+own POST /api/admin/paint tests use (group D there) -- a real
+file-backed sqlite database, since app/admin_ops.py's routes go through
+app/db.py's connect()/WriteSession, a fresh connection per call, so
+":memory:" would not share data between them.
+"""
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+import time
+
+import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+
+import app.db as db
+from app import discord_notify
+from app.admin_ops import router as admin_router
+from app.auth import http_exception_as_error_body
+from app.config import settings
+from app.db import MIGRATIONS, SCHEMA
+from app.sessions import SESSION_COOKIE_NAME, create_session
+
+NOW = int(time.time())
+_TEST_WEBHOOK = "https://discord.test/api/webhooks/999/supersecrettoken"
+
+
+def _init_schema(conn_or_path) -> None:
+    """Applies SCHEMA + MIGRATIONS -- accepts either a path (opens its
+    own connection) or an already-open connection, matching the two
+    shapes this file needs it for (a real db_path fixture, and the
+    in-memory seed tests below)."""
+    owns_conn = isinstance(conn_or_path, str)
+    conn = sqlite3.connect(conn_or_path) if owns_conn else conn_or_path
+    conn.executescript(SCHEMA)
+    for stmt in MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                continue
+            raise
+    conn.commit()
+    if owns_conn:
+        conn.close()
+
+
+@pytest.fixture
+def db_path(tmp_path, monkeypatch):
+    path = str(tmp_path / "game.db")
+    _init_schema(path)
+    monkeypatch.setattr(db.settings, "db_path", path)
+    return path
+
+
+def _make_account(db_path, *, role: str | None = "admin", with_totp: bool = True) -> int:
+    """A real account row, optionally holding `role` and an ACTIVATED
+    TOTP secret -- app/admin_api.py's _role_guard() requires both an
+    admin/operator role AND an activated TOTP row to use any
+    /api/admin/* route at all (see that function's own docstring); a
+    dummy secret is fine, nothing here decrypts it, same pattern
+    tests/test_paint_source_both.py's own _make_admin_client uses.
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute("INSERT INTO account(created_at, role) VALUES (?, ?)", (NOW, role))
+    account_id = cur.lastrowid
+    if with_totp:
+        conn.execute(
+            "INSERT INTO account_totp(account_id, secret_encrypted, created_at, activated_at) "
+            "VALUES (?, 'unused', ?, ?)",
+            (account_id, NOW, NOW),
+        )
+    conn.commit()
+    conn.close()
+    return account_id
+
+
+def _client_for(account_id: int | None) -> TestClient:
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.add_exception_handler(HTTPException, http_exception_as_error_body)
+    client = TestClient(app)
+    if account_id is not None:
+        raw_token = asyncio.run(create_session(account_id, device_label=None))
+        client.cookies.set(SESSION_COOKIE_NAME, raw_token)
+    return client
+
+
+def _configure_discord(db_path, **overrides) -> None:
+    """Writes straight to discord_config -- the DB IS the config now,
+    same as tests/test_paint_source_both.py's _set_paint_source() for
+    freqmapper_config."""
+    cfg = {
+        "enabled": 1,
+        "webhook_url": _TEST_WEBHOOK,
+        "username": "",
+        "team_emoji": "",
+        "announce_month_honors": 1,
+    }
+    cfg.update(overrides)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE discord_config SET enabled = :enabled, webhook_url = :webhook_url, "
+        " username = :username, team_emoji = :team_emoji, "
+        " announce_month_honors = :announce_month_honors WHERE id = 1",
+        cfg,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _discord_row(db_path) -> sqlite3.Row:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM discord_config WHERE id = 1").fetchone()
+    conn.close()
+    return row
+
+
+# ---- GET /api/admin/discord never returns the webhook URL ---------------
+
+
+def test_get_discord_never_returns_webhook_url(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "webhook_url" not in body["config"]
+    assert "supersecrettoken" not in resp.text
+    assert body["config"]["webhook_set"] is True
+    # Last 4 characters only -- enough to recognize, never enough to use.
+    assert body["config"]["webhook_hint"] == "oken"
+
+
+def test_get_discord_reports_webhook_not_set_when_blank(db_path):
+    account_id = _make_account(db_path)
+    # discord_config's own bare column defaults -- webhook_url = ''.
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    assert resp.json()["config"]["webhook_set"] is False
+    assert resp.json()["config"]["webhook_hint"] == ""
+
+
+def test_get_discord_reports_outbox_health(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO discord_outbox(kind, key, payload, created_at, posted_at) "
+        "VALUES ('month_honors', '2026-08:mc', '{}', ?, ?)", (NOW, NOW),
+    )
+    conn.execute(
+        "INSERT INTO discord_outbox(kind, key, payload, created_at, attempts, last_error) "
+        "VALUES ('month_honors', '2026-07:mc', '{}', ?, 2, 'HTTP 500')", (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    outbox = resp.json()["outbox"]
+    assert outbox["posted"] == 1
+    assert outbox["pending"] == 1
+    assert outbox["failed"] == 1
+    assert len(outbox["recent"]) == 2
+    failed_row = next(r for r in outbox["recent"] if r["key"] == "2026-07:mc")
+    assert failed_row["last_error"] == "HTTP 500"
+
+
+# ---- POST leaves the stored webhook unchanged unless told otherwise -----
+
+
+def test_post_discord_without_webhook_url_key_leaves_stored_value_unchanged(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path, webhook_url="https://discord.test/api/webhooks/1/original")
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "NewName", "team_emoji": "",
+        "announce_month_honors": True,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["webhook_set"] is True
+    assert _discord_row(db_path)["webhook_url"] == "https://discord.test/api/webhooks/1/original"
+    assert _discord_row(db_path)["username"] == "NewName"
+
+
+def test_post_discord_with_empty_string_webhook_url_leaves_stored_value_unchanged(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path, webhook_url="https://discord.test/api/webhooks/1/original")
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "webhook_url": "", "username": "", "team_emoji": "",
+        "announce_month_honors": True,
+    })
+    assert resp.status_code == 200, resp.text
+    assert _discord_row(db_path)["webhook_url"] == "https://discord.test/api/webhooks/1/original"
+
+
+def test_post_discord_with_new_webhook_url_replaces_stored_value(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path, webhook_url="https://discord.test/api/webhooks/1/original")
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "webhook_url": "https://discord.test/api/webhooks/1/replaced",
+        "username": "", "team_emoji": "", "announce_month_honors": True,
+    })
+    assert resp.status_code == 200, resp.text
+    assert _discord_row(db_path)["webhook_url"] == "https://discord.test/api/webhooks/1/replaced"
+
+
+def test_post_discord_clear_webhook_true_clears_it(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "",
+        "announce_month_honors": True, "clear_webhook": True,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["webhook_set"] is False
+    assert _discord_row(db_path)["webhook_url"] == ""
+
+
+def test_post_discord_round_trips_other_fields(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": False, "username": "MyBot",
+        "team_emoji": "RED=<:mw_red:1>", "announce_month_honors": False,
+    })
+    assert resp.status_code == 200, resp.text
+    cfg = resp.json()["config"]
+    assert cfg["enabled"] is False
+    assert cfg["username"] == "MyBot"
+    assert cfg["team_emoji"] == "RED=<:mw_red:1>"
+    assert cfg["announce_month_honors"] is False
+
+
+# ---- announcements_enabled: both gates required --------------------------
+
+
+def test_announcements_enabled_false_when_disabled_even_with_webhook_set():
+    assert discord_notify.announcements_enabled(
+        {"enabled": False, "webhook_url": _TEST_WEBHOOK}
+    ) is False
+
+
+def test_announcements_enabled_false_when_enabled_but_webhook_empty():
+    assert discord_notify.announcements_enabled(
+        {"enabled": True, "webhook_url": ""}
+    ) is False
+
+
+def test_announcements_enabled_true_when_both_set():
+    assert discord_notify.announcements_enabled(
+        {"enabled": True, "webhook_url": _TEST_WEBHOOK}
+    ) is True
+
+
+# ---- fresh install seeds discord_config from settings --------------------
+
+
+def test_seed_discord_config_from_env_seeds_fresh_row(monkeypatch):
+    monkeypatch.setattr(settings, "discord_webhook_announcements", _TEST_WEBHOOK)
+    monkeypatch.setattr(settings, "discord_webhook_username", "SeedBot")
+    monkeypatch.setattr(settings, "discord_team_emoji", "RED=<:mw_red:1>")
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _init_schema(conn)
+
+    discord_notify.seed_discord_config_from_env(conn)
+
+    row = conn.execute(
+        "SELECT enabled, webhook_url, username, team_emoji, updated_at "
+        "  FROM discord_config WHERE id = 1"
+    ).fetchone()
+    conn.close()
+    assert row["enabled"] == 1
+    assert row["webhook_url"] == _TEST_WEBHOOK
+    assert row["username"] == "SeedBot"
+    assert row["team_emoji"] == "RED=<:mw_red:1>"
+    assert row["updated_at"] != 0
+
+
+def test_seed_discord_config_from_env_disabled_when_no_webhook(monkeypatch):
+    monkeypatch.setattr(settings, "discord_webhook_announcements", "")
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _init_schema(conn)
+
+    discord_notify.seed_discord_config_from_env(conn)
+
+    row = conn.execute("SELECT enabled, webhook_url FROM discord_config WHERE id = 1").fetchone()
+    conn.close()
+    assert row["enabled"] == 0
+    assert row["webhook_url"] == ""
+
+
+def test_seed_discord_config_from_env_never_reseeds_after_an_edit(monkeypatch):
+    """Once updated_at is non-zero (an operator has saved through
+    POST /api/admin/discord, or a previous boot already seeded it), a
+    later boot must never silently overwrite that edit."""
+    monkeypatch.setattr(settings, "discord_webhook_announcements", _TEST_WEBHOOK)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _init_schema(conn)
+    conn.execute(
+        "UPDATE discord_config SET webhook_url = 'https://operator.example/hook', "
+        " updated_at = 12345 WHERE id = 1"
+    )
+
+    discord_notify.seed_discord_config_from_env(conn)
+
+    row = conn.execute("SELECT webhook_url, updated_at FROM discord_config WHERE id = 1").fetchone()
+    conn.close()
+    assert row["webhook_url"] == "https://operator.example/hook"
+    assert row["updated_at"] == 12345
+
+
+# ---- POST /api/admin/discord/test ----------------------------------------
+
+
+def test_post_discord_test_enqueues_row(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord/test", json={})
+    assert resp.status_code == 200, resp.text
+    key = resp.json()["key"]
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT key FROM discord_outbox WHERE kind = 'test'").fetchall()
+    conn.close()
+    assert [r[0] for r in rows] == [key]
+
+
+def test_post_discord_test_twice_enqueues_two_separate_rows(db_path):
+    """Each call must get its own unique key -- discord_outbox's
+    UNIQUE(kind, key) exactly-once index must never suppress a second,
+    deliberate test click as if it were a duplicate freeze."""
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp1 = client.post("/api/admin/discord/test", json={})
+    resp2 = client.post("/api/admin/discord/test", json={})
+    assert resp1.status_code == 200, resp1.text
+    assert resp2.status_code == 200, resp2.text
+    key1, key2 = resp1.json()["key"], resp2.json()["key"]
+    assert key1 != key2
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT key FROM discord_outbox WHERE kind = 'test'").fetchall()
+    conn.close()
+    assert sorted(r[0] for r in rows) == sorted([key1, key2])
+
+
+def test_post_discord_test_refuses_when_not_enabled(db_path):
+    account_id = _make_account(db_path)
+    # discord_config's own bare defaults -- enabled=0, webhook_url=''.
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord/test", json={})
+    assert resp.status_code == 400
+    conn = sqlite3.connect(db_path)
+    count = conn.execute("SELECT count(*) FROM discord_outbox").fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+# ---- POST /api/admin/discord/outbox/retry --------------------------------
+
+
+def test_post_discord_outbox_retry_resets_attempts_and_error(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute(
+        "INSERT INTO discord_outbox(kind, key, payload, created_at, attempts, last_error) "
+        "VALUES ('month_honors', '2026-08:mc', '{}', ?, 3, 'HTTP 500: boom')", (NOW,),
+    )
+    row_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord/outbox/retry", json={"id": row_id})
+    assert resp.status_code == 200, resp.text
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT attempts, last_error, posted_at FROM discord_outbox WHERE id = ?", (row_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == 0
+    assert row[1] is None
+    assert row[2] is None
+
+
+def test_post_discord_outbox_retry_unknown_id_404s(db_path):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/outbox/retry", json={"id": 999999})
+    assert resp.status_code == 404
+
+
+# ---- both routes require the admin role -----------------------------------
+
+
+def test_get_discord_requires_role_unauthenticated(db_path):
+    # An admin account exists (so _admin_surface_enabled() is true and
+    # the guard's own 404-vs-401 distinction resolves to 401), but this
+    # client sends no session cookie at all.
+    _make_account(db_path)
+    client = _client_for(None)
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+
+
+def test_post_discord_requires_role_unauthenticated(db_path):
+    _make_account(db_path)
+    client = _client_for(None)
+    resp = client.post("/api/admin/discord", json={"enabled": True})
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+
+
+def test_get_discord_requires_role_signed_in_but_no_role(db_path):
+    # An admin account has to exist SOMEWHERE for _admin_surface_enabled()
+    # to consider the surface reachable at all (otherwise every route
+    # 404s regardless of role, proven separately by
+    # test_admin_ops_checkin.py) -- this test's own account, signed in
+    # below, simply holds no role, the same rejection every other
+    # /api/admin/* route gives that case (see app/admin_api.py's
+    # _role_guard() docstring: never distinguishable from "no session
+    # at all").
+    _make_account(db_path, role="admin")
+    account_id = _make_account(db_path, role=None, with_totp=False)
+    client = _client_for(account_id)
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+
+
+def test_post_discord_test_requires_role_signed_in_but_no_role(db_path):
+    _make_account(db_path, role="admin")
+    account_id = _make_account(db_path, role=None, with_totp=False)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/test", json={})
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}

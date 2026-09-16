@@ -22,13 +22,25 @@ path -- anyone holding it can post to the channel as this app, no
 further authentication), the same "a secret, never returned or logged"
 treatment app/config.py already gives freqmapper_api_key and
 admin_token. _post() below is the one place that ever touches the
-setting's value. A timeout or transport failure raises a short, fixed
-message naming the failure kind, never the request or its URL, because
-httpx's own exception text embeds the request (and so the URL) --
-but a non-2xx HTTP response is a different case: the RESPONSE body is
-Discord describing what was wrong with the payload it received, not a
+value. A timeout or transport failure raises a short, fixed message
+naming the failure kind, never the request or its URL, because httpx's
+own exception text embeds the request (and so the URL) -- but a non-2xx
+HTTP response is a different case: the RESPONSE body is Discord
+describing what was wrong with the payload it received, not a
 credential, so a snippet of it is included to make a bad announcement
 diagnosable. See _post()'s own docstring for the line between the two.
+
+Configuration (enabled, webhook_url, username, team_emoji,
+announce_month_honors) lives in the DB, not settings.py directly --
+app/db.py's discord_config singleton, read fresh by
+load_discord_config() below every time it is needed, the same
+DB-backed, admin-editable runtime config app/freqmapper_ingest.py's
+load_freqmapper_config() already established for the FreqMapper
+connector. settings.discord_webhook_announcements/
+discord_webhook_username/discord_team_emoji remain the SEED
+(seed_discord_config_from_env() below, called once from app/db.py's
+init_db()) and the documented bootstrap path for a brand-new
+deployment; once seeded, this module never reads them again.
 """
 from __future__ import annotations
 
@@ -242,15 +254,112 @@ def _total_embed_chars(embeds: list) -> int:
     return total
 
 
-def announcements_enabled() -> bool:
-    """True only when a webhook URL is configured -- mirrors
-    app/oauth.py's provider_enabled(): empty means off, never open, so
-    a fresh install with nothing configured never accumulates an outbox
-    backlog (enqueue() below is a no-op while this is False) and
-    run_forever()'s loop does nothing each cycle rather than trying to
-    post to an empty string.
+def load_discord_config(conn) -> dict:
+    """Fresh, uncached read of the discord_config singleton (app/db.py)
+    -- enabled, webhook_url, username, team_emoji, announce_month_honors,
+    updated_at. Read on every enqueue() call, every drain cycle
+    (_drain_once()), by build_month_honors_embed(), and by every admin
+    route that needs the current values (app/admin_ops.py) -- never
+    cached anywhere in the process. Exactly the pattern
+    app/freqmapper_ingest.py's load_freqmapper_config() uses for
+    freqmapper_config, for the same reason: an admin edit through
+    /api/admin/discord must take effect on the very next freeze or
+    drain cycle, not after a restart.
+
+    Falls back to config.py's original settings if the row is somehow
+    missing (a database whose migrations have not run yet) rather than
+    raising -- defensive, since app/db.py's MIGRATIONS seeds this row
+    unconditionally and it should always be there in practice, but a
+    freeze or drain cycle failing outright over a missing config row
+    would be a worse failure mode than briefly falling back to the
+    settings this row was itself seeded from. `enabled` in that
+    fallback mirrors seed_discord_config_from_env()'s own reasoning: a
+    webhook being configured at all WAS the on/off switch before this
+    table existed, so the fallback reconstructs the same state a real
+    column would hold.
     """
-    return bool(settings.discord_webhook_announcements)
+    row = conn.execute(
+        "SELECT enabled, webhook_url, username, team_emoji, "
+        "       announce_month_honors, updated_at "
+        "  FROM discord_config WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return {
+            "enabled": bool(settings.discord_webhook_announcements),
+            "webhook_url": settings.discord_webhook_announcements,
+            "username": settings.discord_webhook_username,
+            "team_emoji": settings.discord_team_emoji,
+            "announce_month_honors": True,
+            "updated_at": 0,
+        }
+    d = dict(row)
+    d["enabled"] = bool(d["enabled"])
+    d["announce_month_honors"] = bool(d["announce_month_honors"])
+    return d
+
+
+def seed_discord_config_from_env(conn) -> None:
+    """One-time bootstrap, called from app/db.py's init_db() on every
+    startup: populates the discord_config singleton with exactly what
+    settings.py already describes, the same guarded-by-updated_at
+    pattern app/freqmapper_ingest.py's seed_freqmapper_config_from_env
+    uses for freqmapper_config (see that function's own docstring for
+    the full reasoning). Only fires while updated_at is still 0 --
+    app/db.py's MIGRATIONS already guarantees the row exists (bare
+    column defaults) by the time this ever runs, so this is an UPDATE,
+    not an INSERT, and an operator's later edit through
+    /api/admin/discord (which always sets updated_at to the current
+    time) can never be silently overwritten by a later boot.
+
+    `enabled` is seeded to whether a webhook is configured at all, not
+    copied from any settings.py flag -- there never was one. A
+    non-empty DISCORD_WEBHOOK_ANNOUNCEMENTS was itself the on/off switch
+    before this table existed (see announcements_enabled() below), so
+    this is what makes deploying this table change NO behavior for an
+    already-live deployment: same webhook, same "is it actually on"
+    answer, just moved from env-var-and-restart to database-and-admin-
+    API. announce_month_honors is left untouched (the CREATE TABLE
+    default of 1 already reproduces the always-on behavior that existed
+    before this toggle did -- see discord_config's own comment in
+    app/db.py).
+    """
+    row = conn.execute("SELECT updated_at FROM discord_config WHERE id = 1").fetchone()
+    if row is None or row["updated_at"] != 0:
+        return
+    webhook_url = settings.discord_webhook_announcements
+    conn.execute(
+        "UPDATE discord_config SET enabled = ?, webhook_url = ?, username = ?, "
+        " team_emoji = ?, updated_at = ? WHERE id = 1",
+        (
+            int(bool(webhook_url)),
+            webhook_url,
+            settings.discord_webhook_username,
+            settings.discord_team_emoji,
+            int(time.time()),
+        ),
+    )
+    log.info("discord: seeded config from settings (enabled=%s)", bool(webhook_url))
+
+
+def announcements_enabled(cfg: dict) -> bool:
+    """True only when the config's own `enabled` flag is set AND a
+    webhook URL is configured -- both gates, not either alone: an
+    operator can flip `enabled` off without touching the stored
+    webhook (a quick "pause" that leaves the secret in place for later),
+    and a blank webhook_url must never read as "on" no matter what
+    `enabled` says. Mirrors app/oauth.py's provider_enabled(): empty
+    means off, never open, so a fresh install with nothing configured
+    never accumulates an outbox backlog (enqueue() below is a no-op
+    while this is False) and run_forever()'s loop does nothing each
+    cycle rather than trying to post to an empty string.
+
+    Takes an already-loaded config dict (load_discord_config()'s own
+    return shape) rather than a connection -- every caller here already
+    has one loaded for the current cycle (enqueue(), _drain_once()), so
+    this stays a pure, trivially-testable check rather than a second DB
+    read every time it is asked.
+    """
+    return bool(cfg.get("enabled")) and bool(cfg.get("webhook_url"))
 
 
 class DiscordSendError(Exception):
@@ -272,10 +381,13 @@ class DiscordSendError(Exception):
     """
 
 
-async def _post(payload: dict, *, http_client: httpx.AsyncClient | None = None) -> None:
-    """POST one already-built Discord message body to the configured
-    webhook. Raises DiscordSendError on a non-2xx response or any
-    transport failure; never returns anything on success.
+async def _post(url: str, payload: dict, *, http_client: httpx.AsyncClient | None = None) -> None:
+    """POST one already-built Discord message body to `url` -- the
+    configured webhook (discord_config.webhook_url, loaded fresh by the
+    caller; see _drain_once() below, which loads it once per drain cycle
+    rather than once per row). Raises DiscordSendError on a non-2xx
+    response or any transport failure; never returns anything on
+    success.
 
     `http_client` is accepted purely so tests can hand this an
     httpx.AsyncClient wired to an httpx.MockTransport (the same
@@ -285,7 +397,6 @@ async def _post(payload: dict, *, http_client: httpx.AsyncClient | None = None) 
     since a month freezes at most a handful of times a year and there
     is no benefit to keeping a pooled connection open between them.
     """
-    url = settings.discord_webhook_announcements
     client = http_client
     owns_client = client is None
     if owns_client:
@@ -326,9 +437,17 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> None:
     or connection.
 
     A no-op when announcements are disabled (announcements_enabled() is
-    False) -- a fresh or webhook-less install must never accumulate a
-    discord_outbox backlog it will never drain, only to dump all of it
-    the moment an operator finally configures a webhook months later.
+    False against the freshly loaded discord_config) -- a fresh or
+    webhook-less install must never accumulate a discord_outbox backlog
+    it will never drain, only to dump all of it the moment an operator
+    finally configures a webhook months later.
+
+    For kind="month_honors" specifically, also a no-op when
+    discord_config.announce_month_honors is off -- a SEPARATE gate from
+    `enabled`, so an operator can leave the webhook enabled (letting a
+    manual kind="test" announcement from POST /api/admin/discord/test
+    still go out) while turning off the automatic end-of-month post on
+    its own. No other kind is gated by it.
 
     INSERT OR IGNORE on discord_outbox's UNIQUE(kind, key) index is the
     exactly-once guarantee: a duplicate (kind, key) -- the admin
@@ -336,7 +455,10 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> None:
     month, most likely -- is silently dropped, never a second row and
     never a second post.
     """
-    if not announcements_enabled():
+    cfg = load_discord_config(conn)
+    if not announcements_enabled(cfg):
+        return
+    if kind == "month_honors" and not cfg["announce_month_honors"]:
         return
     conn.execute(
         "INSERT OR IGNORE INTO discord_outbox(kind, key, payload, created_at) VALUES (?, ?, ?, ?)",
@@ -433,19 +555,19 @@ def _team_award_line(a: dict, emoji: dict[str, str]) -> str:
     return f"{dot}{scope}: {_award_line(a)}"
 
 
-def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
+def build_month_honors_embed(conn, month: str, protocol: str, result: dict) -> dict:
     """The full Discord webhook JSON body (an `embeds` list of up to
     three embeds -- Standings, Honors, By team; see below for when the
     latter two are omitted) for one frozen month's result, as returned
     by app/results.py's compute_month()/freeze_month() -- standings and
     awards. Plain text throughout, with exactly one deliberate
-    exception: a per-team coloured-dot custom emoji (settings.
-    discord_team_emoji, parsed by _parse_team_emoji()) prefixed onto
-    every line that names a team, when an operator has configured one
-    for that team -- see _team_dot()'s own comment for the fallback
-    that keeps a deployment without one rendering exactly as before.
-    This is the ONLY emoji this module ever emits; nothing else here
-    invents its own.
+    exception: a per-team coloured-dot custom emoji (discord_config.
+    team_emoji, loaded fresh via load_discord_config() and parsed by
+    _parse_team_emoji()) prefixed onto every line that names a team,
+    when an operator has configured one for that team -- see
+    _team_dot()'s own comment for the fallback that keeps a deployment
+    without one rendering exactly as before. This is the ONLY emoji this
+    module ever emits; nothing else here invents its own.
 
     Awards use results.AWARD_LABELS (via each award dict's own `label`,
     already set by compute_month()) so this never invents its own
@@ -459,8 +581,9 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     """
     from . import results
 
+    cfg = load_discord_config(conn)
     proto_label = _PROTOCOL_NAMES.get(protocol, protocol)
-    emoji = _parse_team_emoji(settings.discord_team_emoji)
+    emoji = _parse_team_emoji(cfg["team_emoji"])
 
     standings = sorted(
         result.get("standings") or [],
@@ -607,12 +730,12 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     # named when it was created in the channel's Integrations settings
     # (Discord's own unrenamed placeholder, "Captain Hook," if nobody
     # bothered to change it), which says nothing about what app actually
-    # posted. Falls back to the literal "MeshWars" if the setting is
-    # ever blanked out -- see settings.discord_webhook_username's own
-    # comment for why this is the one field in this section that is
-    # never simply omitted when unset.
+    # posted. Falls back to the literal "MeshWars" if the config value is
+    # ever blank -- see settings.discord_webhook_username's own comment
+    # for why this is the one field in this section that is never simply
+    # omitted when unset.
     return {
-        "username": settings.discord_webhook_username or "MeshWars",
+        "username": cfg["username"] or "MeshWars",
         "embeds": embeds,
     }
 
@@ -636,16 +759,20 @@ async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
     already failed discord_outbox_max_attempts times (a permanently
     broken webhook must eventually stop being retried). Both are plain
     WHERE clauses, not a Python-side filter, so a skipped row is never
-    even fetched.
+    even fetched. discord_config (enabled/webhook_url) is loaded once
+    per cycle here, not once per row -- an admin editing the config
+    mid-cycle takes effect on the NEXT cycle, the same granularity
+    app/freqmapper_ingest.py's own poll loop already applies to its
+    config.
     """
-    if not announcements_enabled():
-        return
-
     now = int(time.time())
     cutoff = now - settings.discord_outbox_max_age_hours * 3600
 
     conn = connect()
     try:
+        cfg = load_discord_config(conn)
+        if not announcements_enabled(cfg):
+            return
         rows = conn.execute(
             "SELECT id, payload, attempts FROM discord_outbox "
             " WHERE posted_at IS NULL AND created_at >= ? AND attempts < ? "
@@ -667,7 +794,7 @@ async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
             await _mark_failed(row["id"], row["attempts"], "stored payload is not valid JSON")
             continue
         try:
-            await _post(payload, http_client=http_client)
+            await _post(cfg["webhook_url"], payload, http_client=http_client)
         except DiscordSendError as e:
             await _mark_failed(row["id"], row["attempts"], str(e))
             continue
@@ -705,11 +832,10 @@ async def run_forever() -> None:
     UNCONDITIONALLY by app/main.py's lifespan, the same "the loop must
     stay alive to notice a later config change" reasoning
     app/freqmapper_ingest.py's own run_forever() docstring gives for
-    `enabled`: announcements_enabled() is a runtime setting (an
-    operator can add DISCORD_WEBHOOK_ANNOUNCEMENTS and restart, or a
-    future admin route could flip it live), so a fresh install with no
-    webhook configured yet still starts this task, but it simply does
-    nothing each cycle until one is set.
+    `enabled`: discord_config is a runtime, DB-backed setting (an
+    operator can flip it live through /api/admin/discord, no restart),
+    so a fresh install with no webhook configured yet still starts this
+    task, but it simply does nothing each cycle until one is set.
 
     Never raises out of the loop -- same fire-and-forget contract
     app/account_api.py's _notify_security() applies to a single mail
@@ -717,7 +843,7 @@ async def run_forever() -> None:
     cycle's rows must never crash the process or stop later cycles
     (and later months' announcements) from ever running again.
     """
-    log.info("discord outbox loop starting (announcements gated by discord_webhook_announcements)")
+    log.info("discord outbox loop starting (announcements gated by discord_config)")
     while True:
         try:
             await _drain_once()

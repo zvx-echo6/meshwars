@@ -1076,8 +1076,13 @@ class Settings(BaseSettings):
     #
     # Empty means off, same "empty means off, never open" contract every
     # other optional credential in this file uses (join_invite_code,
-    # smtp_host, ...) -- discord_notify.announcements_enabled() is the
-    # one place that checks this. A Discord webhook URL is itself a
+    # smtp_host, ...). This value, and discord_webhook_username/
+    # discord_team_emoji below, are the SEED only -- app/db.py's
+    # discord_config table is the actual source of truth from the first
+    # boot onward (app/discord_notify.py's seed_discord_config_from_env(),
+    # called once from init_db()); an operator edits the live values
+    # through app/admin_ops.py's /api/admin/discord, not by changing
+    # these env vars and redeploying. A Discord webhook URL is itself a
     # bearer credential (anyone who has it can post to the channel as
     # this app, no further auth), so it is never logged and never
     # returned from any route, same as freqmapper_api_key/admin_token

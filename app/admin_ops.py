@@ -37,7 +37,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import mc_api, results
+from . import discord_notify, mc_api, results
 from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
     checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
@@ -1652,6 +1652,250 @@ async def admin_notice_save(request: Request):
         "active": active,
         "updated_at": now,
     })
+
+
+# ---- Discord announcements (app/db.py's discord_config/discord_outbox,
+# app/discord_notify.py) ---------------------------------------------------
+
+
+def _scrub_discord_secrets(cfg: dict) -> dict:
+    """Never let discord_config.webhook_url leave this process in a
+    JSON response -- same rule, same shape as _scrub_freqmapper_secrets
+    above for freqmapper_config.api_key. Replaced with a webhook_set
+    boolean plus a last-4-characters hint (enough for an operator to
+    recognize "yes, that's the one I pasted in" without ever showing
+    the credential itself); every other field passes through unchanged.
+    """
+    out = dict(cfg)
+    url = out.pop("webhook_url", "") or ""
+    out["webhook_set"] = bool(url)
+    out["webhook_hint"] = url[-4:] if url else ""
+    return out
+
+
+@router.get("/api/admin/discord")
+async def admin_discord(request: Request):
+    """Current Discord announcement config (secret scrubbed) plus
+    outbox health, for the admin panel's Discord section. config comes
+    from load_discord_config (app/discord_notify.py) -- the same
+    fresh-every-read singleton enqueue()/the drain loop/
+    build_month_honors_embed() all read, never settings.py, so what
+    this route returns is exactly what the next freeze or drain cycle
+    will act on. `failed` is a SUBSET of `pending` (attempts > 0 AND
+    posted_at IS NULL) -- a row that has failed at least once but has
+    not yet hit discord_outbox_max_attempts is both pending (still
+    eligible to be retried) and failed (the last attempt did not
+    succeed); this is not a disjoint three-way split. `recent` is the
+    most recent 10 outbox rows regardless of status, newest first --
+    last_error is safe to show here, it is Discord's own response text
+    describing what was wrong with the payload this app sent, never a
+    credential (see app/discord_notify.py's module docstring).
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    conn = connect()
+    try:
+        cfg = discord_notify.load_discord_config(conn)
+        pending = conn.execute(
+            "SELECT count(*) FROM discord_outbox WHERE posted_at IS NULL"
+        ).fetchone()[0]
+        posted = conn.execute(
+            "SELECT count(*) FROM discord_outbox WHERE posted_at IS NOT NULL"
+        ).fetchone()[0]
+        failed = conn.execute(
+            "SELECT count(*) FROM discord_outbox WHERE attempts > 0 AND posted_at IS NULL"
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, kind, key, posted_at, attempts, last_error FROM discord_outbox "
+            " ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+    finally:
+        conn.close()
+    return JSONResponse({
+        "config": _scrub_discord_secrets(cfg),
+        "outbox": {
+            "pending": pending,
+            "posted": posted,
+            "failed": failed,
+            "recent": [dict(r) for r in rows],
+        },
+    })
+
+
+@router.post("/api/admin/discord")
+async def admin_discord_update(request: Request):
+    """Update the Discord announcement config singleton. Takes effect
+    on the very next freeze (build_month_honors_embed()/enqueue()) or
+    drain cycle -- both read discord_config fresh every time
+    (load_discord_config), never settings.py.
+
+    webhook_url is a SECRET (see discord_config's own comment in
+    app/db.py): an ABSENT or empty-string webhook_url in the body
+    leaves the stored value UNCHANGED, not cleared -- GET
+    /api/admin/discord never returns the real value, so a form that
+    always echoes '' into this field would otherwise silently wipe the
+    webhook on every unrelated edit. Same exact contract POST
+    /api/admin/paint already applies to freqmapper_config.api_key (see
+    that route's own docstring); clear_webhook is the explicit way to
+    actually blank this one out.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    enabled = bool(body.get("enabled"))
+    username = (body.get("username") or "").strip()
+    team_emoji = (body.get("team_emoji") or "").strip()
+    announce_month_honors = bool(body.get("announce_month_honors"))
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        current = conn.execute(
+            "SELECT webhook_url FROM discord_config WHERE id = 1"
+        ).fetchone()
+        current_webhook = current["webhook_url"] if current else ""
+        if body.get("clear_webhook") is True:
+            webhook_url = ""
+        else:
+            submitted = body.get("webhook_url")
+            webhook_url = submitted if isinstance(submitted, str) and submitted else current_webhook
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO discord_config(id, enabled, webhook_url, username, team_emoji, "
+            " announce_month_honors, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  enabled = excluded.enabled, webhook_url = excluded.webhook_url, "
+            "  username = excluded.username, team_emoji = excluded.team_emoji, "
+            "  announce_month_honors = excluded.announce_month_honors, "
+            "  updated_at = excluded.updated_at",
+            (int(enabled), webhook_url, username, team_emoji, int(announce_month_honors), now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_config_save",
+            detail=f"enabled={enabled} announce_month_honors={announce_month_honors}", now=now,
+        )
+        conn.execute("COMMIT")
+        cfg = discord_notify.load_discord_config(conn)
+    finally:
+        conn.close()
+    log.info("admin: discord config updated (enabled=%s)", enabled)
+    return JSONResponse({"config": _scrub_discord_secrets(cfg)})
+
+
+@router.post("/api/admin/discord/test")
+async def admin_discord_test(request: Request):
+    """Enqueue a small test announcement (kind="test") so an operator
+    can confirm the webhook actually works without waiting for a real
+    month to freeze. key is the current unix timestamp in NANOSECONDS
+    (time.time_ns(), not int(time.time())) -- always unique, so it can
+    never collide with a real kind="month_honors" key (a different
+    `kind` entirely) and, just as importantly, never collides with
+    ITSELF: two clicks landing in the same wall-clock second would
+    otherwise share one second-resolution key and the second click
+    would be silently dropped by discord_outbox's own UNIQUE(kind, key)
+    exactly-once index instead of enqueuing a second row. Returns
+    immediately; the existing drain loop (app/discord_notify.py's
+    run_forever()) posts it on its own schedule, same as any other
+    queued announcement.
+
+    Refuses with 400 when announcements are not actually enabled
+    (discord_notify.announcements_enabled() false) -- enqueue() itself
+    would silently no-op in that case, and a "test" button that reports
+    success while queuing nothing would be a lying success flag: it
+    would tell an operator the webhook works when nothing was ever
+    queued to prove it.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    now = int(time.time())
+    conn = connect()
+    try:
+        cfg = discord_notify.load_discord_config(conn)
+        if not discord_notify.announcements_enabled(cfg):
+            return JSONResponse(
+                {"error": "Discord announcements are not enabled, or no webhook is configured"},
+                status_code=400,
+            )
+        key = str(time.time_ns())
+        payload = {
+            "username": cfg["username"] or "MeshWars",
+            "embeds": [{
+                "title": "MeshWars test announcement",
+                "description": "If you can see this in Discord, the webhook is working.",
+            }],
+        }
+        conn.execute("BEGIN IMMEDIATE")
+        discord_notify.enqueue(conn, kind="test", key=key, payload=payload, now=now)
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_test_announcement",
+            detail=f"key={key}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: enqueued discord test announcement (key=%s)", key)
+    return JSONResponse({"enqueued": True, "key": key})
+
+
+@router.post("/api/admin/discord/outbox/retry")
+async def admin_discord_outbox_retry(request: Request):
+    """Reset one failed discord_outbox row for retry: attempts back to
+    0 and last_error cleared, so the next drain cycle
+    (app/discord_notify.py's _drain_once()) picks it up again exactly
+    as if it had never failed. Does not touch kind/key/payload/
+    created_at -- created_at is left alone deliberately, so
+    discord_outbox_max_age_hours still ages out a row that has been
+    sitting broken for a very long time even after a manual retry
+    resets its attempt count.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    row_id = body.get("id")
+    if not isinstance(row_id, int) or isinstance(row_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE discord_outbox SET attempts = 0, last_error = NULL WHERE id = ?", (row_id,)
+        )
+        if cur.rowcount == 0:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "not found"}, status_code=404)
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_outbox_retry",
+            detail=f"id={row_id}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: reset discord outbox row %d for retry", row_id)
+    return JSONResponse({"retried": True, "id": row_id})
 
 
 @router.post("/api/admin/month/freeze")

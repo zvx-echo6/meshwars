@@ -2049,6 +2049,131 @@ async function saveNotice(b, overrideActive) {
   b.disabled = false;
 }
 
+// ---- discord announcements ----------------------------------------------
+//
+// Same "whole singleton, one POST" shape savePaint()/saveNotice() above
+// already use for their own DB-backed config. The webhook URL never
+// comes back from GET /api/admin/discord (app/admin_ops.py's
+// _scrub_discord_secrets) -- only webhook_set/webhook_hint, the same
+// has_api_key-shaped hint the Paint section's API key field already
+// uses -- so the input is always rendered blank and a blank submit
+// leaves the stored value alone (clear_webhook is the explicit way to
+// actually blank it).
+
+function renderDiscordForm(cfg) {
+  document.getElementById('dc-enabled').checked = !!cfg.enabled;
+  document.getElementById('dc-month-honors').checked = !!cfg.announce_month_honors;
+  document.getElementById('dc-webhook-url').value = '';
+  document.getElementById('dc-clear-webhook').checked = false;
+  document.getElementById('dc-webhook-hint').textContent = cfg.webhook_set
+    ? ('currently set, ending in ' + cfg.webhook_hint)
+    : 'not set';
+  document.getElementById('dc-username').value = cfg.username || '';
+  document.getElementById('dc-team-emoji').value = cfg.team_emoji || '';
+}
+
+function renderDiscordOutbox(outbox) {
+  const summary = document.getElementById('dc-outbox-summary');
+  summary.replaceChildren();
+  const p = el('p', { className: 'adm-net-health' + (outbox.failed > 0 ? ' adm-status-bad' : '') });
+  p.appendChild(el('span', {
+    text: outbox.pending + ' pending, ' + outbox.posted + ' posted, ' + outbox.failed + ' failed',
+  }));
+  summary.appendChild(p);
+
+  const host = document.getElementById('dc-outbox');
+  host.replaceChildren();
+  if (!outbox.recent.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No announcements queued yet.' }));
+    return;
+  }
+  outbox.recent.forEach((row) => {
+    const rowEl = el('div', { className: 'adm-row' });
+    const info = el('div', { className: 'adm-row-info' });
+    info.appendChild(el('span', { className: 'adm-mono', text: row.kind + ':' + row.key }));
+    info.appendChild(el('span', {
+      text: row.posted_at ? ('posted ' + fmtTs(row.posted_at))
+        : (row.attempts + (row.attempts === 1 ? ' attempt' : ' attempts')),
+    }));
+    if (row.last_error) {
+      info.appendChild(el('span', { text: row.last_error }));
+    }
+    rowEl.appendChild(info);
+    if (!row.posted_at && row.attempts > 0) {
+      rowEl.appendChild(btn('Retry', 'adm-btn-quiet', (b) => retryDiscordOutboxRow(b, row.id)));
+    }
+    host.appendChild(rowEl);
+  });
+}
+
+async function loadDiscord() {
+  try {
+    const d = await api('/api/admin/discord');
+    renderDiscordForm(d.config);
+    renderDiscordOutbox(d.outbox);
+  } catch (e) {
+    setStatus('Discord config load failed: ' + e.message, true);
+  }
+}
+
+async function saveDiscord(b) {
+  const out = document.getElementById('dc-result');
+  out.replaceChildren();
+
+  const payload = {
+    enabled: document.getElementById('dc-enabled').checked,
+    announce_month_honors: document.getElementById('dc-month-honors').checked,
+    username: document.getElementById('dc-username').value.trim(),
+    team_emoji: document.getElementById('dc-team-emoji').value.trim(),
+  };
+  // Blank means keep the existing webhook -- see app/admin_ops.py's
+  // admin_discord_update, the same convention the Paint section's own
+  // api_key field already uses. clear_webhook is the explicit way to
+  // actually blank it.
+  if (document.getElementById('dc-clear-webhook').checked) {
+    payload.clear_webhook = true;
+  } else {
+    const webhookUrl = document.getElementById('dc-webhook-url').value;
+    if (webhookUrl) payload.webhook_url = webhookUrl;
+  }
+
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord', payload);
+    renderDiscordForm(r.config);
+    out.textContent = 'Saved.';
+    setStatus('Discord config saved', false);
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function sendDiscordTest(b) {
+  const out = document.getElementById('dc-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    await post('/api/admin/discord/test', {});
+    out.textContent = 'Test announcement queued -- check the channel shortly.';
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function retryDiscordOutboxRow(b, id) {
+  b.disabled = true;
+  try {
+    await post('/api/admin/discord/outbox/retry', { id: id });
+    await loadDiscord();
+  } catch (e) {
+    setStatus('Retry failed: ' + e.message, true);
+  }
+  b.disabled = false;
+}
+
 // ---- read-API keys ----------------------------------------------------
 
 async function loadApiClients() {
@@ -2141,7 +2266,7 @@ function badge(id, value, bad) {
 async function refreshAll() {
   const loads = [
     loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
-    loadTraffic(), loadCheckinAwards(),
+    loadDiscord(), loadTraffic(), loadCheckinAwards(),
   ];
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
@@ -2265,5 +2390,7 @@ document.getElementById('nt-save').addEventListener('click', function () { saveN
 // first retyping title/body/version just to satisfy the required-field
 // check saveNotice() otherwise runs.
 document.getElementById('nt-clear').addEventListener('click', function () { saveNotice(this, false); });
+document.getElementById('dc-save').addEventListener('click', function () { saveDiscord(this); });
+document.getElementById('dc-test').addEventListener('click', function () { sendDiscordTest(this); });
 
 checkAccess();

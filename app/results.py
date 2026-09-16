@@ -797,7 +797,7 @@ def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) 
     # announced.
     discord_notify.enqueue(
         conn, kind="month_honors", key=f"{month}:{protocol}",
-        payload=discord_notify.build_month_honors_embed(month, protocol, result),
+        payload=discord_notify.build_month_honors_embed(conn, month, protocol, result),
         now=now,
     )
 
