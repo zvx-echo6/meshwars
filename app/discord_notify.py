@@ -779,11 +779,13 @@ def _award_line(a: dict) -> str:
 # heavy, repeated 30+ times across a by-team field, and read as noise
 # -- but the line still needs SOME token boundary, and a spaced middle
 # dot gives one at a fraction of the visual weight. Used by
-# _team_award_line() below and by the weekly recap's own multi-token
-# lines (_weekly_placement_section()'s "TEAM **rank** <sep> movement",
-# _weekly_exploration_section()'s per-player firsts count) -- every one
-# of them a line with more than two tokens that would otherwise run
-# together. Deliberately NOT applied to the standings lines
+# _team_award_line() below and by _weekly_exploration_section()'s
+# per-player "new" count line -- every one of them a line with more than
+# two tokens that would otherwise run together. NOT used by
+# _weekly_placement_section(), whose "TEAM **rank** <arrow-or-italic-
+# tail>" shape separates its own tokens with plain spaces and Discord's
+# own italics instead (see that function's own comment). Deliberately
+# NOT applied to the standings lines
 # (build_month_honors_embed()'s standings_text, already just
 # "<dot>TEAM **<number>**", two unambiguous tokens) or the headline
 # honors field values (_award_line()/_value_unit_line(), already split
@@ -1511,9 +1513,12 @@ def _weekly_placement_section(conn, protocol: str, start_ts: int, end_ts: int,
     rank line does not already carry, so it is left out entirely: "the
     rank is the point."
 
-    Line shape: "<dot> TEAM **<ordinal>** <sep> <movement>", e.g.
-    "ORANGE **2nd** · up from 5th" / "GREEN **1st** · no change" /
-    "BLUE **6th** · down from 4th".
+    Line shape: "<dot> TEAM **<ordinal>** <movement>", e.g.
+    "ORANGE **2nd** ▲ *from 5th*" / "GREEN **1st** *no change*" /
+    "BLUE **6th** ▼ *from 4th*" -- arrows in place of the "up"/"down"
+    words (the owner's own call: "use arrows instead of up and down
+    words"), "from Nth" kept as the italic tail so which prior rank a
+    team moved from/to is still stated, not just the direction.
 
     Reuses app/results.py's ownership_at() -- the exact function
     compute_month() itself calls to answer "who holds what right now"
@@ -1570,14 +1575,31 @@ def _weekly_placement_section(conn, protocol: str, start_ts: int, end_ts: int,
         current_rank = i + 1
         prior_rank = before_rank.get(team)
         if prior_rank is None:
-            movement = "new to the board"
+            # Not an up/down word -- nothing to turn into an arrow here,
+            # since there is no PRIOR rank to have moved from. Left as-is
+            # per the owner's own instruction.
+            movement = "*new to the board*"
         elif prior_rank == current_rank:
-            movement = "no change"
+            # No glyph expresses "unchanged" -- an up or down arrow would
+            # actively claim movement that didn't happen -- so this stays
+            # italic text rather than a symbol, same as "new to the
+            # board".
+            movement = "*no change*"
         elif current_rank < prior_rank:
-            movement = f"up from {_ordinal(prior_rank)}"
+            # Up: U+25B2, BLACK UP-POINTING TRIANGLE (a geometric symbol,
+            # not emoji) in place of the word "up" -- the owner's own
+            # call. Written as a \u escape, matching how _SEP above
+            # encodes its own middle dot, rather than a literal
+            # multi-byte character in the source. "from Nth" stays as
+            # the italic tail so the prior rank is still legible, not
+            # just the direction.
+            movement = f"\u25B2 *from {_ordinal(prior_rank)}*"
         else:
-            movement = f"down from {_ordinal(prior_rank)}"
-        lines.append(f"{_team_dot(emoji, team)}{team} **{_ordinal(current_rank)}**{_SEP}{movement}")
+            # Down: U+25BC, BLACK DOWN-POINTING TRIANGLE -- same
+            # reasoning and same \u-escape convention as the up case
+            # above.
+            movement = f"\u25BC *from {_ordinal(prior_rank)}*"
+        lines.append(f"{_team_dot(emoji, team)}{team} **{_ordinal(current_rank)}** {movement}")
     # No trailing unit line -- a rank/movement line is self-explanatory,
     # unlike a bare number that needs "squares held" stated once to mean
     # anything (see _join_team_field()'s own `unit` parameter).
@@ -1597,7 +1619,7 @@ def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
     None when there is no active season for `protocol` covering this
     window (season_id is None -- see _season_id_for_ts()) or no
     qualifying activation at all inside it -- a quiet week's Exploration
-    section is simply omitted, never rendered as "0 firsts."
+    section is simply omitted, never rendered as "0 new."
     """
     if season_id is None:
         return None
@@ -1611,9 +1633,12 @@ def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
 
     n_summits = sum(1 for r in rows if r["ref_type"] == "summit")
     n_parks = sum(1 for r in rows if r["ref_type"] == "park")
+    # Display word is "new", not "first" -- the owner's own call, purely
+    # presentational (see the per-player line below for the fuller note).
+    # "claimed" dropped too: it was padding the owner never asked for.
     lines = [
-        f"**{_fmt_number(n_summits)}** first summit{'' if n_summits == 1 else 's'} "
-        f"and **{_fmt_number(n_parks)}** first park{'' if n_parks == 1 else 's'} claimed"
+        f"**{_fmt_number(n_summits)}** new summit{'' if n_summits == 1 else 's'} "
+        f"and **{_fmt_number(n_parks)}** new park{'' if n_parks == 1 else 's'}"
     ]
 
     # ONE unattributed elevation figure -- deliberately no player name
@@ -1630,6 +1655,20 @@ def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
     # Per-player COUNT of firsts -- never a place name -- capped to
     # _MAX_WEEKLY_RECAP_PLAYERS, sorted by count desc then name asc so a
     # tie has a stable, deterministic order.
+    #
+    # Rendered word is "new", not "first"/"firsts" -- the owner's own
+    # call ("labelling firsts is awkward i dont like it. use new
+    # instead"). This is PRESENTATION ONLY: the underlying rule is still
+    # "that player's first activation of that place in this season" (see
+    # qualifying_place_firsts()'s own docstring and HARD PRIVACY WARNING
+    # in app/place_scoring.py), and that function's name -- along with
+    # its variables and docstring -- is NOT renamed to match. Only the
+    # rendered string changes.
+    #
+    # Incidental win: "new" has no separate plural, so the singular/
+    # plural branch that used to pick between "first" and "firsts" has
+    # nothing left to decide and is removed outright rather than kept
+    # around computing a value nobody reads.
     counts: dict[int, int] = {}
     info: dict[int, tuple[str, str]] = {}
     for r in rows:
@@ -1641,7 +1680,7 @@ def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
         name, team = info[pid]
         lines.append(
             f"{_team_dot(emoji, team)}{name}{_SEP}"
-            f"**{_fmt_number(count)}** *first{'' if count == 1 else 's'}*"
+            f"**{_fmt_number(count)}** *new*"
         )
 
     value = "\n".join(lines)

@@ -1669,9 +1669,9 @@ def test_build_weekly_recap_embed_placement_changes_section(conn):
     embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
     field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Placement changes")
     lines = field["value"].splitlines()
-    assert lines[0] == "GREEN **1st** · no change"
-    assert lines[1] == "ORANGE **2nd** · up from 3rd"
-    assert lines[2] == "BLUE **3rd** · down from 2nd"
+    assert lines[0] == "GREEN **1st** *no change*"
+    assert lines[1] == "ORANGE **2nd** ▲ *from 3rd*"
+    assert lines[2] == "BLUE **3rd** ▼ *from 2nd*"
 
 
 def test_weekly_placement_section_sorted_descending_by_current_standing(conn):
@@ -1715,7 +1715,7 @@ def test_weekly_placement_section_team_absent_at_window_start_reads_new_to_the_b
 
     embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
     field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Placement changes")
-    assert field["value"] == "PURPLE **1st** · new to the board"
+    assert field["value"] == "PURPLE **1st** *new to the board*"
 
 
 def test_build_weekly_recap_embed_exploration_section_matches_exact_shape(conn):
@@ -1756,10 +1756,113 @@ def test_build_weekly_recap_embed_exploration_section_matches_exact_shape(conn):
     embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
     field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Exploration")
     lines = field["value"].splitlines()
-    assert lines[0] == "**2** first summits and **1** first park claimed"
+    assert lines[0] == "**2** new summits and **1** new park"
     assert lines[1] == "Highest new summit: **9,763** *ft*"
-    assert "l3@n" in field["value"] and "**2** *firsts*" in field["value"]
-    assert "Raptor" in field["value"] and "**1** *first*" in field["value"]
+    assert "l3@n" in field["value"] and "**2** *new*" in field["value"]
+    assert "Raptor" in field["value"] and "**1** *new*" in field["value"]
+    assert "first" not in field["value"].lower()
+
+
+def test_weekly_exploration_section_header_says_new_not_first(conn):
+    """The owner's own wording call ("labelling firsts is awkward i dont
+    like it. use new instead") -- presentation only, the header line."""
+    _enable_discord(conn)
+    now = int(time.time())
+    start_ts, end_ts = now - 3 * 86400, now + 4 * 86400
+    _wr_season(conn, 1, started_at=start_ts - 1_000_000, ends_at=end_ts + 1_000_000)
+    _wr_player(conn, 50, "Header1", "RED")
+    conn.execute(
+        "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+        "elevation_ft, points_reason, active, created_at) VALUES "
+        "(1, 'summit', 's1', 'Peak One', 44, -116, 90, 'TEST', 9763, 'remote_scaled', 1, 0)"
+    )
+    conn.execute(
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+        "VALUES (1, 50, '2026-09-09', 90, ?, 'mc')", (start_ts + 10,),
+    )
+
+    embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
+    field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Exploration")
+    lines = field["value"].splitlines()
+    assert lines[0] == "**1** new summit and **0** new parks"
+    assert "first" not in field["value"].lower()
+
+
+def test_weekly_exploration_section_player_line_uses_new_not_firsts(conn):
+    """A player with several qualifying firsts in the window still shows
+    a bare count, now labelled "new" -- "firsts"/"first" must not
+    appear anywhere in the rendered line."""
+    _enable_discord(conn)
+    now = int(time.time())
+    start_ts, end_ts = now - 3 * 86400, now + 4 * 86400
+    _wr_season(conn, 1, started_at=start_ts - 1_000_000, ends_at=end_ts + 1_000_000)
+    _wr_player(conn, 60, "Trio", "BLUE")
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+            "elevation_ft, points_reason, active, created_at) VALUES "
+            "(?, 'summit', ?, ?, 44, -116, 90, 'TEST', 9000, 'remote_scaled', 1, 0)",
+            (i + 1, f"s{i}", f"Peak {i}"),
+        )
+        conn.execute(
+            "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+            "VALUES (?, 60, '2026-09-09', 90, ?, 'mc')", (i + 1, start_ts + 10 + i),
+        )
+
+    embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
+    field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Exploration")
+    assert "Trio" in field["value"] and "**3** *new*" in field["value"]
+    assert "firsts" not in field["value"].lower()
+
+
+def test_weekly_placement_section_uses_arrows_not_up_down_words(conn):
+    """Owner's own call ("use arrows instead of up and down words"): a
+    team that climbed shows the up-triangle and no "up from" text; a
+    team that dropped shows the down-triangle and no "down from" text."""
+    _enable_discord(conn)
+    now = int(time.time())
+    start_ts, end_ts = now - 3 * 86400, now
+    _wr_season(conn, 1, started_at=start_ts - 1_000_000, ends_at=end_ts + 1_000_000)
+    _wr_player(conn, 1, "Gplayer", "GREEN")
+    _wr_player(conn, 2, "Bplayer", "BLUE")
+    _wr_player(conn, 3, "Oplayer", "ORANGE")
+    for i in range(10):
+        _wr_capture(conn, 1, f"g{i}_1", start_ts - 2000, 1, "GREEN")
+    for i in range(5):
+        _wr_capture(conn, 1, f"b{i}_1", start_ts - 2000, 2, "BLUE")
+    for i in range(2):
+        _wr_capture(conn, 1, f"o{i}_1", start_ts - 2000, 3, "ORANGE")
+    for i in range(4):
+        _wr_capture(conn, 1, f"o{i}_2", start_ts + 100, 3, "ORANGE")
+
+    embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
+    field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Placement changes")
+    value = field["value"]
+    orange_line = next(line for line in value.splitlines() if line.startswith("ORANGE"))
+    blue_line = next(line for line in value.splitlines() if line.startswith("BLUE"))
+    green_line = next(line for line in value.splitlines() if line.startswith("GREEN"))
+
+    assert "▲" in orange_line
+    assert "up from" not in value.lower()
+    assert "▼" in blue_line
+    assert "down from" not in value.lower()
+
+    # The unchanged team gets neither arrow glyph -- an arrow would
+    # actively lie about movement that didn't happen.
+    assert "▲" not in green_line
+    assert "▼" not in green_line
+
+
+def test_qualifying_place_firsts_name_unchanged(conn):
+    """Guard against a well-meaning rename: the "new" wording is a
+    PRESENTATION change only (app/discord_notify.py's render site) --
+    the underlying rule and its function name in app/place_scoring.py
+    must stay qualifying_place_firsts()."""
+    from app import place_scoring
+
+    assert hasattr(place_scoring, "qualifying_place_firsts")
+    assert callable(place_scoring.qualifying_place_firsts)
+    assert place_scoring.qualifying_place_firsts.__name__ == "qualifying_place_firsts"
 
 
 def test_build_weekly_recap_embed_never_has_a_nets_field(conn):
