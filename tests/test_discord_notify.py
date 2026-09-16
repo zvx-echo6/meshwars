@@ -151,7 +151,10 @@ def test_build_month_honors_embed_renders_labels_and_standings():
     embed = discord_notify.build_month_honors_embed("2026-08", "mc", _sample_result())
     text = json.dumps(embed)
     assert "MeshCore" in text
-    assert "2026-08" in text
+    # The embed title names the month in human form ("August 2026"),
+    # not the raw "YYYY-MM" key -- see _month_title().
+    assert "August 2026" in text
+    assert "2026-08" not in text
     assert "RED: 120 squares held" in text
     assert "BLUE: 80 squares held" in text
     assert "Largest Territory" in text
@@ -226,25 +229,29 @@ def _real_world_month_result():
 
 def test_build_month_honors_embed_never_exceeds_discord_field_limit():
     """Regression guard for the real 30-field/HTTP-400 incident: no
-    matter how many headline + per-team awards a month has, the embed
-    must never carry more than Discord's documented hard limit of 25
+    matter how many headline + per-team awards a month has, no SINGLE
+    embed may carry more than Discord's documented hard limit of 25
     fields (exceeding it fails the whole message, not just the extra
-    fields)."""
+    fields) -- checked per embed, since Honors and By team are now two
+    separate embeds rather than one combined `fields` list."""
     embed = discord_notify.build_month_honors_embed("2026-08", "mc", _real_world_month_result())
-    fields = embed["embeds"][0]["fields"]
-    assert len(fields) <= 25
+    for e in embed["embeds"]:
+        assert len(e.get("fields") or []) <= 25
 
 
 def test_build_month_honors_embed_groups_per_team_awards_into_one_field_each():
-    """10 headline awards (one field each) + 2 distinct per-team award
-    keys (team_attacker, team_defender) across 10 teams must produce
-    10 + 2 = 12 fields, never 10 + 20: a per-team award is grouped by
-    award key into one field listing every team, not one field per
-    team (frontend/results.js's own split for this data)."""
+    """10 headline awards (one field each, in the Honors embed) + 2
+    distinct per-team award keys (team_attacker, team_defender) across
+    10 teams grouped into 2 fields (in the By team embed) -- never 10
+    headline + 20 per-team fields: a per-team award is grouped by award
+    key into one field listing every team, not one field per team
+    (frontend/results.js's own split for this data)."""
     embed = discord_notify.build_month_honors_embed("2026-08", "mc", _real_world_month_result())
-    fields = embed["embeds"][0]["fields"]
-    assert len(fields) == 12
-    attacker_field = next(f for f in fields if f["name"] == "Top Attacker")
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    by_team = next(e for e in embed["embeds"] if e["title"] == "By team")
+    assert len(honors["fields"]) == 10
+    assert len(by_team["fields"]) == 2
+    attacker_field = next(f for f in by_team["fields"] if f["name"] == "Top Attacker")
     # All ten teams' lines live inside that ONE field's value.
     for n in range(10):
         assert f"TEAM{n}" in attacker_field["value"]
@@ -361,6 +368,107 @@ def test_build_month_honors_embed_standings_use_thousands_separator():
     description = embed["embeds"][0]["description"]
     assert "GREEN: 6,005 squares held" in description
     assert "GREEN: 6005 squares held" not in description
+
+
+# ---- three embeds, team colour, density -----------------------------------
+
+
+def test_build_month_honors_embed_produces_three_embeds_in_order():
+    """A normal month with both headline AND per-team awards must
+    produce exactly three embeds -- Standings, Honors, By team -- in
+    that order, replacing the old single dense embed."""
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _real_world_month_result())
+    titles = [e["title"] for e in embed["embeds"]]
+    assert titles == ["MeshCore — August 2026", "Honors", "By team"]
+
+
+def test_build_month_honors_embed_omits_empty_by_team_embed():
+    """A month with no per-team (scoped) awards must produce exactly 2
+    embeds -- Standings, Honors -- never a third, empty 'By team'
+    embed with no fields in it."""
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _sample_result())
+    embeds = embed["embeds"]
+    assert len(embeds) == 2
+    assert [e["title"] for e in embeds] == ["MeshCore — August 2026", "Honors"]
+
+
+def test_build_month_honors_embed_color_matches_leading_team():
+    """All three embeds carry the same `color`, the integer value of
+    the LEADING team (the first, highest-squares entry of `standings`)
+    -- GREEN leading must colour every embed 0x2ecc40, never a mix or a
+    guessed default."""
+    result = _sample_result()
+    result["standings"] = [
+        {"team": "GREEN", "squares": 200},
+        {"team": "RED", "squares": 100},
+    ]
+    result["awards"].append(_team_award("team_attacker", "Top Attacker", "GREEN", 5.0))
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    embeds = embed["embeds"]
+    assert len(embeds) == 3
+    for e in embeds:
+        assert e["color"] == 0x2ecc40
+
+
+def test_build_month_honors_embed_no_color_when_standings_empty():
+    """Empty standings means no leading team to colour by -- `color`
+    must be omitted from every embed entirely, never defaulted."""
+    result = _sample_result()
+    result["standings"] = []
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    for e in embed["embeds"]:
+        assert "color" not in e
+
+
+def test_build_month_honors_embed_honors_fields_inline_by_team_fields_not():
+    """Honors fields are laid out three-across (inline=True) to fix the
+    owner's "DENSE" complaint about the old stacked shape; By team
+    fields stay full-width (inline=False) because each value is a
+    multi-line per-team list that would be unreadable squeezed a third
+    as wide."""
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _real_world_month_result())
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    by_team = next(e for e in embed["embeds"] if e["title"] == "By team")
+    assert honors["fields"] and all(f["inline"] is True for f in honors["fields"])
+    assert by_team["fields"] and all(f["inline"] is False for f in by_team["fields"])
+
+
+def test_build_month_honors_embed_drops_by_team_over_char_budget(monkeypatch):
+    """When the assembled payload would exceed Discord's 6000-character
+    total-embed budget, the 'By team' embed is dropped first and
+    entirely -- Standings and Honors must still render in full, never
+    truncated, to make the drop reproducible without needing thousands
+    of characters of fixture text, the budget itself is monkeypatched
+    down for this test."""
+    monkeypatch.setattr(discord_notify, "_MAX_TOTAL_EMBED_CHARS", 50)
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _real_world_month_result())
+    titles = [e["title"] for e in embed["embeds"]]
+    assert "By team" not in titles
+    assert titles == ["MeshCore — August 2026", "Honors"]
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    assert len(honors["fields"]) == 10
+
+
+# ---- _month_title -----------------------------------------------------
+
+
+def test_month_title_normal():
+    assert discord_notify._month_title("2026-08") == "August 2026"
+
+
+def test_month_title_invalid_month_returns_unchanged():
+    """A month that doesn't parse to 1-12 (out of range, or not
+    "YYYY-MM" shaped at all) returns the raw input unchanged -- never
+    raises, never produces something like "None 2026"."""
+    assert discord_notify._month_title("2026-13") == "2026-13"
+    assert discord_notify._month_title("garbage") == "garbage"
+
+
+def test_build_month_honors_embed_title_uses_month_name_not_key():
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _sample_result())
+    title = embed["embeds"][0]["title"]
+    assert title == "MeshCore — August 2026"
+    assert "2026-08" not in title
 
 
 # ---- _post error messages ------------------------------------------------

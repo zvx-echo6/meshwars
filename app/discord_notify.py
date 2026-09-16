@@ -76,6 +76,99 @@ _PROTOCOL_NAMES = {"mc": "MeshCore", "mt": "Meshtastic"}
 # applies regardless of what a future award shape produces.
 _MAX_EMBED_FIELDS = 25
 
+# Discord's own documented hard limit on the TOTAL character count
+# across every embed in one message -- title + description + each
+# field's name + value, summed across ALL embeds, not per embed (see
+# _total_embed_chars() below for exactly what is counted). This is
+# separate from, and in addition to, _MAX_EMBED_FIELDS above: a message
+# can have well under 25 fields in every embed and still be rejected on
+# this budget alone. When the assembled three-embed payload
+# (build_month_honors_embed() below) would exceed it, the "By team"
+# embed is dropped first and entirely -- never truncated -- because it
+# is the least important of the three: a reader who only sees standings
+# and the headline Honors embed still gets the full story for the
+# month, while per-team breakdowns are supplementary detail.
+_MAX_TOTAL_EMBED_CHARS = 6000
+
+# Team colours, mirrored from frontend/theme.css's own canonical
+# definitions (~line 100) as INTEGERS -- Discord's embed `color` field
+# takes a decimal int, not a hex string, so these are written as
+# 0xff4136-style literals to stay visually comparable to the CSS hex
+# values they come from, rather than pre-converted to decimal.
+# theme.css's own comment: "If a team colour ever changes it changes in
+# five files, and this is one of them" -- frontend/theme.css,
+# frontend/mc.js, frontend/map2.js, frontend/join.js, and
+# frontend/results.js are those five. This module is now the SIXTH: if
+# a team colour ever changes, change it here too.
+_TEAM_COLORS = {
+    "RED": 0xff4136,
+    "GREEN": 0x2ecc40,
+    "BLUE": 0x3d8bfd,
+    "PURPLE": 0xb10dc9,
+    "YELLOW": 0xffdc00,
+    "ORANGE": 0xff8a00,
+    "PINK": 0xff8ac6,
+}
+
+
+def _team_color(team: str | None) -> int | None:
+    """The team's Discord embed colour, or None for a blank/unknown
+    team name -- never raises. build_month_honors_embed() uses this to
+    colour the month's announcement by whichever team is LEADING, and a
+    corrupt or future team name this table doesn't know about must
+    degrade to "no colour" there, never to a guessed default and never
+    to a crashed announcement.
+    """
+    if not team:
+        return None
+    return _TEAM_COLORS.get(team)
+
+
+# Mirrors MONTH_NAMES in frontend/results.js exactly (same order,
+# same spelling) -- see _month_title() below.
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def _month_title(month: str) -> str:
+    """"2026-08" -> "August 2026" -- mirrors monthTitle() in
+    frontend/results.js so the Discord announcement and the website's
+    own /results page always name a month the same way; a raw
+    "YYYY-MM" key in the embed title read, verbatim, as "ugly." A month
+    string that doesn't parse to a 1-12 calendar month (or isn't
+    "YYYY-MM" shaped at all) is returned UNCHANGED rather than raising
+    or -- the trap a naive `MONTH_NAMES[m - 1]` index falls into --
+    rendering something like "None 2026".
+    """
+    try:
+        year = month[:4]
+        m = int(month[5:7])
+    except (ValueError, IndexError):
+        return month
+    if not 1 <= m <= 12:
+        return month
+    return f"{_MONTH_NAMES[m - 1]} {year}"
+
+
+def _total_embed_chars(embeds: list) -> int:
+    """Sum of title + description + each field's name/value, across
+    every embed given -- the same text Discord counts toward its own
+    6000-character total-embed budget (_MAX_TOTAL_EMBED_CHARS above).
+    Author/footer/thumbnail text also count on Discord's side, but this
+    module never sets any of those, so they would only ever contribute
+    zero and are left out of the sum entirely.
+    """
+    total = 0
+    for embed in embeds:
+        total += len(embed.get("title") or "")
+        total += len(embed.get("description") or "")
+        for f in embed.get("fields") or []:
+            total += len(f.get("name") or "")
+            total += len(f.get("value") or "")
+    return total
+
 
 def announcements_enabled() -> bool:
     """True only when a webhook URL is configured -- mirrors
@@ -266,9 +359,10 @@ def _team_award_line(a: dict) -> str:
 
 
 def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
-    """The full Discord webhook JSON body (an `embeds` list, one embed)
-    for one frozen month's result, as returned by
-    app/results.py's compute_month()/freeze_month() -- standings and
+    """The full Discord webhook JSON body (an `embeds` list of up to
+    three embeds -- Standings, Honors, By team; see below for when the
+    latter two are omitted) for one frozen month's result, as returned
+    by app/results.py's compute_month()/freeze_month() -- standings and
     awards. Plain text only, no emoji anywhere, matching this module's
     own no-emoji rule.
 
@@ -308,6 +402,14 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     # per-team awards are grouped into ONE field per award KEY, with
     # every team's line inside that field's value instead of a field of
     # its own.
+    #
+    # The two groups are also now two SEPARATE embeds (Honors, By team
+    # -- see below) rather than one combined `fields` list: the owner's
+    # own feedback on the old single-embed shape was that 13 stacked
+    # full-width fields read as "DENSE," and headline awards (short,
+    # one-line values) and per-team awards (multi-line lists) don't
+    # want the same field width either -- see the `inline` settings
+    # below.
     team_rank = {s.get("team"): i for i, s in enumerate(standings)}
     headline_fields = []
     team_awards: dict[str, list[dict]] = {}
@@ -324,9 +426,13 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
             team_awards[key].append(a)
         else:
             label = a.get("label") or results.AWARD_LABELS.get(a.get("award"), a.get("award"))
-            headline_fields.append({"name": label, "value": _award_line(a), "inline": False})
+            # inline=True: headline awards are short one-line values, so
+            # Discord lays these out three-across instead of stacking
+            # each one the full width of the message -- the owner's own
+            # "DENSE" complaint about the old shape.
+            headline_fields.append({"name": label, "value": _award_line(a), "inline": True})
 
-    award_fields = headline_fields
+    team_fields = []
     for key in team_award_order:
         group = team_awards[key]
         # Same order the standings table above is drawn in, so a reader
@@ -338,20 +444,27 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
         group.sort(key=lambda a: (team_rank.get(a.get("scope"), len(team_rank)), a.get("scope") or ""))
         label = group[0].get("label") or results.AWARD_LABELS.get(key, key)
         lines = "\n".join(_team_award_line(a) for a in group)
-        award_fields.append({"name": label, "value": lines, "inline": False})
+        # inline=False, deliberately unlike headline_fields above: each
+        # of these values is a multi-line list (one line per team), and
+        # squeezing a multi-line list into a third of the message width
+        # would be unreadable rather than merely dense.
+        team_fields.append({"name": label, "value": lines, "inline": False})
 
-    # Belt-and-suspenders: whatever the grouping above produces, never
-    # hand Discord more than its own hard limit -- see
-    # _MAX_EMBED_FIELDS's own comment for why a 26th field is not a
-    # partial failure but a 400 for the whole message.
-    award_fields = award_fields[:_MAX_EMBED_FIELDS]
+    # Belt-and-suspenders, PER EMBED: whatever the grouping above
+    # produces, never hand Discord more fields in one embed than its
+    # own hard limit -- see _MAX_EMBED_FIELDS's own comment for why a
+    # 26th field is not a partial failure but a 400 for the whole
+    # message. Honors and By team are now separate embeds, so each is
+    # capped independently rather than against one shared 25-field
+    # budget.
+    headline_fields = headline_fields[:_MAX_EMBED_FIELDS]
+    team_fields = team_fields[:_MAX_EMBED_FIELDS]
 
     base_url = (settings.oauth_public_base_url or "").rstrip("/")
 
-    embed = {
-        "title": f"{proto_label} results: {month}",
+    standings_embed = {
+        "title": f"{proto_label} — {_month_title(month)}",
         "description": f"Standings:\n{standings_text}",
-        "fields": award_fields,
     }
     # A Discord embed's "url" must be an ABSOLUTE url -- a relative one
     # (e.g. "/results") makes Discord reject the ENTIRE message with an
@@ -360,7 +473,46 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     # back to a relative path. This only bites a deployment that has
     # not set OAUTH_PUBLIC_BASE_URL, which is why it was invisible here.
     if base_url:
-        embed["url"] = f"{base_url}/results"
+        standings_embed["url"] = f"{base_url}/results"
+
+    # Never emit an embed with an empty `fields` list -- Discord allows
+    # that, but it renders as a bare, pointless title with nothing under
+    # it, so a group with nothing to show is left out of the message
+    # entirely rather than sent as an empty shell.
+    honors_embed = {"title": "Honors", "fields": headline_fields} if headline_fields else None
+    team_embed = {"title": "By team", "fields": team_fields} if team_fields else None
+
+    # The month's colour: the LEADING team (first entry of `standings`,
+    # already sorted by squares descending above) -- the post itself
+    # reads as that month's winning team's colour, so the colour
+    # carries information rather than being decoration. This is the
+    # same reasoning frontend/theme.css gives for team colours not
+    # being a skinnable/brand choice: they mean something in the game,
+    # not just on screen. Omitted -- never guessed at a default --
+    # when there are no standings at all, or the leading team's name
+    # isn't one _TEAM_COLORS knows.
+    leading_team = standings[0].get("team") if standings else None
+    color = _team_color(leading_team)
+    embeds = [standings_embed]
+    if honors_embed is not None:
+        embeds.append(honors_embed)
+    if team_embed is not None:
+        embeds.append(team_embed)
+    if color is not None:
+        for e in embeds:
+            e["color"] = color
+
+    # Discord's 6000-character TOTAL budget across every embed in the
+    # message (_MAX_TOTAL_EMBED_CHARS's own comment) is separate from,
+    # and in addition to, the per-embed field-count guard above. If the
+    # assembled payload would exceed it, "By team" is dropped first and
+    # entirely, never truncated: it is the least important of the three
+    # embeds (a reader still gets the full month from Standings +
+    # Honors alone), and a truncated field value is far more confusing
+    # on screen than that field simply not being there.
+    if team_embed is not None and _total_embed_chars(embeds) > _MAX_TOTAL_EMBED_CHARS:
+        embeds = [e for e in embeds if e is not team_embed]
+
     # "username" overrides the webhook's own configured display name --
     # without it, Discord shows whatever the webhook happened to be
     # named when it was created in the channel's Integrations settings
@@ -372,7 +524,7 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     # never simply omitted when unset.
     return {
         "username": settings.discord_webhook_username or "MeshWars",
-        "embeds": [embed],
+        "embeds": embeds,
     }
 
 
