@@ -22,9 +22,13 @@ path -- anyone holding it can post to the channel as this app, no
 further authentication), the same "a secret, never returned or logged"
 treatment app/config.py already gives freqmapper_api_key and
 admin_token. _post() below is the one place that ever touches the
-setting's value, and every error it raises is a short, fixed message
-naming the failure kind, never the request or its URL -- see that
-function's own docstring.
+setting's value. A timeout or transport failure raises a short, fixed
+message naming the failure kind, never the request or its URL, because
+httpx's own exception text embeds the request (and so the URL) --
+but a non-2xx HTTP response is a different case: the RESPONSE body is
+Discord describing what was wrong with the payload it received, not a
+credential, so a snippet of it is included to make a bad announcement
+diagnosable. See _post()'s own docstring for the line between the two.
 """
 from __future__ import annotations
 
@@ -47,12 +51,30 @@ log = logging.getLogger("discord_notify")
 # httpx.Timeout, and app/oauth.py's token-exchange client).
 _POST_TIMEOUT_SECONDS = 10.0
 
+# How much of Discord's own non-2xx response body to fold into
+# DiscordSendError's message (see _post() below) -- enough to show the
+# actual field/name Discord objected to without letting one row's
+# stored last_error grow without bound.
+_MAX_ERROR_BODY_CHARS = 200
+
 # protocol -> the name a reader recognizes, for the embed's own text.
 # 'mc'/'mt' are exactly the bare literals every other module in this
 # codebase uses for the two boards (see app/results.py's own module
 # docstring) -- this is purely a DISPLAY table, not a third copy of the
 # protocol discriminator itself.
 _PROTOCOL_NAMES = {"mc": "MeshCore", "mt": "Meshtastic"}
+
+# Discord's own documented hard limit on the number of `fields` entries
+# in one embed. It is not a soft truncation on Discord's end -- posting
+# a 26th field fails the ENTIRE message with an HTTP 400, so this is a
+# guard, not a style choice. build_month_honors_embed() stays well
+# under it (headline awards are one field each, at most one per
+# results.AWARD_LABELS entry with an empty scope; per-team awards are
+# grouped into one field per award KEY rather than one per team, the
+# same headline/per-team split frontend/results.js's renderHonors() and
+# splitAwards() already draw for the same reason), but the slice below
+# applies regardless of what a future award shape produces.
+_MAX_EMBED_FIELDS = 25
 
 
 def announcements_enabled() -> bool:
@@ -74,11 +96,14 @@ class DiscordSendError(Exception):
     announcement, which stays in discord_outbox with posted_at still
     NULL for the next cycle to retry.
 
-    Every message this carries is a short, fixed string naming the
-    failure kind (a timeout, a transport error, a non-2xx status) --
-    never the request itself, since httpx's own exception and request
-    reprs include the URL, and a Discord webhook URL carries its own
-    auth token in the path. See this module's own docstring.
+    A timeout or transport error message is a short, fixed string
+    naming only the failure kind -- never the request itself, since
+    httpx's own exception and request reprs include the URL, and a
+    Discord webhook URL carries its own auth token in the path. A
+    non-2xx status message additionally carries a truncated snippet of
+    Discord's OWN response body, which is safe: it describes what was
+    wrong with the payload this app sent, not the credential used to
+    send it. See this module's own docstring and _post()'s.
     """
 
 
@@ -104,6 +129,7 @@ async def _post(payload: dict, *, http_client: httpx.AsyncClient | None = None) 
         try:
             resp = await client.post(url, json=payload)
         except httpx.TimeoutException as e:
+            # The REQUEST side: never str(e). See below.
             raise DiscordSendError("discord webhook post timed out") from e
         except httpx.HTTPError as e:
             # Deliberately not str(e) -- see this module's own
@@ -112,7 +138,15 @@ async def _post(payload: dict, *, http_client: httpx.AsyncClient | None = None) 
             # deployment's webhook credential.
             raise DiscordSendError(f"discord webhook post failed ({type(e).__name__})") from e
         if resp.status_code < 200 or resp.status_code >= 300:
-            raise DiscordSendError(f"discord webhook post returned HTTP {resp.status_code}")
+            # The RESPONSE side, not the request: Discord's own error
+            # body names the exact problem with the payload (an invalid
+            # field, a length limit, ...) and holds no credential --
+            # unlike the request/exception text above, it is safe to
+            # fold into the message. Capped to _MAX_ERROR_BODY_CHARS so
+            # one row's stored last_error can never grow unbounded.
+            snippet = (resp.text or "").strip()[:_MAX_ERROR_BODY_CHARS]
+            detail = f": {snippet}" if snippet else ""
+            raise DiscordSendError(f"discord webhook post returned HTTP {resp.status_code}{detail}")
     finally:
         if owns_client:
             await client.aclose()
@@ -143,6 +177,60 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> None:
         "INSERT OR IGNORE INTO discord_outbox(kind, key, payload, created_at) VALUES (?, ?, ?, ?)",
         (kind, key, json.dumps(payload), now),
     )
+
+
+def _fmt_number(value) -> str:
+    """Render an award's numeric `value` the way frontend/results.js's
+    own num() does -- a whole number reads as whole, never trailing
+    ".0" (6005.0 -> "6005", not "6005.0") -- plus a thousands separator
+    on top, since a Discord field is read at a glance in a chat
+    scrollback rather than a lined-up table column, and a bare
+    "6005" for a territory count is easy to misread by an order of
+    magnitude in that context. 6005.0 -> "6,005".
+    """
+    n = float(value or 0)
+    if n == int(n):
+        return f"{int(n):,}"
+    return f"{n:,.1f}"
+
+
+def _award_line(a: dict) -> str:
+    """who -- value detail, for one non-placeholder award. Renders all
+    three of who, the number, and its unit -- frontend/results.js's own
+    renderHonors() shows all three for the same reason its comment
+    gives: "Top NetOp 130" without a unit is the exact ambiguity the
+    detail exists to fix, and a bare who with no number at all (this
+    module's old bug) is that same ambiguity made worse. Awards whose
+    detail already restates the number (quick_fingers) are not
+    special-cased -- the site shows both there too, and matching the
+    site is correct and consistent.
+    """
+    who = a.get("player") or a.get("team") or "Unknown"
+    value = a.get("value")
+    detail = a.get("detail")
+    tail = " ".join(x for x in (_fmt_number(value) if value is not None else None, detail) if x)
+    return f"{who} -- {tail}" if tail else who
+
+
+def _team_award_line(a: dict) -> str:
+    """One compact line inside a grouped per-team field: "TEAM: <rest>".
+    Most per-team awards (team_attacker, team_defender, ...) are a
+    property of the team itself, so `who` (player() or team()) is just
+    the scope team again -- "GREEN: GREEN -- 40 squares taken" says
+    GREEN twice for nothing, so the leading "TEAM: " prefix stands in
+    for `who` and _award_line's own who is dropped in that case. A
+    per-team award that DOES name a player distinct from its scope
+    (a team's own top scorer, say) keeps that player's name after the
+    team prefix instead.
+    """
+    scope = a.get("scope") or ""
+    who = a.get("player") or a.get("team") or "Unknown"
+    if who == scope:
+        value = a.get("value")
+        detail = a.get("detail")
+        tail = " ".join(x for x in (_fmt_number(value) if value is not None else None, detail) if x)
+        return f"{scope}: {tail}" if tail else scope
+    return f"{scope}: {_award_line(a)}"
 
 
 def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
@@ -177,16 +265,54 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     else:
         standings_text = "No standings recorded."
 
-    award_fields = []
+    # A month has up to 10 headline awards (scope empty/None) plus one
+    # per-team award per team per per-team award key -- for a 5-team
+    # season that was 20 more rows, and one Discord field each blew
+    # straight through _MAX_EMBED_FIELDS (a real August announcement:
+    # 10 + 20 = 30 fields, rejected outright with an HTTP 400). Mirror
+    # how frontend/results.js already solves this for the same data
+    # (splitAwards()/renderTeamAwards(), and that function's own
+    # comment on why): a headline award still gets its own field, but
+    # per-team awards are grouped into ONE field per award KEY, with
+    # every team's line inside that field's value instead of a field of
+    # its own.
+    team_rank = {s.get("team"): i for i, s in enumerate(standings)}
+    headline_fields = []
+    team_awards: dict[str, list[dict]] = {}
+    team_award_order: list[str] = []
     for a in result.get("awards") or []:
         if a.get("player_id") is None and a.get("team") is None:
             continue  # unwon placeholder -- see with_placeholders() -- nothing to announce
-        label = a.get("label") or results.AWARD_LABELS.get(a.get("award"), a.get("award"))
-        name = f"{label} ({a['scope']})" if a.get("scope") else label
-        who = a.get("player") or a.get("team") or "Unknown"
-        detail = a.get("detail")
-        value = f"{who} -- {detail}" if detail else who
-        award_fields.append({"name": name, "value": value, "inline": False})
+        scope = a.get("scope")
+        if scope:
+            key = a.get("award")
+            if key not in team_awards:
+                team_awards[key] = []
+                team_award_order.append(key)
+            team_awards[key].append(a)
+        else:
+            label = a.get("label") or results.AWARD_LABELS.get(a.get("award"), a.get("award"))
+            headline_fields.append({"name": label, "value": _award_line(a), "inline": False})
+
+    award_fields = headline_fields
+    for key in team_award_order:
+        group = team_awards[key]
+        # Same order the standings table above is drawn in, so a reader
+        # scanning down one lines the two up -- same reasoning
+        # frontend/results.js's renderTeamAwards() gives for its own
+        # `order` list. A team absent from standings (nothing held, no
+        # check-ins, no exploration) still gets a line, sorted after
+        # every ranked team.
+        group.sort(key=lambda a: (team_rank.get(a.get("scope"), len(team_rank)), a.get("scope") or ""))
+        label = group[0].get("label") or results.AWARD_LABELS.get(key, key)
+        lines = "\n".join(_team_award_line(a) for a in group)
+        award_fields.append({"name": label, "value": lines, "inline": False})
+
+    # Belt-and-suspenders: whatever the grouping above produces, never
+    # hand Discord more than its own hard limit -- see
+    # _MAX_EMBED_FIELDS's own comment for why a 26th field is not a
+    # partial failure but a 400 for the whole message.
+    award_fields = award_fields[:_MAX_EMBED_FIELDS]
 
     base_url = (settings.oauth_public_base_url or "").rstrip("/")
     results_url = f"{base_url}/results" if base_url else "/results"

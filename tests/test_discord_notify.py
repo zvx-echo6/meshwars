@@ -193,6 +193,121 @@ def test_build_month_honors_embed_falls_back_to_award_labels(monkeypatch):
     assert results.AWARD_LABELS["empire_builder"] in json.dumps(embed)
 
 
+def _headline_award(i: int) -> dict:
+    return {
+        "award": f"headline_{i}", "label": f"Headline {i}", "scope": "",
+        "player_id": i, "player": f"player{i}", "team": "RED",
+        "value": float(i), "detail": "squares held",
+    }
+
+
+def _team_award(award_key: str, label: str, team: str, value: float) -> dict:
+    return {
+        "award": award_key, "label": label, "scope": team,
+        "player_id": None, "player": None, "team": team,
+        "value": value, "detail": "squares held",
+    }
+
+
+def _real_world_month_result():
+    """Shaped like a real August: 10 headline awards + 20 per-team
+    awards (2 per-team award keys x 10 teams) -- the exact 30-field
+    shape that a live Discord webhook rejected with an HTTP 400 before
+    this fix (Discord's own hard limit is 25 fields per embed)."""
+    result = _sample_result()
+    teams = [f"TEAM{n}" for n in range(10)]
+    result["standings"] = [{"team": t, "squares": 100 - n} for n, t in enumerate(teams)]
+    result["awards"] = [_headline_award(i) for i in range(10)]
+    for t in teams:
+        result["awards"].append(_team_award("team_attacker", "Top Attacker", t, 5.0))
+        result["awards"].append(_team_award("team_defender", "Top Defender", t, 3.0))
+    return result
+
+
+def test_build_month_honors_embed_never_exceeds_discord_field_limit():
+    """Regression guard for the real 30-field/HTTP-400 incident: no
+    matter how many headline + per-team awards a month has, the embed
+    must never carry more than Discord's documented hard limit of 25
+    fields (exceeding it fails the whole message, not just the extra
+    fields)."""
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _real_world_month_result())
+    fields = embed["embeds"][0]["fields"]
+    assert len(fields) <= 25
+
+
+def test_build_month_honors_embed_groups_per_team_awards_into_one_field_each():
+    """10 headline awards (one field each) + 2 distinct per-team award
+    keys (team_attacker, team_defender) across 10 teams must produce
+    10 + 2 = 12 fields, never 10 + 20: a per-team award is grouped by
+    award key into one field listing every team, not one field per
+    team (frontend/results.js's own split for this data)."""
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _real_world_month_result())
+    fields = embed["embeds"][0]["fields"]
+    assert len(fields) == 12
+    attacker_field = next(f for f in fields if f["name"] == "Top Attacker")
+    # All ten teams' lines live inside that ONE field's value.
+    for n in range(10):
+        assert f"TEAM{n}" in attacker_field["value"]
+
+
+def test_build_month_honors_embed_renders_number_with_thousands_separator():
+    """The old code built `value = f"{who} -- {detail}"`, dropping
+    a["value"] entirely -- a real announcement read 'GREEN -- squares
+    held' with no figure at all. The number must render formatted like
+    frontend/results.js's own num() (no trailing .0 on a whole number),
+    plus a thousands separator: 6005.0 -> "6,005", never "6005.0"."""
+    result = _sample_result()
+    result["awards"] = [{
+        "award": "largest_territory", "label": "Largest Territory", "scope": "",
+        "player_id": None, "player": None, "team": "GREEN",
+        "value": 6005.0, "detail": "squares held",
+    }]
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    text = json.dumps(embed)
+    assert "6,005" in text
+    assert "6005.0" not in text
+
+
+# ---- _post error messages ------------------------------------------------
+
+
+def test_post_non_2xx_includes_response_body_snippet_in_error(monkeypatch):
+    monkeypatch.setattr(
+        settings, "discord_webhook_announcements",
+        "https://discord.test/api/webhooks/1/abc",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text='{"message": "Invalid Form Body", "code": 50035}')
+
+    async def go():
+        async with _mock_client(handler) as client:
+            await discord_notify._post({"embeds": []}, http_client=client)
+
+    with pytest.raises(discord_notify.DiscordSendError) as excinfo:
+        _run(go())
+    assert "Invalid Form Body" in str(excinfo.value)
+
+
+def test_post_timeout_error_message_has_no_url(monkeypatch):
+    webhook_host = "discord.test"
+    monkeypatch.setattr(
+        settings, "discord_webhook_announcements",
+        f"https://{webhook_host}/api/webhooks/1/abc",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connect timed out", request=request)
+
+    async def go():
+        async with _mock_client(handler) as client:
+            await discord_notify._post({"embeds": []}, http_client=client)
+
+    with pytest.raises(discord_notify.DiscordSendError) as excinfo:
+        _run(go())
+    assert webhook_host not in str(excinfo.value)
+
+
 # ---- drain loop -----------------------------------------------------------
 
 
