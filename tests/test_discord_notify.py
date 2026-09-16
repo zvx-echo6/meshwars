@@ -268,6 +268,71 @@ def test_build_month_honors_embed_renders_number_with_thousands_separator():
     assert "6005.0" not in text
 
 
+def test_build_month_honors_embed_deduplicates_number_already_in_detail():
+    """A real live announcement rendered 'Quick Fingers:  Littleaton --
+    169 169 s after the net opened' -- frontend/results.js's own
+    renderHonors() shows value and detail in two separate visual
+    columns, so quick_fingers' hand-written detail already restating
+    its own number (value=169.0, detail="169 s after the net opened")
+    shows no visible duplication there. A Discord field value is one
+    line of text, so the number must not be prepended a second time."""
+    result = _sample_result()
+    result["awards"] = [{
+        "award": "quick_fingers", "label": "Quick Fingers", "scope": "",
+        "player_id": 3, "player": "Littleaton", "team": "RED",
+        "value": 169.0, "detail": "169 s after the net opened",
+    }]
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    text = json.dumps(embed)
+    assert "Littleaton -- 169 s after the net opened" in text
+    assert "169 169" not in text
+
+
+def test_build_month_honors_embed_number_detail_normal_path_unbroken():
+    """The common case -- a detail that does NOT restate the number --
+    must still render both value and detail, unchanged by the
+    de-duplication added for quick_fingers-shaped awards."""
+    result = _sample_result()
+    result["awards"] = [{
+        "award": "largest_territory", "label": "Largest Territory", "scope": "",
+        "player_id": None, "player": None, "team": "GREEN",
+        "value": 6005.0, "detail": "squares held",
+    }]
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    assert "GREEN -- 6,005 squares held" in json.dumps(embed)
+
+
+def test_build_month_honors_embed_near_miss_number_not_falsely_deduplicated():
+    """A detail beginning with a LONGER number than value must not be
+    mistaken for a duplicate: "169" is a string-prefix of "1690", but
+    "169 " (number-then-space) is not, so both the value and the full
+    detail must still render."""
+    result = _sample_result()
+    result["awards"] = [{
+        "award": "some_award", "label": "Some Award", "scope": "",
+        "player_id": None, "player": None, "team": "RED",
+        "value": 169.0, "detail": "1690 squares past the towns",
+    }]
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    assert "169 1690 squares past the towns" in json.dumps(embed)
+
+
+def test_build_month_honors_embed_team_award_line_also_deduplicates():
+    """The same de-duplication must apply to a per-team (scoped) award
+    line via _team_award_line(), not just the headline _award_line()
+    path -- both share the fix through one helper."""
+    result = _sample_result()
+    result["awards"] = [{
+        "award": "quick_fingers", "label": "Quick Fingers", "scope": "TEAM0",
+        "player_id": None, "player": None, "team": "TEAM0",
+        "value": 169.0, "detail": "169 s after the net opened",
+    }]
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    text = json.dumps(embed)
+    assert "TEAM0: 169 s after the net opened" in text
+    assert "169 169" not in text
+
+
 def test_build_month_honors_embed_url_absolute_or_omitted(monkeypatch):
     """A Discord embed's "url" must be an ABSOLUTE url -- a relative one
     (the old fallback, "/results") makes Discord reject the WHOLE

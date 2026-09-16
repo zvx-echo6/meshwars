@@ -194,21 +194,55 @@ def _fmt_number(value) -> str:
     return f"{n:,.1f}"
 
 
+def _value_detail_tail(value, detail) -> str:
+    """Join a formatted `value` with its `detail`, for one award --
+    shared by _award_line() and _team_award_line() so both render the
+    same way.
+
+    frontend/results.js's renderHonors() shows `value` and `detail` in
+    two separate visual columns, so an award whose hand-written detail
+    already restates its own number -- e.g. value=169.0,
+    detail="169 s after the net opened" for 'quick_fingers' -- shows no
+    visible duplication there; the number is simply repeated in two
+    places on screen. A Discord field value is a single line of text
+    though, so the same data reads as a stutter: "169 169 s after the
+    net opened". This checks whether `detail` already begins with the
+    number -- either _fmt_number()'s comma-formatted form or the plain
+    integer string, since a hand-written detail will never carry a
+    thousands separator -- and drops the duplicate numeric prefix when
+    it does. The match only fires at the start of `detail` and only
+    when followed by a space or end-of-string, so "9763 ft" matches
+    value=9763 but "1690 squares past the towns" does NOT falsely match
+    value=169 (169 is a prefix of "1690", but "169 " is not).
+
+    Deliberately generic rather than keyed on the 'quick_fingers' award
+    name: any future award whose detail embeds its own number would hit
+    the exact same stutter here.
+    """
+    formatted = _fmt_number(value) if value is not None else None
+    if formatted and detail:
+        prefixes = {formatted}
+        n = float(value)
+        if n == int(n):
+            prefixes.add(str(int(n)))
+        if any(detail == p or detail.startswith(p + " ") for p in prefixes):
+            return detail
+    return " ".join(x for x in (formatted, detail) if x)
+
+
 def _award_line(a: dict) -> str:
     """who -- value detail, for one non-placeholder award. Renders all
     three of who, the number, and its unit -- frontend/results.js's own
     renderHonors() shows all three for the same reason its comment
     gives: "Top NetOp 130" without a unit is the exact ambiguity the
     detail exists to fix, and a bare who with no number at all (this
-    module's old bug) is that same ambiguity made worse. Awards whose
-    detail already restates the number (quick_fingers) are not
-    special-cased -- the site shows both there too, and matching the
-    site is correct and consistent.
+    module's old bug) is that same ambiguity made worse. See
+    _value_detail_tail() for why a detail that already restates the
+    number (quick_fingers) is de-duplicated here even though the site
+    shows both -- a Discord field is one line, not two columns.
     """
     who = a.get("player") or a.get("team") or "Unknown"
-    value = a.get("value")
-    detail = a.get("detail")
-    tail = " ".join(x for x in (_fmt_number(value) if value is not None else None, detail) if x)
+    tail = _value_detail_tail(a.get("value"), a.get("detail"))
     return f"{who} -- {tail}" if tail else who
 
 
@@ -226,9 +260,7 @@ def _team_award_line(a: dict) -> str:
     scope = a.get("scope") or ""
     who = a.get("player") or a.get("team") or "Unknown"
     if who == scope:
-        value = a.get("value")
-        detail = a.get("detail")
-        tail = " ".join(x for x in (_fmt_number(value) if value is not None else None, detail) if x)
+        tail = _value_detail_tail(a.get("value"), a.get("detail"))
         return f"{scope}: {tail}" if tail else scope
     return f"{scope}: {_award_line(a)}"
 
