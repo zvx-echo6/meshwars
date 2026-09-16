@@ -1756,9 +1756,17 @@ async def admin_discord(request: Request):
 @router.post("/api/admin/discord")
 async def admin_discord_update(request: Request):
     """Update the Discord announcement config singleton. Takes effect
-    on the very next freeze (build_month_honors_embed()/enqueue()) or
-    drain cycle -- both read discord_config fresh every time
-    (load_discord_config), never settings.py.
+    on the very next freeze/roll/activation (build_month_honors_embed()/
+    build_season_close_embed()/build_place_activation_embed(), all via
+    enqueue()) or drain cycle -- all read discord_config fresh every
+    time (load_discord_config), never settings.py.
+
+    announce_month_honors, announce_season_close, and
+    announce_place_activation are three INDEPENDENT per-kind gates,
+    same plain bool(body.get(...)) shape as `enabled` itself -- unlike
+    webhook_url below, there is no "omit to keep the current value"
+    special case for any of them, so the admin form always submits all
+    three explicitly.
 
     webhook_url is a SECRET (see discord_config's own comment in
     app/db.py): an ABSENT or empty-string webhook_url in the body
@@ -1785,6 +1793,8 @@ async def admin_discord_update(request: Request):
     username = (body.get("username") or "").strip()
     team_emoji = (body.get("team_emoji") or "").strip()
     announce_month_honors = bool(body.get("announce_month_honors"))
+    announce_season_close = bool(body.get("announce_season_close"))
+    announce_place_activation = bool(body.get("announce_place_activation"))
 
     now = int(time.time())
     conn = connect()
@@ -1802,18 +1812,29 @@ async def admin_discord_update(request: Request):
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT INTO discord_config(id, enabled, webhook_url, username, team_emoji, "
-            " announce_month_honors, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?) "
+            " announce_month_honors, announce_season_close, announce_place_activation, "
+            " updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "  enabled = excluded.enabled, webhook_url = excluded.webhook_url, "
             "  username = excluded.username, team_emoji = excluded.team_emoji, "
             "  announce_month_honors = excluded.announce_month_honors, "
+            "  announce_season_close = excluded.announce_season_close, "
+            "  announce_place_activation = excluded.announce_place_activation, "
             "  updated_at = excluded.updated_at",
-            (int(enabled), webhook_url, username, team_emoji, int(announce_month_honors), now),
+            (
+                int(enabled), webhook_url, username, team_emoji,
+                int(announce_month_honors), int(announce_season_close),
+                int(announce_place_activation), now,
+            ),
         )
         _log_admin_action(
             conn, actor_account_id=session.account_id, action="discord_config_save",
-            detail=f"enabled={enabled} announce_month_honors={announce_month_honors}", now=now,
+            detail=(
+                f"enabled={enabled} announce_month_honors={announce_month_honors} "
+                f"announce_season_close={announce_season_close} "
+                f"announce_place_activation={announce_place_activation}"
+            ), now=now,
         )
         conn.execute("COMMIT")
         cfg = discord_notify.load_discord_config(conn)

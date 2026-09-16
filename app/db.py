@@ -2245,13 +2245,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_discord_outbox_key ON discord_outbox(kind,
 -- "deploying this changes nothing" contract every other seeded default
 -- in this table follows.
 CREATE TABLE IF NOT EXISTS discord_config (
-    id                    INTEGER PRIMARY KEY CHECK (id = 1),
-    enabled               INTEGER NOT NULL DEFAULT 0,
-    webhook_url           TEXT NOT NULL DEFAULT '',
-    username              TEXT NOT NULL DEFAULT '',
-    team_emoji            TEXT NOT NULL DEFAULT '',
-    announce_month_honors INTEGER NOT NULL DEFAULT 1,
-    updated_at            INTEGER NOT NULL DEFAULT 0
+    id                         INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled                    INTEGER NOT NULL DEFAULT 0,
+    webhook_url                TEXT NOT NULL DEFAULT '',
+    username                   TEXT NOT NULL DEFAULT '',
+    team_emoji                 TEXT NOT NULL DEFAULT '',
+    announce_month_honors      INTEGER NOT NULL DEFAULT 1,
+    -- Per-kind gates for the two announcement kinds added alongside
+    -- season closes (app/mc_scoring.py's maybe_roll_season()) and
+    -- notable place activations (app/place_scoring.py's credit_places())
+    -- -- same "separate from `enabled`, on by default" shape
+    -- announce_month_honors already established: an operator who never
+    -- visits /api/admin/discord to turn a new kind off keeps getting it,
+    -- and either can be switched off without touching the webhook or any
+    -- other kind. See MIGRATIONS below -- discord_config already existed
+    -- in every deployment before these two columns did, so an ALTER is
+    -- also required there, not just here.
+    announce_season_close      INTEGER NOT NULL DEFAULT 1,
+    announce_place_activation  INTEGER NOT NULL DEFAULT 1,
+    updated_at                 INTEGER NOT NULL DEFAULT 0
 );
 
 -- Per-kind Discord channel routing, on top of discord_config's own
@@ -2825,6 +2837,18 @@ MIGRATIONS = [
     # settings.py on a truly fresh install; this migration only has to
     # guarantee the row EXISTS, not what it holds.
     "INSERT OR IGNORE INTO discord_config(id) VALUES (1)",
+    # announce_season_close / announce_place_activation added after
+    # discord_config already shipped and was live in every deployment
+    # (unlike announce_month_honors, which landed in the same CREATE
+    # TABLE as the rest of this table's columns and so never needed a
+    # migration of its own) -- same situation as place.rotates/active
+    # above, an ALTER is required here too. Default to 1 (on), matching
+    # announce_month_honors's own default: an operator who never visits
+    # /api/admin/discord to turn one of these off keeps getting both new
+    # kinds announced, the same "opt-out, not opt-in" behavior every
+    # existing announcement kind already has.
+    "ALTER TABLE discord_config ADD COLUMN announce_season_close INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE discord_config ADD COLUMN announce_place_activation INTEGER NOT NULL DEFAULT 1",
 ]
 
 PRAGMAS = [

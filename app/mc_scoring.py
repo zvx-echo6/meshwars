@@ -628,12 +628,27 @@ def maybe_roll_season(conn: sqlite3.Connection, now: int, protocol: str) -> bool
     why), or 'TIE' if there is no unique leader (including the case
     where nobody holds any tiles or points at all).
 
+    Also enqueues a Discord "season closed" announcement -- see the
+    enqueue() call below, right after the season's own rows are written,
+    for why the ordering (not before, not in a second transaction) is
+    load-bearing.
+
     Pruning of old MeshCore season data (tile/score/capture rows) is
     deferred for now -- nothing is deleted on rollover, matching how the
     Meshtastic side only prunes once a season count threshold is hit.
     """
+    # Local import, mirroring app/results.py's freeze_month() for the
+    # exact same call (discord_notify.enqueue(), from inside a scoring
+    # write path) -- unlike results.py, this module has no reverse
+    # import FROM discord_notify to create an actual cycle, but keeping
+    # the import local here too keeps the dependency direction strictly
+    # one-way (discord_notify never needs to know mc_scoring exists) and
+    # costs nothing: a season rolls over at most a couple of times a
+    # month.
+    from . import discord_notify
+
     row = conn.execute(
-        "SELECT id, ends_at FROM mc_season WHERE protocol = ? AND status = 'active' "
+        "SELECT id, started_at, ends_at FROM mc_season WHERE protocol = ? AND status = 'active' "
         "ORDER BY id DESC LIMIT 1",
         (protocol,),
     ).fetchone()
@@ -672,6 +687,34 @@ def maybe_roll_season(conn: sqlite3.Connection, now: int, protocol: str) -> bool
     log.info(
         "mc scoring: closed season %d winner=%s totals=%s",
         season_id, winner, totals,
+    )
+
+    # Enqueued on THIS SAME conn, inside the caller's still-open
+    # transaction, AFTER the mc_season_team_tally rows and the closing
+    # UPDATE above -- same reasoning as app/results.py's freeze_month():
+    # a roll that raises after this point rolls back the whole
+    # transaction, this row included, so a season that never actually
+    # closed can never be announced.
+    #
+    # key = the closed season's own id -- unique and stable, and a
+    # season closes exactly once, so discord_outbox's UNIQUE(kind, key)
+    # index (via enqueue()'s INSERT OR IGNORE) makes a second roll of
+    # the SAME season (should one ever be attempted) a silent no-op
+    # rather than a second announcement.
+    discord_notify.enqueue(
+        conn, kind="season_close", key=str(season_id),
+        payload=discord_notify.build_season_close_embed(
+            conn, protocol,
+            {"id": season_id, "winner": winner},
+            # `all_teams` (every team the tally rows above were just
+            # written for), not `totals.keys()` alone: team_totals()
+            # only carries a key for a team with at least one nonzero
+            # component, so a team holding nothing at all this season
+            # would otherwise silently drop off the standings instead of
+            # showing up with a combined score of zero.
+            [{"team": t, "total": totals.get(t, 0.0)} for t in all_teams],
+        ),
+        now=now,
     )
 
     ends_at = now + settings.mc_season_days * 86400

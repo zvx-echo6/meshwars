@@ -14,6 +14,25 @@ NOW = int(time.time())
 WEEK = week_start_for_ts(NOW)
 
 
+def _enable_discord(conn) -> None:
+    """Same DB-backed config as tests/test_discord_notify.py's own
+    _enable_discord() -- discord_notify.enqueue() is a no-op while
+    announcements are disabled (discord_config's own default), and the
+    whole point of the tests below is to prove credit_places() is not a
+    no-op here."""
+    conn.execute(
+        "UPDATE discord_config SET enabled = 1, "
+        " webhook_url = 'https://discord.test/api/webhooks/1/x' WHERE id = 1"
+    )
+
+
+def _player(conn, player_id, team="RED"):
+    conn.execute(
+        "INSERT INTO player(player_id, display_name, team, created_at) VALUES (?, ?, ?, ?)",
+        (player_id, f"player-{player_id}", team, NOW),
+    )
+
+
 def _place(conn, place_id, ref_type, lat, lon, points, rotates=0, active=1):
     conn.execute(
         "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
@@ -345,3 +364,63 @@ def test_existing_stacked_history_is_never_rewritten(conn):
         "SELECT place_id, player_id, week_start, points, awarded_at FROM place_activation "
         " WHERE week_start = ? ORDER BY place_id", (old_week,)).fetchall()]
     assert after == before, "historic activation rows must not change"
+
+
+# ---- Discord "notable activation" announcement ---------------------------
+
+
+def test_credit_places_enqueues_discord_announcement_for_a_notable_activation(conn):
+    """A summit -- notable by ref_type alone, and also this deployment's
+    first ever activation of it -- must enqueue a place_activation
+    announcement, keyed on the new place_activation row's own id."""
+    _enable_discord(conn)
+    _player(conn, 40)
+    cid = _place_on(conn, 1, "summit", 43.5, -116.5, points=100)
+
+    credited = credit_places(conn, player_id=40, cell_id=cid, ts=NOW, paint_outcome="captured")
+    assert credited == [(1, 100)]
+
+    activation_id = conn.execute(
+        "SELECT id FROM place_activation WHERE place_id = 1 AND player_id = 40"
+    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT kind, key FROM discord_outbox WHERE kind = 'place_activation'"
+    ).fetchall()
+    assert [(r["kind"], r["key"]) for r in rows] == [("place_activation", str(activation_id))]
+
+
+def test_credit_places_does_not_enqueue_for_a_non_notable_activation(conn):
+    """A plain landmark that has already been activated before (so
+    'first ever' does not apply either) matches none of the three
+    notability rules -- credit_places() must still credit the points,
+    but must not enqueue anything: this is the ordinary, non-notable
+    case that makes up the overwhelming majority of ~373 monthly
+    activations."""
+    _enable_discord(conn)
+    _player(conn, 41)
+    _player(conn, 42)
+    cid = _place_on(conn, 1, "landmark", 43.6, -116.6, points=10)
+
+    # A prior activation of this SAME place, a different week, so the
+    # place is no longer this deployment's "first ever" for it.
+    old_week = week_start_for_ts(NOW - 14 * 86400)
+    conn.execute(
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (1, 41, ?, 10, ?)", (old_week, NOW - 14 * 86400),
+    )
+
+    credited = credit_places(conn, player_id=42, cell_id=cid, ts=NOW, paint_outcome="captured")
+    assert credited == [(1, 10)]
+    assert conn.execute("SELECT * FROM discord_outbox").fetchall() == []
+
+
+def test_credit_places_no_op_when_discord_disabled(conn):
+    """discord_config defaults to disabled -- crediting a summit must
+    still work exactly as before, and must not accumulate an outbox
+    backlog no webhook will ever drain."""
+    _player(conn, 43)
+    cid = _place_on(conn, 1, "summit", 43.7, -116.7, points=100)
+
+    credited = credit_places(conn, player_id=43, cell_id=cid, ts=NOW, paint_outcome="captured")
+    assert credited == [(1, 100)]
+    assert conn.execute("SELECT * FROM discord_outbox").fetchall() == []

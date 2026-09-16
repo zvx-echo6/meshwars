@@ -2063,6 +2063,8 @@ async function saveNotice(b, overrideActive) {
 function renderDiscordForm(cfg) {
   document.getElementById('dc-enabled').checked = !!cfg.enabled;
   document.getElementById('dc-month-honors').checked = !!cfg.announce_month_honors;
+  document.getElementById('dc-season-close').checked = !!cfg.announce_season_close;
+  document.getElementById('dc-place-activation').checked = !!cfg.announce_place_activation;
   document.getElementById('dc-webhook-url').value = '';
   document.getElementById('dc-clear-webhook').checked = false;
   document.getElementById('dc-webhook-hint').textContent = cfg.webhook_set
@@ -2207,6 +2209,8 @@ async function saveDiscord(b) {
   const payload = {
     enabled: document.getElementById('dc-enabled').checked,
     announce_month_honors: document.getElementById('dc-month-honors').checked,
+    announce_season_close: document.getElementById('dc-season-close').checked,
+    announce_place_activation: document.getElementById('dc-place-activation').checked,
     username: document.getElementById('dc-username').value.trim(),
     team_emoji: document.getElementById('dc-team-emoji').value.trim(),
   };

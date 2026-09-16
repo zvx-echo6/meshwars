@@ -257,6 +257,67 @@ def test_post_discord_round_trips_other_fields(db_path):
     assert cfg["announce_month_honors"] is False
 
 
+def test_get_discord_reports_the_two_new_announce_toggles(db_path):
+    """discord_config's own CREATE TABLE/MIGRATIONS default both new
+    toggles to 1 (on) -- an operator who never visits this route yet
+    still gets both new announcement kinds."""
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200, resp.text
+    cfg = resp.json()["config"]
+    assert cfg["announce_season_close"] is True
+    assert cfg["announce_place_activation"] is True
+
+
+def test_post_discord_round_trips_season_close_and_place_activation_toggles(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "",
+        "announce_month_honors": True,
+        "announce_season_close": False,
+        "announce_place_activation": False,
+    })
+    assert resp.status_code == 200, resp.text
+    cfg = resp.json()["config"]
+    assert cfg["announce_season_close"] is False
+    assert cfg["announce_place_activation"] is False
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "",
+        "announce_month_honors": True,
+        "announce_season_close": True,
+        "announce_place_activation": True,
+    })
+    assert resp.status_code == 200, resp.text
+    cfg = resp.json()["config"]
+    assert cfg["announce_season_close"] is True
+    assert cfg["announce_place_activation"] is True
+
+
+def test_post_discord_season_close_toggle_does_not_affect_place_activation(db_path):
+    """The two new toggles are independent -- flipping one off must
+    leave the other exactly where it was."""
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "",
+        "announce_month_honors": True,
+        "announce_season_close": False,
+        "announce_place_activation": True,
+    })
+    assert resp.status_code == 200, resp.text
+    cfg = resp.json()["config"]
+    assert cfg["announce_season_close"] is False
+    assert cfg["announce_place_activation"] is True
+
+
 # ---- announcements_enabled: both gates required --------------------------
 
 

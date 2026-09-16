@@ -31,7 +31,8 @@ credential, so a snippet of it is included to make a bad announcement
 diagnosable. See _post()'s own docstring for the line between the two.
 
 Configuration (enabled, webhook_url, username, team_emoji,
-announce_month_honors) lives in the DB, not settings.py directly --
+announce_month_honors, announce_season_close, announce_place_activation)
+lives in the DB, not settings.py directly --
 app/db.py's discord_config singleton, read fresh by
 load_discord_config() below every time it is needed, the same
 DB-backed, admin-editable runtime config app/freqmapper_ingest.py's
@@ -112,6 +113,15 @@ _MAX_EMBED_FIELDS = 25
 # embed's construction below) can never drift apart or say two
 # different things for the same figure.
 _STANDINGS_UNIT = "squares held"
+
+# The unit for build_season_close_embed()'s own standings field -- a
+# SEASON's standing is decided on team_totals() (squares held PLUS
+# check-in points PLUS Places Worth Going points, see that function's
+# own docstring in app/mc_scoring.py), not squares alone, so it needs
+# its own word rather than reusing _STANDINGS_UNIT above: printing
+# "squares held" next to a number that is not a square count would be
+# actively wrong, not just imprecise.
+_SEASON_TOTAL_UNIT = "combined score"
 
 # Discord's own documented hard limit on the TOTAL character count
 # across every embed in one message -- title + description + each
@@ -304,14 +314,16 @@ def _total_embed_chars(embeds: list) -> int:
 def load_discord_config(conn) -> dict:
     """Fresh, uncached read of the discord_config singleton (app/db.py)
     -- enabled, webhook_url, username, team_emoji, announce_month_honors,
-    updated_at. Read on every enqueue() call, every drain cycle
-    (_drain_once()), by build_month_honors_embed(), and by every admin
-    route that needs the current values (app/admin_ops.py) -- never
-    cached anywhere in the process. Exactly the pattern
-    app/freqmapper_ingest.py's load_freqmapper_config() uses for
-    freqmapper_config, for the same reason: an admin edit through
-    /api/admin/discord must take effect on the very next freeze or
-    drain cycle, not after a restart.
+    announce_season_close, announce_place_activation, updated_at. Read
+    on every enqueue() call, every drain cycle (_drain_once()), by
+    build_month_honors_embed()/build_season_close_embed()/
+    build_place_activation_embed(), and by every admin route that needs
+    the current values (app/admin_ops.py) -- never cached anywhere in
+    the process. Exactly the pattern app/freqmapper_ingest.py's
+    load_freqmapper_config() uses for freqmapper_config, for the same
+    reason: an admin edit through /api/admin/discord must take effect on
+    the very next freeze/roll/activation or drain cycle, not after a
+    restart.
 
     Falls back to config.py's original settings if the row is somehow
     missing (a database whose migrations have not run yet) rather than
@@ -323,11 +335,16 @@ def load_discord_config(conn) -> dict:
     fallback mirrors seed_discord_config_from_env()'s own reasoning: a
     webhook being configured at all WAS the on/off switch before this
     table existed, so the fallback reconstructs the same state a real
-    column would hold.
+    column would hold. announce_month_honors/announce_season_close/
+    announce_place_activation all default True in the fallback too --
+    the same CREATE TABLE default every one of them carries, so a
+    missing row degrades to exactly the schema's own defaults rather
+    than inventing a different answer.
     """
     row = conn.execute(
         "SELECT enabled, webhook_url, username, team_emoji, "
-        "       announce_month_honors, updated_at "
+        "       announce_month_honors, announce_season_close, "
+        "       announce_place_activation, updated_at "
         "  FROM discord_config WHERE id = 1"
     ).fetchone()
     if row is None:
@@ -337,11 +354,15 @@ def load_discord_config(conn) -> dict:
             "username": settings.discord_webhook_username,
             "team_emoji": settings.discord_team_emoji,
             "announce_month_honors": True,
+            "announce_season_close": True,
+            "announce_place_activation": True,
             "updated_at": 0,
         }
     d = dict(row)
     d["enabled"] = bool(d["enabled"])
     d["announce_month_honors"] = bool(d["announce_month_honors"])
+    d["announce_season_close"] = bool(d["announce_season_close"])
+    d["announce_place_activation"] = bool(d["announce_place_activation"])
     return d
 
 
@@ -589,7 +610,12 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> bool:
     `enabled`, so an operator can leave the webhook enabled (letting a
     manual kind="test" announcement from POST /api/admin/discord/test
     still go out) while turning off the automatic end-of-month post on
-    its own. No other kind is gated by it.
+    its own. kind="season_close" and kind="place_activation" have the
+    exact same per-kind shape, gated by announce_season_close and
+    announce_place_activation respectively -- three independent
+    on/off switches, each of which can be flipped without touching
+    `enabled` or either of the other two. No other kind is gated by any
+    of them.
 
     Also a no-op when discord_channel's per-kind routing
     (resolve_discord_webhook(), against _channel_kind_candidates(kind))
@@ -612,6 +638,10 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> bool:
     if not announcements_enabled(cfg):
         return False
     if kind == "month_honors" and not cfg["announce_month_honors"]:
+        return False
+    if kind == "season_close" and not cfg["announce_season_close"]:
+        return False
+    if kind == "place_activation" and not cfg["announce_place_activation"]:
         return False
     channels = load_discord_channels(conn)
     if resolve_discord_webhook(cfg, channels, kind) is None:
@@ -1016,6 +1046,227 @@ def build_month_honors_embed(conn, month: str, protocol: str, result: dict) -> d
     }
 
 
+def build_season_close_embed(conn, protocol: str, season_row, tallies: list[dict]) -> dict:
+    """The full Discord webhook JSON body for one closed MeshCore/
+    Meshtastic season (app/mc_scoring.py's maybe_roll_season(), called
+    inside that function's own write transaction, AFTER the closing
+    season's rows are written -- see that function's own comment for
+    why the ordering matters).
+
+    Mirrors build_month_honors_embed()'s structure and every hard-won
+    rule its own docstring and inline comments already establish: team
+    dots from discord_config.team_emoji with the same plain-text
+    fallback (_team_dot()), bold numbers via _fmt_number(), an
+    italicised unit, never a "--" separator, an absolute-or-omitted
+    `url`, and Discord's own _MAX_EMBED_FIELDS/_MAX_FIELD_VALUE_CHARS/
+    _MAX_TOTAL_EMBED_CHARS budgets. The standings field reuses
+    _join_team_field() verbatim -- a season's final standings are
+    exactly the same shape as a month's "By team" field (one line per
+    team, trimmed from the bottom if it would ever overflow
+    _MAX_FIELD_VALUE_CHARS) -- so this embed's two short fields
+    (standings, winner) never come close to the 6000-character total
+    budget in practice; there is nothing this function could drop and
+    still say anything meaningful, unlike build_month_honors_embed()'s
+    three-embed message, so no drop step is needed here.
+
+    `season_row` is the CLOSED season's own row shape (at minimum `id`
+    and `winner` -- either a team name or the literal 'TIE', see
+    maybe_roll_season()'s own docstring). `tallies` is a list of
+    {"team", "total"} dicts -- the SAME team_totals() figure
+    maybe_roll_season() used to decide the winner in the first place
+    (squares held + check-in points + Places Worth Going points), not
+    mc_season_team_tally's own persisted columns (which hold only the
+    squares/check-in split, for history -- see that table's own comment
+    in app/db.py). Passing the exact number that decided the winner,
+    rather than re-deriving a different one here, guarantees this
+    announcement can never show a standings order that disagrees with
+    the winner it names.
+
+    winner == 'TIE' is handled explicitly: rendered as "It's a tie!",
+    never as a bare "TIE" that would read as a team's name, and no
+    colour is looked up for it -- _team_color('TIE') would already
+    return None (it is simply absent from _TEAM_COLORS), but this is
+    spelled out rather than relied on as a coincidence.
+
+    Imported LOCALLY by maybe_roll_season() (app/mc_scoring.py), not the
+    other way -- this module has no reason to import mc_scoring at all,
+    so there is no circular-import concern here the way
+    build_month_honors_embed() has with app/results.py.
+    """
+    cfg = load_discord_config(conn)
+    proto_label = _PROTOCOL_NAMES.get(protocol, protocol)
+    emoji = _parse_team_emoji(cfg["team_emoji"])
+
+    standings = sorted(
+        tallies or [],
+        key=lambda t: (-(t.get("total") or 0), t.get("team") or ""),
+    )
+    lines = [
+        f"{_team_dot(emoji, t.get('team'))}{t.get('team')} **{_fmt_number(t.get('total', 0))}**"
+        for t in standings
+    ]
+    standings_value = _join_team_field(lines, _SEASON_TOTAL_UNIT) if lines else "No standings recorded."
+
+    winner = season_row["winner"]
+    if winner is None or winner == "TIE":
+        winner_value = "It's a tie!"
+        color = None
+    else:
+        winner_value = f"{_team_dot(emoji, winner)}**{winner}**"
+        color = _team_color(winner)
+
+    fields = [
+        {"name": "Final standings", "value": standings_value, "inline": False},
+        {"name": "Winner", "value": winner_value, "inline": False},
+    ][:_MAX_EMBED_FIELDS]
+
+    embed = {
+        "title": f"{proto_label} — Season #{season_row['id']} closed",
+        "fields": fields,
+    }
+    base_url = (settings.oauth_public_base_url or "").rstrip("/")
+    # Same absolute-or-omitted rule as build_month_honors_embed()'s own
+    # standings_embed url -- a relative path here would make Discord
+    # reject the ENTIRE message with an HTTP 400, not just drop the link.
+    if base_url:
+        embed["url"] = f"{base_url}/results"
+    if color is not None:
+        embed["color"] = color
+
+    return {
+        "username": cfg["username"] or "MeshWars",
+        "embeds": [embed],
+    }
+
+
+# ---------------------------------------------------------------------
+# Notable place activations (app/place_scoring.py's credit_places(),
+# app/db.py's place/place_activation tables).
+#
+# Live volume is ~373 activations a month across ~61 players (roughly a
+# dozen a day) -- announcing every single one would bury everything else
+# this module posts, so only a NOTABLE activation is announced at all.
+# THIS is the one, clearly-commented place all three notability rules
+# live -- add, remove, or retune a rule HERE, never by reaching into
+# _PLACE_NOTABILITY_LABELS or build_place_activation_embed() below,
+# which only render whatever this function decided:
+#
+#   1. A SUMMIT activation (place.ref_type == 'summit' -- the schema's
+#      own name for the category, not an invented label; 'park' and
+#      'landmark' are the other two ref_types and neither is notable by
+#      type alone).
+#   2. The FIRST EVER activation of this place -- no earlier
+#      place_activation row exists for this place_id (checked against
+#      every OTHER activation row for the same place, never just this
+#      week's or this player's own history).
+#   3. A NEW HIGHEST-ELEVATION activation for the whole deployment --
+#      this place's elevation_ft exceeds every OTHER activated place's
+#      elevation_ft on file (place.elevation_ft is set only for
+#      summits; a place with no elevation on file can never trigger or
+#      be beaten by this rule).
+#
+# Any one of the three is enough to notify; they are not exclusive, and
+# build_place_activation_embed() below lists every rule this activation
+# actually matched.
+def place_activation_notability(conn, *, place_id: int, ref_type: str, elevation_ft, activation_id: int) -> list[str]:
+    """Which of the rules above `activation_id` (place_activation's own
+    row id, already inserted by the caller on the same connection)
+    matches, as a list of reason keys in no particular order -- empty
+    when none apply, meaning the caller must not announce this
+    activation at all. Every check here is scoped to EXCLUDE
+    `activation_id` itself (`id != ?`), since the row this function is
+    asked about already exists by the time it runs -- without that
+    exclusion, "first ever" and "highest elevation" would always see
+    themselves and never fire.
+    """
+    reasons = []
+    if ref_type == "summit":
+        reasons.append("summit")
+
+    prior = conn.execute(
+        "SELECT 1 FROM place_activation WHERE place_id = ? AND id != ? LIMIT 1",
+        (place_id, activation_id),
+    ).fetchone()
+    if prior is None:
+        reasons.append("first_ever")
+
+    if elevation_ft is not None:
+        prev_max = conn.execute(
+            "SELECT MAX(p.elevation_ft) FROM place_activation pa "
+            "  JOIN place p ON p.id = pa.place_id "
+            " WHERE pa.id != ? AND p.elevation_ft IS NOT NULL",
+            (activation_id,),
+        ).fetchone()[0]
+        if prev_max is None or elevation_ft > prev_max:
+            reasons.append("elevation_record")
+
+    return reasons
+
+
+# Human labels for place_activation_notability()'s reason keys, in a
+# FIXED display order (a summit that is also this deployment's first
+# ever activation of it always reads "Summit · First activation ever",
+# never the reverse) -- kept as one ordered list rather than a plain
+# dict so build_place_activation_embed() below never has to guess at an
+# order the set/dict iteration itself does not guarantee.
+_PLACE_NOTABILITY_LABELS = [
+    ("summit", "Summit"),
+    ("first_ever", "First activation ever"),
+    ("elevation_record", "New elevation record"),
+]
+
+
+def build_place_activation_embed(conn, protocol: str, place, player, reasons: list[str]) -> dict:
+    """One compact Discord embed for a single notable place activation
+    (app/place_scoring.py's credit_places(), called on the same
+    connection and inside the same transaction as the place_activation
+    INSERT itself -- see that call site's own comment for why). Kept
+    deliberately SHORT: this is the only announcement kind that can fire
+    several times a day (see this section's own module-level comment on
+    volume), so unlike build_month_honors_embed()/
+    build_season_close_embed() there is no multi-field breakdown here,
+    just who, which place, the team dot, and why it was notable.
+
+    `place` is a place row (id, name, ref_type, points, elevation_ft --
+    at minimum); `player` is a player row (display_name, team). `reasons`
+    is place_activation_notability()'s own return -- a non-empty list,
+    since the caller only ever builds this embed for an activation that
+    already matched at least one rule.
+    """
+    cfg = load_discord_config(conn)
+    proto_label = _PROTOCOL_NAMES.get(protocol, protocol)
+    emoji = _parse_team_emoji(cfg["team_emoji"])
+    dot = _team_dot(emoji, player["team"])
+
+    reason_line = _SEP.join(label for key, label in _PLACE_NOTABILITY_LABELS if key in reasons)
+
+    fields = [{"name": "Points", "value": f"**{_fmt_number(place['points'])}**", "inline": True}]
+    if place["elevation_ft"] is not None:
+        # Shown only when this place actually carries elevation data
+        # (summits only, today) -- a park/landmark's elevation_ft is
+        # always NULL, and a blank/zero figure here would be worse than
+        # just leaving the field out.
+        fields.append({
+            "name": "Elevation",
+            "value": f"**{_fmt_number(place['elevation_ft'])}** *ft*",
+            "inline": True,
+        })
+
+    embed = {
+        "title": f"{proto_label}: {place['name']}",
+        "description": f"{dot}{player['display_name']}{_SEP}{reason_line}",
+        "fields": fields,
+    }
+    color = _team_color(player["team"])
+    if color is not None:
+        embed["color"] = color
+
+    return {
+        "username": cfg["username"] or "MeshWars",
+        "embeds": [embed],
+    }
+
+
 async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
     """One pass over the pending rows in discord_outbox -- the unit
     run_forever() repeats on its own interval, pulled out on its own so
@@ -1144,11 +1395,23 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 # check_due_time_driven() below, BEFORE that cycle's _drain_once() --
 # so anything enqueued here still gets posted in the very same cycle.
 #
-# TIME_DRIVEN_PROVIDERS: list[Callable[[], list[dict]]]
+# TIME_DRIVEN_PROVIDERS: list[Callable[[sqlite3.Connection, int], list[dict]]]
 #
 # Each entry is a PROVIDER FUNCTION -- not a static description of one
-# announcement -- called with no arguments, fresh, on every single
-# due-check, returning a list of ZERO OR MORE items due RIGHT NOW:
+# announcement -- called as provider(conn, now), fresh, on every single
+# due-check, returning a list of ZERO OR MORE items due RIGHT NOW. `conn`
+# is check_due_time_driven()'s own caller's connection (the same one
+# enqueue() itself takes), passed straight through rather than opened
+# fresh here: a provider needs database access to decide what is due
+# (see the checkin_net-derived worked example below, which SELECTs from
+# it), and check_due_time_driven() already runs inside an open
+# WriteSession (_check_due_time_driven_once() below) -- a provider
+# opening a SECOND connection of its own would be a second writer
+# competing for the same in-flight write lock, not a second reader.
+# `now` is that same caller's clock (int(time.time()), read once for the
+# whole cycle) so every provider in one due-check agrees on what instant
+# "right now" means, rather than each one calling time.time() itself a
+# few microseconds apart.
 #
 #   [{"kind": str, "key": str, "payload": dict}, ...]
 #
@@ -1186,21 +1449,25 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 # words on why this can't be a fixed entry: "there WILL be more
 # communities this should not be hardcoded but adapted and computed
 # directly from the net schedules." So a net-wrapup provider would, on
-# every call:
+# every call (given its own (conn, now)):
 #
-#   1. SELECT the ENABLED rows of checkin_net -- nothing about their
-#      count, weekdays, labels, or timezones is ever written into code;
-#      a net added through the admin UI starts getting wrap-ups on its
-#      own very next due net with NO code change and NO redeploy, and a
-#      disabled/deleted net simply stops appearing in this SELECT and so
-#      never produces one again.
-#   2. for EACH row, decide "is it due" and compute the local calendar
-#      date the wrap-up covers using THAT ROW'S OWN `weekday` and
-#      `timezone` (zoneinfo.ZoneInfo(row["timezone"]), the same
-#      per-entry-timezone pattern app/results.py's own _tz() already
-#      establishes for month arithmetic) -- NEVER one single app-wide
-#      clock, because two nets can be due on different calendar days,
-#      in different zones, at the same instant.
+#   1. SELECT the ENABLED rows of checkin_net, on the `conn` it was
+#      handed -- nothing about their count, weekdays, labels, or
+#      timezones is ever written into code; a net added through the
+#      admin UI starts getting wrap-ups on its own very next due net
+#      with NO code change and NO redeploy, and a disabled/deleted net
+#      simply stops appearing in this SELECT and so never produces one
+#      again.
+#   2. for EACH row, decide "is it due" against the passed-in `now`
+#      (never time.time() called fresh inside the provider -- every
+#      provider in one due-check must agree on the same instant) and
+#      compute the local calendar date the wrap-up covers using THAT
+#      ROW'S OWN `weekday` and `timezone` (zoneinfo.ZoneInfo(row
+#      ["timezone"]), the same per-entry-timezone pattern
+#      app/results.py's own _tz() already establishes for month
+#      arithmetic) -- NEVER one single app-wide clock, because two nets
+#      can be due on different calendar days, in different zones, at
+#      the same instant.
 #   3. for each due net, yield one item shaped like:
 #        kind = f"net_wrapup:{net['id']}"     -- per-net ROUTING, falls
 #                                                 back to the generic
@@ -1211,8 +1478,11 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 #                                                 never announced twice
 #
 # CHEAPNESS: this whole check runs every discord_outbox_poll_interval_
-# seconds (30s by default) FOREVER, for the life of the process -- every
-# provider in this list must stay cheap. checkin_net has a handful of
+# seconds (30s by default) FOREVER, for the life of the process, ON THE
+# SAME WriteSession CONNECTION the caller is already holding open (see
+# _check_due_time_driven_once() below) -- every provider in this list
+# must stay cheap, because a slow provider here holds the write lock
+# just as long as a slow enqueue() would. checkin_net has a handful of
 # rows (four, today) and reading all of it every cycle is fine -- even
 # many more communities is still a tiny table -- but this is NOT a
 # license for a provider to run anything heavier: a provider must NEVER
@@ -1242,14 +1512,19 @@ def check_due_time_driven(conn, now: int) -> int:
 
     SYNC, and takes the CALLER's own connection -- same shape as
     enqueue() itself, since this is nothing but a loop that calls it.
-    Never raises: a single misbehaving provider is logged and skipped,
-    never allowed to stop a later provider in the same list, or a later
-    call to this function on the next cycle.
+    Each provider is called as provider(conn, now), passed straight
+    through: a provider that needs its own DB access (any real one
+    will) uses THIS connection, inside THIS already-open transaction,
+    rather than opening a second one of its own -- see
+    TIME_DRIVEN_PROVIDERS's own docstring for why. Never raises: a
+    single misbehaving provider is logged and skipped, never allowed to
+    stop a later provider in the same list, or a later call to this
+    function on the next cycle.
     """
     inserted = 0
     for provider in TIME_DRIVEN_PROVIDERS:
         try:
-            items = provider()
+            items = provider(conn, now)
         except Exception:
             log.exception("discord: time-driven provider failed, skipping it this cycle")
             continue

@@ -1222,7 +1222,7 @@ def test_check_due_time_driven_called_twice_same_period_enqueues_once(conn, monk
     anywhere in this module."""
     _enable_discord(conn)
 
-    def fake_provider():
+    def fake_provider(conn, now):
         return [{"kind": "fake_weekly", "key": "2026-W37", "payload": {"embeds": []}}]
 
     monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [fake_provider])
@@ -1243,7 +1243,7 @@ def test_check_due_time_driven_provider_returning_multiple_items_enqueues_all(co
     them must be enqueued, not just the first."""
     _enable_discord(conn)
 
-    def fake_net_provider():
+    def fake_net_provider(conn, now):
         return [
             {"kind": "fake_net_wrapup:1", "key": "1:2026-09-14", "payload": {"embeds": []}},
             {"kind": "fake_net_wrapup:2", "key": "2:2026-09-15", "payload": {"embeds": []}},
@@ -1266,7 +1266,7 @@ def test_check_due_time_driven_provider_returning_multiple_items_enqueues_all(co
 def test_check_due_time_driven_provider_returning_empty_list_is_noop(conn, monkeypatch):
     _enable_discord(conn)
 
-    def fake_provider_nothing_due():
+    def fake_provider_nothing_due(conn, now):
         return []
 
     monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [fake_provider_nothing_due])
@@ -1281,10 +1281,10 @@ def test_check_due_time_driven_provider_returning_empty_list_is_noop(conn, monke
 def test_check_due_time_driven_one_provider_failing_does_not_stop_another(conn, monkeypatch, caplog):
     _enable_discord(conn)
 
-    def broken_provider():
+    def broken_provider(conn, now):
         raise RuntimeError("boom")
 
-    def working_provider():
+    def working_provider(conn, now):
         return [{"kind": "fake_weekly", "key": "2026-W37", "payload": {"embeds": []}}]
 
     monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [broken_provider, working_provider])
@@ -1295,6 +1295,30 @@ def test_check_due_time_driven_one_provider_failing_does_not_stop_another(conn, 
     assert inserted == 1
     rows = conn.execute("SELECT * FROM discord_outbox WHERE kind = 'fake_weekly'").fetchall()
     assert len(rows) == 1
+
+
+def test_check_due_time_driven_passes_conn_and_now_to_each_provider(conn, monkeypatch):
+    """The provider contract this task changes: provider(conn, now), not
+    provider() -- a provider needs database access (check_due_time_driven()
+    already holds a connection; a provider must use THIS one, not open a
+    second connection of its own inside an in-flight WriteSession), and
+    `now` is the SAME clock check_due_time_driven() itself was called
+    with, not a fresh time.time() read inside the provider."""
+    _enable_discord(conn)
+    received = {}
+
+    def recording_provider(passed_conn, passed_now):
+        received["conn"] = passed_conn
+        received["now"] = passed_now
+        return []
+
+    monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [recording_provider])
+
+    now = int(time.time())
+    discord_notify.check_due_time_driven(conn, now)
+
+    assert received["conn"] is conn
+    assert received["now"] == now
 
 
 def test_drain_loop_gives_up_after_max_attempts(db_path, monkeypatch):
@@ -1324,3 +1348,409 @@ def test_drain_loop_gives_up_after_max_attempts(db_path, monkeypatch):
     posted_at, attempts, last_error = _read_row(db_path, row_id)
     assert posted_at is None
     assert attempts == 2
+
+
+# ---- build_season_close_embed -------------------------------------------
+
+
+def test_build_season_close_embed_standings_have_dots_and_bold_totals(conn):
+    _enable_discord(conn, team_emoji="RED=<:mw_red:1>,BLUE=<:mw_blue:2>")
+    tallies = [{"team": "RED", "total": 6120.0}, {"team": "BLUE", "total": 80.0}]
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 7, "winner": "RED"}, tallies,
+    )
+    standings = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Final standings")
+    assert "<:mw_red:1>" in standings["value"]
+    assert "<:mw_blue:2>" in standings["value"]
+    # Bold, thousands-separated, no trailing ".0".
+    assert "**6,120**" in standings["value"]
+    assert "**80**" in standings["value"]
+
+
+def test_build_season_close_embed_title_names_protocol_and_season(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 42, "winner": "RED"}, [{"team": "RED", "total": 10.0}],
+    )
+    assert embed["embeds"][0]["title"] == "MeshCore — Season #42 closed"
+
+
+def test_build_season_close_embed_meshtastic_protocol_name(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_season_close_embed(
+        conn, "mt", {"id": 1, "winner": "RED"}, [{"team": "RED", "total": 10.0}],
+    )
+    assert "Meshtastic" in embed["embeds"][0]["title"]
+
+
+def test_build_season_close_embed_names_winner(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 1, "winner": "BLUE"}, [{"team": "BLUE", "total": 55.0}],
+    )
+    winner = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Winner")
+    assert "BLUE" in winner["value"]
+
+
+def test_build_season_close_embed_tie_renders_as_tie_not_a_team_name(conn):
+    """winner == 'TIE' must read as a sentence saying it's a tie, never
+    as the bare literal 'TIE' printed as if it named a team -- and no
+    colour is looked up for it."""
+    _enable_discord(conn)
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 2, "winner": "TIE"},
+        [{"team": "RED", "total": 50.0}, {"team": "BLUE", "total": 50.0}],
+    )
+    winner = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Winner")
+    assert winner["value"] == "It's a tie!"
+    assert "color" not in embed["embeds"][0]
+
+
+def test_build_season_close_embed_colors_by_winning_team(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 3, "winner": "GREEN"}, [{"team": "GREEN", "total": 99.0}],
+    )
+    assert embed["embeds"][0]["color"] == discord_notify._TEAM_COLORS["GREEN"]
+
+
+def test_build_season_close_embed_no_color_for_unknown_winner(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 5, "winner": "NOTATEAM"}, [{"team": "NOTATEAM", "total": 1.0}],
+    )
+    assert "color" not in embed["embeds"][0]
+
+
+def test_build_season_close_embed_never_exceeds_discord_limits(conn):
+    """Regression guard mirroring build_month_honors_embed()'s own --
+    however many teams a season ever ends up with, no single embed may
+    carry more than 25 fields, no field value may exceed 1024
+    characters, and the whole payload must stay under the 6000-character
+    total budget."""
+    _enable_discord(conn)
+    # 80 long-named teams -- enough that the joined standings field
+    # genuinely overflows _MAX_FIELD_VALUE_CHARS and _join_team_field()'s
+    # own bottom-truncation actually has to trim something, not just a
+    # guard that happens to never fire.
+    tallies = [{"team": f"TEAM_WITH_A_LONG_NAME_{n:03d}", "total": 100000 - n} for n in range(80)]
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 9, "winner": "TEAM_WITH_A_LONG_NAME_000"}, tallies,
+    )
+    standings = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Final standings")
+    assert discord_notify._TRUNCATION_MARKER in standings["value"]
+    for e in embed["embeds"]:
+        assert len(e.get("fields") or []) <= discord_notify._MAX_EMBED_FIELDS
+        for f in e.get("fields") or []:
+            assert len(f["value"]) <= discord_notify._MAX_FIELD_VALUE_CHARS
+    assert discord_notify._total_embed_chars(embed["embeds"]) <= discord_notify._MAX_TOTAL_EMBED_CHARS
+
+
+def test_build_season_close_embed_no_double_dash_separator(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 4, "winner": "RED"}, [{"team": "RED", "total": 5.0}],
+    )
+    assert "--" not in json.dumps(embed)
+
+
+def test_build_season_close_embed_url_absolute_or_omitted(conn, monkeypatch):
+    monkeypatch.setattr(settings, "oauth_public_base_url", "")
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 1, "winner": "RED"}, [{"team": "RED", "total": 1.0}],
+    )
+    assert "url" not in embed["embeds"][0]
+
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 1, "winner": "RED"}, [{"team": "RED", "total": 1.0}],
+    )
+    assert embed["embeds"][0]["url"].startswith("https://")
+
+
+def test_build_season_close_embed_no_emoji(conn):
+    embed = discord_notify.build_season_close_embed(
+        conn, "mc", {"id": 1, "winner": "RED"}, [{"team": "RED", "total": 1.0}],
+    )
+    assert not _has_emoji(json.dumps(embed))
+
+
+# ---- place activation notability -----------------------------------------
+
+
+def test_place_activation_notability_summit_is_notable(conn):
+    conn.execute(
+        "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+        "active, created_at) VALUES (1, 'summit', 'r1', 'Mount Borah', 44.0, -113.0, 100, 'TEST', 1, 0)"
+    )
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (1, 1, 1, '2026-09-09', 100, ?)", (int(time.time()),),
+    )
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=1, ref_type="summit", elevation_ft=12662.0, activation_id=1,
+    )
+    assert "summit" in reasons
+
+
+def test_place_activation_notability_park_is_not_summit(conn):
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=1, ref_type="park", elevation_ft=None, activation_id=1,
+    )
+    assert "summit" not in reasons
+
+
+def test_place_activation_notability_first_ever_when_no_prior_row(conn):
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (1, 1, 1, '2026-09-09', 5, ?)", (int(time.time()),),
+    )
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=1, ref_type="landmark", elevation_ft=None, activation_id=1,
+    )
+    assert "first_ever" in reasons
+
+
+def test_place_activation_notability_not_first_ever_when_a_prior_row_exists(conn):
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (1, 1, 1, '2026-09-02', 5, ?)", (now,),
+    )
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (2, 1, 2, '2026-09-09', 5, ?)", (now,),
+    )
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=1, ref_type="landmark", elevation_ft=None, activation_id=2,
+    )
+    assert "first_ever" not in reasons
+
+
+def test_place_activation_notability_elevation_record_when_highest_on_file(conn):
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+        "elevation_ft, active, created_at) VALUES "
+        "(1, 'summit', 'r1', 'Lower Peak', 44.0, -113.0, 80, 'TEST', 6000, 1, 0), "
+        "(2, 'summit', 'r2', 'Higher Peak', 44.1, -113.1, 100, 'TEST', 9000, 1, 0)"
+    )
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (1, 1, 1, '2026-09-09', 80, ?)", (now,),
+    )
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (2, 2, 2, '2026-09-09', 100, ?)", (now,),
+    )
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=2, ref_type="summit", elevation_ft=9000.0, activation_id=2,
+    )
+    assert "elevation_record" in reasons
+
+
+def test_place_activation_notability_not_a_record_when_a_higher_one_exists(conn):
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+        "elevation_ft, active, created_at) VALUES "
+        "(1, 'summit', 'r1', 'Higher Peak', 44.0, -113.0, 100, 'TEST', 9000, 1, 0), "
+        "(2, 'summit', 'r2', 'Lower Peak', 44.1, -113.1, 80, 'TEST', 6000, 1, 0)"
+    )
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (1, 1, 1, '2026-09-09', 100, ?)", (now,),
+    )
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (2, 2, 2, '2026-09-09', 80, ?)", (now,),
+    )
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=2, ref_type="summit", elevation_ft=6000.0, activation_id=2,
+    )
+    assert "elevation_record" not in reasons
+
+
+def test_place_activation_notability_no_elevation_data_never_matches_that_rule(conn):
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (1, 5, 1, '2026-09-09', 5, ?)", (int(time.time()),),
+    )
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=5, ref_type="landmark", elevation_ft=None, activation_id=1,
+    )
+    assert "elevation_record" not in reasons
+
+
+def test_place_activation_notability_non_notable_activation_yields_no_reasons(conn):
+    """A plain landmark, already activated before, with no elevation data
+    -- none of the three rules apply, and the whole point of this
+    feature is that most of ~373 monthly activations look like this."""
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (1, 1, 1, '2026-09-02', 5, ?)", (now,),
+    )
+    conn.execute(
+        "INSERT INTO place_activation(id, place_id, player_id, week_start, points, awarded_at) "
+        "VALUES (2, 1, 2, '2026-09-09', 5, ?)", (now,),
+    )
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=1, ref_type="landmark", elevation_ft=None, activation_id=2,
+    )
+    assert reasons == []
+
+
+# ---- build_place_activation_embed ----------------------------------------
+
+
+def _place_row(**overrides):
+    row = {"name": "Mount Borah", "points": 100, "elevation_ft": 12662.0}
+    row.update(overrides)
+    return row
+
+
+def _player_row(**overrides):
+    row = {"display_name": "KI7NOX", "team": "RED"}
+    row.update(overrides)
+    return row
+
+
+def test_build_place_activation_embed_is_short_and_names_who_place_and_reason(conn):
+    _enable_discord(conn, team_emoji="RED=<:mw_red:1>")
+    embed = discord_notify.build_place_activation_embed(
+        conn, "mc", _place_row(), _player_row(), ["summit", "first_ever"],
+    )
+    e = embed["embeds"][0]
+    assert "Mount Borah" in e["title"]
+    assert "<:mw_red:1>" in e["description"]
+    assert "KI7NOX" in e["description"]
+    assert "Summit" in e["description"]
+    assert "First activation ever" in e["description"]
+    # SHORT: no fields beyond the compact points/elevation pair, no
+    # multi-field breakdown the way month honors or season close have.
+    assert len(e["fields"]) <= 2
+
+
+def test_build_place_activation_embed_reason_order_is_fixed(conn):
+    """Regardless of the order _place_activation_notability() happened
+    to return reasons in, the rendered line always reads Summit before
+    First activation ever before New elevation record."""
+    _enable_discord(conn)
+    embed = discord_notify.build_place_activation_embed(
+        conn, "mc", _place_row(), _player_row(),
+        ["elevation_record", "summit", "first_ever"],
+    )
+    desc = embed["embeds"][0]["description"]
+    assert desc.index("Summit") < desc.index("First activation ever") < desc.index("New elevation record")
+
+
+def test_build_place_activation_embed_omits_elevation_field_when_no_elevation_data(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_place_activation_embed(
+        conn, "mc", _place_row(elevation_ft=None), _player_row(), ["first_ever"],
+    )
+    names = [f["name"] for f in embed["embeds"][0]["fields"]]
+    assert "Elevation" not in names
+
+
+def test_build_place_activation_embed_points_bold_thousands_separator(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_place_activation_embed(
+        conn, "mc", _place_row(points=1234), _player_row(), ["first_ever"],
+    )
+    points_field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Points")
+    assert points_field["value"] == "**1,234**"
+
+
+def test_build_place_activation_embed_colors_by_player_team(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_place_activation_embed(
+        conn, "mc", _place_row(), _player_row(team="GREEN"), ["first_ever"],
+    )
+    assert embed["embeds"][0]["color"] == discord_notify._TEAM_COLORS["GREEN"]
+
+
+def test_build_place_activation_embed_no_double_dash(conn):
+    _enable_discord(conn)
+    embed = discord_notify.build_place_activation_embed(
+        conn, "mc", _place_row(), _player_row(), ["summit", "first_ever", "elevation_record"],
+    )
+    assert "--" not in json.dumps(embed)
+
+
+def test_build_place_activation_embed_no_emoji_literal(conn):
+    embed = discord_notify.build_place_activation_embed(
+        conn, "mc", _place_row(), _player_row(), ["summit"],
+    )
+    assert not _has_emoji(json.dumps(embed))
+
+
+# ---- per-kind announce_* toggles -----------------------------------------
+
+
+def test_enqueue_is_noop_when_announce_season_close_off(conn):
+    _enable_discord(conn)
+    conn.execute("UPDATE discord_config SET announce_season_close = 0 WHERE id = 1")
+    inserted = discord_notify.enqueue(conn, kind="season_close", key="7", payload={}, now=int(time.time()))
+    assert inserted is False
+    assert conn.execute("SELECT * FROM discord_outbox").fetchall() == []
+
+
+def test_enqueue_is_noop_when_announce_place_activation_off(conn):
+    _enable_discord(conn)
+    conn.execute("UPDATE discord_config SET announce_place_activation = 0 WHERE id = 1")
+    inserted = discord_notify.enqueue(conn, kind="place_activation", key="1", payload={}, now=int(time.time()))
+    assert inserted is False
+    assert conn.execute("SELECT * FROM discord_outbox").fetchall() == []
+
+
+def test_announce_season_close_off_does_not_suppress_other_kinds(conn):
+    """Each per-kind toggle gates only its OWN kind -- turning
+    announce_season_close off must not touch month_honors or
+    place_activation."""
+    _enable_discord(conn)
+    conn.execute("UPDATE discord_config SET announce_season_close = 0 WHERE id = 1")
+    now = int(time.time())
+    assert discord_notify.enqueue(conn, kind="month_honors", key="2026-08:mc", payload={}, now=now) is True
+    assert discord_notify.enqueue(conn, kind="place_activation", key="1", payload={}, now=now) is True
+    assert discord_notify.enqueue(conn, kind="season_close", key="7", payload={}, now=now) is False
+
+
+def test_announce_place_activation_off_does_not_suppress_other_kinds(conn):
+    _enable_discord(conn)
+    conn.execute("UPDATE discord_config SET announce_place_activation = 0 WHERE id = 1")
+    now = int(time.time())
+    assert discord_notify.enqueue(conn, kind="month_honors", key="2026-08:mc", payload={}, now=now) is True
+    assert discord_notify.enqueue(conn, kind="season_close", key="7", payload={}, now=now) is True
+    assert discord_notify.enqueue(conn, kind="place_activation", key="1", payload={}, now=now) is False
+
+
+def test_announce_month_honors_off_does_not_suppress_the_two_new_kinds(conn):
+    _enable_discord(conn, announce_month_honors=0)
+    now = int(time.time())
+    assert discord_notify.enqueue(conn, kind="month_honors", key="2026-08:mc", payload={}, now=now) is False
+    assert discord_notify.enqueue(conn, kind="season_close", key="7", payload={}, now=now) is True
+    assert discord_notify.enqueue(conn, kind="place_activation", key="1", payload={}, now=now) is True
+
+
+def test_enqueue_season_close_same_key_twice_leaves_exactly_one_row(conn):
+    _enable_discord(conn)
+    now = int(time.time())
+    first = discord_notify.enqueue(conn, kind="season_close", key="7", payload={}, now=now)
+    second = discord_notify.enqueue(conn, kind="season_close", key="7", payload={}, now=now)
+    assert first is True
+    assert second is False
+    rows = conn.execute("SELECT * FROM discord_outbox WHERE kind = 'season_close'").fetchall()
+    assert len(rows) == 1
+
+
+def test_enqueue_place_activation_same_key_twice_leaves_exactly_one_row(conn):
+    _enable_discord(conn)
+    now = int(time.time())
+    first = discord_notify.enqueue(conn, kind="place_activation", key="42", payload={}, now=now)
+    second = discord_notify.enqueue(conn, kind="place_activation", key="42", payload={}, now=now)
+    assert first is True
+    assert second is False
+    rows = conn.execute("SELECT * FROM discord_outbox WHERE kind = 'place_activation'").fetchall()
+    assert len(rows) == 1

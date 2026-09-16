@@ -69,6 +69,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 
+from . import discord_notify
 from .grid import ring_expand
 from .place_rotation import resolve_week, week_start_for_ts
 
@@ -230,8 +231,13 @@ def credit_places(
     # place on this cell is the ONLY candidate, and the runners-up are
     # discarded here rather than kept as a fallback further down -- see
     # the NON-STACKING note in the module docstring.
+    # name/ref_type/elevation_ft carried along here purely for the
+    # Discord notable-activation announcement below (build_place_
+    # activation_embed()'s own docstring) -- a second SELECT keyed on
+    # `place_id` alone would cost the same index hit this row already
+    # paid for, for no benefit.
     row = conn.execute(
-        "SELECT id, points FROM place "
+        "SELECT id, points, name, ref_type, elevation_ft FROM place "
         f" WHERE id IN ({marks}) "
         "   AND active = 1 "
         "   AND (rotates = 0 OR EXISTS ("
@@ -255,6 +261,7 @@ def credit_places(
         return []
 
     place_id, points = row["id"], row["points"]
+    place_name, ref_type, elevation_ft = row["name"], row["ref_type"], row["elevation_ft"]
 
     already_points = conn.execute(
         "SELECT COALESCE(SUM(points), 0) FROM place_activation "
@@ -295,12 +302,53 @@ def credit_places(
     # NOT come back later in the same week to pay out the difference --
     # see the module docstring.
     awarded = min(points, remaining)
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (place_id, player_id, week_start, awarded, ts, protocol),
     )
+    activation_id = cur.lastrowid
     credited = [(place_id, awarded)]
+
+    # Discord "notable activation" announcement -- see
+    # discord_notify.place_activation_notability()'s own module-level
+    # comment for the three rules (summit / first ever / new elevation
+    # record) this is checking, on the SAME connection and inside the
+    # SAME transaction as the INSERT just above: a paint that later
+    # rolls back this transaction must never have already announced an
+    # activation that, in the end, never happened. key=str(activation_id)
+    # is discord_outbox's own dedupe key -- place_activation.id is
+    # unique and assigned exactly once, so the same activation can never
+    # enqueue a second row even if this code path somehow ran twice for
+    # it.
+    reasons = discord_notify.place_activation_notability(
+        conn, place_id=place_id, ref_type=ref_type, elevation_ft=elevation_ft,
+        activation_id=activation_id,
+    )
+    if reasons:
+        player_row = conn.execute(
+            "SELECT display_name, team FROM player WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()
+        # player_row should always exist in production -- a scoring ping
+        # only ever reaches credit_places() for an already-registered
+        # player -- but crediting the place itself must never be put at
+        # risk by an announcement that is purely supplementary, so a
+        # missing row (a synthetic/test player_id, or data this
+        # deployment somehow lost) just skips the announcement rather
+        # than raising out of a function whose real job -- the INSERT
+        # above -- already succeeded.
+        if player_row is not None:
+            discord_notify.enqueue(
+                conn, kind="place_activation", key=str(activation_id),
+                payload=discord_notify.build_place_activation_embed(
+                    conn, protocol,
+                    {"name": place_name, "points": awarded, "elevation_ft": elevation_ft},
+                    player_row,
+                    reasons,
+                ),
+                now=ts,
+            )
     if awarded < points:
         log.info(
             "place_scoring: player %d credited %s at cell %s (week %s) "
