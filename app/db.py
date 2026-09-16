@@ -2279,6 +2279,15 @@ CREATE TABLE IF NOT EXISTS discord_config (
     -- above -- same independent, on-by-default, separate-from-`enabled`
     -- shape as every other per-kind gate in this table.
     announce_weekly_recap      INTEGER NOT NULL DEFAULT 1,
+    -- Per-net wrap-up (app/discord_notify.py's net_wrapup_provider(), a
+    -- TIME_DRIVEN_PROVIDERS entry, kind="net_wrapup:<checkin_net.id>") --
+    -- same independent, on-by-default, separate-from-`enabled` shape as
+    -- every other per-kind gate in this table. ONE toggle gates every
+    -- net's wrap-up; an operator who wants only SOME nets to post routes
+    -- the rest to a disabled discord_channel row instead (see that
+    -- table's own comment) rather than this column growing a per-net
+    -- flag of its own.
+    announce_net_wrapup        INTEGER NOT NULL DEFAULT 1,
     updated_at                 INTEGER NOT NULL DEFAULT 0
 );
 
@@ -2872,6 +2881,12 @@ MIGRATIONS = [
     # announcement) and why. Default 1 (on), same "opt-out, not opt-in"
     # reasoning as every other announcement kind.
     "ALTER TABLE discord_config ADD COLUMN announce_weekly_recap INTEGER NOT NULL DEFAULT 1",
+    # announce_net_wrapup: same "added after discord_config already
+    # shipped, so an ALTER is required" situation as the three columns
+    # above -- see this column's own comment on the CREATE TABLE above.
+    # Default 1 (on), same "opt-out, not opt-in" reasoning as every other
+    # announcement kind.
+    "ALTER TABLE discord_config ADD COLUMN announce_net_wrapup INTEGER NOT NULL DEFAULT 1",
 ]
 
 PRAGMAS = [

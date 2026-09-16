@@ -31,8 +31,9 @@ credential, so a snippet of it is included to make a bad announcement
 diagnosable. See _post()'s own docstring for the line between the two.
 
 Configuration (enabled, webhook_url, username, team_emoji,
-announce_month_honors, announce_season_close, announce_weekly_recap)
-lives in the DB, not settings.py directly -- (announce_place_activation
+announce_month_honors, announce_season_close, announce_weekly_recap,
+announce_net_wrapup) lives in the DB, not settings.py directly --
+(announce_place_activation
 is still a real column, kept per this codebase's "never drop a column"
 rule, but is no longer read anywhere: the per-event place announcement
 it gated was retired 2026-09-16 in favour of the weekly recap's
@@ -70,7 +71,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -321,10 +322,11 @@ def _total_embed_chars(embeds: list) -> int:
 def load_discord_config(conn) -> dict:
     """Fresh, uncached read of the discord_config singleton (app/db.py)
     -- enabled, webhook_url, username, team_emoji, announce_month_honors,
-    announce_season_close, announce_weekly_recap, updated_at. Read on
-    every enqueue() call, every drain cycle (_drain_once()), by
-    build_month_honors_embed()/build_season_close_embed()/
-    build_weekly_recap_embed(), and by every admin route that needs the
+    announce_season_close, announce_weekly_recap, announce_net_wrapup,
+    updated_at. Read on every enqueue() call, every drain cycle
+    (_drain_once()), by build_month_honors_embed()/
+    build_season_close_embed()/build_weekly_recap_embed()/
+    build_net_wrapup_embed(), and by every admin route that needs the
     current values (app/admin_ops.py) -- never cached anywhere in the
     process. Exactly the pattern app/freqmapper_ingest.py's
     load_freqmapper_config() uses for freqmapper_config, for the same
@@ -350,15 +352,15 @@ def load_discord_config(conn) -> dict:
     webhook being configured at all WAS the on/off switch before this
     table existed, so the fallback reconstructs the same state a real
     column would hold. announce_month_honors/announce_season_close/
-    announce_weekly_recap all default True in the fallback too -- the
-    same CREATE TABLE default every one of them carries, so a missing
-    row degrades to exactly the schema's own defaults rather than
-    inventing a different answer.
+    announce_weekly_recap/announce_net_wrapup all default True in the
+    fallback too -- the same CREATE TABLE default every one of them
+    carries, so a missing row degrades to exactly the schema's own
+    defaults rather than inventing a different answer.
     """
     row = conn.execute(
         "SELECT enabled, webhook_url, username, team_emoji, "
         "       announce_month_honors, announce_season_close, "
-        "       announce_weekly_recap, updated_at "
+        "       announce_weekly_recap, announce_net_wrapup, updated_at "
         "  FROM discord_config WHERE id = 1"
     ).fetchone()
     if row is None:
@@ -370,6 +372,7 @@ def load_discord_config(conn) -> dict:
             "announce_month_honors": True,
             "announce_season_close": True,
             "announce_weekly_recap": True,
+            "announce_net_wrapup": True,
             "updated_at": 0,
         }
     d = dict(row)
@@ -377,6 +380,7 @@ def load_discord_config(conn) -> dict:
     d["announce_month_honors"] = bool(d["announce_month_honors"])
     d["announce_season_close"] = bool(d["announce_season_close"])
     d["announce_weekly_recap"] = bool(d["announce_weekly_recap"])
+    d["announce_net_wrapup"] = bool(d["announce_net_wrapup"])
     return d
 
 
@@ -626,10 +630,15 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> bool:
     still go out) while turning off the automatic end-of-month post on
     its own. kind="season_close" and kind="weekly_recap" have the exact
     same per-kind shape, gated by announce_season_close and
-    announce_weekly_recap respectively -- three independent on/off
-    switches, each of which can be flipped without touching `enabled` or
-    either of the other two. No other kind is gated by any of them.
-    (kind="place_activation" used to be the third -- see
+    announce_weekly_recap respectively. Every colon-scoped
+    kind="net_wrapup:<net id>" is gated the same way too, by
+    announce_net_wrapup -- checked against the GENERIC prefix
+    ("net_wrapup"), never the per-instance kind, since this is one
+    on/off switch for every net's wrap-up, not a per-net one (see that
+    column's own comment in app/db.py). Four independent on/off
+    switches in total, each of which can be flipped without touching
+    `enabled` or any of the others. No other kind is gated by any of
+    them. (kind="place_activation" used to be a fifth -- see
     announce_place_activation's own comment in app/db.py's CREATE
     TABLE -- but nothing enqueues that kind any more, so this function no
     longer branches on it.)
@@ -659,6 +668,8 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> bool:
     if kind == "season_close" and not cfg["announce_season_close"]:
         return False
     if kind == "weekly_recap" and not cfg["announce_weekly_recap"]:
+        return False
+    if kind.split(":", 1)[0] == "net_wrapup" and not cfg["announce_net_wrapup"]:
         return False
     channels = load_discord_channels(conn)
     if resolve_discord_webhook(cfg, channels, kind) is None:
@@ -767,13 +778,17 @@ def _award_line(a: dict) -> str:
 # preceding change (see _team_award_line()'s history) because it was
 # heavy, repeated 30+ times across a by-team field, and read as noise
 # -- but the line still needs SOME token boundary, and a spaced middle
-# dot gives one at a fraction of the visual weight. Used ONLY by
-# _team_award_line() below -- deliberately NOT applied to the
-# standings lines (build_month_honors_embed()'s standings_text, already
-# just "<dot>TEAM **<number>**", two unambiguous tokens) or the
-# headline honors field values (_award_line()/_value_unit_line(),
-# already split across two separate lines), neither of which has this
-# run-together problem.
+# dot gives one at a fraction of the visual weight. Used by
+# _team_award_line() below and by the weekly recap's own multi-token
+# lines (_weekly_placement_section()'s "TEAM **rank** <sep> movement",
+# _weekly_exploration_section()'s per-player firsts count) -- every one
+# of them a line with more than two tokens that would otherwise run
+# together. Deliberately NOT applied to the standings lines
+# (build_month_honors_embed()'s standings_text, already just
+# "<dot>TEAM **<number>**", two unambiguous tokens) or the headline
+# honors field values (_award_line()/_value_unit_line(), already split
+# across two separate lines), neither of which has this run-together
+# problem.
 _SEP = " \u00b7 "
 
 
@@ -1307,13 +1322,12 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 #   [{"kind": str, "key": str, "payload": dict}, ...]
 #
 # A provider decides for itself how many items that is. A fixed weekly
-# thing returns at most one item (usually zero: due only once a week) --
-# weekly_recap_provider() below is exactly this shape. THE REASON this is
-# a list of PROVIDERS rather than a single static registry entry: a
-# provider can instead be NET-DERIVED, returning one item per
-# currently-due row of a table that itself changes over time -- see the
-# worked example below, which this module ships the MACHINERY for but
-# implements NO real provider for yet (that remains a later task).
+# thing returns at most one item PER PROTOCOL (usually zero: due only
+# once a week) -- weekly_recap_provider() below is exactly this shape.
+# THE REASON this is a list of PROVIDERS rather than a single static
+# registry entry: a provider can instead be NET-DERIVED, returning one
+# item per currently-due row of a table that itself changes over time --
+# see net_wrapup_provider() below, which is exactly this shape.
 #
 # "kind" is discord_outbox's routing key -- resolve_discord_webhook()
 # resolves it via _channel_kind_candidates() exactly like any other
@@ -1332,35 +1346,33 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 # IGNORE, every single time it is called -- calling it twice inside the
 # same period is always exactly as safe as calling it once.
 #
-# THE WORKED EXAMPLE this shape exists for (NOT implemented in this
-# task -- ship no real provider, no real kind): a per-net "wrap-up"
-# announcement, one per checkin_net row (app/db.py: id, label, protocol,
-# weekday, start_hour, end_hour, timezone, enabled -- this deployment
-# currently has four ENABLED rows, spanning America/Boise and
-# America/Los_Angeles across three different weekdays). Matt's own
-# words on why this can't be a fixed entry: "there WILL be more
-# communities this should not be hardcoded but adapted and computed
-# directly from the net schedules." So a net-wrapup provider would, on
-# every call (given its own (conn, now)):
+# net_wrapup_provider() below is the worked example this shape was
+# always meant for, now real: a per-net "wrap-up" announcement, one per
+# checkin_net row (app/db.py: id, label, protocol, weekday, start_hour,
+# end_hour, timezone, enabled -- live deployments span multiple IANA
+# zones across multiple weekdays). Matt's own words on why this can't be
+# a fixed entry: "there WILL be more communities this should not be
+# hardcoded but adapted and computed directly from the net schedules."
+# So net_wrapup_provider(), on every call (given its own (conn, now)):
 #
-#   1. SELECT the ENABLED rows of checkin_net, on the `conn` it was
+#   1. SELECTs the ENABLED rows of checkin_net, on the `conn` it was
 #      handed -- nothing about their count, weekdays, labels, or
 #      timezones is ever written into code; a net added through the
 #      admin UI starts getting wrap-ups on its own very next due net
 #      with NO code change and NO redeploy, and a disabled/deleted net
 #      simply stops appearing in this SELECT and so never produces one
 #      again.
-#   2. for EACH row, decide "is it due" against the passed-in `now`
+#   2. for EACH row, decides "is it due" against the passed-in `now`
 #      (never time.time() called fresh inside the provider -- every
 #      provider in one due-check must agree on the same instant) and
-#      compute the local calendar date the wrap-up covers using THAT
+#      computes the local calendar date the wrap-up covers using THAT
 #      ROW'S OWN `weekday` and `timezone` (zoneinfo.ZoneInfo(row
 #      ["timezone"]), the same per-entry-timezone pattern
 #      app/results.py's own _tz() already establishes for month
 #      arithmetic) -- NEVER one single app-wide clock, because two nets
 #      can be due on different calendar days, in different zones, at
-#      the same instant.
-#   3. for each due net, yield one item shaped like:
+#      the same instant. See _due_net_wrapups() below for the exact rule.
+#   3. for each due net, yields one item shaped like:
 #        kind = f"net_wrapup:{net['id']}"     -- per-net ROUTING, falls
 #                                                 back to the generic
 #                                                 "net_wrapup" channel
@@ -1392,14 +1404,13 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 # (a cheap discord_outbox lookup short-circuits every later cycle that
 # same day). No other provider gets this exception without the same
 # reasoning holding for it.
-_WEEKLY_RECAP_PROTOCOL = "mc"
 
-# Cap on how many players' first-count or streak lines the Exploration/
-# Nets sections of the weekly recap list -- a busy week must never blow
-# Discord's field-value budget. "Top 5": qualifying_place_firsts()'s own
-# measured volume is ~82 qualifying firsts a MONTH (about 2 a day), so
-# even the busiest realistic week touches only a handful of distinct
-# players and this is headroom, not a truncation that fires in practice.
+# Cap on how many players' first-count lines the Exploration section of
+# the weekly recap lists -- a busy week must never blow Discord's
+# field-value budget. "Top 5": qualifying_place_firsts()'s own measured
+# volume is ~82 qualifying firsts a MONTH (about 2 a day), so even the
+# busiest realistic week touches only a handful of distinct players and
+# this is headroom, not a truncation that fires in practice.
 _MAX_WEEKLY_RECAP_PLAYERS = 5
 
 
@@ -1469,13 +1480,40 @@ def _weekly_recap_due(now: int) -> tuple[str, int, int] | None:
     return key, start_ts, end_ts
 
 
+def _ordinal(n: int) -> str:
+    """1 -> "1st", 2 -> "2nd", 3 -> "3rd", 4 -> "4th", 11 -> "11th" --
+    English ordinal suffix rules, where every "teens" value (10 through
+    20, by the n % 100 test below) takes "th" regardless of its last
+    digit -- 11th/12th/13th, not "11st"/"12nd"/"13rd" -- and every other
+    value takes "st"/"nd"/"rd"/"th" off its last digit alone. Ranks in
+    this module never exceed the number of teams (settings.teams_list is
+    small), but the rule is written generally rather than hand-listing
+    the few values that could ever actually appear.
+    """
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def _weekly_placement_section(conn, protocol: str, start_ts: int, end_ts: int,
                                emoji: dict[str, str]) -> str | None:
-    """"Placement changes": how many squares each team gained or lost
-    over the window, one line per team that held ground at either end of
-    it, ordered by CURRENT (end-of-window) standing -- the same order
-    build_month_honors_embed()'s own standings_text is drawn in, so a
-    reader scanning both posts sees teams in the same order.
+    """"Placement changes": each team's CURRENT rank (by squares held,
+    descending, ties broken by team name ascending -- see _ranked()
+    below), and how that rank moved since the window opened, one line
+    per team that holds any ground right now, ordered by current rank
+    ascending (1st first) -- the owner's own correction: the old version
+    of this section showed squares GAINED, which is positive for nearly
+    every team nearly every week and so never actually read as movement.
+    A reader wants to know who is winning and who is climbing, and only
+    a RANK answers that; the raw squares-held count sorts the very same
+    order this section is already in and does not add "movement" the
+    rank line does not already carry, so it is left out entirely: "the
+    rank is the point."
+
+    Line shape: "<dot> TEAM **<ordinal>** <sep> <movement>", e.g.
+    "ORANGE **2nd** · up from 5th" / "GREEN **1st** · no change" /
+    "BLUE **6th** · down from 4th".
 
     Reuses app/results.py's ownership_at() -- the exact function
     compute_month() itself calls to answer "who holds what right now"
@@ -1485,9 +1523,20 @@ def _weekly_placement_section(conn, protocol: str, start_ts: int, end_ts: int,
     last week's own close) versus at end_ts - 1 (this window's own
     close, the same "end is exclusive, the close is end - 1" convention
     compute_month() uses). Both are point-in-time snapshots every
-    existing standings page already trusts; a team's "change" is nothing
-    more than their difference, so there is no second scoring path here
-    to ever fall out of sync with the first.
+    existing standings page already trusts; a team's rank is nothing
+    more than its position in that snapshot, so there is no second
+    scoring path here to ever fall out of sync with the first.
+
+    A team absent from `after` (held nothing at the window's close --
+    wiped out, or never held ground at all) has no CURRENT rank to
+    report and is left out of this section entirely: unlike the old
+    squares-delta version, which could at least show a negative number
+    for a team that lost everything, "rank N (currently absent)" has no
+    natural reading, and a wipe-out already shows up in every OTHER
+    team's own rank moving up over it. A team absent from `before` (new
+    to holding ground since the window opened) still gets a line -- its
+    current rank, with "new to the board" in place of an up/down/no
+    change verdict, since there is no PRIOR rank to compare against.
 
     Returns None when no team holds any ground at either end of the
     window (a brand-new or reset board) -- "no standings recorded" is
@@ -1501,23 +1550,38 @@ def _weekly_placement_section(conn, protocol: str, start_ts: int, end_ts: int,
             counts[r["team"]] = counts.get(r["team"], 0) + 1
         return counts
 
+    def _ranked(counts: dict[str, int]) -> list[str]:
+        # Team names in rank order (index 0 = 1st) -- squares held
+        # descending, then team name ascending as a stable, deterministic
+        # tiebreak (the same tiebreak _join_team_field()'s own callers
+        # already rely on elsewhere in this module for equal-value rows).
+        return [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
     before = _by_team(results.ownership_at(conn, protocol, start_ts - 1))
     after = _by_team(results.ownership_at(conn, protocol, end_ts - 1))
-    teams = set(before) | set(after)
-    if not teams:
+    if not before and not after:
         return None
 
-    ordered = sorted(teams, key=lambda t: (-after.get(t, 0), t))
+    after_order = _ranked(after)
+    before_rank = {t: i + 1 for i, t in enumerate(_ranked(before))}
+
     lines = []
-    for t in ordered:
-        delta = after.get(t, 0) - before.get(t, 0)
-        # _fmt_number() already renders a negative number with its own
-        # leading "-" (Python's own comma formatting does that natively)
-        # -- only the positive/zero case needs an explicit sign added,
-        # so a gain reads "+12" rather than a bare, easy-to-miss "12".
-        sign = "+" if delta > 0 else ""
-        lines.append(f"{_team_dot(emoji, t)}{t} **{sign}{_fmt_number(delta)}**")
-    return _join_team_field(lines, "squares this week")
+    for i, team in enumerate(after_order):
+        current_rank = i + 1
+        prior_rank = before_rank.get(team)
+        if prior_rank is None:
+            movement = "new to the board"
+        elif prior_rank == current_rank:
+            movement = "no change"
+        elif current_rank < prior_rank:
+            movement = f"up from {_ordinal(prior_rank)}"
+        else:
+            movement = f"down from {_ordinal(prior_rank)}"
+        lines.append(f"{_team_dot(emoji, team)}{team} **{_ordinal(current_rank)}**{_SEP}{movement}")
+    # No trailing unit line -- a rank/movement line is self-explanatory,
+    # unlike a bare number that needs "squares held" stated once to mean
+    # anything (see _join_team_field()'s own `unit` parameter).
+    return _join_team_field(lines, None)
 
 
 def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
@@ -1589,62 +1653,9 @@ def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
     return value if len(value) <= _MAX_FIELD_VALUE_CHARS else value[:_MAX_FIELD_VALUE_CHARS]
 
 
-def _weekly_nets_section(conn, start_ts: int, end_ts: int, emoji: dict[str, str]) -> str | None:
-    """"Nets": check-in activity for the window, from mc_checkin_award --
-    how many check-ins, across which nets (checkin_net.label, BOTH
-    boards' nets alike -- a check-in event names no location, so unlike
-    Exploration above this section carries no protocol filter and none
-    of qualifying_place_firsts()'s privacy concern), and any notable
-    streak. Streaks are READ BACK from mc_checkin_award.streak, already
-    computed and stored at award time by app/checkin.py's
-    checkin_streak() -- never recomputed here.
-
-    None when nobody checked in at all during the window.
-    """
-    rows = conn.execute(
-        "SELECT a.player_id, a.streak, pl.display_name AS player_name, pl.team AS team, "
-        "       COALESCE(n.label, 'an unlabeled net') AS net_label "
-        "  FROM mc_checkin_award a "
-        "  JOIN player pl ON pl.player_id = a.player_id "
-        "  LEFT JOIN checkin_net n ON n.id = a.net_id "
-        " WHERE a.awarded_at >= ? AND a.awarded_at < ?",
-        (start_ts, end_ts),
-    ).fetchall()
-    if not rows:
-        return None
-
-    nets = sorted({r["net_label"] for r in rows})
-    lines = [
-        f"**{_fmt_number(len(rows))}** check-in{'' if len(rows) == 1 else 's'} across "
-        f"**{_fmt_number(len(nets))}** net{'' if len(nets) == 1 else 's'}"
-        f"{_SEP}{', '.join(nets)}"
-    ]
-
-    # A "notable" streak is 2 or more consecutive nets -- a single
-    # check-in has a streak of 1 by definition (app/checkin.py's
-    # checkin_streak()) and is not itself news. Keeps the LONGEST streak
-    # seen per player this window (a player can check into more than one
-    # net inside seven days), capped and ordered the same way the
-    # Exploration section's player list is above.
-    best: dict[int, tuple[int, str, str]] = {}
-    for r in rows:
-        streak = r["streak"] or 0
-        if streak < 2:
-            continue
-        pid = r["player_id"]
-        if pid not in best or streak > best[pid][0]:
-            best[pid] = (streak, r["player_name"], r["team"])
-    ranked = sorted(best.values(), key=lambda v: (-v[0], v[1]))
-    for streak, name, team in ranked[:_MAX_WEEKLY_RECAP_PLAYERS]:
-        lines.append(f"{_team_dot(emoji, team)}{name}{_SEP}**{_fmt_number(streak)}**-net streak")
-
-    value = "\n".join(lines)
-    return value if len(value) <= _MAX_FIELD_VALUE_CHARS else value[:_MAX_FIELD_VALUE_CHARS]
-
-
 def build_weekly_recap_embed(conn, protocol: str, start_ts: int, end_ts: int) -> dict | None:
-    """The full Discord webhook JSON body for one week's recap -- three
-    sections (Placement changes, Exploration, Nets -- see
+    """The full Discord webhook JSON body for one week's recap -- two
+    sections (Placement changes, Exploration -- see
     weekly_recap_provider() for the window this covers and why), each
     its own field in a single embed, using every rendering rule already
     established elsewhere in this module: team dots from
@@ -1655,10 +1666,15 @@ def build_weekly_recap_embed(conn, protocol: str, start_ts: int, end_ts: int) ->
 
     A section with nothing to report for the window is OMITTED, not
     rendered empty (see each _weekly_*_section() helper's own docstring
-    for what "nothing to report" means for it) -- and when all three are
+    for what "nothing to report" means for it) -- and when both are
     empty, this returns None so weekly_recap_provider() enqueues
     nothing: an empty week gets NO message at all, never a Discord post
     that says so.
+
+    Nets are deliberately NOT one of these sections any more: a weekly
+    roll-up of check-in activity was rejected in favour of a per-net
+    wrap-up posted the day after each net (net_wrapup_provider() below)
+    -- see that provider's own docstring.
     """
     cfg = load_discord_config(conn)
     emoji = _parse_team_emoji(cfg["team_emoji"])
@@ -1671,9 +1687,6 @@ def build_weekly_recap_embed(conn, protocol: str, start_ts: int, end_ts: int) ->
     exploration = _weekly_exploration_section(conn, protocol, season_id, start_ts, end_ts, emoji)
     if exploration:
         fields.append({"name": "Exploration", "value": exploration, "inline": False})
-    nets = _weekly_nets_section(conn, start_ts, end_ts, emoji)
-    if nets:
-        fields.append({"name": "Nets", "value": nets, "inline": False})
     if not fields:
         return None
     fields = fields[:_MAX_EMBED_FIELDS]
@@ -1698,11 +1711,13 @@ def build_weekly_recap_embed(conn, protocol: str, start_ts: int, end_ts: int) ->
         # Should not happen in practice -- each section's own value is
         # already capped well under _MAX_FIELD_VALUE_CHARS above -- but
         # never hand Discord a payload that would 400 the whole message.
-        # Drop the least-critical section first (Nets, then
-        # Exploration), the same "drop a whole piece rather than
-        # truncate it" philosophy build_month_honors_embed() already
-        # applies to its own "By team" embed.
-        for name in ("Nets", "Exploration"):
+        # Drop the least-critical section first (Exploration, keeping
+        # Placement changes -- the standings movement -- as the one
+        # thing this post must always be able to say), the same "drop a
+        # whole piece rather than truncate it" philosophy
+        # build_month_honors_embed() already applies to its own
+        # "By team" embed.
+        for name in ("Exploration",):
             fields = [f for f in fields if f["name"] != name]
             embed["fields"] = fields
             if _total_embed_chars(embeds) <= _MAX_TOTAL_EMBED_CHARS:
@@ -1714,41 +1729,85 @@ def build_weekly_recap_embed(conn, protocol: str, start_ts: int, end_ts: int) ->
     }
 
 
+def _active_recap_protocols(conn) -> list[str]:
+    """Every protocol with a currently active mc_season row, in a fixed
+    order (_PROTOCOL_NAMES's own key order: 'mc' then 'mt') so a test or
+    a reader comparing two weeks' worth of keys sees a stable order
+    rather than SQLite's unspecified one. Mirrors month honors' own
+    per-protocol split -- app/results.py's freeze_month() is called once
+    per protocol, enqueue()ing kind="month_honors" with a key of
+    f"{month}:{protocol}" each time (see that function's own docstring)
+    -- so the weekly recap follows the exact same "the two boards are
+    separate games, always announced separately" rule every other part
+    of this codebase already applies, rather than combining them into
+    one post. A protocol with no active season (never started yet, or
+    between seasons) gets no recap item: there is no season for a week's
+    standing to be a week INSIDE of.
+
+    A plain query, not app/mc_scoring.py's ensure_active_season() --
+    this must never CREATE a season as a side effect of checking whether
+    one exists, the way that function does for its own, very different,
+    scoring-path callers.
+    """
+    return [
+        p for p in _PROTOCOL_NAMES
+        if conn.execute(
+            "SELECT 1 FROM mc_season WHERE protocol = ? AND status = 'active' LIMIT 1", (p,),
+        ).fetchone() is not None
+    ]
+
+
 def weekly_recap_provider(conn, now: int) -> list[dict]:
     """TIME_DRIVEN_PROVIDERS entry for the Sunday weekly recap -- see
     _weekly_recap_due() for exactly when this fires and what window it
     covers, and build_weekly_recap_embed() for the message itself.
 
+    Emits ONE ITEM PER PROTOCOL with an active season (_active_recap_
+    protocols() above) -- never a single combined post: a MeshCore-only
+    board used to mean Meshtastic players never appeared here at all,
+    which month honors already avoided by announcing each board
+    separately, and this now follows the same rule. Each protocol's item
+    carries its OWN key (f"{period_key}:{protocol}"), so the two boards'
+    recaps dedupe entirely independently of each other -- MeshCore's
+    post existing already (or being disabled, or empty) has no bearing
+    on whether Meshtastic's goes out this week, and vice versa. `kind`
+    stays the plain "weekly_recap" for both -- the same "kind carries no
+    protocol, key does" shape month_honors' own kind never needed
+    scoping either, since routing (resolve_discord_webhook()) has no
+    reason to ever split the two boards onto different channels.
+
     This is the one provider in this list allowed to touch big, growing
     tables (mc_tile_capture_log via app/results.py's ownership_at(),
-    place_activation via qualifying_place_firsts(), mc_checkin_award) --
-    a deliberate, narrow exception to TIME_DRIVEN_PROVIDERS's own "never
-    query a large table" rule (see that list's own docstring), safe here
-    because this does NOT pay that cost on every ~30-second poll cycle:
+    place_activation via qualifying_place_firsts()) -- a deliberate,
+    narrow exception to TIME_DRIVEN_PROVIDERS's own "never query a large
+    table" rule (see that list's own docstring), safe here because this
+    does NOT pay that cost on every ~30-second poll cycle:
     _weekly_recap_due() itself is pure date/timezone arithmetic with no
     DB access at all, and returns None on six days out of seven -- so
     the heavy path below is only ever reached on a Sunday. And even on a
-    Sunday, this checks discord_outbox directly for THIS WEEK'S
-    (kind, key) BEFORE building the payload -- one indexed lookup on
-    discord_outbox's own UNIQUE(kind, key) index -- so once the first
-    Sunday poll cycle has actually enqueued the week's row, every
-    remaining cycle that same day exits right here. In the ordinary
-    case, the heavy computation below runs at most ONCE per ISO week,
-    not once per poll cycle.
+    Sunday, this checks discord_outbox directly for THAT PROTOCOL'S key
+    BEFORE building its payload -- one indexed lookup on discord_outbox's
+    own UNIQUE(kind, key) index per protocol -- so once the first Sunday
+    poll cycle has actually enqueued a protocol's row, every remaining
+    cycle that same day skips straight past it. In the ordinary case,
+    the heavy computation below runs at most ONCE per protocol per ISO
+    week, not once per poll cycle.
 
-    (A genuinely empty week -- build_weekly_recap_embed() returning None
-    -- never produces a row, so this early-exit cannot kick in for it;
-    every remaining Sunday cycle re-runs the heavy computation for as
-    long as the week stays empty. Accepted: an empty week is not the
-    normal state of an active season, and the alternative -- a second
-    "we checked and it was empty" marker table -- is exactly the kind of
+    (A genuinely empty week for one protocol -- build_weekly_recap_embed()
+    returning None for it -- never produces a row, so this early-exit
+    cannot kick in for that protocol; every remaining Sunday cycle
+    re-runs the heavy computation for it for as long as that protocol's
+    week stays empty, independently of whether the OTHER protocol's row
+    has already been posted. Accepted: an empty week is not the normal
+    state of an active season, and the alternative -- a second "we
+    checked and it was empty" marker table -- is exactly the kind of
     second source of truth TIME_DRIVEN_PROVIDERS's own docstring already
     argues against.)
     """
     due = _weekly_recap_due(now)
     if due is None:
         return []
-    key, start_ts, end_ts = due
+    period_key, start_ts, end_ts = due
 
     # Cheap pre-checks only -- enqueue() (via check_due_time_driven())
     # remains the real, authoritative gate for both `enabled` and
@@ -1757,20 +1816,206 @@ def weekly_recap_provider(conn, now: int) -> list[dict]:
     cfg = load_discord_config(conn)
     if not announcements_enabled(cfg) or not cfg.get("announce_weekly_recap"):
         return []
-    already = conn.execute(
-        "SELECT 1 FROM discord_outbox WHERE kind = 'weekly_recap' AND key = ?",
-        (key,),
-    ).fetchone()
-    if already is not None:
-        return []
 
-    payload = build_weekly_recap_embed(conn, _WEEKLY_RECAP_PROTOCOL, start_ts, end_ts)
-    if payload is None:
-        return []
-    return [{"kind": "weekly_recap", "key": key, "payload": payload}]
+    items = []
+    for protocol in _active_recap_protocols(conn):
+        key = f"{period_key}:{protocol}"
+        already = conn.execute(
+            "SELECT 1 FROM discord_outbox WHERE kind = 'weekly_recap' AND key = ?",
+            (key,),
+        ).fetchone()
+        if already is not None:
+            continue
+        payload = build_weekly_recap_embed(conn, protocol, start_ts, end_ts)
+        if payload is None:
+            continue
+        items.append({"kind": "weekly_recap", "key": key, "payload": payload})
+    return items
 
 
-TIME_DRIVEN_PROVIDERS: list = [weekly_recap_provider]
+# ---------------------------------------------------------------------
+# Per-net wrap-up -- the checkin_net-derived TIME_DRIVEN_PROVIDERS
+# worked example, now real. See that list's own docstring for the shape
+# this implements.
+
+
+def _due_net_wrapups(conn, now: int) -> list[dict]:
+    """Every ENABLED checkin_net row whose wrap-up is due right now,
+    each as {"net": <row>, "net_date": "YYYY-MM-DD"} -- "due" meaning
+    08:00 or LATER, on the calendar day immediately after the net's own
+    weekday, in THAT ROW'S OWN timezone (zoneinfo.ZoneInfo(net
+    ["timezone"])) -- never settings.checkin_net_timezone or any other
+    single app-wide clock, because two nets in different zones (or on
+    different weekdays) are due on different local days at the very same
+    instant `now`.
+
+    Nothing about a net's count, weekday, hours, or timezone is read
+    from anywhere but this SELECT: an operator adding a net through
+    admin starts getting wrap-ups on its very next occurrence with no
+    code change, and disabling one (the `WHERE enabled = 1` below) stops
+    them immediately -- see checkin_net's own comment in app/db.py and
+    TIME_DRIVEN_PROVIDERS's own docstring for why this must stay true.
+
+    Gated on hour >= 8, deliberately not == 8: if this process was down
+    (or the poll simply missed the exact hour) at 08:00, the wrap-up
+    must still post later that same local day rather than silently
+    never firing for that occurrence. This cannot double-post: `net_date`
+    below is fixed for the entire rest of that local day (it is
+    YESTERDAY's date, computed once from `local_now.date()`, not from
+    `now` a second time), so discord_outbox's own UNIQUE(kind, key) --
+    net_wrapup_provider()'s key is f"{net id}:{net_date}" -- silently
+    drops every poll cycle after the first one that actually enqueues,
+    exactly like weekly_recap_provider()'s own once-a-week guarantee.
+
+    `net_date` is computed as a CALENDAR date (local_now.date() minus one
+    day), not `now` minus 86400 seconds -- date arithmetic, not a fixed
+    offset, so a day that crosses a daylight-saving change still lands on
+    the correct previous calendar date. This is the exact date
+    app/checkin.py's net_date_for_net() would itself have stamped onto
+    that night's mc_checkin_award rows (net['weekday'] matching, hour
+    inside [start_hour, end_hour]), so build_net_wrapup_embed() below can
+    look check-ins up by that same net_date directly rather than
+    recomputing a timestamp window.
+    """
+    nets = conn.execute(
+        "SELECT id, label, protocol, weekday, start_hour, end_hour, timezone "
+        "  FROM checkin_net WHERE enabled = 1"
+    ).fetchall()
+    due = []
+    for net in nets:
+        local_now = datetime.fromtimestamp(now, tz=ZoneInfo(net["timezone"]))
+        if local_now.weekday() != (net["weekday"] + 1) % 7:
+            continue
+        if local_now.hour < 8:
+            continue
+        net_date = (local_now.date() - timedelta(days=1)).isoformat()
+        due.append({"net": net, "net_date": net_date})
+    return due
+
+
+def build_net_wrapup_embed(conn, net, net_date: str) -> dict | None:
+    """The full Discord webhook JSON body for one net's wrap-up -- the
+    net's own label and date, how many players checked in, who they
+    were (with their team dot), and any notable streak, all pulled from
+    mc_checkin_award rows for THIS net's THIS occurrence: `net_id = ?`
+    and `net_date = ?`, the exact (net_id, net_date) pair app/checkin.py
+    already stamps onto a check-in at award time (see
+    net_date_for_net()) -- so this is a plain, already-indexed lookup
+    (idx_mc_checkin_award_net), never a timestamp-range scan.
+
+    Named players and counts only -- a check-in event names no
+    location, so unlike the weekly recap's own Exploration section this
+    carries none of qualifying_place_firsts()'s privacy concern (see
+    this module's own HARD PRIVACY RULE at the top of the file): pairing
+    a named player with a named PLACE is what is forbidden, and nothing
+    here ever reads a place.
+
+    A "notable" streak is 2 or more consecutive checked-in nets -- a
+    single check-in has a streak of 1 by definition (app/checkin.py's
+    checkin_streak()) and is not itself news. Streaks are READ BACK from
+    mc_checkin_award.streak, already computed and stored at award time --
+    never recomputed here.
+
+    Reuses _join_team_field() for the line list -- the exact same
+    per-field 1024-character trim (dropping the LAST lines first, a
+    truncation marker in their place) build_month_honors_embed()'s "By
+    team" fields and the weekly recap's own sections already rely on,
+    so a night with an unusually large turnout degrades the same way
+    every other roster-shaped field in this module already does, rather
+    than needing a second trimming rule.
+
+    Returns None when nobody checked in for this net on this date -- a
+    quiet night posts NOTHING, never an empty "0 checked in" message
+    (net_wrapup_provider() below relies on this to decide whether there
+    is anything to enqueue at all).
+    """
+    cfg = load_discord_config(conn)
+    emoji = _parse_team_emoji(cfg["team_emoji"])
+
+    rows = conn.execute(
+        "SELECT a.player_id, a.streak, p.display_name AS player_name, p.team AS team "
+        "  FROM mc_checkin_award a "
+        "  JOIN player p ON p.player_id = a.player_id "
+        " WHERE a.net_id = ? AND a.net_date = ? "
+        " ORDER BY a.awarded_at",
+        (net["id"], net_date),
+    ).fetchall()
+    if not rows:
+        return None
+
+    # The count line is the field's own first line, not the field NAME --
+    # a field name renders as a plain header on Discord's side (see every
+    # other embed in this module: "Placement changes", "Exploration",
+    # "By team", ...), never markdown-formatted text, so the bold count
+    # belongs in the value like every other bold number this module ever
+    # renders.
+    lines = [f"**{_fmt_number(len(rows))}** checked in"]
+    for r in rows:
+        streak = r["streak"] or 0
+        line = f"{_team_dot(emoji, r['team'])}{r['player_name']}"
+        if streak >= 2:
+            line += f"{_SEP}**{_fmt_number(streak)}**-net streak"
+        lines.append(line)
+    checkins_value = _join_team_field(lines, None)
+
+    embed = {
+        "title": f"{net['label']} — {net_date}",
+        "fields": [{"name": "Check-ins", "value": checkins_value, "inline": False}][:_MAX_EMBED_FIELDS],
+    }
+    # Same absolute-or-omitted rule as every other embed's own `url` in
+    # this module -- a relative path here would make Discord reject the
+    # ENTIRE message with an HTTP 400, not just drop the link.
+    base_url = (settings.oauth_public_base_url or "").rstrip("/")
+    if base_url:
+        embed["url"] = f"{base_url}/results"
+
+    return {
+        "username": cfg["username"] or "MeshWars",
+        "embeds": [embed],
+    }
+
+
+def net_wrapup_provider(conn, now: int) -> list[dict]:
+    """TIME_DRIVEN_PROVIDERS entry for the per-net wrap-up -- see
+    _due_net_wrapups() for exactly when a net is due and
+    build_net_wrapup_embed() for the message itself.
+
+    Unlike weekly_recap_provider() above, this needs no discord_outbox
+    pre-check before building a payload: checkin_net has a handful of
+    rows (TIME_DRIVEN_PROVIDERS's own "CHEAPNESS" comment already
+    requires this to stay small), and build_net_wrapup_embed() only ever
+    runs one indexed (net_id, net_date) lookup against mc_checkin_award
+    per due net, never a scan of a large or growing table -- so there is
+    no expensive path here for an early exit to protect against, the
+    same reasoning weekly_recap_provider()'s own docstring gives for why
+    IT needs the pre-check and this one does not.
+
+    kind is colon-scoped per net (f"net_wrapup:{net id}") -- resolved by
+    resolve_discord_webhook() via _channel_kind_candidates() against a
+    per-net route first, falling back to the generic "net_wrapup"
+    channel, then discord_config's own default, with zero special-casing
+    here (see that function's own docstring). key is
+    f"{net id}:{net_date}" -- per-net, per-occurrence DEDUPE, entirely
+    independent of every other net's own key, so two nets due on the
+    same poll cycle (or the same net, called twice for the one
+    occurrence) each get exactly one outbox row via enqueue()'s own
+    INSERT OR IGNORE.
+    """
+    items = []
+    for due in _due_net_wrapups(conn, now):
+        net, net_date = due["net"], due["net_date"]
+        payload = build_net_wrapup_embed(conn, net, net_date)
+        if payload is None:
+            continue
+        items.append({
+            "kind": f"net_wrapup:{net['id']}",
+            "key": f"{net['id']}:{net_date}",
+            "payload": payload,
+        })
+    return items
+
+
+TIME_DRIVEN_PROVIDERS: list = [weekly_recap_provider, net_wrapup_provider]
 
 
 def check_due_time_driven(conn, now: int) -> int:

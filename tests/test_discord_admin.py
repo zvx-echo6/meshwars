@@ -343,6 +343,60 @@ def test_post_discord_no_longer_accepts_announce_place_activation(db_path):
     assert "announce_place_activation" not in resp.json()["config"]
 
 
+def test_get_discord_reports_the_net_wrapup_toggle(db_path):
+    """discord_config's own CREATE TABLE/MIGRATIONS default this toggle
+    to 1 (on) -- an operator who never visits this route yet still gets
+    per-net wrap-ups."""
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["announce_net_wrapup"] is True
+
+
+def test_post_discord_round_trips_net_wrapup_toggle(db_path):
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "",
+        "announce_month_honors": True, "announce_season_close": True,
+        "announce_weekly_recap": True, "announce_net_wrapup": False,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["announce_net_wrapup"] is False
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "",
+        "announce_month_honors": True, "announce_season_close": True,
+        "announce_weekly_recap": True, "announce_net_wrapup": True,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["announce_net_wrapup"] is True
+
+
+def test_post_discord_net_wrapup_toggle_off_suppresses_only_net_wrapups(db_path):
+    """The toggle is independent -- flipping it off must leave
+    announce_season_close/announce_weekly_recap exactly where they
+    were."""
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "",
+        "announce_month_honors": True, "announce_season_close": True,
+        "announce_weekly_recap": True, "announce_net_wrapup": False,
+    })
+    assert resp.status_code == 200, resp.text
+    cfg = resp.json()["config"]
+    assert cfg["announce_net_wrapup"] is False
+    assert cfg["announce_season_close"] is True
+    assert cfg["announce_weekly_recap"] is True
+
+
 # ---- announcements_enabled: both gates required --------------------------
 
 

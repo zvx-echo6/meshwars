@@ -1762,12 +1762,12 @@ async def admin_discord_update(request: Request):
     read discord_config fresh every
     time (load_discord_config), never settings.py.
 
-    announce_month_honors, announce_season_close, and
-    announce_weekly_recap are three INDEPENDENT per-kind gates, same
+    announce_month_honors, announce_season_close, announce_weekly_recap,
+    and announce_net_wrapup are four INDEPENDENT per-kind gates, same
     plain bool(body.get(...)) shape as `enabled` itself -- unlike
     webhook_url below, there is no "omit to keep the current value"
     special case for any of them, so the admin form always submits all
-    three explicitly. (announce_place_activation is no longer one of
+    four explicitly. (announce_place_activation is no longer one of
     them: the per-event place announcement it gated was retired
     2026-09-16 in favour of announce_weekly_recap's Sunday recap -- see
     that column's own comment in app/db.py. The column itself still
@@ -1801,6 +1801,7 @@ async def admin_discord_update(request: Request):
     announce_month_honors = bool(body.get("announce_month_honors"))
     announce_season_close = bool(body.get("announce_season_close"))
     announce_weekly_recap = bool(body.get("announce_weekly_recap"))
+    announce_net_wrapup = bool(body.get("announce_net_wrapup"))
 
     now = int(time.time())
     conn = connect()
@@ -1819,19 +1820,20 @@ async def admin_discord_update(request: Request):
         conn.execute(
             "INSERT INTO discord_config(id, enabled, webhook_url, username, team_emoji, "
             " announce_month_honors, announce_season_close, announce_weekly_recap, "
-            " updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " announce_net_wrapup, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "  enabled = excluded.enabled, webhook_url = excluded.webhook_url, "
             "  username = excluded.username, team_emoji = excluded.team_emoji, "
             "  announce_month_honors = excluded.announce_month_honors, "
             "  announce_season_close = excluded.announce_season_close, "
             "  announce_weekly_recap = excluded.announce_weekly_recap, "
+            "  announce_net_wrapup = excluded.announce_net_wrapup, "
             "  updated_at = excluded.updated_at",
             (
                 int(enabled), webhook_url, username, team_emoji,
                 int(announce_month_honors), int(announce_season_close),
-                int(announce_weekly_recap), now,
+                int(announce_weekly_recap), int(announce_net_wrapup), now,
             ),
         )
         _log_admin_action(
@@ -1839,7 +1841,8 @@ async def admin_discord_update(request: Request):
             detail=(
                 f"enabled={enabled} announce_month_honors={announce_month_honors} "
                 f"announce_season_close={announce_season_close} "
-                f"announce_weekly_recap={announce_weekly_recap}"
+                f"announce_weekly_recap={announce_weekly_recap} "
+                f"announce_net_wrapup={announce_net_wrapup}"
             ), now=now,
         )
         conn.execute("COMMIT")

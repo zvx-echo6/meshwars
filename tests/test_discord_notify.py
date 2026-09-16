@@ -1582,12 +1582,19 @@ def _wr_capture(conn, season_id, cid, ts, by_player_id, by_team):
     )
 
 
-def _wr_net(conn, net_id=1, label="Wednesday MC", protocol="mc"):
+def _wr_net(conn, net_id=1, label="Wednesday MC", protocol="mc", *,
+            weekday=2, start_hour=18, end_hour=20, timezone="America/Boise", enabled=1):
+    """A checkin_net row -- weekday/start_hour/end_hour/timezone/enabled
+    are keyword-only, defaulting to the same Wednesday-evening
+    America/Boise net every pre-existing caller in this file relies on,
+    so net_wrapup_provider()'s own tests (below) can override just the
+    scheduling fields they need to vary without disturbing anything
+    else."""
     conn.execute(
         "INSERT INTO checkin_net(id, label, protocol, kind, connector_url, weekday, "
         " start_hour, end_hour, timezone, enabled, created_at) "
-        "VALUES (?, ?, ?, 'corescope', 'http://x', 2, 18, 20, 'America/Boise', 1, 0)",
-        (net_id, label, protocol),
+        "VALUES (?, ?, ?, 'corescope', 'http://x', ?, ?, ?, ?, ?, 0)",
+        (net_id, label, protocol, weekday, start_hour, end_hour, timezone, enabled),
     )
 
 
@@ -1634,20 +1641,81 @@ def test_build_weekly_recap_embed_empty_data_returns_none(conn):
 
 
 def test_build_weekly_recap_embed_placement_changes_section(conn):
+    """Placement changes renders RANK MOVEMENT, not squares gained (the
+    owner's own correction -- a squares-gained figure is positive for
+    nearly every team nearly every week and never reads as movement):
+    GREEN holds 10 squares, untouched all week, and stays 1st ("no
+    change"). ORANGE starts with 2 squares (3rd) and captures 4 more
+    DURING the window to reach 6, climbing to 2nd ("up from 3rd"). BLUE
+    holds 5 squares, also untouched -- but is overtaken by ORANGE's
+    gain, dropping from 2nd to 3rd ("down from 2nd") without losing a
+    single square of its own. Ordered by CURRENT rank ascending."""
     _enable_discord(conn)
     now = int(time.time())
     start_ts, end_ts = now - 3 * 86400, now
     _wr_season(conn, 1, started_at=start_ts - 1_000_000, ends_at=end_ts + 1_000_000)
-    _wr_player(conn, 1, "Alice", "RED")
-    _wr_player(conn, 2, "Bob", "GREEN")
-    _wr_capture(conn, 1, "10_10", start_ts - 500, 1, "RED")    # held before AND after the window
-    _wr_capture(conn, 1, "20_20", start_ts + 500, 2, "GREEN")  # gained DURING the window
+    _wr_player(conn, 1, "Gplayer", "GREEN")
+    _wr_player(conn, 2, "Bplayer", "BLUE")
+    _wr_player(conn, 3, "Oplayer", "ORANGE")
+    for i in range(10):
+        _wr_capture(conn, 1, f"g{i}_1", start_ts - 2000, 1, "GREEN")
+    for i in range(5):
+        _wr_capture(conn, 1, f"b{i}_1", start_ts - 2000, 2, "BLUE")
+    for i in range(2):
+        _wr_capture(conn, 1, f"o{i}_1", start_ts - 2000, 3, "ORANGE")
+    for i in range(4):
+        _wr_capture(conn, 1, f"o{i}_2", start_ts + 100, 3, "ORANGE")
 
     embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
     field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Placement changes")
-    assert "GREEN" in field["value"] and "**+1**" in field["value"]
-    assert "RED" in field["value"] and "**0**" in field["value"]
-    assert "squares this week" in field["value"]
+    lines = field["value"].splitlines()
+    assert lines[0] == "GREEN **1st** · no change"
+    assert lines[1] == "ORANGE **2nd** · up from 3rd"
+    assert lines[2] == "BLUE **3rd** · down from 2nd"
+
+
+def test_weekly_placement_section_sorted_descending_by_current_standing(conn):
+    """Order is by CURRENT rank ascending -- equivalently, by squares
+    held descending -- with a stable tiebreak on team name; NOT by team
+    name, and not by any order unrelated to the figure the field
+    displays. A real production bug once put the largest gainer fifth in
+    a differently-ordered list; this fixture's squares counts are
+    deliberately unrelated to alphabetical team-name order, so an
+    accidental alphabetical sort would fail this test."""
+    _enable_discord(conn)
+    now = int(time.time())
+    start_ts, end_ts = now - 3 * 86400, now
+    _wr_season(conn, 1, started_at=start_ts - 1_000_000, ends_at=end_ts + 1_000_000)
+    _wr_player(conn, 1, "P1", "YELLOW")
+    _wr_player(conn, 2, "P2", "RED")
+    _wr_player(conn, 3, "P3", "BLUE")
+    for i in range(3):
+        _wr_capture(conn, 1, f"y{i}", start_ts - 2000, 1, "YELLOW")  # 3 squares -- 3rd
+    for i in range(9):
+        _wr_capture(conn, 1, f"r{i}", start_ts - 2000, 2, "RED")     # 9 squares -- 1st
+    for i in range(6):
+        _wr_capture(conn, 1, f"b{i}", start_ts - 2000, 3, "BLUE")    # 6 squares -- 2nd
+
+    embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
+    field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Placement changes")
+    teams_in_order = [line.split(" ", 1)[0] for line in field["value"].splitlines()]
+    assert teams_in_order == ["RED", "BLUE", "YELLOW"]
+
+
+def test_weekly_placement_section_team_absent_at_window_start_reads_new_to_the_board(conn):
+    """A team with no PRIOR rank (held nothing at the window's open) gets
+    a current rank but no up/down verdict -- there is nothing to compare
+    against."""
+    _enable_discord(conn)
+    now = int(time.time())
+    start_ts, end_ts = now - 3 * 86400, now
+    _wr_season(conn, 1, started_at=start_ts - 1_000_000, ends_at=end_ts + 1_000_000)
+    _wr_player(conn, 1, "P1", "PURPLE")
+    _wr_capture(conn, 1, "p1_1", start_ts + 100, 1, "PURPLE")  # captured DURING the window only
+
+    embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
+    field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Placement changes")
+    assert field["value"] == "PURPLE **1st** · new to the board"
 
 
 def test_build_weekly_recap_embed_exploration_section_matches_exact_shape(conn):
@@ -1694,7 +1762,11 @@ def test_build_weekly_recap_embed_exploration_section_matches_exact_shape(conn):
     assert "Raptor" in field["value"] and "**1** *first*" in field["value"]
 
 
-def test_build_weekly_recap_embed_nets_section(conn):
+def test_build_weekly_recap_embed_never_has_a_nets_field(conn):
+    """The owner rejected a weekly roll-up of nets -- nets get their own
+    per-net wrap-up instead (net_wrapup_provider()) -- so even a week
+    with real check-in activity (which used to feed a "Nets" field) AND
+    real placement/exploration data must never surface one here."""
     _enable_discord(conn)
     now = int(time.time())
     start_ts, end_ts = now - 3 * 86400, now + 4 * 86400
@@ -1704,14 +1776,13 @@ def test_build_weekly_recap_embed_nets_section(conn):
     _wr_net(conn, 1, "Wednesday MC")
     _wr_checkin(conn, season_id=1, player_id=20, awarded_at=start_ts + 10, streak=3, message_id="m1")
     _wr_checkin(conn, season_id=1, player_id=21, awarded_at=start_ts + 20, streak=1, message_id="m2")
+    _wr_capture(conn, 1, "1_1", start_ts + 5, 20, "RED")
 
     embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
-    field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Nets")
-    value = field["value"]
-    assert "**2** check-ins across **1** net" in value
-    assert "Wednesday MC" in value
-    assert "l3@n" in value and "**3**-net streak" in value
-    assert "Raptor" not in value  # a streak of 1 is not "notable"
+    assert embed is not None
+    names = [f["name"] for f in embed["embeds"][0]["fields"]]
+    assert "Nets" not in names
+    assert "Placement changes" in names
 
 
 def test_build_weekly_recap_embed_never_pairs_a_place_name_with_a_player_name(conn):
@@ -1769,11 +1840,12 @@ def test_weekly_recap_provider_respects_its_own_toggle(conn):
     tz = ZoneInfo(settings.checkin_net_timezone)
     sunday = datetime(2026, 9, 13, 15, 0, tzinfo=tz)
     # Give it real data so an "empty week" false-negative can't hide a
-    # broken toggle check.
+    # broken toggle check -- a capture, since check-ins alone no longer
+    # produce any weekly recap content (the Nets section was removed;
+    # see net_wrapup_provider()'s own docstring for what replaced it).
     _wr_season(conn, 1, started_at=0, ends_at=int(sunday.timestamp()) + 100_000_000)
     _wr_player(conn, 1, "Alice", "RED")
-    _wr_net(conn, 1)
-    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=int(sunday.timestamp()) - 3 * 86400)
+    _wr_capture(conn, 1, "1_1", int(sunday.timestamp()) - 3 * 86400, 1, "RED")
 
     items = discord_notify.weekly_recap_provider(conn, int(sunday.timestamp()))
     assert items == []
@@ -1791,8 +1863,10 @@ def test_check_due_time_driven_weekly_recap_fires_once_per_week_then_again_next_
     sunday2 = datetime(2026, 9, 20, 12, 0, tzinfo=tz)
     _wr_season(conn, 1, started_at=0, ends_at=int(sunday2.timestamp()) + 100_000_000)
     _wr_player(conn, 1, "Alice", "RED")
-    _wr_net(conn, 1)
-    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=int(sunday1.timestamp()) - 3 * 86400, message_id="m1")
+    # A capture, not a check-in -- check-ins alone no longer produce any
+    # weekly recap content (the Nets section was removed; see
+    # net_wrapup_provider()'s own docstring for what replaced it).
+    _wr_capture(conn, 1, "1_1", int(sunday1.timestamp()) - 3 * 86400, 1, "RED")
 
     now1 = int(sunday1.timestamp())
     first = discord_notify.check_due_time_driven(conn, now1)
@@ -1801,16 +1875,255 @@ def test_check_due_time_driven_weekly_recap_fires_once_per_week_then_again_next_
     assert second == 0
     rows = conn.execute("SELECT key FROM discord_outbox WHERE kind = 'weekly_recap'").fetchall()
     assert len(rows) == 1
+    assert rows[0]["key"] == "2026-W37:mc"
 
-    # A fresh check-in inside the SECOND week, so its own recap is not
-    # itself an empty week (which build_weekly_recap_embed() -- correctly
-    # -- posts nothing for, see that function's own test above). A
-    # different net_date: mc_checkin_award's own PRIMARY KEY is
-    # (season_id, player_id, net_date), so the first week's row would
-    # otherwise collide with this one.
-    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=int(sunday2.timestamp()) - 3 * 86400,
-                message_id="m2", net_date="2026-09-16")
+    # A fresh capture inside the SECOND week, on a NEW cell, so its own
+    # recap is not itself an empty week (which build_weekly_recap_embed()
+    # -- correctly -- posts nothing for, see that function's own test
+    # above).
+    _wr_capture(conn, 1, "2_2", int(sunday2.timestamp()) - 3 * 86400, 1, "RED")
     third = discord_notify.check_due_time_driven(conn, int(sunday2.timestamp()))
     assert third == 1
     rows = conn.execute("SELECT key FROM discord_outbox WHERE kind = 'weekly_recap'").fetchall()
     assert len(rows) == 2
+
+
+# ---- weekly recap: per-protocol emission -----------------------------
+
+
+def test_weekly_recap_provider_emits_one_item_per_protocol_with_active_season(conn):
+    """The recap is per-protocol, exactly like month honors (see
+    _active_recap_protocols()'s own docstring) -- a week with an active
+    season on BOTH boards posts TWO items, one per protocol, each keyed
+    by its own protocol so the two dedupe entirely independently."""
+    _enable_discord(conn)
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    sunday = datetime(2026, 9, 13, 12, 0, tzinfo=tz)
+    now = int(sunday.timestamp())
+    _wr_season(conn, 1, protocol="mc", started_at=0, ends_at=now + 100_000_000)
+    _wr_season(conn, 2, protocol="mt", started_at=0, ends_at=now + 100_000_000)
+    _wr_player(conn, 1, "McPlayer", "RED")
+    _wr_player(conn, 2, "MtPlayer", "BLUE")
+    _wr_capture(conn, 1, "1_1", now - 3 * 86400, 1, "RED")
+    _wr_capture(conn, 2, "2_2", now - 3 * 86400, 2, "BLUE")
+
+    items = discord_notify.weekly_recap_provider(conn, now)
+    assert len(items) == 2
+    assert {i["kind"] for i in items} == {"weekly_recap"}
+    assert {i["key"] for i in items} == {"2026-W37:mc", "2026-W37:mt"}
+
+
+def test_weekly_recap_provider_only_protocol_with_active_season_gets_an_item(conn):
+    """Only ONE board has an active season this week -- exactly one
+    item, for that protocol alone; the other board is silent, not
+    posted as an empty recap."""
+    _enable_discord(conn)
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    sunday = datetime(2026, 9, 13, 12, 0, tzinfo=tz)
+    now = int(sunday.timestamp())
+    _wr_season(conn, 1, protocol="mc", started_at=0, ends_at=now + 100_000_000)
+    _wr_player(conn, 1, "McPlayer", "RED")
+    _wr_capture(conn, 1, "1_1", now - 3 * 86400, 1, "RED")
+
+    items = discord_notify.weekly_recap_provider(conn, now)
+    assert len(items) == 1
+    assert items[0]["key"] == "2026-W37:mc"
+
+
+# ---- per-net wrap-up (net_wrapup_provider, TIME_DRIVEN_PROVIDERS) --------
+#
+# 2026-09-09 is a real Wednesday and 2026-09-10 the Thursday right after
+# it, both in America/Boise -- consistent with the fixed Sundays the
+# weekly recap tests above already anchor on (2026-09-13). Used
+# throughout as known-good instants for the same reason those are: the
+# exact date/key a test asserts on must never depend on when the suite
+# happens to run.
+
+
+def test_due_net_wrapups_fires_at_8am_the_day_after_in_the_nets_own_timezone(conn):
+    _wr_net(conn, 1, "Wednesday MC", weekday=2, start_hour=18, end_hour=20, timezone="America/Boise")
+    tz = ZoneInfo("America/Boise")
+
+    wed_evening = int(datetime(2026, 9, 9, 19, 0, tzinfo=tz).timestamp())   # the net's own day
+    thu_early = int(datetime(2026, 9, 10, 7, 59, tzinfo=tz).timestamp())    # day after, before 08:00
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())       # day after, exactly 08:00
+    thu_late = int(datetime(2026, 9, 10, 22, 0, tzinfo=tz).timestamp())     # day after, well past 08:00
+    fri = int(datetime(2026, 9, 11, 9, 0, tzinfo=tz).timestamp())           # two days after
+
+    assert discord_notify._due_net_wrapups(conn, wed_evening) == []
+    assert discord_notify._due_net_wrapups(conn, thu_early) == []
+
+    due = discord_notify._due_net_wrapups(conn, thu_8am)
+    assert len(due) == 1
+    assert due[0]["net"]["id"] == 1
+    assert due[0]["net_date"] == "2026-09-09"
+
+    # hour >= 8, not == 8 -- still due later the same local day, so a
+    # service that was down at 08:00 sharp still catches this occurrence.
+    due_late = discord_notify._due_net_wrapups(conn, thu_late)
+    assert len(due_late) == 1
+    assert due_late[0]["net_date"] == "2026-09-09"
+
+    assert discord_notify._due_net_wrapups(conn, fri) == []
+
+
+def test_due_net_wrapups_two_nets_different_timezones_fire_independently(conn):
+    """Two nets, different weekdays AND different IANA zones -- each is
+    due only on its OWN local schedule, never the other's, from the same
+    kind of `now` instant."""
+    _wr_net(conn, 1, "Wednesday MC", protocol="mc",
+            weekday=2, start_hour=18, end_hour=20, timezone="America/Boise")
+    _wr_net(conn, 2, "Friday MT", protocol="mt",
+            weekday=4, start_hour=19, end_hour=21, timezone="America/Los_Angeles")
+
+    tz_boise = ZoneInfo("America/Boise")
+    thu_8am_boise = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz_boise).timestamp())
+    due = discord_notify._due_net_wrapups(conn, thu_8am_boise)
+    assert {d["net"]["id"] for d in due} == {1}
+
+    tz_la = ZoneInfo("America/Los_Angeles")
+    sat_8am_la = int(datetime(2026, 9, 12, 8, 0, tzinfo=tz_la).timestamp())
+    due2 = discord_notify._due_net_wrapups(conn, sat_8am_la)
+    assert {d["net"]["id"] for d in due2} == {2}
+
+
+def test_net_wrapup_provider_zero_checkins_yields_no_item(conn):
+    _enable_discord(conn)
+    _wr_net(conn, 1, "Wednesday MC")
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    assert discord_notify.net_wrapup_provider(conn, thu_8am) == []
+
+
+def test_net_wrapup_provider_renders_checkins_and_notable_streak(conn):
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_player(conn, 1, "l3@n", "RED")
+    _wr_player(conn, 2, "Raptor", "GREEN")
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=0, streak=3, net_id=1,
+                message_id="m1", net_date="2026-09-09")
+    _wr_checkin(conn, season_id=1, player_id=2, awarded_at=0, streak=1, net_id=1,
+                message_id="m2", net_date="2026-09-09")
+
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["kind"] == "net_wrapup:1"
+    assert item["key"] == "1:2026-09-09"
+    assert item["payload"]["embeds"][0]["title"] == "Wednesday MC — 2026-09-09"
+    field = item["payload"]["embeds"][0]["fields"][0]
+    assert field["name"] == "Check-ins"
+    assert "**2** checked in" in field["value"]
+    assert "l3@n" in field["value"] and "**3**-net streak" in field["value"]
+    assert "Raptor" in field["value"]
+    assert "-net streak" not in field["value"].split("Raptor")[1].split("\n")[0]  # streak of 1 is not "notable"
+
+
+def test_net_wrapup_new_net_added_at_runtime_gets_wrapups_with_no_code_change(conn):
+    """A checkin_net row added after this process started gets wrap-ups
+    on its very next occurrence -- net_wrapup_provider() reads the table
+    fresh on every call, so nothing about a new net is hardcoded
+    anywhere."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_player(conn, 1, "NewPlayer", "RED")
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    assert discord_notify.net_wrapup_provider(conn, thu_8am) == []
+
+    _wr_net(conn, 5, "New Net")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=0, net_id=5,
+                message_id="m1", net_date="2026-09-09")
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    assert len(items) == 1
+    assert items[0]["kind"] == "net_wrapup:5"
+
+
+def test_net_wrapup_disabling_a_net_stops_its_wrapups(conn):
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_player(conn, 1, "P", "RED")
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=0, net_id=1,
+                message_id="m1", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    assert len(discord_notify.net_wrapup_provider(conn, thu_8am)) == 1
+
+    conn.execute("UPDATE checkin_net SET enabled = 0 WHERE id = 1")
+    assert discord_notify.net_wrapup_provider(conn, thu_8am) == []
+
+
+def test_check_due_time_driven_net_wrapup_fires_once_per_occurrence_then_again_next_time(conn, monkeypatch):
+    """Called twice for the same net occurrence, this enqueues exactly
+    one row (discord_outbox's own UNIQUE(kind, key), via enqueue()'s
+    INSERT OR IGNORE); called again for the NEXT week's occurrence, a
+    second, distinct row."""
+    monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [discord_notify.net_wrapup_provider])
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_player(conn, 1, "P", "RED")
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=0, net_id=1,
+                message_id="m1", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    thu1_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    first = discord_notify.check_due_time_driven(conn, thu1_8am)
+    second = discord_notify.check_due_time_driven(conn, thu1_8am)
+    assert first == 1
+    assert second == 0
+    rows = conn.execute("SELECT key FROM discord_outbox WHERE kind = 'net_wrapup:1'").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["key"] == "1:2026-09-09"
+
+    # The following week's occurrence -- a different net_date, so a
+    # different key, on the SAME net.
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=0, net_id=1,
+                message_id="m2", net_date="2026-09-16")
+    thu2_8am = int(datetime(2026, 9, 17, 8, 0, tzinfo=tz).timestamp())
+    third = discord_notify.check_due_time_driven(conn, thu2_8am)
+    assert third == 1
+    rows = conn.execute("SELECT key FROM discord_outbox WHERE kind = 'net_wrapup:1'").fetchall()
+    assert len(rows) == 2
+
+
+def test_enqueue_is_noop_when_announce_net_wrapup_off(conn):
+    _enable_discord(conn)
+    conn.execute("UPDATE discord_config SET announce_net_wrapup = 0 WHERE id = 1")
+    inserted = discord_notify.enqueue(
+        conn, kind="net_wrapup:1", key="1:2026-09-09", payload={}, now=int(time.time()),
+    )
+    assert inserted is False
+
+
+def test_announce_net_wrapup_off_does_not_suppress_other_kinds(conn):
+    """The toggle gates only net_wrapup -- an unrelated kind (here,
+    weekly_recap) keeps working while it is off."""
+    _enable_discord(conn)
+    conn.execute("UPDATE discord_config SET announce_net_wrapup = 0 WHERE id = 1")
+    now = int(time.time())
+    assert discord_notify.enqueue(conn, kind="weekly_recap", key="2026-W37:mc", payload={}, now=now) is True
+    assert discord_notify.enqueue(conn, kind="net_wrapup:1", key="1:2026-09-09", payload={}, now=now) is False
+
+
+def test_announce_net_wrapup_gates_by_generic_prefix_not_the_scoped_kind(conn):
+    """The toggle is ONE switch for every net -- checked against the
+    generic "net_wrapup" prefix, not the per-instance
+    "net_wrapup:<id>" kind -- so it is off for every net at once, not
+    per net (an operator wanting only some nets silenced routes those to
+    a disabled discord_channel row instead -- see that table's own
+    comment in app/db.py)."""
+    _enable_discord(conn)
+    conn.execute("UPDATE discord_config SET announce_net_wrapup = 0 WHERE id = 1")
+    now = int(time.time())
+    assert discord_notify.enqueue(conn, kind="net_wrapup:1", key="1:x", payload={}, now=now) is False
+    assert discord_notify.enqueue(conn, kind="net_wrapup:2", key="2:x", payload={}, now=now) is False
