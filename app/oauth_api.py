@@ -119,6 +119,7 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from . import discord_bot
 from .auth import new_rate_limit_bucket
 from .client_ip import get_client_ip
 from .config import settings
@@ -352,6 +353,35 @@ def _link_identity(
         "VALUES (?, 'identity_linked', ?, 'user', ?)",
         (account_id, f"provider={provider_name} subject={identity.subject}{detail_suffix}", now),
     )
+
+
+async def _sync_discord_roles_if_player_linked(account_id: int) -> None:
+    """Discord role sync (app/discord_bot.py) trigger #2 -- "after a
+    Discord identity is linked to an account that already has a
+    player" (see that module's own WHAT THIS DOES section; trigger #1
+    is POST /api/account/link-key's own call, the "player linked to
+    account" direction). Called from oauth_callback() (cases "linked"/
+    "auto_linked") and pending_link() below, both AFTER their own
+    WriteSession has already committed.
+
+    Resolves account_id -> player_id itself (every call site here has
+    an account_id, not a player_id) and no-ops with no Discord call at
+    all when this account has no linked player yet -- sync_member()
+    already handles that, but checking here first avoids opening a
+    connection to discover nothing to do on the much more common case
+    (an account still mid-onboarding, no player claimed yet). Fire-
+    and-forget throughout: sync_member_safe() never raises.
+    """
+    conn = connect()
+    try:
+        player = conn.execute(
+            "SELECT player_id FROM player WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        if player is None:
+            return
+        await discord_bot.sync_member_safe(conn, player["player_id"])
+    finally:
+        conn.close()
 
 
 # How long a just-expired or just-consumed row in a hashed-single-use-
@@ -1362,6 +1392,15 @@ async def oauth_callback(provider: str, request: Request) -> Response:
             now=now,
         )
 
+    if prov.name == "discord" and outcome["case"] in ("linked", "auto_linked"):
+        # Discord role sync trigger #2 -- see
+        # _sync_discord_roles_if_player_linked()'s own docstring. Never
+        # for outcome "login" (case 1): that is an existing identity
+        # signing back in, not a new link, and app/discord_bot.py's
+        # periodic reconcile already covers any drift since the last
+        # sync for an account that never changes.
+        await _sync_discord_roles_if_player_linked(outcome["account_id"])
+
     resp = await _respond_to_callback_outcome(request, outcome=outcome, identity=identity, now=now)
     _clear_flow_cookies(resp)
     return resp
@@ -1643,6 +1682,11 @@ async def pending_link(
             "UPDATE account_pending_identity SET consumed_at = ? WHERE token_hash = ?",
             (now, row["token_hash"]),
         )
+
+    if row["provider"] == "discord":
+        # Discord role sync trigger #2 -- see
+        # _sync_discord_roles_if_player_linked()'s own docstring.
+        await _sync_discord_roles_if_player_linked(session.account_id)
 
     resp = JSONResponse({"result": "linked", "account_id": session.account_id}, status_code=200)
     _clear_pending_cookie(resp)  # see pending_create's matching comment above

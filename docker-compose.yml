@@ -134,6 +134,26 @@ services:
       # -- a missing line here means the value sits correctly in .env
       # and silently never reaches the app.
       DISCORD_TEAM_EMOJI: "${DISCORD_TEAM_EMOJI:-}"
+      # Discord ROLE sync (app/discord_bot.py) -- a THIRD, separate
+      # Discord integration: a real bot user ("Herald") in the guild,
+      # authenticated by this token, that assigns/removes team roles on
+      # guild members. NOT a webhook URL and NOT the OAUTH_DISCORD_*
+      # sign-in credential above. A SECRET, same "empty means off,
+      # never logged, never returned by any route" treatment as
+      # ACCOUNT_TOTP_ENCRYPTION_KEY -- see .env.example for where to get
+      # one. THE KNOWN TRAP: compose does not pass .env through
+      # wholesale, so a missing line here means a real token sitting in
+      # .env silently never reaches the container and role sync just
+      # never does anything, with no error anywhere obvious. Never set a
+      # real value in this file; it is a public repository.
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
+      # The Discord guild (server) id role sync operates in. Not a
+      # secret (visible to anyone in the server), but still needs this
+      # forwarding line for the same reason DISCORD_TEAM_EMOJI does --
+      # this is only the one-time SEED for discord_config.guild_id (see
+      # that setting's own comment in app/config.py); an operator edits
+      # the live value afterward through /api/admin/discord.
+      DISCORD_GUILD_ID: "${DISCORD_GUILD_ID:-}"
     volumes:
       # The game database, in a directory beside this compose file. A
       # plain directory rather than a named volume so the operator can

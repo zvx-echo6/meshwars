@@ -484,6 +484,25 @@
           <h3 class="adm-h3">Outbox health</h3>
           <div id="dc-outbox-summary"></div>
           <div id="dc-outbox"></div>
+
+          <h3 class="adm-h3">Team roles</h3>
+          <details class="adm-about">
+            <summary>About team roles</summary>
+            <p class="adm-hint">A separate feature from the announcements above: "Herald," a Discord bot, gives a player's linked Discord account the role for their MeshWars team (and no other team's role) once they're both linked and a member of the server. The bot token is a secret, set only via the DISCORD_BOT_TOKEN environment variable -- never entered here.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-roles-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-field-label adm-field-label-wide">Guild (server) ID<input type="text" id="dc-guild-id" autocomplete="off" placeholder="right-click the server icon in Discord -> Copy Server ID" /></label>
+            <span class="adm-hint" id="dc-bot-token-hint"></span>
+          </div>
+          <p class="adm-hint">Enabled/Guild ID are saved together with the Save button above -- they're part of the same form.</p>
+          <div class="adm-form">
+            <button type="button" id="dc-roles-ensure" class="adm-btn">Create / repair team roles</button>
+            <button type="button" id="dc-roles-reconcile" class="adm-btn adm-btn-quiet">Reconcile all now</button>
+          </div>
+          <div id="dc-roles-result" class="adm-result"></div>
+          <div id="dc-roles-reconcile-status" class="adm-hint"></div>
+          <div id="dc-team-roles"></div>
         </section>
 
         <section class="adm-section" data-section="keys" hidden>
@@ -505,7 +524,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260916-5"></script>
+  <script src="/static/admin.js?v=20260916-6"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

@@ -86,7 +86,7 @@ import time
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import mc_api, results
+from . import discord_bot, mc_api, results
 from .auth import new_rate_limit_bucket
 from .client_ip import get_client_ip
 from .config import settings
@@ -779,6 +779,18 @@ async def link_key(
         player = _player_out(conn, player_id)
     finally:
         conn.close()
+
+    # Discord role sync (app/discord_bot.py) -- fire-and-forget, same
+    # never-break-delay-or-roll-back contract as _notify_security()
+    # just below. This is the "player linked to an account" trigger
+    # (app/discord_bot.py module docstring's WHAT THIS DOES section);
+    # a no-op if this account has no linked Discord identity or role
+    # sync isn't configured at all.
+    sync_conn = connect()
+    try:
+        await discord_bot.sync_member_safe(sync_conn, player_id)
+    finally:
+        sync_conn.close()
 
     # Security notice (Stage 2, event 6) -- see _notify_security()'s own
     # docstring for why a send failure here can never surface to this

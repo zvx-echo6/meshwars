@@ -37,7 +37,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import discord_notify, mc_api, results
+from . import discord_bot, discord_notify, mc_api, results
 from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
     checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
@@ -1717,6 +1717,19 @@ async def admin_discord(request: Request):
     sorted by kind so the admin table renders in a stable order across
     reloads rather than shuffling with SQLite's own unspecified row
     order.
+
+    `config.bot_token_set` is app/discord_bot.py's role-sync bot token
+    (settings.discord_bot_token) -- NEVER the token itself, only whether
+    one is configured, same never-return-the-real-secret rule as every
+    webhook field on this same response, except this one lives in the
+    environment, not discord_config, so it isn't already covered by
+    _scrub_discord_secrets(). `team_roles` is every discord_team_role
+    row (team, role_id, updated_at) -- a Discord role id is not a
+    credential (visible to anyone in the server who can see that role at
+    all), so it is returned as-is. `last_reconcile` is app/discord_bot.py's
+    get_last_reconcile() -- the most recent reconcile pass, manual or
+    scheduled, process-local (see that function's own docstring for why
+    it doesn't survive a restart).
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -1739,11 +1752,18 @@ async def admin_discord(request: Request):
             "SELECT id, kind, key, posted_at, attempts, last_error FROM discord_outbox "
             " ORDER BY id DESC LIMIT 10"
         ).fetchall()
+        team_roles = conn.execute(
+            "SELECT team, role_id, updated_at FROM discord_team_role ORDER BY team"
+        ).fetchall()
     finally:
         conn.close()
+    config_out = _scrub_discord_secrets(cfg)
+    config_out["bot_token_set"] = bool(settings.discord_bot_token)
     return JSONResponse({
-        "config": _scrub_discord_secrets(cfg),
+        "config": config_out,
         "channels": [_scrub_discord_channel(c) for _, c in sorted(channels.items())],
+        "team_roles": [dict(r) for r in team_roles],
+        "last_reconcile": discord_bot.get_last_reconcile(),
         "outbox": {
             "pending": pending,
             "posted": posted,
@@ -1783,6 +1803,18 @@ async def admin_discord_update(request: Request):
     /api/admin/paint already applies to freqmapper_config.api_key (see
     that route's own docstring); clear_webhook is the explicit way to
     actually blank this one out.
+
+    roles_enabled and guild_id (app/discord_bot.py's role sync -- an
+    entirely separate feature from every announce_* field above) are
+    saved the same plain way as `enabled` and `username`: no "omit to
+    keep current" special case, since neither is a secret (a guild id
+    is visible to anyone in the server, same as a channel id -- see
+    app/config.py's discord_guild_id comment). Whether the BOT TOKEN
+    itself is set is never accepted or returned here at all -- that is
+    settings.discord_bot_token, environment-only, exactly like
+    account_totp_encryption_key (see GET /api/admin/discord's own
+    `bot_token_set` field for the one thing this app ever reveals about
+    it).
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -1802,6 +1834,8 @@ async def admin_discord_update(request: Request):
     announce_season_close = bool(body.get("announce_season_close"))
     announce_weekly_recap = bool(body.get("announce_weekly_recap"))
     announce_net_wrapup = bool(body.get("announce_net_wrapup"))
+    roles_enabled = bool(body.get("roles_enabled"))
+    guild_id = (body.get("guild_id") or "").strip()
 
     now = int(time.time())
     conn = connect()
@@ -1820,8 +1854,8 @@ async def admin_discord_update(request: Request):
         conn.execute(
             "INSERT INTO discord_config(id, enabled, webhook_url, username, team_emoji, "
             " announce_month_honors, announce_season_close, announce_weekly_recap, "
-            " announce_net_wrapup, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " announce_net_wrapup, guild_id, roles_enabled, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "  enabled = excluded.enabled, webhook_url = excluded.webhook_url, "
             "  username = excluded.username, team_emoji = excluded.team_emoji, "
@@ -1829,11 +1863,13 @@ async def admin_discord_update(request: Request):
             "  announce_season_close = excluded.announce_season_close, "
             "  announce_weekly_recap = excluded.announce_weekly_recap, "
             "  announce_net_wrapup = excluded.announce_net_wrapup, "
+            "  guild_id = excluded.guild_id, roles_enabled = excluded.roles_enabled, "
             "  updated_at = excluded.updated_at",
             (
                 int(enabled), webhook_url, username, team_emoji,
                 int(announce_month_honors), int(announce_season_close),
-                int(announce_weekly_recap), int(announce_net_wrapup), now,
+                int(announce_weekly_recap), int(announce_net_wrapup),
+                guild_id, int(roles_enabled), now,
             ),
         )
         _log_admin_action(
@@ -1842,15 +1878,18 @@ async def admin_discord_update(request: Request):
                 f"enabled={enabled} announce_month_honors={announce_month_honors} "
                 f"announce_season_close={announce_season_close} "
                 f"announce_weekly_recap={announce_weekly_recap} "
-                f"announce_net_wrapup={announce_net_wrapup}"
+                f"announce_net_wrapup={announce_net_wrapup} "
+                f"roles_enabled={roles_enabled}"
             ), now=now,
         )
         conn.execute("COMMIT")
         cfg = discord_notify.load_discord_config(conn)
     finally:
         conn.close()
-    log.info("admin: discord config updated (enabled=%s)", enabled)
-    return JSONResponse({"config": _scrub_discord_secrets(cfg)})
+    log.info("admin: discord config updated (enabled=%s roles_enabled=%s)", enabled, roles_enabled)
+    config_out = _scrub_discord_secrets(cfg)
+    config_out["bot_token_set"] = bool(settings.discord_bot_token)
+    return JSONResponse({"config": config_out})
 
 
 @router.post("/api/admin/discord/channel")
@@ -2038,6 +2077,84 @@ async def admin_discord_outbox_retry(request: Request):
         conn.close()
     log.info("admin: reset discord outbox row %d for retry", row_id)
     return JSONResponse({"retried": True, "id": row_id})
+
+
+@router.post("/api/admin/discord/roles/ensure")
+async def admin_discord_roles_ensure(request: Request):
+    """"Create / repair team roles" -- app/discord_bot.py's
+    ensure_team_roles(), which makes sure every MeshWars team has
+    exactly one Discord role (creating one, or adopting an existing
+    same-named role, or recreating one deleted by hand) and records its
+    id in discord_team_role. Refuses with 400 when role sync isn't
+    actually configured (roles_enabled off, or no bot token, or no
+    guild id) -- same "don't report success for a button that did
+    nothing" reasoning POST /api/admin/discord/test already applies to
+    its own precondition check.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    result = await discord_bot.ensure_team_roles()
+    if not result.get("ok"):
+        return JSONResponse(
+            {"error": result.get("reason") or "role sync is not enabled or not fully configured"},
+            status_code=400,
+        )
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_roles_ensure",
+            detail=(
+                f"created={result['created']} recreated={result['recreated']} "
+                f"reused={result['reused']}"
+            ), now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: ensured discord team roles (created=%s recreated=%s reused=%s)",
+              result["created"], result["recreated"], result["reused"])
+    return JSONResponse(result)
+
+
+@router.post("/api/admin/discord/roles/reconcile")
+async def admin_discord_roles_reconcile(request: Request):
+    """"Reconcile all now" -- runs app/discord_bot.py's reconcile_all()
+    immediately, bypassing maybe_reconcile_roles()'s own 15-minute
+    interval gate (an operator clicking this button means now, not
+    "whenever the background loop next gets to it") but still updating
+    that same gate, so the background loop's own next tick correctly
+    waits out a fresh interval from this manual run rather than firing
+    again moments later. Refuses with 400 on the same "not actually
+    configured" precondition as the ensure-roles route above.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    result = await discord_bot.reconcile_all()
+    if not result.get("ok"):
+        return JSONResponse(
+            {"error": result.get("reason") or "role sync is not enabled or not fully configured"},
+            status_code=400,
+        )
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_roles_reconcile",
+            detail=f"checked={result['checked']} changed={result['changed']}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: discord roles reconcile (checked=%d changed=%d)",
+              result["checked"], result["changed"])
+    return JSONResponse(result)
 
 
 @router.post("/api/admin/month/freeze")

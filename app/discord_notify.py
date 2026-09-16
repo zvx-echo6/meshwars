@@ -360,7 +360,8 @@ def load_discord_config(conn) -> dict:
     row = conn.execute(
         "SELECT enabled, webhook_url, username, team_emoji, "
         "       announce_month_honors, announce_season_close, "
-        "       announce_weekly_recap, announce_net_wrapup, updated_at "
+        "       announce_weekly_recap, announce_net_wrapup, "
+        "       guild_id, roles_enabled, updated_at "
         "  FROM discord_config WHERE id = 1"
     ).fetchone()
     if row is None:
@@ -373,6 +374,12 @@ def load_discord_config(conn) -> dict:
             "announce_season_close": True,
             "announce_weekly_recap": True,
             "announce_net_wrapup": True,
+            # Role sync (app/discord_bot.py) has no settings.py seed of
+            # its own beyond guild_id -- see that module's own
+            # _roles_ready() -- so this fallback reproduces the same
+            # "not configured yet" state a real row defaults to.
+            "guild_id": settings.discord_guild_id,
+            "roles_enabled": False,
             "updated_at": 0,
         }
     d = dict(row)
@@ -381,6 +388,7 @@ def load_discord_config(conn) -> dict:
     d["announce_season_close"] = bool(d["announce_season_close"])
     d["announce_weekly_recap"] = bool(d["announce_weekly_recap"])
     d["announce_net_wrapup"] = bool(d["announce_net_wrapup"])
+    d["roles_enabled"] = bool(d["roles_enabled"])
     return d
 
 
@@ -505,12 +513,19 @@ def seed_discord_config_from_env(conn) -> None:
     webhook_url = settings.discord_webhook_announcements
     conn.execute(
         "UPDATE discord_config SET enabled = ?, webhook_url = ?, username = ?, "
-        " team_emoji = ?, updated_at = ? WHERE id = 1",
+        " team_emoji = ?, guild_id = ?, updated_at = ? WHERE id = 1",
         (
             int(bool(webhook_url)),
             webhook_url,
             settings.discord_webhook_username,
             settings.discord_team_emoji,
+            # guild_id (app/discord_bot.py's role sync): seeded here the
+            # exact same one-time way as every other column in this
+            # statement, but deliberately does NOT flip `roles_enabled`
+            # -- that stays 0 (its own column default) until an operator
+            # actually opts in through /api/admin/discord, even on a
+            # deployment that already has DISCORD_GUILD_ID set.
+            settings.discord_guild_id,
             int(time.time()),
         ),
     )
@@ -2283,13 +2298,28 @@ async def run_forever() -> None:
     provider enqueues this cycle is picked up by the SAME cycle's drain
     pass rather than waiting a full poll interval.
 
+    Also calls app/discord_bot.py's maybe_reconcile_roles() once per
+    cycle -- a THIRD, unrelated Discord feature (role sync, never a
+    webhook post) riding this same already-alive loop rather than
+    starting a second asyncio.create_task of its own, per Matt's own
+    call: one background loop, its own interval gate. maybe_reconcile_
+    roles() itself no-ops on every cycle except the one every
+    _RECONCILE_INTERVAL_SECONDS (15 minutes) that is actually due, so
+    this adds no real per-cycle cost. Imported locally, not at module
+    level: app/discord_bot.py imports FROM this module (load_discord_
+    config, _TEAM_COLORS), so importing it back here at module load
+    time would be a circular import -- same reasoning
+    build_month_honors_embed()'s own local `from . import results`
+    already gives.
+
     Never raises out of the loop -- same fire-and-forget contract
     app/account_api.py's _notify_security() applies to a single mail
     send, extended here to a whole poll cycle: a bug handling one
-    cycle's rows (or one cycle's due-check) must never crash the process
-    or stop later cycles (and later months' announcements) from ever
-    running again. The two halves are wrapped separately so a due-check
-    failure never skips that same cycle's drain pass, or vice versa.
+    cycle's rows (or one cycle's due-check, or one cycle's role
+    reconcile) must never crash the process or stop later cycles (and
+    later months' announcements) from ever running again. Each of the
+    three is wrapped separately so one's failure never skips the other
+    two in the same cycle.
     """
     log.info("discord outbox loop starting (announcements gated by discord_config)")
     while True:
@@ -2305,4 +2335,11 @@ async def run_forever() -> None:
             raise
         except Exception:
             log.exception("discord outbox: drain cycle failed")
+        try:
+            from . import discord_bot
+            await discord_bot.maybe_reconcile_roles()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("discord roles: reconcile cycle failed")
         await asyncio.sleep(max(settings.discord_outbox_poll_interval_seconds, 1))

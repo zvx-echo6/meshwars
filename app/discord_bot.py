@@ -1,0 +1,618 @@
+"""Discord role sync for MeshWars teams -- "Herald," the bot this app
+talks to Discord's own REST API with (app/discord_notify.py, by
+contrast, only ever POSTs to a webhook and never authenticates as a
+bot at all -- these are two entirely separate Discord integrations
+that happen to share one server).
+
+WHAT THIS DOES: a MeshWars player who has (a) linked a Discord account
+(app/oauth_api.py's Discord provider -- account_identity.subject is
+that Discord user's own snowflake id) and (b) is a member of the
+configured guild gets the Discord role that names their MeshWars team,
+and no other team's role. Nothing else: this bot is not a chat bot, it
+never reads or sends a message, and its only three permissions in the
+guild are Manage Roles, View Channels, and Pin Messages -- the second
+two are Discord requirements for a bot to exist in a server and see
+its own role list at all, not anything this module actually uses.
+
+PRIVACY: a team role reveals a Discord user's MeshWars TEAM -- never
+their in-game player name, never a location, never anything about
+where they've been. Linking Discord at all is opt-in, entirely the
+player's own choice (app/oauth_api.py's case 2/3, or POST
+/api/account/pending/link), and this module only ever acts on an
+identity that link already produced. This is compatible with the rule
+app/public_api.py:38 states for the read API's own two-tier privacy
+model ("identity can be public, location can be public, the link
+between them requires a session") -- a team role is the "identity"
+tier (which team, publicly visible to anyone in the Discord server,
+same as a player's own choice to show a coloured dot next to their
+name), never the "location" tier, and the account-linking session that
+produced the underlying account_identity row is exactly the "requires
+a session" gate that rule already describes.
+
+CONFIG: DISCORD_BOT_TOKEN (app/config.py's discord_bot_token) is a
+SECRET, held in the environment only -- never the database, never
+returned by any route, never logged -- the exact same treatment
+app/config.py's account_totp_encryption_key already gets (see that
+setting's own comment): a stolen database file alone must never be
+enough to act as this bot. Everything else -- guild_id, roles_enabled,
+and the discovered team->role id mapping (discord_team_role) -- is
+non-secret, DB-backed, and admin-editable through
+app/admin_ops.py's /api/admin/discord, the exact same "runtime config
+lives in the DB, read fresh every time, never cached" shape
+app/discord_notify.py's own load_discord_config() already established
+(this module imports that same function rather than inventing a
+second reader for the same row).
+
+GATING: every entry point below (sync_member, ensure_team_roles,
+reconcile_all) starts with _roles_ready(), which is False unless ALL
+THREE of roles_enabled=1 (discord_config), a non-empty
+DISCORD_BOT_TOKEN, and a non-empty guild_id are true. A fresh install,
+or one that has only ever configured the separate webhook
+announcements feed, does nothing here at all -- no outbound calls, no
+discord_team_role writes, nothing to disable that doesn't already
+default to off.
+
+FIRE-AND-FORGET: every call site that triggers a sync from an HTTP
+route (POST /api/account/link-key, the Discord OAuth callback cases,
+POST /api/account/pending/link, admin_set_team, switch_team) does so
+through sync_member_safe(), which never raises -- the exact same
+contract app/account_api.py's _notify_security() already applies to a
+security-notice email send: a Discord outage must never break, delay,
+or roll back the account/team action that triggered it. Every one of
+those call sites invokes sync_member_safe() AFTER its own write
+transaction has already committed (WriteSession's __aexit__, or a
+route's own manual COMMIT), never from inside one -- the same "HTTP
+work happens outside any WriteSession" rule app/discord_notify.py's
+outbox drain loop already follows, for the same reason: a slow or
+hung Discord call must never hold this process's single global write
+lock.
+
+RECONCILE: reconcile_all() is a slow full sweep over every player with
+a linked Discord identity, meant to catch drift the event-driven paths
+above can miss (someone joins the Discord server after linking; an
+operator hand-edits roles in Discord itself). maybe_reconcile_roles()
+is the interval-gated wrapper app/discord_notify.py's run_forever()
+calls once per its own poll cycle (every
+discord_outbox_poll_interval_seconds, 30s by default) -- see that
+function's own docstring for why this rides the EXISTING background
+loop with its own, much longer (_RECONCILE_INTERVAL_SECONDS, 15
+minutes) gate, rather than this module starting a second
+asyncio.create_task of its own.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+
+import httpx
+
+from .config import settings
+from .db import WriteSession, connect
+from .discord_notify import _TEAM_COLORS, load_discord_config
+
+log = logging.getLogger("discord_bot")
+
+# Discord's own bot API, v10 -- entirely separate from the webhook URLs
+# app/discord_notify.py posts to (those carry their own auth in the
+# URL path; this base is authenticated per-request via the
+# "Authorization: Bot <token>" header _request() below sets).
+_API_BASE = "https://discord.com/api/v10"
+
+# Same per-call budget app/discord_notify.py's _POST_TIMEOUT_SECONDS
+# uses for its own single outbound webhook POST -- generous for a
+# small JSON request/response to Discord's own API.
+_REQUEST_TIMEOUT_SECONDS = 10.0
+
+# Discord's edge rejects a default/missing User-Agent on some routes
+# with a bare 403 that gives no other clue what was wrong -- this is
+# the documented fix (discord.dev's own API reference asks for a
+# descriptive UA naming the application and a contact URL).
+_USER_AGENT = "DiscordBot (https://meshwars.com, 1.0)"
+
+# Same truncation budget app/discord_notify.py's _MAX_ERROR_BODY_CHARS
+# uses for the identical reason: Discord's own error body names the
+# exact field/permission it objected to and holds no credential, so a
+# snippet of it is safe (and useful) to fold into a raised message --
+# but only a bounded snippet, never the whole thing.
+_MAX_ERROR_BODY_CHARS = 200
+
+# Team roles grant nothing -- see ensure_team_roles()'s own docstring.
+# Discord's own API takes permissions as a string-encoded bitfield;
+# "0" is the documented way to say "no permissions at all."
+_TEAM_ROLE_PERMISSIONS = "0"
+
+# How often maybe_reconcile_roles() actually runs reconcile_all(), out
+# of every call app/discord_notify.py's run_forever() makes to it (once
+# per its own 30s poll cycle). 15 minutes, NOT that 30s interval: a
+# full reconcile walks every player with a linked Discord identity, one
+# guild-member GET plus up to a handful of role PUT/DELETEs each --
+# real work against Discord's own rate limits, not a cheap local table
+# scan the way the outbox drain's own due-check is. Nothing about role
+# drift needs sub-minute latency the way a freshly queued announcement
+# does; the event-driven paths (sync_member_safe, called on link and on
+# every team change) already handle the common case immediately, and
+# this sweep exists only to catch what those miss.
+_RECONCILE_INTERVAL_SECONDS = 15 * 60
+
+
+class DiscordAPIError(Exception):
+    """Raised by _request()/_check_ok() below on any failure talking to
+    Discord's bot API -- mirrors app/discord_notify.py's
+    DiscordSendError exactly, including the same never-str(e)-on-a-
+    transport-failure rule: httpx's own exception text embeds the
+    request, and every request here carries this deployment's bot
+    token in its Authorization header. A non-2xx HTTP response is
+    different -- Discord's OWN response body describes what was wrong
+    with the request this app sent, not a credential, so a truncated
+    snippet of it is safe to include (see _check_ok() below).
+
+    Every caller here treats this as "this one sync attempt failed,"
+    never as a reason to crash a background loop or a request handler
+    -- see sync_member_safe()'s own docstring for the fire-and-forget
+    boundary that stops one of these from ever reaching an HTTP route.
+    """
+
+
+def _roles_ready(cfg: dict) -> bool:
+    """True only when role sync is actually configured to run:
+    discord_config.roles_enabled=1 AND a bot token AND a guild id are
+    all present. Every public entry point below (sync_member,
+    ensure_team_roles, reconcile_all) checks this FIRST and no-ops
+    (returns a small {"ok": False, ...} dict, makes no outbound call,
+    writes nothing) when it is False -- so a deployment that has never
+    touched this feature, or has deliberately turned it off, behaves
+    exactly as if this module did not exist. `cfg` is an
+    already-loaded load_discord_config() dict, same "caller already
+    has one loaded this cycle" shape load_discord_channels()'s own
+    callers use in app/discord_notify.py.
+    """
+    return bool(cfg.get("roles_enabled")) and bool(settings.discord_bot_token) and bool(cfg.get("guild_id"))
+
+
+def _parse_retry_after(resp: httpx.Response) -> float:
+    """Discord's documented 429 shape carries `retry_after` (seconds,
+    a float) in the JSON body -- the header of the same name exists
+    too, but the body is Discord's own bot-API-specific value and is
+    preferred here. Falls back to the header, then to a flat 1.0s, if
+    the body isn't the shape expected -- this must never raise, since
+    it runs inside a rate-limit path that is already the "something
+    went wrong" branch.
+    """
+    try:
+        body = resp.json()
+        retry_after = body.get("retry_after")
+        if isinstance(retry_after, (int, float)):
+            return float(retry_after)
+    except Exception:
+        pass
+    header = resp.headers.get("Retry-After")
+    try:
+        return float(header)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+async def _request(
+    method: str,
+    path: str,
+    *,
+    json_body: dict | None = None,
+    http_client: httpx.AsyncClient | None = None,
+) -> httpx.Response:
+    """One authenticated call to Discord's bot API, returning the raw
+    response for the caller to interpret (status codes carry meaning
+    here that a single "raise on anything but 2xx" helper would lose --
+    a 404 on GET .../members/{id} means "not in this server," not a
+    failure -- see sync_member() below). Raises DiscordAPIError only
+    for a transport-level failure (timeout, connection error) or a 429
+    that is still a 429 after honouring `retry_after` once (Discord's
+    own doc: a well-behaved client backs off once and tries again;
+    hitting it twice in a row means something is generating far more
+    traffic than one player's sync ever should, and this gives up for
+    THIS call rather than looping against a live rate limit).
+
+    `http_client` is accepted purely so tests can hand this an
+    httpx.AsyncClient wired to an httpx.MockTransport, the same
+    injectable-client shape app/discord_notify.py's _post() and
+    app/oauth.py's exchange_code() already use for their own outbound
+    calls -- every real caller leaves it None and a short-lived client
+    is opened and closed around this one request.
+    """
+    headers = {
+        "Authorization": f"Bot {settings.discord_bot_token}",
+        "User-Agent": _USER_AGENT,
+    }
+    client = http_client
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        async def _one_call() -> httpx.Response:
+            try:
+                return await client.request(
+                    method, f"{_API_BASE}{path}", json=json_body, headers=headers
+                )
+            except httpx.TimeoutException as e:
+                raise DiscordAPIError("discord api request timed out") from e
+            except httpx.HTTPError as e:
+                # Deliberately not str(e) -- see this module's own
+                # docstring and DiscordAPIError's: httpx's own
+                # exception text embeds the request, headers included,
+                # and the Authorization header carries the bot token.
+                raise DiscordAPIError(f"discord api request failed ({type(e).__name__})") from e
+
+        resp = await _one_call()
+        if resp.status_code == 429:
+            # Honour Discord's own back-off exactly once, then retry --
+            # see this function's own docstring for why a second 429
+            # gives up rather than looping.
+            await asyncio.sleep(_parse_retry_after(resp))
+            resp = await _one_call()
+            if resp.status_code == 429:
+                raise DiscordAPIError("discord api rate limited twice in a row, giving up this cycle")
+        return resp
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
+def _check_ok(resp: httpx.Response, action: str) -> None:
+    """Raises DiscordAPIError on any non-2xx response, with a truncated
+    snippet of Discord's own response body (safe -- see this module's
+    own docstring and DiscordAPIError's). Callers that treat a specific
+    status specially (sync_member()'s 404-means-not-a-member) check
+    that status BEFORE calling this, so it never fires for a case that
+    isn't actually a failure.
+    """
+    if 200 <= resp.status_code < 300:
+        return
+    snippet = (resp.text or "").strip()[:_MAX_ERROR_BODY_CHARS]
+    detail = f": {snippet}" if snippet else ""
+    raise DiscordAPIError(f"discord api {action} returned HTTP {resp.status_code}{detail}")
+
+
+async def _list_guild_roles(guild_id: str, *, http_client: httpx.AsyncClient | None = None) -> list[dict]:
+    resp = await _request("GET", f"/guilds/{guild_id}/roles", http_client=http_client)
+    _check_ok(resp, "list roles")
+    return resp.json()
+
+
+async def _create_guild_role(
+    guild_id: str,
+    *,
+    name: str,
+    color: int,
+    hoist: bool,
+    mentionable: bool,
+    permissions: str,
+    http_client: httpx.AsyncClient | None = None,
+) -> dict:
+    resp = await _request(
+        "POST",
+        f"/guilds/{guild_id}/roles",
+        json_body={
+            "name": name,
+            "color": color,
+            "hoist": hoist,
+            "mentionable": mentionable,
+            "permissions": permissions,
+        },
+        http_client=http_client,
+    )
+    _check_ok(resp, "create role")
+    return resp.json()
+
+
+async def _upsert_team_role(team: str, role_id: str, now: int) -> None:
+    """Record (or update) discord_team_role's one row for `team` --
+    the ONLY table this module ever writes to, and a small enough write
+    that a short-lived WriteSession per call (the same pattern
+    app/discord_notify.py's _mark_posted()/_mark_failed() already use
+    for their own one-row updates) is simpler than threading a
+    caller-owned connection through ensure_team_roles()'s async/await
+    HTTP calls.
+    """
+    async with WriteSession() as conn:
+        conn.execute(
+            "INSERT INTO discord_team_role(team, role_id, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(team) DO UPDATE SET role_id = excluded.role_id, updated_at = excluded.updated_at",
+            (team, role_id, now),
+        )
+
+
+async def ensure_team_roles(*, http_client: httpx.AsyncClient | None = None) -> dict:
+    """Make sure every team in _TEAM_COLORS (app/discord_notify.py's
+    own palette -- reused verbatim, never a second copy, so a team
+    colour change there is automatically the colour the next call here
+    creates/repairs a role with too) has exactly one Discord role, and
+    that discord_team_role remembers its id. Safe to call repeatedly --
+    an operator's "Create / repair team roles" button in
+    app/admin_ops.py, and nothing else, since this never runs on its
+    own schedule.
+
+    Per team:
+      - discord_team_role already has a row AND that role id is still
+        a real role in the guild -> left alone entirely (no API call
+        for that team beyond the one shared GET below).
+      - a row exists but its role id is gone from the guild (deleted by
+        hand) -> a NEW role is created and the row is updated to the
+        new id. The old, deleted role is not "restored" -- Discord has
+        no such operation -- this is a fresh role that happens to have
+        the same name and colour.
+      - no row, but the guild already has a role with this exact name
+        -> that existing role is adopted (its id is written to a new
+        row) rather than creating a duplicate -- an operator who
+        created team roles by hand before this feature existed must
+        never end up with two "GREEN" roles.
+      - no row and no matching name -> a new role is created.
+
+    Returns {"ok": True, "created": [...], "recreated": [...],
+    "reused": [...], "unchanged": [...]} (team names in each bucket),
+    or {"ok": False, "reason": ...} when role sync isn't configured
+    (_roles_ready() False) -- no API call is made in that case at all.
+    """
+    conn = connect()
+    try:
+        cfg = load_discord_config(conn)
+        if not _roles_ready(cfg):
+            return {"ok": False, "reason": "roles sync disabled or not fully configured"}
+        guild_id = cfg["guild_id"]
+        existing = {
+            r["team"]: dict(r)
+            for r in conn.execute("SELECT team, role_id, updated_at FROM discord_team_role").fetchall()
+        }
+    finally:
+        conn.close()
+
+    guild_roles = await _list_guild_roles(guild_id, http_client=http_client)
+    roles_by_id = {r["id"]: r for r in guild_roles}
+    roles_by_name = {r["name"]: r for r in guild_roles}
+
+    now = int(time.time())
+    created: list[str] = []
+    recreated: list[str] = []
+    reused: list[str] = []
+    unchanged: list[str] = []
+
+    for team, color in _TEAM_COLORS.items():
+        row = existing.get(team)
+        if row is not None and row["role_id"] in roles_by_id:
+            unchanged.append(team)
+            continue
+        if row is None:
+            found = roles_by_name.get(team)
+            if found is not None:
+                await _upsert_team_role(team, found["id"], now)
+                reused.append(team)
+                continue
+        new_role = await _create_guild_role(
+            guild_id,
+            name=team,
+            color=color,
+            hoist=True,
+            mentionable=False,
+            permissions=_TEAM_ROLE_PERMISSIONS,
+            http_client=http_client,
+        )
+        await _upsert_team_role(team, new_role["id"], now)
+        if row is None:
+            created.append(team)
+        else:
+            recreated.append(team)
+
+    return {"ok": True, "created": created, "recreated": recreated, "reused": reused, "unchanged": unchanged}
+
+
+async def sync_member(
+    conn, player_id: int, *, http_client: httpx.AsyncClient | None = None
+) -> dict:
+    """Make one player's Discord roles match their current MeshWars
+    team, and only that team -- called directly (and awaited to
+    completion) by reconcile_all() below, and via the never-raises
+    sync_member_safe() wrapper from every event-driven call site (see
+    this module's own docstring's FIRE-AND-FORGET section).
+
+    `conn` is used for READS ONLY (player, account_identity,
+    discord_team_role, discord_config) -- this function never writes to
+    the database, so `conn` needs no write lock and callers are free to
+    hand it a plain connect() connection, including one opened AFTER an
+    unrelated WriteSession has already committed (see sync_member_safe's
+    call sites) or the caller's own already-open connection.
+
+    No-ops (returns {"ok": True, "reason": ...}, makes NO outbound
+    call) for every case where there is nothing to do:
+      - role sync not configured (_roles_ready() False)
+      - the player has no linked account, or the account has no
+        provider='discord' account_identity row
+      - GET .../members/{snowflake} returns 404 -- not a member of the
+        guild right now, not an error
+    A disabled player (player.disabled_at set) or one with no team
+    (should not happen in practice, but handled explicitly rather than
+    assumed) is treated as "desired role: none" -- every team role is
+    removed, nothing is added.
+
+    Computes the diff between the member's CURRENT roles (from the GET)
+    and the desired set, and issues only the PUT/DELETE calls actually
+    needed -- a member already correctly holding just their team's role
+    causes zero role-mutating calls, only the one GET. Never touches a
+    role that isn't one of discord_team_role's own tracked ids: a
+    member's other server roles (moderator, booster, whatever else this
+    guild has) are none of this bot's business.
+    """
+    cfg = load_discord_config(conn)
+    if not _roles_ready(cfg):
+        return {"ok": False, "reason": "roles sync disabled or not fully configured"}
+    guild_id = cfg["guild_id"]
+
+    player = conn.execute(
+        "SELECT account_id, team, disabled_at FROM player WHERE player_id = ?", (player_id,)
+    ).fetchone()
+    if player is None or player["account_id"] is None:
+        return {"ok": True, "reason": "player has no linked account"}
+
+    identity = conn.execute(
+        "SELECT subject FROM account_identity WHERE account_id = ? AND provider = 'discord'",
+        (player["account_id"],),
+    ).fetchone()
+    if identity is None:
+        return {"ok": True, "reason": "account has no linked discord identity"}
+    snowflake = identity["subject"]
+
+    role_id_by_team = {
+        r["team"]: r["role_id"]
+        for r in conn.execute("SELECT team, role_id FROM discord_team_role").fetchall()
+    }
+    all_team_role_ids = set(role_id_by_team.values())
+
+    resp = await _request("GET", f"/guilds/{guild_id}/members/{snowflake}", http_client=http_client)
+    if resp.status_code == 404:
+        return {"ok": True, "reason": "not a member of the guild"}
+    _check_ok(resp, "get member")
+    member = resp.json()
+    current_role_ids = set(member.get("roles") or [])
+
+    is_disabled = player["disabled_at"] is not None
+    team = player["team"] if not is_disabled else None
+    desired_role_id = role_id_by_team.get(team) if team else None
+
+    to_add = {desired_role_id} if desired_role_id and desired_role_id not in current_role_ids else set()
+    to_remove = {rid for rid in (current_role_ids & all_team_role_ids) if rid != desired_role_id}
+
+    for rid in to_add:
+        r = await _request(
+            "PUT", f"/guilds/{guild_id}/members/{snowflake}/roles/{rid}", http_client=http_client
+        )
+        _check_ok(r, "add member role")
+    for rid in to_remove:
+        r = await _request(
+            "DELETE", f"/guilds/{guild_id}/members/{snowflake}/roles/{rid}", http_client=http_client
+        )
+        _check_ok(r, "remove member role")
+
+    return {"ok": True, "added": sorted(to_add), "removed": sorted(to_remove)}
+
+
+async def sync_member_safe(conn, player_id: int) -> None:
+    """Fire-and-forget wrapper around sync_member() for every
+    event-driven call site (link-key, the Discord OAuth callback cases,
+    pending/link, a team change) -- never raises. Same contract
+    app/account_api.py's _notify_security() applies to a security-notice
+    send: a Discord outage, a misconfigured guild, a role permission
+    problem, anything -- must never surface to the caller or undo the
+    account/team action that already committed. Logs and swallows.
+    """
+    try:
+        await sync_member(conn, player_id)
+    except Exception:
+        log.exception("discord roles: sync failed for player %d", player_id)
+
+
+# Monotonic timestamp of the last time reconcile_all() actually ran
+# (whether it did real work or no-op'd on _roles_ready()), managed
+# entirely by reconcile_all() itself -- see maybe_reconcile_roles()'s
+# own docstring for why a manual admin-triggered run and the periodic
+# background one share this one gate rather than each keeping their own.
+_last_reconcile_gate_at = 0.0
+
+# The last reconcile_all() result, for GET /api/admin/discord to show
+# an operator ("last reconcile time," "count of members changed") --
+# process-local only, not persisted to the database: this is
+# operational visibility into a pass that just ran, not the underlying
+# state itself (role membership always lives in Discord and is always
+# fully re-derivable by the very next reconcile), so losing it across a
+# restart costs nothing worth a migration.
+_last_reconcile_result: dict = {"ok": False, "at": 0, "checked": 0, "changed": 0}
+
+
+async def reconcile_all(*, http_client: httpx.AsyncClient | None = None) -> dict:
+    """One full pass over every player with a linked Discord identity,
+    calling sync_member() for each. Exists to catch what the
+    event-driven paths (sync_member_safe on link/team-change) can miss:
+    someone who links Discord and only joins the guild later, or a role
+    an operator edited by hand in Discord itself, drifting away from
+    what this app thinks is true. Called directly by
+    POST /api/admin/discord/roles/reconcile (bypassing
+    maybe_reconcile_roles()'s interval gate -- an operator clicking
+    "Reconcile all now" means now) and, on its own schedule, by
+    maybe_reconcile_roles() below.
+
+    Updates _last_reconcile_gate_at UNCONDITIONALLY, at the very start,
+    before any await -- so a manual run and the periodic loop can never
+    race each other into overlapping work, and the periodic loop's next
+    tick (maybe_reconcile_roles()) correctly waits out a full
+    _RECONCILE_INTERVAL_SECONDS from whichever call happened most
+    recently, manual or scheduled.
+
+    No-ops immediately (an {"ok": False, ...} result, no player list
+    ever read, no outbound calls) when role sync isn't configured
+    (_roles_ready() False).
+
+    A single player's sync_member() failure is logged and skipped, same
+    "one bad row must never stop the rest of the cycle" rule
+    app/discord_notify.py's check_due_time_driven() and _drain_once()
+    already apply to their own per-item loops -- one broken identity
+    (a snowflake Discord no longer recognizes, say) must never prevent
+    every other player in the same pass from being reconciled.
+    """
+    global _last_reconcile_gate_at, _last_reconcile_result
+    _last_reconcile_gate_at = time.monotonic()
+
+    conn = connect()
+    try:
+        cfg = load_discord_config(conn)
+        if not _roles_ready(cfg):
+            result = {"ok": False, "reason": "roles sync disabled or not fully configured",
+                       "at": int(time.time()), "checked": 0, "changed": 0}
+            _last_reconcile_result = result
+            return result
+        player_ids = [
+            r["player_id"]
+            for r in conn.execute(
+                "SELECT DISTINCT p.player_id FROM player p "
+                "JOIN account_identity ai ON ai.account_id = p.account_id AND ai.provider = 'discord' "
+                "WHERE p.account_id IS NOT NULL"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    changed = 0
+    for player_id in player_ids:
+        read_conn = connect()
+        try:
+            outcome = await sync_member(read_conn, player_id, http_client=http_client)
+        except Exception:
+            log.exception("discord roles: reconcile failed for player %d", player_id)
+            continue
+        finally:
+            read_conn.close()
+        if outcome.get("added") or outcome.get("removed"):
+            changed += 1
+
+    result = {"ok": True, "at": int(time.time()), "checked": len(player_ids), "changed": changed}
+    _last_reconcile_result = result
+    return result
+
+
+async def maybe_reconcile_roles(*, http_client: httpx.AsyncClient | None = None) -> dict | None:
+    """Interval-gated wrapper app/discord_notify.py's run_forever() calls
+    once per its own poll cycle -- see this module's own docstring's
+    RECONCILE section, and _RECONCILE_INTERVAL_SECONDS's own comment,
+    for why this is 15 minutes rather than that loop's native 30s.
+    Returns reconcile_all()'s own result dict on a cycle that actually
+    ran it, or None when the interval hasn't elapsed since the last run
+    (manual or scheduled) -- the gate is skipped this tick, nothing is
+    read or called.
+    """
+    if time.monotonic() - _last_reconcile_gate_at < _RECONCILE_INTERVAL_SECONDS:
+        return None
+    return await reconcile_all(http_client=http_client)
+
+
+def get_last_reconcile() -> dict:
+    """The last reconcile_all() result (manual or scheduled), for GET
+    /api/admin/discord -- see _last_reconcile_result's own comment for
+    why this is process-local rather than a database row.
+    """
+    return dict(_last_reconcile_result)

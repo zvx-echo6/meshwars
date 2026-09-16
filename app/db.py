@@ -2288,6 +2288,17 @@ CREATE TABLE IF NOT EXISTS discord_config (
     -- table's own comment) rather than this column growing a per-net
     -- flag of its own.
     announce_net_wrapup        INTEGER NOT NULL DEFAULT 1,
+    -- Discord ROLE sync (app/discord_bot.py), an entirely separate
+    -- feature from every announce_* toggle above (those gate what the
+    -- WEBHOOK posts; this gates what the BOT does to guild members'
+    -- roles). guild_id is non-secret and seeded from DISCORD_GUILD_ID
+    -- the same one-time way webhook_url/username/team_emoji already
+    -- are (seed_discord_config_from_env(), app/discord_notify.py).
+    -- roles_enabled defaults to 0 (OFF), unlike every announce_*
+    -- column's opt-out default -- see the MIGRATIONS entry for this
+    -- same pair of columns for why.
+    guild_id                   TEXT NOT NULL DEFAULT '',
+    roles_enabled              INTEGER NOT NULL DEFAULT 0,
     updated_at                 INTEGER NOT NULL DEFAULT 0
 );
 
@@ -2328,6 +2339,30 @@ CREATE TABLE IF NOT EXISTS discord_channel (
     webhook_url TEXT NOT NULL DEFAULT '',
     enabled     INTEGER NOT NULL DEFAULT 1,
     updated_at  INTEGER NOT NULL DEFAULT 0
+);
+
+-- Discord ROLE sync (app/discord_bot.py -- "Herald," a separate Discord
+-- integration from the webhook announcements above: this one
+-- authenticates as a bot, via DISCORD_BOT_TOKEN, and never posts a
+-- message at all). One row per MeshWars team, remembering the Discord
+-- role id app/discord_bot.py's ensure_team_roles() created (or
+-- adopted, if a same-named role already existed) for that team, so a
+-- role is discovered ONCE and reused forever after rather than
+-- ensure_team_roles() searching the guild's role list by name on every
+-- call, and so app/discord_bot.py's sync_member() knows which of a
+-- member's current roles are "team roles" at all (any id in this
+-- table) versus some other role this bot must never touch (moderator,
+-- booster, anything else the guild has). `team` matches the keys of
+-- app/discord_notify.py's own _TEAM_COLORS palette (RED, GREEN, ...)
+-- -- reused verbatim rather than a second copy, so the two can never
+-- name a different set of teams. discord_config.guild_id/roles_enabled
+-- (below) are the other two pieces of this feature's config; both live
+-- there rather than a third table, following that singleton's own
+-- existing "one config row per Discord feature" shape.
+CREATE TABLE IF NOT EXISTS discord_team_role (
+    team        TEXT PRIMARY KEY,
+    role_id     TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
 );
 """
 
@@ -2887,6 +2922,22 @@ MIGRATIONS = [
     # Default 1 (on), same "opt-out, not opt-in" reasoning as every other
     # announcement kind.
     "ALTER TABLE discord_config ADD COLUMN announce_net_wrapup INTEGER NOT NULL DEFAULT 1",
+    # guild_id / roles_enabled: app/discord_bot.py's Discord ROLE sync
+    # feature, added after discord_config already shipped -- same
+    # "an ALTER is required here too" situation as every column above.
+    # guild_id is non-secret (a Discord guild id is just a number
+    # visible to anyone in the server, same as a channel id) and is
+    # seeded from DISCORD_GUILD_ID the same one-time,
+    # guarded-by-updated_at way webhook_url/username/team_emoji already
+    # are (see app/discord_notify.py's seed_discord_config_from_env()).
+    # roles_enabled defaults to 0 (OFF) -- deliberately NOT the
+    # "opt-out, not opt-in" default every announce_* column above uses:
+    # this feature needs a bot token AND a guild id AND an operator to
+    # have actually run "Create / repair team roles" before it can do
+    # anything sensible, so it must never turn itself on the moment a
+    # database happens to gain this column.
+    "ALTER TABLE discord_config ADD COLUMN guild_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE discord_config ADD COLUMN roles_enabled INTEGER NOT NULL DEFAULT 0",
 ]
 
 PRAGMAS = [

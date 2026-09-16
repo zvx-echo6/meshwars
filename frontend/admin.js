@@ -2073,6 +2073,49 @@ function renderDiscordForm(cfg) {
     : 'not set';
   document.getElementById('dc-username').value = cfg.username || '';
   document.getElementById('dc-team-emoji').value = cfg.team_emoji || '';
+
+  // Team roles (app/discord_bot.py) -- an entirely separate feature
+  // from every field above, but roles_enabled/guild_id are plain,
+  // non-secret columns saved together with the rest of this same form
+  // (see saveDiscord() below). bot_token_set never carries the token
+  // itself -- only whether DISCORD_BOT_TOKEN is configured at all, the
+  // same has_api_key-shaped hint every other secret field on this page
+  // already uses.
+  document.getElementById('dc-roles-enabled').checked = !!cfg.roles_enabled;
+  document.getElementById('dc-guild-id').value = cfg.guild_id || '';
+  document.getElementById('dc-bot-token-hint').textContent = cfg.bot_token_set
+    ? 'Bot token: configured'
+    : 'Bot token: not set (DISCORD_BOT_TOKEN environment variable)';
+}
+
+// Team roles (app/discord_bot.py) -- discord_team_role rows, purely
+// informational here (an operator repairs them with the buttons below,
+// never edits a role id by hand).
+function renderTeamRoles(teamRoles) {
+  const host = document.getElementById('dc-team-roles');
+  host.replaceChildren();
+  if (!teamRoles.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No team roles discovered yet -- use "Create / repair team roles" below.' }));
+    return;
+  }
+  teamRoles.forEach((r) => {
+    const row = el('div', { className: 'adm-row' });
+    const info = el('div', { className: 'adm-row-info' });
+    info.appendChild(el('strong', { className: 'adm-mono', text: r.team }));
+    info.appendChild(el('span', { className: 'adm-mono', text: r.role_id }));
+    row.appendChild(info);
+    host.appendChild(row);
+  });
+}
+
+function renderReconcileStatus(lastReconcile) {
+  const out = document.getElementById('dc-roles-reconcile-status');
+  if (!lastReconcile || !lastReconcile.at) {
+    out.textContent = 'No reconcile has run yet.';
+    return;
+  }
+  out.textContent = 'Last reconcile: ' + fmtTs(lastReconcile.at)
+    + ' -- checked ' + lastReconcile.checked + ', changed ' + lastReconcile.changed + '.';
 }
 
 function renderDiscordOutbox(outbox) {
@@ -2198,6 +2241,8 @@ async function loadDiscord() {
     renderDiscordForm(d.config);
     renderDiscordChannels(d.channels || []);
     renderDiscordOutbox(d.outbox);
+    renderTeamRoles(d.team_roles || []);
+    renderReconcileStatus(d.last_reconcile);
   } catch (e) {
     setStatus('Discord config load failed: ' + e.message, true);
   }
@@ -2215,6 +2260,8 @@ async function saveDiscord(b) {
     announce_net_wrapup: document.getElementById('dc-net-wrapup').checked,
     username: document.getElementById('dc-username').value.trim(),
     team_emoji: document.getElementById('dc-team-emoji').value.trim(),
+    roles_enabled: document.getElementById('dc-roles-enabled').checked,
+    guild_id: document.getElementById('dc-guild-id').value.trim(),
   };
   // Blank means keep the existing webhook -- see app/admin_ops.py's
   // admin_discord_update, the same convention the Paint section's own
@@ -2260,6 +2307,36 @@ async function retryDiscordOutboxRow(b, id) {
     await loadDiscord();
   } catch (e) {
     setStatus('Retry failed: ' + e.message, true);
+  }
+  b.disabled = false;
+}
+
+async function ensureDiscordRoles(b) {
+  const out = document.getElementById('dc-roles-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord/roles/ensure', {});
+    out.textContent = 'Created: ' + (r.created.join(', ') || 'none')
+      + '. Recreated: ' + (r.recreated.join(', ') || 'none')
+      + '. Reused: ' + (r.reused.join(', ') || 'none') + '.';
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function reconcileDiscordRoles(b) {
+  const out = document.getElementById('dc-roles-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord/roles/reconcile', {});
+    out.textContent = 'Checked ' + r.checked + ' player(s), changed ' + r.changed + '.';
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
   }
   b.disabled = false;
 }
@@ -2483,5 +2560,7 @@ document.getElementById('nt-clear').addEventListener('click', function () { save
 document.getElementById('dc-save').addEventListener('click', function () { saveDiscord(this); });
 document.getElementById('dc-test').addEventListener('click', function () { sendDiscordTest(this); });
 document.getElementById('dc-channel-add').addEventListener('click', function () { addDiscordChannel(this); });
+document.getElementById('dc-roles-ensure').addEventListener('click', function () { ensureDiscordRoles(this); });
+document.getElementById('dc-roles-reconcile').addEventListener('click', function () { reconcileDiscordRoles(this); });
 
 checkAccess();

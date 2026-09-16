@@ -1161,6 +1161,42 @@ class Settings(BaseSettings):
     # stray placeholder text. See discord_notify._parse_team_emoji().
     discord_team_emoji: str = ""
 
+    # ---- Discord role sync (app/discord_bot.py) ----------------------------
+    # A THIRD, entirely separate Discord integration on top of the two
+    # above -- OAUTH_DISCORD_CLIENT_ID/SECRET (a player signing in with
+    # their own Discord account) and discord_webhook_announcements (this
+    # app posting to one channel via a webhook). This one authenticates
+    # as an actual bot user in the guild ("Herald"), via a bot token, so
+    # it can read guild members and manage roles.
+    #
+    # SECRET, environment only, exactly like account_totp_encryption_key
+    # above: never stored in discord_config or any other table, never
+    # returned by any route, never logged. A stolen database file alone
+    # must never be enough to act as this bot in the guild. Get one from
+    # discord.com/developers/applications -> your application -> Bot ->
+    # Reset Token; the bot must already be added to the guild with
+    # (at minimum) the Manage Roles permission, and its own role must sit
+    # ABOVE every team role in the guild's role list, or its Manage Roles
+    # permission cannot actually assign or remove them (Discord's own
+    # role-hierarchy rule, not something this app can work around).
+    #
+    # Empty means role sync can never run: app/discord_bot.py's
+    # _roles_ready() requires this AND discord_config.roles_enabled=1 AND
+    # a configured guild_id, all three, before making a single API call.
+    discord_bot_token: str = ""
+
+    # The Discord guild (server) id role sync operates in -- one guild
+    # per deployment, same as this app's Discord OAuth login (there is
+    # no per-team or per-net guild). Non-secret (a guild id is visible to
+    # anyone in the server, the same as a channel id) -- this is the SEED
+    # only, written once into discord_config.guild_id by
+    # seed_discord_config_from_env() the same guarded-by-updated_at way
+    # discord_webhook_announcements seeds discord_config.webhook_url; an
+    # operator edits the live value through app/admin_ops.py's
+    # /api/admin/discord afterward, not by changing this env var and
+    # redeploying.
+    discord_guild_id: str = ""
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

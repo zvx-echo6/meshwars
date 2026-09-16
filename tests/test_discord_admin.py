@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import app.db as db
-from app import discord_notify
+from app import admin_ops, discord_bot, discord_notify
 from app.admin_ops import router as admin_router
 from app.auth import http_exception_as_error_body
 from app.config import settings
@@ -753,3 +753,181 @@ def test_post_discord_test_requires_role_signed_in_but_no_role(db_path):
     resp = client.post("/api/admin/discord/test", json={})
     assert resp.status_code == 401
     assert resp.json() == {"error": "unauthorized"}
+
+
+# ---- Discord role sync (app/discord_bot.py) admin surface ----------------
+#
+# The bot token itself (settings.discord_bot_token) never appears
+# anywhere this section touches -- GET /api/admin/discord only ever
+# reports whether one is configured (`bot_token_set`), never the value.
+# ensure_team_roles()/reconcile_all() are monkeypatched to canned async
+# stubs throughout: their own real behavior (the guild-role diffing,
+# the member role diff) is tests/test_discord_bot.py's job -- this file
+# only proves the ROUTES wire up correctly (guard, logging, response
+# shape, the 400-on-not-configured precondition).
+
+_TEST_BOT_TOKEN = "totally-secret-bot-token-must-never-leak"
+
+
+@pytest.fixture(autouse=True)
+def _reset_reconcile_state(monkeypatch):
+    monkeypatch.setattr(discord_bot, "_last_reconcile_gate_at", 0.0)
+    monkeypatch.setattr(discord_bot, "_last_reconcile_result",
+                         {"ok": False, "at": 0, "checked": 0, "changed": 0})
+
+
+def test_get_discord_reports_bot_token_set(db_path, monkeypatch):
+    monkeypatch.setattr(settings, "discord_bot_token", _TEST_BOT_TOKEN)
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    assert resp.json()["config"]["bot_token_set"] is True
+    assert _TEST_BOT_TOKEN not in resp.text
+
+
+def test_get_discord_reports_bot_token_not_set(db_path, monkeypatch):
+    monkeypatch.setattr(settings, "discord_bot_token", "")
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    assert resp.json()["config"]["bot_token_set"] is False
+
+
+def test_get_discord_lists_team_roles(db_path):
+    account_id = _make_account(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO discord_team_role(team, role_id, updated_at) VALUES ('RED', 'role-red', ?)",
+        (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    team_roles = resp.json()["team_roles"]
+    assert {"team": "RED", "role_id": "role-red", "updated_at": NOW} in team_roles
+
+
+def test_get_discord_includes_last_reconcile(db_path, monkeypatch):
+    monkeypatch.setattr(discord_bot, "_last_reconcile_result",
+                         {"ok": True, "at": NOW, "checked": 3, "changed": 1})
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    assert resp.json()["last_reconcile"] == {"ok": True, "at": NOW, "checked": 3, "changed": 1}
+
+
+def test_post_discord_saves_roles_enabled_and_guild_id(db_path):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": False, "username": "", "team_emoji": "",
+        "announce_month_honors": True, "announce_season_close": True,
+        "announce_weekly_recap": True, "announce_net_wrapup": True,
+        "roles_enabled": True, "guild_id": "123456789",
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["config"]
+    assert body["roles_enabled"] is True
+    assert body["guild_id"] == "123456789"
+    row = _discord_row(db_path)
+    assert row["roles_enabled"] == 1
+    assert row["guild_id"] == "123456789"
+
+
+def test_post_discord_roles_ensure_calls_ensure_team_roles(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_ensure(*, http_client=None):
+        return {"ok": True, "created": ["RED"], "recreated": [], "reused": ["GREEN"], "unchanged": []}
+
+    monkeypatch.setattr(admin_ops.discord_bot, "ensure_team_roles", fake_ensure)
+
+    resp = client.post("/api/admin/discord/roles/ensure", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["created"] == ["RED"]
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    action = conn.execute(
+        "SELECT action FROM admin_action_log WHERE action = 'discord_roles_ensure'"
+    ).fetchone()
+    conn.close()
+    assert action is not None
+
+
+def test_post_discord_roles_ensure_400_when_not_configured(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_ensure(*, http_client=None):
+        return {"ok": False, "reason": "roles sync disabled or not fully configured"}
+
+    monkeypatch.setattr(admin_ops.discord_bot, "ensure_team_roles", fake_ensure)
+
+    resp = client.post("/api/admin/discord/roles/ensure", json={})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_post_discord_roles_reconcile_calls_reconcile_all(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_reconcile(*, http_client=None):
+        return {"ok": True, "at": NOW, "checked": 5, "changed": 2}
+
+    monkeypatch.setattr(admin_ops.discord_bot, "reconcile_all", fake_reconcile)
+
+    resp = client.post("/api/admin/discord/roles/reconcile", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["checked"] == 5
+    assert resp.json()["changed"] == 2
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    action = conn.execute(
+        "SELECT detail FROM admin_action_log WHERE action = 'discord_roles_reconcile'"
+    ).fetchone()
+    conn.close()
+    assert action is not None
+    assert "checked=5" in action["detail"]
+
+
+def test_post_discord_roles_reconcile_400_when_not_configured(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_reconcile(*, http_client=None):
+        return {"ok": False, "reason": "roles sync disabled or not fully configured"}
+
+    monkeypatch.setattr(admin_ops.discord_bot, "reconcile_all", fake_reconcile)
+
+    resp = client.post("/api/admin/discord/roles/reconcile", json={})
+    assert resp.status_code == 400
+
+
+def test_post_discord_roles_ensure_requires_role(db_path):
+    _make_account(db_path, role="admin")
+    account_id = _make_account(db_path, role=None, with_totp=False)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/roles/ensure", json={})
+    assert resp.status_code == 401
+
+
+def test_post_discord_roles_reconcile_requires_role(db_path):
+    _make_account(db_path, role="admin")
+    account_id = _make_account(db_path, role=None, with_totp=False)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/roles/reconcile", json={})
+    assert resp.status_code == 401

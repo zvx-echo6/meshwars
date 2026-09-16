@@ -54,6 +54,7 @@ import unicodedata
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from . import discord_bot
 from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
 from .client_ip import get_client_ip
 from .config import settings
@@ -676,6 +677,19 @@ async def switch_team(
         raise
     finally:
         conn.close()
+
+    # Discord role sync (app/discord_bot.py) -- fire-and-forget, run
+    # AFTER the transaction above has already committed (this function
+    # never uses WriteSession, but the same "HTTP work happens outside
+    # any write transaction" rule applies), never allowed to break,
+    # delay, or roll back a team switch that already succeeded. A
+    # no-op when the player has no linked Discord identity or role sync
+    # isn't configured at all -- see sync_member_safe()'s own docstring.
+    sync_conn = connect()
+    try:
+        await discord_bot.sync_member_safe(sync_conn, player_id)
+    finally:
+        sync_conn.close()
 
     return JSONResponse(
         {"team": team, "next_switch_at": end},
