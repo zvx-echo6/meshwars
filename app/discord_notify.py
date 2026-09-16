@@ -41,6 +41,22 @@ discord_webhook_username/discord_team_emoji remain the SEED
 (seed_discord_config_from_env() below, called once from app/db.py's
 init_db()) and the documented bootstrap path for a brand-new
 deployment; once seeded, this module never reads them again.
+
+Two more pieces of plumbing on top of the single default webhook above:
+
+- PER-KIND ROUTING (app/db.py's discord_channel table): an announcement
+  kind can be routed to its own webhook instead of the shared default.
+  load_discord_channels() reads the routing table; resolve_discord_webhook()
+  is the ONE place that decides, per kind, which URL wins (see its own
+  docstring for the enabled=0-means-do-not-announce distinction).
+  Resolved fresh at POST time in _drain_once(), never at enqueue() time
+  and never stored on the outbox row -- a channel move after a row is
+  already queued must still be honored.
+- TIME-DRIVEN ANNOUNCEMENTS (TIME_DRIVEN_PROVIDERS, check_due_time_driven()):
+  the "clock" for a kind with no triggering event to enqueue() from, since
+  this app has no scheduler and must not grow one. See
+  TIME_DRIVEN_PROVIDERS's own docstring for the shape (a list of PROVIDER
+  FUNCTIONS, not fixed entries) and the worked example of why.
 """
 from __future__ import annotations
 
@@ -329,6 +345,96 @@ def load_discord_config(conn) -> dict:
     return d
 
 
+def load_discord_channels(conn) -> dict[str, dict]:
+    """Every discord_channel row, keyed by `kind` -- a fresh, uncached
+    read, same "never cached, read every time it is needed" contract
+    load_discord_config() above documents for discord_config. Read once
+    per enqueue() call and once per drain cycle (_drain_once(), which
+    loads it alongside discord_config and resolves each row's channel
+    from this already-loaded dict rather than re-querying per outbox
+    row -- see that function's own docstring).
+
+    A kind absent from the returned dict has no override at all -- the
+    common case for every kind before an operator ever visits
+    /api/admin/discord's channel table -- and resolve_discord_webhook()
+    below treats a missing key exactly like a row it has never seen.
+    """
+    rows = conn.execute(
+        "SELECT kind, webhook_url, enabled, updated_at FROM discord_channel"
+    ).fetchall()
+    return {row["kind"]: dict(row) for row in rows}
+
+
+def _channel_kind_candidates(kind: str) -> list[str]:
+    """Most-specific-first candidate list for resolving `kind` against
+    discord_channel: `kind` itself, then -- only when it is colon-scoped
+    ("<generic>:<instance>") -- the generic prefix before the FIRST
+    colon. A plain, unscoped kind ("month_honors", "test") yields just
+    itself, one element, so resolve_discord_webhook() below behaves
+    identically to a simple single-kind lookup for every kind this task
+    ships.
+
+    This is the plumbing a future per-instance kind rides on without any
+    further change here: a net wrap-up (see discord_notify's own
+    TIME_DRIVEN_PROVIDERS docstring for the worked example) would use
+    kind="net_wrapup:<net id>", which resolves against a per-net
+    override FIRST ("net_wrapup:12"), falling back to a generic
+    "net_wrapup" channel shared by every net that has no override of its
+    own, before ever falling all the way back to discord_config's
+    default -- so an operator CAN split one community's wrap-ups onto
+    their own channel later without that ever being required.
+    """
+    if ":" in kind:
+        return [kind, kind.split(":", 1)[0]]
+    return [kind]
+
+
+def resolve_discord_webhook(cfg: dict, channels: dict[str, dict], kind: str) -> str | None:
+    """The webhook URL `kind` should post to right now, or None when it
+    must not be announced at all -- the ONE place this whole module
+    decides that, called fresh both by enqueue() (to decide whether to
+    skip queuing in the first place) and by _drain_once() (to decide
+    where each pending row actually posts). `cfg` and `channels` are
+    already-loaded load_discord_config()/load_discord_channels() dicts
+    for the CURRENT cycle -- this function makes no DB call of its own,
+    so a caller iterating many outbox rows in one drain cycle resolves
+    each row's kind from the same loaded snapshot rather than a fresh
+    query per row.
+
+    Tries _channel_kind_candidates(kind) in order, most specific first.
+    The FIRST candidate that has ANY row in `channels` wins outright --
+    resolution stops there, it never keeps searching for a "better"
+    match once it has found a configured one:
+
+    - enabled=0: explicit "do not announce this kind at all" -- returns
+      None. NOT a fallback to a less-specific candidate or to
+      discord_config's default; see discord_channel's own SCHEMA comment
+      for why silently falling back here would be exactly wrong (an
+      operator turning a kind off would see it keep posting to the main
+      channel).
+    - enabled=1 with a non-empty webhook_url: that row's own webhook.
+    - enabled=1 with a BLANK webhook_url (turned on before a URL was
+      ever pasted in): treated as not actually configured, so this
+      falls through to discord_config's own default -- same as no row
+      at all -- rather than trying to POST to an empty string.
+
+    Only when NONE of the candidates has any row at all does this fall
+    back to discord_config.webhook_url -- the original, single-channel
+    behavior every deployment already has, unchanged for every kind an
+    operator has never touched in the new channel table.
+    """
+    for candidate in _channel_kind_candidates(kind):
+        row = channels.get(candidate)
+        if row is None:
+            continue
+        if not row["enabled"]:
+            return None
+        if row["webhook_url"]:
+            return row["webhook_url"]
+        break
+    return cfg.get("webhook_url") or None
+
+
 def seed_discord_config_from_env(conn) -> None:
     """One-time bootstrap, called from app/db.py's init_db() on every
     startup: populates the discord_config singleton with exactly what
@@ -459,13 +565,18 @@ async def _post(url: str, payload: dict, *, http_client: httpx.AsyncClient | Non
             await client.aclose()
 
 
-def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> None:
+def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> bool:
     """Queue one announcement -- SYNC, and takes the CALLER's own
     connection, so it runs inside whatever transaction the caller is
     already holding (app/results.py's freeze_month(), inside the same
     WriteSession/BEGIN IMMEDIATE block that just wrote month_result/
     month_standing/month_award). Nothing here opens its own transaction
-    or connection.
+    or connection. Returns True when a new row was actually inserted,
+    False for every no-op case below (disabled, gated off, or a
+    duplicate (kind, key) the UNIQUE index silently dropped) -- used by
+    check_due_time_driven() below to know how many of a due-check's
+    candidate items actually turned into new rows, without a second
+    query.
 
     A no-op when announcements are disabled (announcements_enabled() is
     False against the freshly loaded discord_config) -- a fresh or
@@ -480,21 +591,36 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> None:
     still go out) while turning off the automatic end-of-month post on
     its own. No other kind is gated by it.
 
+    Also a no-op when discord_channel's per-kind routing
+    (resolve_discord_webhook(), against _channel_kind_candidates(kind))
+    resolves to None -- an operator explicitly switched this kind off.
+    This is an ENQUEUE-TIME check only, deciding whether to queue at
+    all; it never determines WHERE a queued row eventually posts -- that
+    is resolved again, fresh, by _drain_once() at POST time, precisely
+    so a channel move after a row is already queued still takes effect
+    (see _drain_once()'s own docstring for why the URL itself is never
+    stored on the outbox row).
+
     INSERT OR IGNORE on discord_outbox's UNIQUE(kind, key) index is the
     exactly-once guarantee: a duplicate (kind, key) -- the admin
     re-freeze route calling freeze_month() again for an already-frozen
-    month, most likely -- is silently dropped, never a second row and
+    month, most likely, or check_due_time_driven() attempting the same
+    period's item twice -- is silently dropped, never a second row and
     never a second post.
     """
     cfg = load_discord_config(conn)
     if not announcements_enabled(cfg):
-        return
+        return False
     if kind == "month_honors" and not cfg["announce_month_honors"]:
-        return
-    conn.execute(
+        return False
+    channels = load_discord_channels(conn)
+    if resolve_discord_webhook(cfg, channels, kind) is None:
+        return False
+    cur = conn.execute(
         "INSERT OR IGNORE INTO discord_outbox(kind, key, payload, created_at) VALUES (?, ?, ?, ?)",
         (kind, key, json.dumps(payload), now),
     )
+    return cur.rowcount == 1
 
 
 def _fmt_number(value) -> str:
@@ -909,11 +1035,28 @@ async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
     already failed discord_outbox_max_attempts times (a permanently
     broken webhook must eventually stop being retried). Both are plain
     WHERE clauses, not a Python-side filter, so a skipped row is never
-    even fetched. discord_config (enabled/webhook_url) is loaded once
-    per cycle here, not once per row -- an admin editing the config
+    even fetched. discord_config AND discord_channel are each loaded
+    ONCE per cycle here, not once per row -- an admin editing either
     mid-cycle takes effect on the NEXT cycle, the same granularity
     app/freqmapper_ingest.py's own poll loop already applies to its
-    config.
+    config -- and every row's own webhook is resolved
+    (resolve_discord_webhook()) against that one already-loaded snapshot
+    rather than a fresh discord_channel query per row.
+
+    THIS is the POST-TIME resolution the outbox's own design depends on:
+    a row never carries its own target URL, only `kind`, so a channel
+    move an operator makes after a row was already queued is picked up
+    the very next time this function runs, for every row still pending
+    -- never the channel that happened to be configured back when
+    enqueue() first wrote it.
+
+    A row whose kind currently resolves to None (an operator switched it
+    off via discord_channel since it was queued) is skipped exactly like
+    an aged-out or attempts-exhausted row -- left pending, attempts and
+    last_error untouched, not counted as a failure, because nothing was
+    actually attempted. It simply waits: if the kind is re-enabled later
+    it posts on the next cycle, and it still ages out via created_at like
+    any other pending row.
     """
     now = int(time.time())
     cutoff = now - settings.discord_outbox_max_age_hours * 3600
@@ -923,8 +1066,9 @@ async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
         cfg = load_discord_config(conn)
         if not announcements_enabled(cfg):
             return
+        channels = load_discord_channels(conn)
         rows = conn.execute(
-            "SELECT id, payload, attempts FROM discord_outbox "
+            "SELECT id, kind, payload, attempts FROM discord_outbox "
             " WHERE posted_at IS NULL AND created_at >= ? AND attempts < ? "
             " ORDER BY id",
             (cutoff, settings.discord_outbox_max_attempts),
@@ -933,6 +1077,11 @@ async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
         conn.close()
 
     for row in rows:
+        webhook_url = resolve_discord_webhook(cfg, channels, row["kind"])
+        if webhook_url is None:
+            # Explicitly switched off since this row was queued -- see
+            # this function's own docstring. Left pending, untouched.
+            continue
         try:
             payload = json.loads(row["payload"])
         except (TypeError, ValueError):
@@ -944,7 +1093,7 @@ async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
             await _mark_failed(row["id"], row["attempts"], "stored payload is not valid JSON")
             continue
         try:
-            await _post(cfg["webhook_url"], payload, http_client=http_client)
+            await _post(webhook_url, payload, http_client=http_client)
         except DiscordSendError as e:
             await _mark_failed(row["id"], row["attempts"], str(e))
             continue
@@ -977,6 +1126,153 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
         )
 
 
+
+# ---------------------------------------------------------------------
+# Time-driven announcements -- the "clock" for kinds with no triggering
+# event to enqueue() from.
+#
+# month_honors hangs off a real event: app/results.py's freeze_month()
+# calls enqueue() itself, inside its own write transaction, the moment a
+# month closes. Some future kinds -- a weekly recap, a per-net wrap-up
+# posted the day after a net -- have no such event; nothing else in this
+# app ever calls a function at "the day after Tuesday's net." This app
+# has NO scheduler by design and must not grow one (no cron, no APScheduler,
+# no extra background task per kind) -- so instead, the ALREADY-RUNNING
+# drain loop (run_forever(), polling every discord_outbox_poll_interval_
+# seconds, currently 30s) asks once per cycle, cheaply, "is anything
+# time-driven due right now," via TIME_DRIVEN_PROVIDERS and
+# check_due_time_driven() below, BEFORE that cycle's _drain_once() --
+# so anything enqueued here still gets posted in the very same cycle.
+#
+# TIME_DRIVEN_PROVIDERS: list[Callable[[], list[dict]]]
+#
+# Each entry is a PROVIDER FUNCTION -- not a static description of one
+# announcement -- called with no arguments, fresh, on every single
+# due-check, returning a list of ZERO OR MORE items due RIGHT NOW:
+#
+#   [{"kind": str, "key": str, "payload": dict}, ...]
+#
+# A provider decides for itself how many items that is. A fixed weekly
+# thing returns at most one item (usually zero: due only once a week).
+# THE REASON this is a list of PROVIDERS rather than a single static
+# registry entry: a provider can be NET-DERIVED, returning one item per
+# currently-due row of a table that itself changes over time -- see the
+# worked example below, which this module ships the MACHINERY for but
+# implements NO real provider for yet (that is a later task).
+#
+# "kind" is discord_outbox's routing key -- resolve_discord_webhook()
+# resolves it via _channel_kind_candidates() exactly like any other
+# announcement, so a colon-scoped kind (e.g. "net_wrapup:12") is routed
+# to a per-instance channel first, falling back to the generic prefix,
+# then to discord_config's own default, with zero special-casing here.
+# "key" is discord_outbox's DEDUPE key: passed straight to enqueue(),
+# relying ENTIRELY on discord_outbox's existing UNIQUE(kind, key) index
+# for "once per period." There is deliberately NO separate "last run"
+# timestamp or table anywhere in this feature -- that would be a SECOND
+# source of truth for the exact same fact discord_outbox already answers
+# durably (a row for this (kind, key) exists, or it does not), and the
+# two could drift out of step with each other. A provider proves an item
+# is due by computing that period's own key; check_due_time_driven()
+# below proves "not already sent" for free, via enqueue()'s own INSERT OR
+# IGNORE, every single time it is called -- calling it twice inside the
+# same period is always exactly as safe as calling it once.
+#
+# THE WORKED EXAMPLE this shape exists for (NOT implemented in this
+# task -- ship no real provider, no real kind): a per-net "wrap-up"
+# announcement, one per checkin_net row (app/db.py: id, label, protocol,
+# weekday, start_hour, end_hour, timezone, enabled -- this deployment
+# currently has four ENABLED rows, spanning America/Boise and
+# America/Los_Angeles across three different weekdays). Matt's own
+# words on why this can't be a fixed entry: "there WILL be more
+# communities this should not be hardcoded but adapted and computed
+# directly from the net schedules." So a net-wrapup provider would, on
+# every call:
+#
+#   1. SELECT the ENABLED rows of checkin_net -- nothing about their
+#      count, weekdays, labels, or timezones is ever written into code;
+#      a net added through the admin UI starts getting wrap-ups on its
+#      own very next due net with NO code change and NO redeploy, and a
+#      disabled/deleted net simply stops appearing in this SELECT and so
+#      never produces one again.
+#   2. for EACH row, decide "is it due" and compute the local calendar
+#      date the wrap-up covers using THAT ROW'S OWN `weekday` and
+#      `timezone` (zoneinfo.ZoneInfo(row["timezone"]), the same
+#      per-entry-timezone pattern app/results.py's own _tz() already
+#      establishes for month arithmetic) -- NEVER one single app-wide
+#      clock, because two nets can be due on different calendar days,
+#      in different zones, at the same instant.
+#   3. for each due net, yield one item shaped like:
+#        kind = f"net_wrapup:{net['id']}"     -- per-net ROUTING, falls
+#                                                 back to the generic
+#                                                 "net_wrapup" channel
+#        key  = f"{net['id']}:{local_date}"   -- per-net, per-date
+#                                                 DEDUPE, so the SAME
+#                                                 net's SAME date is
+#                                                 never announced twice
+#
+# CHEAPNESS: this whole check runs every discord_outbox_poll_interval_
+# seconds (30s by default) FOREVER, for the life of the process -- every
+# provider in this list must stay cheap. checkin_net has a handful of
+# rows (four, today) and reading all of it every cycle is fine -- even
+# many more communities is still a tiny table -- but this is NOT a
+# license for a provider to run anything heavier: a provider must NEVER
+# query a large/growing table (mc_tile, mc_tile_capture_log,
+# player_ingest_stat, ...) directly from here. A provider that needs a
+# heavier computation to decide "am I due" must precompute or cache that
+# decision elsewhere and read only the cheap, already-decided state in
+# this function.
+#
+# Ship EMPTY: this task adds the mechanism only, no real entries.
+TIME_DRIVEN_PROVIDERS: list = []
+
+
+def check_due_time_driven(conn, now: int) -> int:
+    """Call every provider in TIME_DRIVEN_PROVIDERS once, and enqueue()
+    whatever items each one says is due right now. Returns how many
+    items actually turned into NEW outbox rows (enqueue()'s own bool
+    return, summed) -- 0 for an empty registry, and 0 again for a second
+    call inside the same period once every item's (kind, key) is already
+    in discord_outbox, since dueness here is decided ENTIRELY by that
+    table's own UNIQUE(kind, key) index (via enqueue()'s INSERT OR
+    IGNORE) -- see TIME_DRIVEN_PROVIDERS's own docstring for why there is
+    no separate "last run" column to get out of sync with it. This makes
+    calling this function twice in the same period always exactly as
+    safe as calling it once, by construction, not by a check written
+    here.
+
+    SYNC, and takes the CALLER's own connection -- same shape as
+    enqueue() itself, since this is nothing but a loop that calls it.
+    Never raises: a single misbehaving provider is logged and skipped,
+    never allowed to stop a later provider in the same list, or a later
+    call to this function on the next cycle.
+    """
+    inserted = 0
+    for provider in TIME_DRIVEN_PROVIDERS:
+        try:
+            items = provider()
+        except Exception:
+            log.exception("discord: time-driven provider failed, skipping it this cycle")
+            continue
+        for item in items:
+            if enqueue(conn, kind=item["kind"], key=item["key"], payload=item["payload"], now=now):
+                inserted += 1
+    return inserted
+
+
+async def _check_due_time_driven_once() -> None:
+    """WriteSession wrapper around check_due_time_driven() for
+    run_forever()'s own use. Unlike _drain_once() (which reads and posts
+    outside the write lock because posting is a slow network call), a
+    due-check is pure DB work end to end -- the cheap reads
+    TIME_DRIVEN_PROVIDERS's own docstring requires, plus a handful of
+    enqueue()'s INSERT OR IGNOREs -- so holding the write lock for the
+    whole check is fine and simpler than juggling two connections.
+    """
+    now = int(time.time())
+    async with WriteSession() as conn:
+        check_due_time_driven(conn, now)
+
+
 async def run_forever() -> None:
     """Background poll loop over discord_outbox -- started
     UNCONDITIONALLY by app/main.py's lifespan, the same "the loop must
@@ -987,14 +1283,29 @@ async def run_forever() -> None:
     so a fresh install with no webhook configured yet still starts this
     task, but it simply does nothing each cycle until one is set.
 
+    Runs the time-driven due-check (_check_due_time_driven_once())
+    BEFORE each cycle's _drain_once() -- see TIME_DRIVEN_PROVIDERS's own
+    docstring for why this loop, rather than a second scheduler, is what
+    this app uses for a kind with no triggering event -- so anything a
+    provider enqueues this cycle is picked up by the SAME cycle's drain
+    pass rather than waiting a full poll interval.
+
     Never raises out of the loop -- same fire-and-forget contract
     app/account_api.py's _notify_security() applies to a single mail
     send, extended here to a whole poll cycle: a bug handling one
-    cycle's rows must never crash the process or stop later cycles
-    (and later months' announcements) from ever running again.
+    cycle's rows (or one cycle's due-check) must never crash the process
+    or stop later cycles (and later months' announcements) from ever
+    running again. The two halves are wrapped separately so a due-check
+    failure never skips that same cycle's drain pass, or vice versa.
     """
     log.info("discord outbox loop starting (announcements gated by discord_config)")
     while True:
+        try:
+            await _check_due_time_driven_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("discord: time-driven due-check cycle failed")
         try:
             await _drain_once()
         except asyncio.CancelledError:

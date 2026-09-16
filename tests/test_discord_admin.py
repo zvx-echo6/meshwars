@@ -341,6 +341,144 @@ def test_seed_discord_config_from_env_never_reseeds_after_an_edit(monkeypatch):
     assert row["updated_at"] == 12345
 
 
+# ---- discord_channel routing table (Piece 1 admin surface) --------------
+
+
+def _channel_row(db_path, kind: str) -> sqlite3.Row:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM discord_channel WHERE kind = ?", (kind,)).fetchone()
+    conn.close()
+    return row
+
+
+def test_get_discord_never_returns_full_channel_webhook_url(db_path):
+    """A per-kind route's webhook is exactly as much a secret as the
+    default one -- GET /api/admin/discord must never leak the real URL
+    for ANY row in `channels`, only webhook_set/webhook_hint."""
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO discord_channel(kind, webhook_url, enabled, updated_at) "
+        "VALUES ('month_honors', 'https://discord.test/api/webhooks/1/reallysecrettoken', 1, ?)",
+        (NOW,),
+    )
+    conn.execute(
+        "INSERT INTO discord_channel(kind, webhook_url, enabled, updated_at) "
+        "VALUES ('test', 'https://discord.test/api/webhooks/2/anothersecret', 0, ?)",
+        (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200, resp.text
+    assert "reallysecrettoken" not in resp.text
+    assert "anothersecret" not in resp.text
+    channels = {c["kind"]: c for c in resp.json()["channels"]}
+    assert set(channels) == {"month_honors", "test"}
+    assert "webhook_url" not in channels["month_honors"]
+    assert "webhook_url" not in channels["test"]
+    assert channels["month_honors"]["webhook_set"] is True
+    assert channels["month_honors"]["webhook_hint"] == "oken"
+    assert channels["test"]["enabled"] is False
+
+
+def test_post_discord_channel_creates_new_route(db_path):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord/channel", json={
+        "kind": "month_honors",
+        "webhook_url": "https://discord.test/api/webhooks/3/brandnew",
+        "enabled": True,
+    })
+    assert resp.status_code == 200, resp.text
+    assert "brandnew" not in resp.text
+    assert resp.json()["channel"]["webhook_set"] is True
+    row = _channel_row(db_path, "month_honors")
+    assert row["webhook_url"] == "https://discord.test/api/webhooks/3/brandnew"
+    assert row["enabled"] == 1
+
+
+def test_post_discord_channel_without_webhook_url_leaves_stored_value_unchanged(db_path):
+    account_id = _make_account(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO discord_channel(kind, webhook_url, enabled, updated_at) "
+        "VALUES ('month_honors', 'https://discord.test/api/webhooks/1/original', 1, ?)",
+        (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    # Only toggling `enabled` -- no webhook_url in the body at all.
+    resp = client.post("/api/admin/discord/channel", json={"kind": "month_honors", "enabled": False})
+    assert resp.status_code == 200, resp.text
+    row = _channel_row(db_path, "month_honors")
+    assert row["webhook_url"] == "https://discord.test/api/webhooks/1/original"
+    assert row["enabled"] == 0
+
+
+def test_post_discord_channel_empty_string_webhook_url_leaves_stored_value_unchanged(db_path):
+    account_id = _make_account(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO discord_channel(kind, webhook_url, enabled, updated_at) "
+        "VALUES ('month_honors', 'https://discord.test/api/webhooks/1/original', 1, ?)",
+        (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord/channel", json={
+        "kind": "month_honors", "webhook_url": "", "enabled": True,
+    })
+    assert resp.status_code == 200, resp.text
+    row = _channel_row(db_path, "month_honors")
+    assert row["webhook_url"] == "https://discord.test/api/webhooks/1/original"
+
+
+def test_post_discord_channel_clear_webhook_true_clears_it(db_path):
+    account_id = _make_account(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO discord_channel(kind, webhook_url, enabled, updated_at) "
+        "VALUES ('month_honors', 'https://discord.test/api/webhooks/1/original', 1, ?)",
+        (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord/channel", json={
+        "kind": "month_honors", "clear_webhook": True,
+    })
+    assert resp.status_code == 200, resp.text
+    row = _channel_row(db_path, "month_honors")
+    assert row["webhook_url"] == ""
+
+
+def test_post_discord_channel_requires_kind(db_path):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/channel", json={"webhook_url": "https://x"})
+    assert resp.status_code == 400
+
+
+def test_post_discord_channel_requires_role_signed_in_but_no_role(db_path):
+    _make_account(db_path, role="admin")
+    account_id = _make_account(db_path, role=None, with_totp=False)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/channel", json={"kind": "month_honors"})
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized"}
+
+
 # ---- POST /api/admin/discord/test ----------------------------------------
 
 

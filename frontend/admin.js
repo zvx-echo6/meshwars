@@ -2106,10 +2106,94 @@ function renderDiscordOutbox(outbox) {
   });
 }
 
+// Per-kind channel routing (app/db.py's discord_channel,
+// app/admin_ops.py's POST /api/admin/discord/channel) -- same
+// never-show-the-real-webhook rule as the default webhook field above:
+// GET /api/admin/discord's `channels` never carries a real URL, only
+// webhook_set/webhook_hint, so each row's webhook input always renders
+// blank and a blank Save leaves that row's stored value alone (its own
+// "Clear" checkbox is the explicit way to blank it).
+function renderDiscordChannels(channels) {
+  const host = document.getElementById('dc-channels');
+  host.replaceChildren();
+  if (!channels.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No per-kind routes configured -- every kind uses the default webhook above.' }));
+    return;
+  }
+  channels.forEach((c) => {
+    const row = el('div', { className: 'adm-row' });
+
+    const info = el('div', { className: 'adm-row-info' });
+    info.appendChild(el('strong', { className: 'adm-mono', text: c.kind }));
+    info.appendChild(el('span', {
+      text: c.webhook_set ? ('webhook set, ending in ' + c.webhook_hint) : 'webhook not set',
+    }));
+    row.appendChild(info);
+
+    const form = el('div', { className: 'adm-row-actions' });
+    const enabledLabel = el('label', { className: 'adm-check-label' });
+    const enabledBox = el('input', { type: 'checkbox' });
+    enabledBox.className = 'adm-check';
+    enabledBox.checked = !!c.enabled;
+    enabledLabel.appendChild(enabledBox);
+    enabledLabel.appendChild(document.createTextNode(' On'));
+    form.appendChild(enabledLabel);
+
+    const webhookInput = el('input', { type: 'password', placeholder: 'leave blank to keep current' });
+    webhookInput.autocomplete = 'off';
+    form.appendChild(webhookInput);
+
+    const clearLabel = el('label', { className: 'adm-check-label' });
+    const clearBox = el('input', { type: 'checkbox' });
+    clearBox.className = 'adm-check';
+    clearLabel.appendChild(clearBox);
+    clearLabel.appendChild(document.createTextNode(' Clear'));
+    form.appendChild(clearLabel);
+
+    form.appendChild(btn('Save', 'adm-btn-quiet', async (b) => {
+      b.disabled = true;
+      try {
+        const payload = { kind: c.kind, enabled: enabledBox.checked };
+        if (clearBox.checked) {
+          payload.clear_webhook = true;
+        } else if (webhookInput.value) {
+          payload.webhook_url = webhookInput.value;
+        }
+        await post('/api/admin/discord/channel', payload);
+        await loadDiscord();
+      } catch (e) {
+        setStatus('Channel route save failed: ' + e.message, true);
+      }
+      b.disabled = false;
+    }));
+    row.appendChild(form);
+
+    host.appendChild(row);
+  });
+}
+
+async function addDiscordChannel(b) {
+  const input = document.getElementById('dc-channel-new-kind');
+  const out = document.getElementById('dc-channel-result');
+  out.replaceChildren();
+  const kind = input.value.trim();
+  if (!kind) { out.textContent = 'Give it a kind first.'; return; }
+  b.disabled = true;
+  try {
+    await post('/api/admin/discord/channel', { kind: kind, enabled: true });
+    input.value = '';
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 async function loadDiscord() {
   try {
     const d = await api('/api/admin/discord');
     renderDiscordForm(d.config);
+    renderDiscordChannels(d.channels || []);
     renderDiscordOutbox(d.outbox);
   } catch (e) {
     setStatus('Discord config load failed: ' + e.message, true);
@@ -2392,5 +2476,6 @@ document.getElementById('nt-save').addEventListener('click', function () { saveN
 document.getElementById('nt-clear').addEventListener('click', function () { saveNotice(this, false); });
 document.getElementById('dc-save').addEventListener('click', function () { saveDiscord(this); });
 document.getElementById('dc-test').addEventListener('click', function () { sendDiscordTest(this); });
+document.getElementById('dc-channel-add').addEventListener('click', function () { addDiscordChannel(this); });
 
 checkAccess();

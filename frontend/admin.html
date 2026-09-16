@@ -469,6 +469,15 @@
           </div>
           <div id="dc-result" class="adm-result"></div>
 
+          <h3 class="adm-h3">Channel routing</h3>
+          <p class="adm-hint">Send a specific announcement kind to its own Discord channel instead of the default one above. A kind with no route here uses the default webhook; a route left "Off" is never announced at all -- it does NOT fall back to the default.</p>
+          <div id="dc-channels"></div>
+          <div class="adm-form">
+            <input type="text" id="dc-channel-new-kind" autocomplete="off" placeholder="kind, e.g. month_honors" />
+            <button type="button" id="dc-channel-add" class="adm-btn adm-btn-quiet">Add route</button>
+          </div>
+          <div id="dc-channel-result" class="adm-result"></div>
+
           <h3 class="adm-h3">Outbox health</h3>
           <div id="dc-outbox-summary"></div>
           <div id="dc-outbox"></div>
@@ -493,7 +502,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260916-1"></script>
+  <script src="/static/admin.js?v=20260916-2"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

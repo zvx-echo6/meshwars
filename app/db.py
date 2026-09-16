@@ -2253,6 +2253,45 @@ CREATE TABLE IF NOT EXISTS discord_config (
     announce_month_honors INTEGER NOT NULL DEFAULT 1,
     updated_at            INTEGER NOT NULL DEFAULT 0
 );
+
+-- Per-kind Discord channel routing, on top of discord_config's own
+-- single default webhook above. `kind` matches discord_outbox.kind (a
+-- plain announcement kind like "month_honors", or a colon-scoped one
+-- like a future "net_wrapup:12" -- see app/discord_notify.py's
+-- _channel_kind_candidates() for how a scoped kind resolves against
+-- both a per-instance row and the generic one before falling back
+-- here). No row for a kind at all is the common case and means "use
+-- discord_config.webhook_url", exactly the one-channel behavior every
+-- deployment already has -- this table only needs a row once an
+-- operator actually wants a kind to go somewhere else.
+--
+-- `enabled` is NOT "fall back to the default when off". It means "do
+-- not announce this kind at all" -- a deliberate, explicit distinction
+-- from a MISSING row (which does fall back): an operator flipping a
+-- kind off is choosing silence for that kind, and silently posting it
+-- to the main channel anyway would be exactly the wrong behavior at
+-- exactly the moment they asked for the opposite. See
+-- app/discord_notify.py's resolve_discord_webhook() for the one place
+-- that implements this rule.
+--
+-- webhook_url is a SECRET, same treatment as discord_config.webhook_url
+-- above (never returned by any route, only a webhook_set boolean plus a
+-- last-4 hint -- app/admin_ops.py's _scrub_discord_secrets). An ABSENT
+-- or blank webhook_url in a POST /api/admin/discord/channel body leaves
+-- a row's stored value UNCHANGED, same clear_webhook-to-actually-blank-it
+-- contract discord_config's own POST route already uses.
+--
+-- Resolved FRESH at POST time, in the drain loop, never at enqueue
+-- time, and NEVER stored on the discord_outbox row itself -- see
+-- app/discord_notify.py's _drain_once() for the reasoning: a pending
+-- row must follow an operator's later channel move, not the channel
+-- that happened to be configured the moment it was queued.
+CREATE TABLE IF NOT EXISTS discord_channel (
+    kind        TEXT PRIMARY KEY,
+    webhook_url TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  INTEGER NOT NULL DEFAULT 0
+);
 """
 
 

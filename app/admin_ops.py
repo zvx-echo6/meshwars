@@ -1673,6 +1673,26 @@ def _scrub_discord_secrets(cfg: dict) -> dict:
     return out
 
 
+def _scrub_discord_channel(row: dict) -> dict:
+    """Same never-return-the-real-URL rule as _scrub_discord_secrets()
+    above, applied to one discord_channel row: kind, enabled,
+    webhook_set, webhook_hint (last 4 characters), updated_at. Used by
+    GET /api/admin/discord for every row in the routing table -- a
+    per-kind webhook is exactly as much a bearer credential as
+    discord_config's own default one (see app/discord_notify.py's module
+    docstring), so it gets the identical treatment, never the real
+    value, no matter which table it lives in.
+    """
+    url = row.get("webhook_url") or ""
+    return {
+        "kind": row["kind"],
+        "enabled": bool(row["enabled"]),
+        "webhook_set": bool(url),
+        "webhook_hint": url[-4:] if url else "",
+        "updated_at": row.get("updated_at", 0),
+    }
+
+
 @router.get("/api/admin/discord")
 async def admin_discord(request: Request):
     """Current Discord announcement config (secret scrubbed) plus
@@ -1690,6 +1710,13 @@ async def admin_discord(request: Request):
     last_error is safe to show here, it is Discord's own response text
     describing what was wrong with the payload this app sent, never a
     credential (see app/discord_notify.py's module docstring).
+
+    `channels` is every discord_channel row (app/discord_notify.py's
+    load_discord_channels()), each scrubbed by _scrub_discord_channel()
+    above -- same never-return-the-real-webhook rule as `config` itself,
+    sorted by kind so the admin table renders in a stable order across
+    reloads rather than shuffling with SQLite's own unspecified row
+    order.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -1698,6 +1725,7 @@ async def admin_discord(request: Request):
     conn = connect()
     try:
         cfg = discord_notify.load_discord_config(conn)
+        channels = discord_notify.load_discord_channels(conn)
         pending = conn.execute(
             "SELECT count(*) FROM discord_outbox WHERE posted_at IS NULL"
         ).fetchone()[0]
@@ -1715,6 +1743,7 @@ async def admin_discord(request: Request):
         conn.close()
     return JSONResponse({
         "config": _scrub_discord_secrets(cfg),
+        "channels": [_scrub_discord_channel(c) for _, c in sorted(channels.items())],
         "outbox": {
             "pending": pending,
             "posted": posted,
@@ -1792,6 +1821,89 @@ async def admin_discord_update(request: Request):
         conn.close()
     log.info("admin: discord config updated (enabled=%s)", enabled)
     return JSONResponse({"config": _scrub_discord_secrets(cfg)})
+
+
+@router.post("/api/admin/discord/channel")
+async def admin_discord_channel_upsert(request: Request):
+    """Upsert one discord_channel routing row: kind, webhook_url,
+    enabled. `kind` names a discord_outbox kind (or a generic prefix of
+    a colon-scoped one -- see app/discord_notify.py's
+    _channel_kind_candidates()) and must be a non-empty string; there is
+    no fixed list of legal kinds here, since a kind can be a future
+    per-instance one this route has no way to enumerate in advance.
+
+    webhook_url follows the EXACT same secret contract as POST
+    /api/admin/discord's own webhook_url field (see that route's own
+    docstring): an ABSENT or empty-string webhook_url in the body leaves
+    a row's already-stored value UNCHANGED rather than wiping it -- GET
+    /api/admin/discord never returns a real per-kind webhook either, so
+    a form re-submitting a blank field on every unrelated edit (e.g.
+    toggling `enabled` alone) must never silently clear it.
+    clear_webhook is the explicit way to actually blank a row's webhook.
+    A brand-new row (no prior stored value) with no webhook_url given
+    and no clear_webhook is created with an empty webhook_url -- nothing
+    to "keep" yet, so this is the only case where the result reads as
+    "on with a blank webhook", which resolve_discord_webhook() already
+    treats as not actually configured and falls back to the default
+    (see that function's own docstring).
+
+    enabled defaults to True for a brand-new row (an operator adding a
+    route is choosing to route it, not to silence the kind -- silencing
+    is exactly what setting enabled=False is for, spelled out
+    explicitly) and otherwise takes the body's own value.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    kind = (body.get("kind") or "").strip()
+    if not kind:
+        return JSONResponse({"error": "kind is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        current = conn.execute(
+            "SELECT webhook_url, enabled FROM discord_channel WHERE kind = ?", (kind,)
+        ).fetchone()
+        current_webhook = current["webhook_url"] if current else ""
+        if body.get("clear_webhook") is True:
+            webhook_url = ""
+        else:
+            submitted = body.get("webhook_url")
+            webhook_url = submitted if isinstance(submitted, str) and submitted else current_webhook
+
+        if "enabled" in body:
+            enabled = bool(body.get("enabled"))
+        else:
+            enabled = bool(current["enabled"]) if current else True
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO discord_channel(kind, webhook_url, enabled, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(kind) DO UPDATE SET "
+            "  webhook_url = excluded.webhook_url, enabled = excluded.enabled, "
+            "  updated_at = excluded.updated_at",
+            (kind, webhook_url, int(enabled), now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_channel_save",
+            detail=f"kind={kind} enabled={enabled}", now=now,
+        )
+        conn.execute("COMMIT")
+        channels = discord_notify.load_discord_channels(conn)
+    finally:
+        conn.close()
+    log.info("admin: discord channel route saved (kind=%s enabled=%s)", kind, enabled)
+    return JSONResponse({"channel": _scrub_discord_channel(channels[kind])})
 
 
 @router.post("/api/admin/discord/test")

@@ -987,6 +987,316 @@ def test_drain_loop_never_posts_a_row_past_max_age(db_path, monkeypatch):
     assert attempts == 0
 
 
+def _set_channel(path_or_conn, kind: str, *, webhook_url: str = "", enabled: int = 1) -> None:
+    """Write one discord_channel row directly, on either a file path
+    (drain-loop tests, which need their own short-lived connection like
+    _enable_discord()'s file-backed cousins below) or an already-open
+    connection (enqueue()-level tests using the in-memory `conn`
+    fixture)."""
+    owns_conn = isinstance(path_or_conn, str)
+    conn = sqlite3.connect(path_or_conn, isolation_level=None) if owns_conn else path_or_conn
+    conn.execute(
+        "INSERT INTO discord_channel(kind, webhook_url, enabled, updated_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(kind) DO UPDATE SET webhook_url = excluded.webhook_url, "
+        " enabled = excluded.enabled, updated_at = excluded.updated_at",
+        (kind, webhook_url, enabled, int(time.time())),
+    )
+    if owns_conn:
+        conn.close()
+
+
+# ---- per-kind channel routing (Piece 1) -----------------------------------
+
+
+def test_resolve_discord_webhook_no_row_falls_back_to_default():
+    cfg = {"webhook_url": _TEST_WEBHOOK}
+    assert discord_notify.resolve_discord_webhook(cfg, {}, "month_honors") == _TEST_WEBHOOK
+
+
+def test_resolve_discord_webhook_own_route_wins_over_default():
+    cfg = {"webhook_url": _TEST_WEBHOOK}
+    channels = {"month_honors": {"webhook_url": "https://discord.test/own", "enabled": 1}}
+    assert discord_notify.resolve_discord_webhook(cfg, channels, "month_honors") == "https://discord.test/own"
+
+
+def test_resolve_discord_webhook_disabled_route_returns_none_not_default():
+    """enabled=0 means 'do not announce' -- NOT a fallback to the
+    default webhook. Silently falling back here would post to the main
+    channel exactly when an operator tried to switch a kind off."""
+    cfg = {"webhook_url": _TEST_WEBHOOK}
+    channels = {"month_honors": {"webhook_url": "https://discord.test/own", "enabled": 0}}
+    assert discord_notify.resolve_discord_webhook(cfg, channels, "month_honors") is None
+
+
+def test_resolve_discord_webhook_enabled_but_blank_url_falls_back_to_default():
+    cfg = {"webhook_url": _TEST_WEBHOOK}
+    channels = {"month_honors": {"webhook_url": "", "enabled": 1}}
+    assert discord_notify.resolve_discord_webhook(cfg, channels, "month_honors") == _TEST_WEBHOOK
+
+
+def test_resolve_discord_webhook_most_specific_first_prefers_instance_kind():
+    """A colon-scoped kind ('net_wrapup:12') resolves against its OWN
+    per-instance row first, before ever falling back to the generic
+    'net_wrapup' prefix -- so an operator CAN split one instance onto
+    its own channel without that being required for every instance."""
+    cfg = {"webhook_url": _TEST_WEBHOOK}
+    channels = {
+        "net_wrapup": {"webhook_url": "https://discord.test/generic", "enabled": 1},
+        "net_wrapup:12": {"webhook_url": "https://discord.test/net12", "enabled": 1},
+    }
+    assert discord_notify.resolve_discord_webhook(cfg, channels, "net_wrapup:12") == "https://discord.test/net12"
+
+
+def test_resolve_discord_webhook_falls_back_to_generic_kind_when_instance_absent():
+    """No per-instance override for THIS instance -- falls back to the
+    generic prefix shared by every instance with no override of its
+    own, before ever reaching the app-wide default."""
+    cfg = {"webhook_url": _TEST_WEBHOOK}
+    channels = {"net_wrapup": {"webhook_url": "https://discord.test/generic", "enabled": 1}}
+    assert discord_notify.resolve_discord_webhook(cfg, channels, "net_wrapup:99") == "https://discord.test/generic"
+
+
+def test_resolve_discord_webhook_no_route_at_all_falls_back_to_default_for_scoped_kind():
+    cfg = {"webhook_url": _TEST_WEBHOOK}
+    assert discord_notify.resolve_discord_webhook(cfg, {}, "net_wrapup:99") == _TEST_WEBHOOK
+
+
+def test_channel_kind_candidates_unscoped_kind_is_single_element():
+    assert discord_notify._channel_kind_candidates("month_honors") == ["month_honors"]
+
+
+def test_channel_kind_candidates_scoped_kind_tries_specific_then_generic():
+    assert discord_notify._channel_kind_candidates("net_wrapup:12") == ["net_wrapup:12", "net_wrapup"]
+
+
+def test_enqueue_skips_kind_with_disabled_route(conn):
+    """A kind whose discord_channel row is explicitly enabled=0 is not
+    queued at all -- distinct from `enabled` on discord_config itself,
+    which is left on here."""
+    _enable_discord(conn)
+    _set_channel(conn, "month_honors", webhook_url="https://discord.test/own", enabled=0)
+    result = discord_notify.enqueue(
+        conn, kind="month_honors", key="2026-08:mc", payload={"embeds": []}, now=int(time.time()),
+    )
+    assert result is False
+    rows = conn.execute("SELECT * FROM discord_outbox").fetchall()
+    assert rows == []
+
+
+def test_enqueue_uses_own_route_but_still_queues_when_enabled(conn):
+    _enable_discord(conn)
+    _set_channel(conn, "month_honors", webhook_url="https://discord.test/own", enabled=1)
+    result = discord_notify.enqueue(
+        conn, kind="month_honors", key="2026-08:mc", payload={"embeds": []}, now=int(time.time()),
+    )
+    assert result is True
+    rows = conn.execute("SELECT * FROM discord_outbox").fetchall()
+    assert len(rows) == 1
+
+
+def test_drain_loop_posts_to_own_route_not_default(db_path):
+    """A kind with its own enabled route posts to THAT route's webhook,
+    never the default configured on discord_config."""
+    _set_channel(db_path, "month_honors", webhook_url="https://discord.test/own-channel", enabled=1)
+    row_id = _insert_row(db_path)
+
+    posted_to = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted_to.append(str(request.url))
+        return httpx.Response(204)
+
+    async def go():
+        async with _mock_client(handler) as client:
+            await discord_notify._drain_once(http_client=client)
+
+    _run(go())
+
+    assert posted_to == ["https://discord.test/own-channel"]
+    posted_at, attempts, last_error = _read_row(db_path, row_id)
+    assert posted_at is not None
+
+
+def test_drain_loop_falls_back_to_default_when_no_route(db_path):
+    """A kind with no discord_channel row at all falls back to the
+    default webhook -- db_path's own fixture already configures that
+    default (_TEST_WEBHOOK)."""
+    row_id = _insert_row(db_path)
+
+    posted_to = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted_to.append(str(request.url))
+        return httpx.Response(204)
+
+    async def go():
+        async with _mock_client(handler) as client:
+            await discord_notify._drain_once(http_client=client)
+
+    _run(go())
+
+    assert posted_to == [_TEST_WEBHOOK]
+    posted_at, attempts, last_error = _read_row(db_path, row_id)
+    assert posted_at is not None
+
+
+def test_drain_loop_disabled_route_leaves_row_pending_no_fallback(db_path):
+    """A row queued for a kind that is now enabled=0 must not post at
+    all -- not to its own (disabled) route, and not to the default --
+    and must be left pending, untouched, rather than marked failed."""
+    _set_channel(db_path, "month_honors", webhook_url="https://discord.test/own-channel", enabled=0)
+    row_id = _insert_row(db_path)
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(204)
+
+    async def go():
+        async with _mock_client(handler) as client:
+            await discord_notify._drain_once(http_client=client)
+
+    _run(go())
+
+    assert calls == []
+    posted_at, attempts, last_error = _read_row(db_path, row_id)
+    assert posted_at is None
+    assert attempts == 0
+    assert last_error is None
+
+
+def test_drain_loop_resolves_channel_at_post_time_not_enqueue_time(db_path):
+    """Changing a route's webhook AFTER a row is already queued must
+    send the PENDING row to the NEW url -- proves the drain loop
+    resolves the channel fresh at post time, never storing a target on
+    the outbox row itself."""
+    _set_channel(db_path, "month_honors", webhook_url="https://discord.test/old-channel", enabled=1)
+    row_id = _insert_row(db_path)
+
+    # Operator moves the channel AFTER the row was already queued.
+    _set_channel(db_path, "month_honors", webhook_url="https://discord.test/new-channel", enabled=1)
+
+    posted_to = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted_to.append(str(request.url))
+        return httpx.Response(204)
+
+    async def go():
+        async with _mock_client(handler) as client:
+            await discord_notify._drain_once(http_client=client)
+
+    _run(go())
+
+    assert posted_to == ["https://discord.test/new-channel"]
+    posted_at, attempts, last_error = _read_row(db_path, row_id)
+    assert posted_at is not None
+
+
+# ---- time-driven announcements (Piece 2) ----------------------------------
+
+
+def test_check_due_time_driven_empty_registry_enqueues_nothing(conn):
+    _enable_discord(conn)
+    inserted = discord_notify.check_due_time_driven(conn, int(time.time()))
+    assert inserted == 0
+    rows = conn.execute("SELECT * FROM discord_outbox").fetchall()
+    assert rows == []
+
+
+def test_check_due_time_driven_empty_registry_safe_to_call_repeatedly(conn):
+    _enable_discord(conn)
+    now = int(time.time())
+    discord_notify.check_due_time_driven(conn, now)
+    discord_notify.check_due_time_driven(conn, now)
+    rows = conn.execute("SELECT * FROM discord_outbox").fetchall()
+    assert rows == []
+
+
+def test_check_due_time_driven_called_twice_same_period_enqueues_once(conn, monkeypatch):
+    """A fake registry entry standing in for a real time-driven kind
+    (none shipped in this task) -- the SAME period key on a second call
+    must be a no-op, proving discord_outbox's own UNIQUE(kind, key) is
+    the entire once-per-period guard, with no separate 'last run' state
+    anywhere in this module."""
+    _enable_discord(conn)
+
+    def fake_provider():
+        return [{"kind": "fake_weekly", "key": "2026-W37", "payload": {"embeds": []}}]
+
+    monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [fake_provider])
+
+    now = int(time.time())
+    first = discord_notify.check_due_time_driven(conn, now)
+    second = discord_notify.check_due_time_driven(conn, now)
+
+    assert first == 1
+    assert second == 0
+    rows = conn.execute("SELECT * FROM discord_outbox WHERE kind = 'fake_weekly'").fetchall()
+    assert len(rows) == 1
+
+
+def test_check_due_time_driven_provider_returning_multiple_items_enqueues_all(conn, monkeypatch):
+    """A net-derived-shaped provider can return more than one due item
+    in a single check (one per currently-due instance) -- every one of
+    them must be enqueued, not just the first."""
+    _enable_discord(conn)
+
+    def fake_net_provider():
+        return [
+            {"kind": "fake_net_wrapup:1", "key": "1:2026-09-14", "payload": {"embeds": []}},
+            {"kind": "fake_net_wrapup:2", "key": "2:2026-09-15", "payload": {"embeds": []}},
+        ]
+
+    monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [fake_net_provider])
+
+    inserted = discord_notify.check_due_time_driven(conn, int(time.time()))
+
+    assert inserted == 2
+    rows = conn.execute(
+        "SELECT kind, key FROM discord_outbox WHERE kind LIKE 'fake_net_wrapup:%' ORDER BY kind"
+    ).fetchall()
+    assert [(r["kind"], r["key"]) for r in rows] == [
+        ("fake_net_wrapup:1", "1:2026-09-14"),
+        ("fake_net_wrapup:2", "2:2026-09-15"),
+    ]
+
+
+def test_check_due_time_driven_provider_returning_empty_list_is_noop(conn, monkeypatch):
+    _enable_discord(conn)
+
+    def fake_provider_nothing_due():
+        return []
+
+    monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [fake_provider_nothing_due])
+
+    inserted = discord_notify.check_due_time_driven(conn, int(time.time()))
+
+    assert inserted == 0
+    rows = conn.execute("SELECT * FROM discord_outbox").fetchall()
+    assert rows == []
+
+
+def test_check_due_time_driven_one_provider_failing_does_not_stop_another(conn, monkeypatch, caplog):
+    _enable_discord(conn)
+
+    def broken_provider():
+        raise RuntimeError("boom")
+
+    def working_provider():
+        return [{"kind": "fake_weekly", "key": "2026-W37", "payload": {"embeds": []}}]
+
+    monkeypatch.setattr(discord_notify, "TIME_DRIVEN_PROVIDERS", [broken_provider, working_provider])
+
+    with caplog.at_level("ERROR"):
+        inserted = discord_notify.check_due_time_driven(conn, int(time.time()))
+
+    assert inserted == 1
+    rows = conn.execute("SELECT * FROM discord_outbox WHERE kind = 'fake_weekly'").fetchall()
+    assert len(rows) == 1
+
+
 def test_drain_loop_gives_up_after_max_attempts(db_path, monkeypatch):
     monkeypatch.setattr(settings, "discord_outbox_max_attempts", 2)
     conn = sqlite3.connect(db_path, isolation_level=None)
