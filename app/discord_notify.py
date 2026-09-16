@@ -1190,9 +1190,24 @@ async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
     when it is older than discord_outbox_max_age_hours (a long outage
     must never dump stale news the moment a webhook is fixed) or has
     already failed discord_outbox_max_attempts times (a permanently
-    broken webhook must eventually stop being retried). Both are plain
-    WHERE clauses, not a Python-side filter, so a skipped row is never
-    even fetched. discord_config AND discord_channel are each loaded
+    broken webhook must eventually stop being retried). This age cutoff
+    is now the thing that actually gives the self-healing time-driven
+    providers (weekly_recap_provider(), net_wrapup_provider() -- see
+    TIME_DRIVEN_PROVIDERS's own docstring) their outer bound: those
+    providers ask "has the most recent completed period been posted
+    yet" with no upper limit of their own on how long ago that period
+    was (see _weekly_recap_period()'s and _due_net_wrapups()'s own
+    "CRITICAL" notes on why they still only ever look at the SINGLE most
+    recent one, never a backlog) -- so a row that WAS enqueued for a
+    period but never actually delivered inside discord_outbox_max_age_
+    hours ages out right here and simply stops being retried, rather
+    than eventually posting as stale news once whatever kept it from
+    sending is fixed. Before this change this cutoff mattered only for
+    an ordinary send failure retried past its window; now it is the
+    thing standing between "briefly undeliverable" and "delivered days
+    late," which is exactly what it is for. Both this and the attempts
+    cutoff are plain WHERE clauses, not a Python-side filter, so a
+    skipped row is never even fetched. discord_config AND discord_channel are each loaded
     ONCE per cycle here, not once per row -- an admin editing either
     mid-cycle takes effect on the NEXT cycle, the same granularity
     app/freqmapper_ingest.py's own poll loop already applies to its
@@ -1400,12 +1415,15 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 #
 # weekly_recap_provider() below is a DELIBERATE, NARROW exception to the
 # "never query a large table" rule just above -- see its own docstring
-# for exactly why that is safe here: the due-check itself
-# (_weekly_recap_due()) is pure date arithmetic, so the heavy query path
-# is only ever reached on a Sunday, and even then only once per ISO week
-# (a cheap discord_outbox lookup short-circuits every later cycle that
-# same day). No other provider gets this exception without the same
-# reasoning holding for it.
+# for exactly why that is safe here: the period arithmetic itself
+# (_weekly_recap_period()) is pure date math with no DB access at all,
+# and the one discord_outbox lookup that follows it (per protocol) is
+# cheap and indexed -- so the heavy build_weekly_recap_embed() path is
+# only ever reached for a period that has not been posted yet, which in
+# the ordinary case is at most once per protocol per ISO week (every
+# later poll cycle that same week short-circuits on the outbox lookup
+# before ever reaching it). No other provider gets this exception
+# without the same reasoning holding for it.
 
 # Cap on how many players' first-count lines the Exploration section of
 # the weekly recap lists -- a busy week must never blow Discord's
@@ -1443,41 +1461,74 @@ def _season_id_for_ts(conn, protocol: str, ts: int) -> int | None:
     return row["id"] if row is not None else None
 
 
-def _weekly_recap_due(now: int) -> tuple[str, int, int] | None:
-    """None when `now` is not Sunday in settings.checkin_net_timezone --
-    the same app-wide local clock a month (app/results.py's _tz()), a
-    net date (app/checkin.py's net_date_for_net()), and a place
-    activation's week_start (app/place_rotation.py's week_start_for_ts())
-    all already use. Otherwise, (period_key, start_ts, end_ts) for the
-    week that just ended.
+def _weekly_recap_period(now: int) -> tuple[str, int, int]:
+    """(period_key, start_ts, end_ts) for the most recently COMPLETED
+    week, ending at the most recent local Sunday 00:00 at or before
+    `now`, in settings.checkin_net_timezone -- the same app-wide local
+    clock a month (app/results.py's _tz()), a net date
+    (app/checkin.py's net_date_for_net()), and a place activation's
+    week_start (app/place_rotation.py's week_start_for_ts()) all already
+    use.
 
-    The window is the SEVEN DAYS ENDING at today's local midnight --
-    last Sunday's midnight (inclusive) through today's midnight
-    (exclusive) -- built from local calendar boundaries the same way
+    SELF-HEALING dueness, not "is it the trigger moment right now": the
+    old version of this function returned None on every day but Sunday,
+    so a service outage spanning a whole Sunday meant the week's own
+    recap was never computed at all -- Monday is not Sunday either, so
+    the very next poll cycle no longer recognised anything as due, and
+    that week's news was gone for good. This function instead always
+    answers "which week most recently finished," which is true on every
+    day of the week, not just the one it happens to end on -- so
+    weekly_recap_provider() below can ask this on a Tuesday and get back
+    exactly the week that ended the preceding Sunday, still due for as
+    long as it has not yet been posted (see that function's own
+    docstring for the check that decides THAT). This mirrors
+    app/results.py's maybe_roll_months(), which likewise asks "which
+    months are finished and not yet frozen" rather than "is it midnight
+    on the 1st" -- the same shift from a trigger-moment check to a
+    completed-period query, for the same reason: a missed moment must
+    not mean a lost period.
+
+    CRITICAL: this returns ONLY the single most recently completed week,
+    never a backlog of every unposted week since some earlier date --
+    there is deliberately no loop here walking backwards over past
+    weeks. Unlike maybe_roll_months() (which DOES walk every unfrozen
+    month, because a missed month freeze would silently under-count
+    every later month's standings), an old, unposted weekly recap has no
+    such downstream correctness cost -- it is a point-in-time news post,
+    not a running total -- so there is nothing to gain and real harm in
+    ever posting it late among a flood of others. Turning this feature
+    on for the first time, or recovering from a long outage, must never
+    dump weeks of old recaps into the channel; it must simply resume
+    with the most recent one. Whatever happened before that is gone,
+    deliberately, not backfilled.
+
+    The window is the SEVEN DAYS ENDING at that Sunday's local midnight
+    -- built from local calendar boundaries the same way
     app/results.py's month_bounds() builds a month, not a fixed
     7 * 86400 offset, so a week that crosses a daylight-saving change is
     still exactly seven calendar days, never an hour short or long.
 
-    The period key is the ISO week of TODAY (the Sunday this fires on),
-    e.g. "2026-W37". discord_outbox's own UNIQUE(kind, key) index is
-    what actually makes this "once a week": this function returns the
-    SAME key on every one of Sunday's ~2,880 thirty-second poll cycles,
-    so enqueue()'s INSERT OR IGNORE (reached via check_due_time_driven())
-    silently drops every call after the first one that actually gets
-    that far -- and a Sunday the app happened to be down for is simply
-    caught on the next poll once it is back up (subject to
-    discord_outbox_max_age_hours, same as any other announcement). No
-    separate "did we already run today" table exists to ever drift out
-    of step with that guarantee.
+    The period key is the ISO week of that Sunday, e.g. "2026-W37" --
+    the same key on EVERY call made before the next Sunday passes,
+    whether that is 2,880 thirty-second polls on the Sunday itself or
+    the same number of polls spread across the outage-recovery days that
+    follow it. discord_outbox's own UNIQUE(kind, key) index (via
+    enqueue()'s INSERT OR IGNORE, reached through
+    check_due_time_driven()) is what actually makes repeated calls safe
+    -- see weekly_recap_provider()'s own docstring for the pre-check
+    that now does double duty as the dueness test itself.
     """
     tz = ZoneInfo(settings.checkin_net_timezone)
     local = datetime.fromtimestamp(now, tz=tz)
-    if local.weekday() != 6:  # datetime.weekday(): Monday=0 .. Sunday=6
-        return None
-    midnight = datetime(local.year, local.month, local.day, tzinfo=tz)
-    end_ts = int(midnight.timestamp())
+    today_midnight = datetime(local.year, local.month, local.day, tzinfo=tz)
+    # datetime.weekday(): Monday=0 .. Sunday=6. Days back to the most
+    # recent Sunday, INCLUSIVE of today (0 when today itself is Sunday):
+    # Sunday(6) -> 0, Monday(0) -> 1, ..., Saturday(5) -> 6.
+    days_since_sunday = (local.weekday() + 1) % 7
+    end_local = today_midnight - timedelta(days=days_since_sunday)
+    end_ts = int(end_local.timestamp())
     start_ts = end_ts - 7 * 86400
-    iso_year, iso_week, _ = local.isocalendar()
+    iso_year, iso_week, _ = end_local.isocalendar()
     key = f"{iso_year}-W{iso_week:02d}"
     return key, start_ts, end_ts
 
@@ -1797,9 +1848,11 @@ def _active_recap_protocols(conn) -> list[str]:
 
 
 def weekly_recap_provider(conn, now: int) -> list[dict]:
-    """TIME_DRIVEN_PROVIDERS entry for the Sunday weekly recap -- see
-    _weekly_recap_due() for exactly when this fires and what window it
-    covers, and build_weekly_recap_embed() for the message itself.
+    """TIME_DRIVEN_PROVIDERS entry for the weekly recap -- see
+    _weekly_recap_period() for exactly which week this covers (the most
+    recently COMPLETED one, self-healing across an outage -- see that
+    function's own docstring) and build_weekly_recap_embed() for the
+    message itself.
 
     Emits ONE ITEM PER PROTOCOL with an active season (_active_recap_
     protocols() above) -- never a single combined post: a MeshCore-only
@@ -1821,32 +1874,39 @@ def weekly_recap_provider(conn, now: int) -> list[dict]:
     narrow exception to TIME_DRIVEN_PROVIDERS's own "never query a large
     table" rule (see that list's own docstring), safe here because this
     does NOT pay that cost on every ~30-second poll cycle:
-    _weekly_recap_due() itself is pure date/timezone arithmetic with no
-    DB access at all, and returns None on six days out of seven -- so
-    the heavy path below is only ever reached on a Sunday. And even on a
-    Sunday, this checks discord_outbox directly for THAT PROTOCOL'S key
-    BEFORE building its payload -- one indexed lookup on discord_outbox's
-    own UNIQUE(kind, key) index per protocol -- so once the first Sunday
-    poll cycle has actually enqueued a protocol's row, every remaining
-    cycle that same day skips straight past it. In the ordinary case,
-    the heavy computation below runs at most ONCE per protocol per ISO
-    week, not once per poll cycle.
+    _weekly_recap_period() itself is pure date/timezone arithmetic with
+    no DB access at all, so the heavy path below is only ever reached
+    after it. And the discord_outbox lookup for THAT PROTOCOL'S key,
+    right below, is the ACTUAL dueness test now, not merely an
+    optimisation on top of one -- under the old Sunday-only trigger,
+    "is it due" and "has it been posted" were two separate questions
+    that happened to agree in the common case; under the self-healing
+    model there is only one question ("is the most recent completed
+    period posted yet"), and this lookup answers it directly. It still
+    also does the SAME expense-avoiding job it always did: once a
+    protocol's row has actually been enqueued, every later poll cycle --
+    Sunday itself, or any outage-recovery day after it, for as long as
+    this stays the most recent completed period -- skips straight past
+    the heavy build below for that protocol. In the ordinary case the
+    heavy computation runs at most ONCE per protocol per ISO week, not
+    once per poll cycle. enqueue()'s own INSERT OR IGNORE on
+    discord_outbox's UNIQUE(kind, key) remains the actual correctness
+    guarantee against a double-post regardless -- this lookup is a
+    dueness signal and a cost-avoidance shortcut, never the guard itself
+    (see enqueue()'s own docstring).
 
     (A genuinely empty week for one protocol -- build_weekly_recap_embed()
     returning None for it -- never produces a row, so this early-exit
-    cannot kick in for that protocol; every remaining Sunday cycle
+    cannot kick in for that protocol; every remaining poll cycle
     re-runs the heavy computation for it for as long as that protocol's
-    week stays empty, independently of whether the OTHER protocol's row
-    has already been posted. Accepted: an empty week is not the normal
-    state of an active season, and the alternative -- a second "we
-    checked and it was empty" marker table -- is exactly the kind of
-    second source of truth TIME_DRIVEN_PROVIDERS's own docstring already
-    argues against.)
+    week stays both empty and the most recently completed one,
+    independently of whether the OTHER protocol's row has already been
+    posted. Accepted: an empty week is not the normal state of an active
+    season, and the alternative -- a second "we checked and it was
+    empty" marker table -- is exactly the kind of second source of truth
+    TIME_DRIVEN_PROVIDERS's own docstring already argues against.)
     """
-    due = _weekly_recap_due(now)
-    if due is None:
-        return []
-    period_key, start_ts, end_ts = due
+    period_key, start_ts, end_ts = _weekly_recap_period(now)
 
     # Cheap pre-checks only -- enqueue() (via check_due_time_driven())
     # remains the real, authoritative gate for both `enabled` and
@@ -1859,6 +1919,10 @@ def weekly_recap_provider(conn, now: int) -> list[dict]:
     items = []
     for protocol in _active_recap_protocols(conn):
         key = f"{period_key}:{protocol}"
+        # THE dueness test, not just an expense-avoiding pre-check --
+        # see this function's own docstring. A row already existing for
+        # this (kind, key) -- posted or still pending -- means this
+        # period is not due; nothing else here decides that question.
         already = conn.execute(
             "SELECT 1 FROM discord_outbox WHERE kind = 'weekly_recap' AND key = ?",
             (key,),
@@ -1879,14 +1943,41 @@ def weekly_recap_provider(conn, now: int) -> list[dict]:
 
 
 def _due_net_wrapups(conn, now: int) -> list[dict]:
-    """Every ENABLED checkin_net row whose wrap-up is due right now,
-    each as {"net": <row>, "net_date": "YYYY-MM-DD"} -- "due" meaning
-    08:00 or LATER, on the calendar day immediately after the net's own
-    weekday, in THAT ROW'S OWN timezone (zoneinfo.ZoneInfo(net
-    ["timezone"])) -- never settings.checkin_net_timezone or any other
-    single app-wide clock, because two nets in different zones (or on
-    different weekdays) are due on different local days at the very same
-    instant `now`.
+    """Every ENABLED checkin_net row's MOST RECENTLY COMPLETED occurrence
+    -- each as {"net": <row>, "net_date": "YYYY-MM-DD"} -- "due" meaning
+    08:00 or LATER has already passed, on the calendar day immediately
+    after that occurrence's weekday, in THAT ROW'S OWN timezone
+    (zoneinfo.ZoneInfo(net["timezone"])) -- never settings.
+    checkin_net_timezone or any other single app-wide clock, because two
+    nets in different zones (or on different weekdays) complete their
+    own "day after at 08:00" trigger on different local days at the very
+    same instant `now`.
+
+    SELF-HEALING, like _weekly_recap_period() above (see that function's
+    own docstring, including the maybe_roll_months() precedent it cites
+    for this same shift): the old version of this function asked "is it
+    the trigger moment right now" (local weekday == day-after AND hour
+    >= 8) and returned nothing at all outside that narrow window -- so a
+    service down for the entire day-after, or simply still down once
+    that day had fully passed, meant a whole occurrence's wrap-up was
+    lost, permanently, the moment the calendar turned over again. This
+    version instead always computes the SINGLE most recently completed
+    occurrence for each net -- true on every day of the week, not just
+    the one the trigger happens to land on -- so net_wrapup_provider()
+    below can ask this on a Saturday, two days after a Wednesday net's
+    Thursday-08:00 trigger, and still get that occurrence back, due for
+    as long as it has not yet been posted (checked there, not here --
+    see that function's own docstring).
+
+    CRITICAL: this returns only the ONE most recent completed occurrence
+    per net, never a backlog of every unposted occurrence stretching
+    back through a long outage -- there is no loop here walking
+    backwards over past weeks for a net. See _weekly_recap_period()'s
+    own docstring for why: turning this feature on, or recovering from a
+    multi-week outage, must never dump a run of old wrap-ups into the
+    channel. If an occurrence was never posted and a newer one has since
+    completed, the old one is gone from this function's output for good;
+    it does not become two due items on the next call.
 
     Nothing about a net's count, weekday, hours, or timezone is read
     from anywhere but this SELECT: an operator adding a net through
@@ -1895,26 +1986,15 @@ def _due_net_wrapups(conn, now: int) -> list[dict]:
     them immediately -- see checkin_net's own comment in app/db.py and
     TIME_DRIVEN_PROVIDERS's own docstring for why this must stay true.
 
-    Gated on hour >= 8, deliberately not == 8: if this process was down
-    (or the poll simply missed the exact hour) at 08:00, the wrap-up
-    must still post later that same local day rather than silently
-    never firing for that occurrence. This cannot double-post: `net_date`
-    below is fixed for the entire rest of that local day (it is
-    YESTERDAY's date, computed once from `local_now.date()`, not from
-    `now` a second time), so discord_outbox's own UNIQUE(kind, key) --
-    net_wrapup_provider()'s key is f"{net id}:{net_date}" -- silently
-    drops every poll cycle after the first one that actually enqueues,
-    exactly like weekly_recap_provider()'s own once-a-week guarantee.
-
-    `net_date` is computed as a CALENDAR date (local_now.date() minus one
-    day), not `now` minus 86400 seconds -- date arithmetic, not a fixed
-    offset, so a day that crosses a daylight-saving change still lands on
-    the correct previous calendar date. This is the exact date
-    app/checkin.py's net_date_for_net() would itself have stamped onto
-    that night's mc_checkin_award rows (net['weekday'] matching, hour
-    inside [start_hour, end_hour]), so build_net_wrapup_embed() below can
-    look check-ins up by that same net_date directly rather than
-    recomputing a timestamp window.
+    `net_date` is computed as a CALENDAR date (the occurrence's own date
+    minus one day), not a fixed second offset -- date arithmetic, not
+    `now` minus 86400 seconds, so a day that crosses a daylight-saving
+    change still lands on the correct previous calendar date. This is
+    the exact date app/checkin.py's net_date_for_net() would itself have
+    stamped onto that night's mc_checkin_award rows (net['weekday']
+    matching, hour inside [start_hour, end_hour]), so
+    build_net_wrapup_embed() below can look check-ins up by that same
+    net_date directly rather than recomputing a timestamp window.
     """
     nets = conn.execute(
         "SELECT id, label, protocol, weekday, start_hour, end_hour, timezone "
@@ -1923,13 +2003,33 @@ def _due_net_wrapups(conn, now: int) -> list[dict]:
     due = []
     for net in nets:
         local_now = datetime.fromtimestamp(now, tz=ZoneInfo(net["timezone"]))
-        if local_now.weekday() != (net["weekday"] + 1) % 7:
-            continue
-        if local_now.hour < 8:
-            continue
-        net_date = (local_now.date() - timedelta(days=1)).isoformat()
+        trigger_weekday = (net["weekday"] + 1) % 7
+        # Days back, from today, to the most recent date matching the
+        # trigger weekday -- 0 when today itself is that weekday.
+        days_back = (local_now.weekday() - trigger_weekday) % 7
+        if days_back == 0 and local_now.hour < 8:
+            # Today IS the trigger day, but 08:00 hasn't happened yet --
+            # the most recently COMPLETED trigger is therefore last
+            # week's, not today's still-pending one.
+            days_back = 7
+        trigger_date = local_now.date() - timedelta(days=days_back)
+        net_date = (trigger_date - timedelta(days=1)).isoformat()
         due.append({"net": net, "net_date": net_date})
     return due
+
+
+# Cap on how many named players build_net_wrapup_embed() lists out of a
+# single night's check-ins -- this is a PRESENTATION decision, not a
+# safety net: a real wrap-up once rendered all 12 (and, on a busier
+# night, would render 25+) check-ins with no cap at all, and
+# _join_team_field()'s own _MAX_FIELD_VALUE_CHARS trim (still applied
+# underneath, see below) is a last-resort guard against Discord's hard
+# 1024-character field limit that ends on a bare "(truncated)" marker
+# with no count of what was cut -- a reader has no way to tell how many
+# names are missing. This cap fires far earlier, on a much smaller
+# number, specifically so the "and N more" line below can always say
+# exactly how many were left out.
+_MAX_NET_WRAPUP_NAMED_PLAYERS = 12
 
 
 def build_net_wrapup_embed(conn, net, net_date: str) -> dict | None:
@@ -1955,13 +2055,32 @@ def build_net_wrapup_embed(conn, net, net_date: str) -> dict | None:
     mc_checkin_award.streak, already computed and stored at award time --
     never recomputed here.
 
+    The named-player list is CAPPED at _MAX_NET_WRAPUP_NAMED_PLAYERS,
+    sorted first so the players worth naming survive the cut: those with
+    a notable (>=2) streak first, by streak descending, then everyone
+    else, stable by name -- a busy night's chronological roster (the
+    order these rows actually arrive in, ORDER BY awarded_at) is not
+    itself a meaningful order to cut at, but "who's on a streak" is
+    exactly the kind of thing a reader wants to see even when the full
+    list doesn't fit. When the true count exceeds the cap, one italic
+    "*and N more*" line is appended -- N is the exact remainder, so a
+    capped list never leaves the reader guessing how many names were
+    left out (unlike _join_team_field()'s own bare "(truncated)"
+    marker). The headline "**<N>** checked in" count above the list is
+    always the TRUE total from `rows`, never the capped count -- the cap
+    only shortens which names are SHOWN, it must never make the night
+    look smaller than it was.
+
     Reuses _join_team_field() for the line list -- the exact same
     per-field 1024-character trim (dropping the LAST lines first, a
     truncation marker in their place) build_month_honors_embed()'s "By
-    team" fields and the weekly recap's own sections already rely on,
-    so a night with an unusually large turnout degrades the same way
-    every other roster-shaped field in this module already does, rather
-    than needing a second trimming rule.
+    team" fields and the weekly recap's own sections already rely on.
+    With the cap above in place this is now the BACKSTOP it was always
+    meant to be (see _MAX_NET_WRAPUP_NAMED_PLAYERS's own comment) rather
+    than the only guard: at most 13 lines (12 names plus the count line,
+    plus one more for "and N more") reach it, well under
+    _MAX_FIELD_VALUE_CHARS in every realistic case, but it stays in
+    place regardless.
 
     Returns None when nobody checked in for this net on this date -- a
     quiet night posts NOTHING, never an empty "0 checked in" message
@@ -1982,19 +2101,43 @@ def build_net_wrapup_embed(conn, net, net_date: str) -> dict | None:
     if not rows:
         return None
 
+    # Notable-streak rows first (streak descending), then everyone else,
+    # stable by name -- see this function's own docstring for why. A
+    # plain `-streak` DESC key on the WHOLE list would put a streak of 1
+    # ahead of a streak of 0 for no reason a reader would recognize as
+    # "notable"; splitting on the same >=2 threshold the streak-suffix
+    # rendering below already uses keeps the two in agreement.
+    def _sort_key(r):
+        streak = r["streak"] or 0
+        if streak >= 2:
+            return (0, -streak, r["player_name"])
+        return (1, 0, r["player_name"])
+    ranked_rows = sorted(rows, key=_sort_key)
+
     # The count line is the field's own first line, not the field NAME --
     # a field name renders as a plain header on Discord's side (see every
     # other embed in this module: "Placement changes", "Exploration",
     # "By team", ...), never markdown-formatted text, so the bold count
     # belongs in the value like every other bold number this module ever
-    # renders.
+    # renders. `len(rows)`, the TRUE total -- never `len(shown)` -- see
+    # this function's own docstring on why the headline must never
+    # shrink to match a capped list.
     lines = [f"**{_fmt_number(len(rows))}** checked in"]
-    for r in rows:
+    shown = ranked_rows[:_MAX_NET_WRAPUP_NAMED_PLAYERS]
+    for r in shown:
         streak = r["streak"] or 0
         line = f"{_team_dot(emoji, r['team'])}{r['player_name']}"
         if streak >= 2:
             line += f"{_SEP}**{_fmt_number(streak)}**-net streak"
         lines.append(line)
+    remaining = len(ranked_rows) - len(shown)
+    if remaining > 0:
+        # Unconditional whenever the roster overflows the cap -- never
+        # leave the reader unable to tell the list was cut. Italic,
+        # matching _TRUNCATION_MARKER's own "reporting a truncation, not
+        # a piece of the night's data" treatment, but naming the exact
+        # count where that marker cannot.
+        lines.append(f"*and {remaining} more*")
     checkins_value = _join_team_field(lines, None)
 
     embed = {
@@ -2016,18 +2159,25 @@ def build_net_wrapup_embed(conn, net, net_date: str) -> dict | None:
 
 def net_wrapup_provider(conn, now: int) -> list[dict]:
     """TIME_DRIVEN_PROVIDERS entry for the per-net wrap-up -- see
-    _due_net_wrapups() for exactly when a net is due and
+    _due_net_wrapups() for exactly which occurrence is due (the most
+    recently COMPLETED one, self-healing across an outage) and
     build_net_wrapup_embed() for the message itself.
 
-    Unlike weekly_recap_provider() above, this needs no discord_outbox
-    pre-check before building a payload: checkin_net has a handful of
-    rows (TIME_DRIVEN_PROVIDERS's own "CHEAPNESS" comment already
-    requires this to stay small), and build_net_wrapup_embed() only ever
-    runs one indexed (net_id, net_date) lookup against mc_checkin_award
-    per due net, never a scan of a large or growing table -- so there is
-    no expensive path here for an early exit to protect against, the
-    same reasoning weekly_recap_provider()'s own docstring gives for why
-    IT needs the pre-check and this one does not.
+    Unlike weekly_recap_provider() above, the discord_outbox check below
+    is not needed to avoid a genuinely EXPENSIVE rebuild -- checkin_net
+    has a handful of rows (TIME_DRIVEN_PROVIDERS's own "CHEAPNESS"
+    comment already requires this to stay small), and
+    build_net_wrapup_embed() only ever runs one indexed (net_id,
+    net_date) lookup against mc_checkin_award per due net, never a scan
+    of a large or growing table. It is needed for a different reason
+    now: under the self-healing model, _due_net_wrapups() returns the
+    SAME occurrence on every poll cycle for as long as it remains the
+    net's most recently completed one -- which, if it stays unposted, is
+    potentially forever, not just for one calendar day the way the old
+    trigger-moment version bounded it. "Due until posted" means this
+    function must itself know whether it has been posted, the same
+    dueness role the check plays in weekly_recap_provider(), so it gets
+    the same treatment here.
 
     kind is colon-scoped per net (f"net_wrapup:{net id}") -- resolved by
     resolve_discord_webhook() via _channel_kind_candidates() against a
@@ -2037,20 +2187,27 @@ def net_wrapup_provider(conn, now: int) -> list[dict]:
     f"{net id}:{net_date}" -- per-net, per-occurrence DEDUPE, entirely
     independent of every other net's own key, so two nets due on the
     same poll cycle (or the same net, called twice for the one
-    occurrence) each get exactly one outbox row via enqueue()'s own
-    INSERT OR IGNORE.
+    occurrence) each get exactly one outbox row. enqueue()'s own INSERT
+    OR IGNORE on discord_outbox's UNIQUE(kind, key) remains the actual
+    correctness guarantee against a double-post regardless of this
+    lookup -- see weekly_recap_provider()'s own docstring for why this
+    check is a dueness signal and a cost-avoidance shortcut, never the
+    guard itself.
     """
     items = []
     for due in _due_net_wrapups(conn, now):
         net, net_date = due["net"], due["net_date"]
+        kind = f"net_wrapup:{net['id']}"
+        key = f"{net['id']}:{net_date}"
+        already = conn.execute(
+            "SELECT 1 FROM discord_outbox WHERE kind = ? AND key = ?", (kind, key),
+        ).fetchone()
+        if already is not None:
+            continue
         payload = build_net_wrapup_embed(conn, net, net_date)
         if payload is None:
             continue
-        items.append({
-            "kind": f"net_wrapup:{net['id']}",
-            "key": f"{net['id']}:{net_date}",
-            "payload": payload,
-        })
+        items.append({"kind": kind, "key": key, "payload": payload})
     return items
 
 

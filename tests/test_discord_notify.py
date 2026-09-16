@@ -1547,12 +1547,12 @@ def test_enqueue_weekly_recap_same_key_twice_leaves_exactly_one_row(conn):
     assert len(rows) == 1
 
 
-# ---- weekly recap (Sunday, TIME_DRIVEN_PROVIDERS) -------------------------
+# ---- weekly recap (self-healing period + dueness, TIME_DRIVEN_PROVIDERS) --
 #
 # 2026-09-13 and 2026-09-20 are both real Sundays in
 # settings.checkin_net_timezone's default, America/Boise -- confirmed
-# below (test_weekly_recap_due_fires_on_sunday_with_correct_window) and
-# used throughout as fixed, known-good instants rather than computed
+# below (test_weekly_recap_period_on_sunday_is_the_week_that_just_ended)
+# and used throughout as fixed, known-good instants rather than computed
 # relative to time.time(), so the exact ISO-week key a test asserts on
 # never depends on when the test suite happens to run.
 
@@ -1607,30 +1607,37 @@ def _wr_checkin(conn, *, season_id, player_id, awarded_at, streak=1, net_id=1, m
     )
 
 
-def test_weekly_recap_due_none_on_a_non_sunday():
-    tz = ZoneInfo(settings.checkin_net_timezone)
-    saturday = datetime(2026, 9, 12, 10, 0, tzinfo=tz)
-    assert saturday.weekday() == 5
-    assert discord_notify._weekly_recap_due(int(saturday.timestamp())) is None
-
-
-def test_weekly_recap_due_fires_on_sunday_with_correct_window():
+def test_weekly_recap_period_on_sunday_is_the_week_that_just_ended():
     tz = ZoneInfo(settings.checkin_net_timezone)
     sunday = datetime(2026, 9, 13, 15, 30, tzinfo=tz)
     assert sunday.weekday() == 6
-    due = discord_notify._weekly_recap_due(int(sunday.timestamp()))
-    assert due is not None
-    key, start_ts, end_ts = due
+    key, start_ts, end_ts = discord_notify._weekly_recap_period(int(sunday.timestamp()))
     assert key == "2026-W37"
     expected_end = int(datetime(2026, 9, 13, tzinfo=tz).timestamp())
     assert end_ts == expected_end
     assert start_ts == expected_end - 7 * 86400
 
 
-def test_weekly_recap_due_different_sundays_get_different_keys():
+def test_weekly_recap_period_self_heals_across_a_missed_sunday():
+    """The self-healing case at the pure period-arithmetic level: a
+    non-Sunday `now` (here, the following Tuesday) still resolves to the
+    exact same (period_key, start_ts, end_ts) a Sunday poll would have
+    computed -- the most recently COMPLETED week, not "is today Sunday."
+    An outage spanning the whole of Sunday must not change which period
+    this reports."""
     tz = ZoneInfo(settings.checkin_net_timezone)
-    key1, _, _ = discord_notify._weekly_recap_due(int(datetime(2026, 9, 13, 12, tzinfo=tz).timestamp()))
-    key2, _, _ = discord_notify._weekly_recap_due(int(datetime(2026, 9, 20, 12, tzinfo=tz).timestamp()))
+    sunday = datetime(2026, 9, 13, 15, 30, tzinfo=tz)
+    tuesday = datetime(2026, 9, 15, 9, 0, tzinfo=tz)
+    assert tuesday.weekday() == 1
+    sunday_period = discord_notify._weekly_recap_period(int(sunday.timestamp()))
+    tuesday_period = discord_notify._weekly_recap_period(int(tuesday.timestamp()))
+    assert tuesday_period == sunday_period
+
+
+def test_weekly_recap_period_different_weeks_get_different_keys():
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    key1, _, _ = discord_notify._weekly_recap_period(int(datetime(2026, 9, 13, 12, tzinfo=tz).timestamp()))
+    key2, _, _ = discord_notify._weekly_recap_period(int(datetime(2026, 9, 20, 12, tzinfo=tz).timestamp()))
     assert key1 != key2
 
 
@@ -1918,7 +1925,13 @@ def test_build_weekly_recap_embed_never_pairs_a_place_name_with_a_player_name(co
     assert "ExtremelyDistinctivePlaceName" not in full_text
 
 
-def test_weekly_recap_provider_returns_nothing_on_a_non_sunday(conn):
+def test_weekly_recap_provider_returns_nothing_with_no_active_season(conn):
+    """Not a "which day of the week" test any more -- under the
+    self-healing model a non-Sunday `now` still resolves to a real
+    completed period (see _weekly_recap_period()) -- this is empty
+    because there is no active season for any protocol at all, the same
+    "nothing to announce" reason _active_recap_protocols() gives for any
+    other `now`."""
     _enable_discord(conn)
     tz = ZoneInfo(settings.checkin_net_timezone)
     saturday = datetime(2026, 9, 12, 10, 0, tzinfo=tz)
@@ -1991,6 +2004,85 @@ def test_check_due_time_driven_weekly_recap_fires_once_per_week_then_again_next_
     assert len(rows) == 2
 
 
+# ---- weekly recap: self-healing dueness (outage recovery) ------------
+
+
+def test_weekly_recap_provider_due_on_sunday_for_the_week_that_just_ended(conn):
+    _enable_discord(conn)
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    sunday = datetime(2026, 9, 13, 15, 0, tzinfo=tz)
+    now = int(sunday.timestamp())
+    _wr_season(conn, 1, started_at=0, ends_at=now + 100_000_000)
+    _wr_player(conn, 1, "Alice", "RED")
+    _wr_capture(conn, 1, "1_1", now - 3 * 86400, 1, "RED")
+
+    items = discord_notify.weekly_recap_provider(conn, now)
+    assert len(items) == 1
+    assert items[0]["key"] == "2026-W37:mc"
+
+
+def test_weekly_recap_provider_still_due_the_following_tuesday_after_an_outage(conn):
+    """The self-healing outage case: nothing posted on the week's own
+    Sunday, and the process is only back up two days later, on the
+    Tuesday -- the same completed week's recap is still due, never
+    lost."""
+    _enable_discord(conn)
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    sunday = datetime(2026, 9, 13, 15, 0, tzinfo=tz)
+    tuesday = datetime(2026, 9, 15, 9, 0, tzinfo=tz)
+    now_tue = int(tuesday.timestamp())
+    _wr_season(conn, 1, started_at=0, ends_at=now_tue + 100_000_000)
+    _wr_player(conn, 1, "Alice", "RED")
+    _wr_capture(conn, 1, "1_1", int(sunday.timestamp()) - 3 * 86400, 1, "RED")
+
+    items = discord_notify.weekly_recap_provider(conn, now_tue)
+    assert len(items) == 1
+    assert items[0]["key"] == "2026-W37:mc"
+
+
+def test_weekly_recap_provider_not_due_once_a_row_for_that_key_exists(conn):
+    _enable_discord(conn)
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    sunday = datetime(2026, 9, 13, 15, 0, tzinfo=tz)
+    now = int(sunday.timestamp())
+    _wr_season(conn, 1, started_at=0, ends_at=now + 100_000_000)
+    _wr_player(conn, 1, "Alice", "RED")
+    _wr_capture(conn, 1, "1_1", now - 3 * 86400, 1, "RED")
+    conn.execute(
+        "INSERT INTO discord_outbox(kind, key, payload, created_at) "
+        "VALUES ('weekly_recap', '2026-W37:mc', '{}', ?)",
+        (now,),
+    )
+
+    assert discord_notify.weekly_recap_provider(conn, now) == []
+
+
+def test_weekly_recap_provider_never_returns_a_backlog_of_old_weeks(conn):
+    """Several PAST weeks of real, unposted activity (simulating a long
+    outage) -- weekly_recap_provider() still returns exactly ONE item,
+    for the most recently completed week alone. There is no walking
+    backwards over the older weeks; see _weekly_recap_period()'s own
+    "CRITICAL" note on why turning this on (or recovering from an
+    outage) must never dump a backlog into the channel."""
+    _enable_discord(conn)
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    sunday = datetime(2026, 9, 13, 15, 0, tzinfo=tz)
+    now = int(sunday.timestamp())
+    _wr_season(conn, 1, started_at=0, ends_at=now + 100_000_000)
+    _wr_player(conn, 1, "Alice", "RED")
+    # Activity in the just-ended week AND several older, never-posted
+    # weeks before it -- each on its own cell so none of these captures
+    # collide with each other.
+    _wr_capture(conn, 1, "this_week", now - 3 * 86400, 1, "RED")
+    _wr_capture(conn, 1, "1_week_ago", now - 10 * 86400, 1, "RED")
+    _wr_capture(conn, 1, "2_weeks_ago", now - 17 * 86400, 1, "RED")
+    _wr_capture(conn, 1, "3_weeks_ago", now - 24 * 86400, 1, "RED")
+
+    items = discord_notify.weekly_recap_provider(conn, now)
+    assert len(items) == 1
+    assert items[0]["key"] == "2026-W37:mc"
+
+
 # ---- weekly recap: per-protocol emission -----------------------------
 
 
@@ -2044,17 +2136,19 @@ def test_weekly_recap_provider_only_protocol_with_active_season_gets_an_item(con
 
 
 def test_due_net_wrapups_fires_at_8am_the_day_after_in_the_nets_own_timezone(conn):
+    """Self-healing: _due_net_wrapups() always returns the net's SINGLE
+    most recently completed occurrence, never an empty list, EXCEPT that
+    before 08:00 on the day immediately after the net (thu_early below),
+    that DAY's occurrence has not yet completed -- so what is returned
+    is still last week's completed occurrence, not this week's -- see
+    test_due_net_wrapups_not_due_before_8am_the_day_after below for that
+    case in isolation."""
     _wr_net(conn, 1, "Wednesday MC", weekday=2, start_hour=18, end_hour=20, timezone="America/Boise")
     tz = ZoneInfo("America/Boise")
 
-    wed_evening = int(datetime(2026, 9, 9, 19, 0, tzinfo=tz).timestamp())   # the net's own day
-    thu_early = int(datetime(2026, 9, 10, 7, 59, tzinfo=tz).timestamp())    # day after, before 08:00
     thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())       # day after, exactly 08:00
     thu_late = int(datetime(2026, 9, 10, 22, 0, tzinfo=tz).timestamp())     # day after, well past 08:00
     fri = int(datetime(2026, 9, 11, 9, 0, tzinfo=tz).timestamp())           # two days after
-
-    assert discord_notify._due_net_wrapups(conn, wed_evening) == []
-    assert discord_notify._due_net_wrapups(conn, thu_early) == []
 
     due = discord_notify._due_net_wrapups(conn, thu_8am)
     assert len(due) == 1
@@ -2067,13 +2161,37 @@ def test_due_net_wrapups_fires_at_8am_the_day_after_in_the_nets_own_timezone(con
     assert len(due_late) == 1
     assert due_late[0]["net_date"] == "2026-09-09"
 
-    assert discord_notify._due_net_wrapups(conn, fri) == []
+    # Two days after -- self-healing means this is STILL the same
+    # occurrence, not an empty list: the old trigger-moment version
+    # returned [] here (weekday no longer matches), which was exactly
+    # the bug this change fixes -- an outage spanning Thursday would
+    # have lost the occurrence for good.
+    due_fri = discord_notify._due_net_wrapups(conn, fri)
+    assert len(due_fri) == 1
+    assert due_fri[0]["net_date"] == "2026-09-09"
 
 
-def test_due_net_wrapups_two_nets_different_timezones_fire_independently(conn):
-    """Two nets, different weekdays AND different IANA zones -- each is
-    due only on its OWN local schedule, never the other's, from the same
-    kind of `now` instant."""
+def test_due_net_wrapups_not_due_before_8am_the_day_after(conn):
+    """Before 08:00 on the day after, THIS occurrence has not completed
+    yet -- the most recently completed one is still last week's."""
+    _wr_net(conn, 1, "Wednesday MC", weekday=2, start_hour=18, end_hour=20, timezone="America/Boise")
+    tz = ZoneInfo("America/Boise")
+    thu_early = int(datetime(2026, 9, 10, 7, 59, tzinfo=tz).timestamp())    # day after, before 08:00
+
+    due = discord_notify._due_net_wrapups(conn, thu_early)
+    assert len(due) == 1
+    assert due[0]["net_date"] == "2026-09-02"  # the PRIOR week's Wednesday, not this week's
+
+
+def test_due_net_wrapups_two_nets_different_timezones_compute_independently(conn):
+    """Two nets, different weekdays AND different IANA zones -- each
+    resolves its own most recently completed occurrence against its OWN
+    local schedule, never the other's, from the SAME `now` instant: at
+    this moment net 1's own trigger (Thursday 08:00 Boise) has just
+    completed, but net 2's own trigger (Saturday 08:00 LA) has not
+    reached its own week yet, so net 2 still reports the PRIOR week's
+    occurrence -- proving the two schedules are computed independently,
+    not off of one shared clock."""
     _wr_net(conn, 1, "Wednesday MC", protocol="mc",
             weekday=2, start_hour=18, end_hour=20, timezone="America/Boise")
     _wr_net(conn, 2, "Friday MT", protocol="mt",
@@ -2082,12 +2200,18 @@ def test_due_net_wrapups_two_nets_different_timezones_fire_independently(conn):
     tz_boise = ZoneInfo("America/Boise")
     thu_8am_boise = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz_boise).timestamp())
     due = discord_notify._due_net_wrapups(conn, thu_8am_boise)
-    assert {d["net"]["id"] for d in due} == {1}
+    by_net = {d["net"]["id"]: d["net_date"] for d in due}
+    assert by_net == {1: "2026-09-09", 2: "2026-09-04"}
 
+    # A later `now`, once net 2's OWN trigger has completed too -- net 2
+    # advances to its own new occurrence while net 1 (whose own trigger
+    # has not recurred yet) stays exactly where it was, each entirely on
+    # its own schedule.
     tz_la = ZoneInfo("America/Los_Angeles")
     sat_8am_la = int(datetime(2026, 9, 12, 8, 0, tzinfo=tz_la).timestamp())
     due2 = discord_notify._due_net_wrapups(conn, sat_8am_la)
-    assert {d["net"]["id"] for d in due2} == {2}
+    by_net2 = {d["net"]["id"]: d["net_date"] for d in due2}
+    assert by_net2 == {1: "2026-09-09", 2: "2026-09-11"}
 
 
 def test_net_wrapup_provider_zero_checkins_yields_no_item(conn):
@@ -2125,6 +2249,142 @@ def test_net_wrapup_provider_renders_checkins_and_notable_streak(conn):
     assert "l3@n" in field["value"] and "**3**-net streak" in field["value"]
     assert "Raptor" in field["value"]
     assert "-net streak" not in field["value"].split("Raptor")[1].split("\n")[0]  # streak of 1 is not "notable"
+
+
+# ---- net wrap-up: capped, sorted check-in list ------------------------
+
+
+def _wr_many_checkins(conn, count, *, net_id=1, net_date="2026-09-09", team="RED"):
+    """Seed `count` players, each with exactly one check-in (streak=1,
+    not notable) for the same net occurrence -- the "big, undifferentiated
+    roster" shape the cap exists for."""
+    for i in range(1, count + 1):
+        _wr_player(conn, i, f"Player{i:02d}", team)
+        _wr_checkin(conn, season_id=1, player_id=i, awarded_at=i, streak=1,
+                    net_id=net_id, message_id=f"m{i}", net_date=net_date)
+
+
+def test_net_wrapup_caps_named_players_and_shows_exact_remainder(conn):
+    """30 check-ins -- well past the 12-name cap -- renders at most 12
+    named players plus one "and 18 more" line, never a bare, count-free
+    truncation."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_many_checkins(conn, 30)
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    assert len(items) == 1
+    field = items[0]["payload"]["embeds"][0]["fields"][0]
+    lines = field["value"].splitlines()
+    named_lines = lines[1:-1]
+    assert len(named_lines) == 12
+    assert lines[-1] == "*and 18 more*"
+
+
+def test_net_wrapup_headline_count_is_the_true_total_not_the_capped_count(conn):
+    """A wrap-up with 30 check-ins must still say 30 in the headline --
+    the cap only shortens which names are SHOWN, it must never shrink
+    the count of how many actually checked in."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_many_checkins(conn, 30)
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    field = items[0]["payload"]["embeds"][0]["fields"][0]
+    assert field["value"].splitlines()[0] == "**30** checked in"
+
+
+def test_net_wrapup_streak_players_sort_first_by_streak_descending(conn):
+    """Players with a notable (>=2) streak survive the cap ahead of
+    everyone else, ordered by streak descending -- the highest streak
+    named first."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_player(conn, 1, "NoStreak", "RED")
+    _wr_player(conn, 2, "SmallStreak", "RED")
+    _wr_player(conn, 3, "BigStreak", "RED")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=1, streak=1,
+                net_id=1, message_id="m1", net_date="2026-09-09")
+    _wr_checkin(conn, season_id=1, player_id=2, awarded_at=2, streak=2,
+                net_id=1, message_id="m2", net_date="2026-09-09")
+    _wr_checkin(conn, season_id=1, player_id=3, awarded_at=3, streak=5,
+                net_id=1, message_id="m3", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    field = items[0]["payload"]["embeds"][0]["fields"][0]
+    lines = field["value"].splitlines()
+    # lines[0] is the headline count -- named players start at lines[1].
+    assert lines[1].startswith("BigStreak")
+    assert lines[2].startswith("SmallStreak")
+    assert lines[3].startswith("NoStreak")
+
+
+def test_net_wrapup_exactly_the_cap_count_shows_no_remainder_line(conn):
+    """Exactly 12 check-ins -- exactly the cap -- renders all 12 names
+    and no "and N more" line at all: there is nothing left to report as
+    cut."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_many_checkins(conn, 12)
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    field = items[0]["payload"]["embeds"][0]["fields"][0]
+    lines = field["value"].splitlines()
+    assert lines[0] == "**12** checked in"
+    assert len(lines) == 13  # headline + all 12 named, nothing more
+    assert not any("more" in line for line in lines)
+
+
+# ---- net wrap-up: self-healing dueness (outage recovery) --------------
+
+
+def test_net_wrapup_provider_still_due_two_days_later_when_unposted(conn):
+    """The self-healing outage case, at the provider level: two days
+    after the net (past the day-after-8am trigger, and past the day it
+    used to fire on too), the occurrence is still due for as long as it
+    has not been posted."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_player(conn, 1, "P", "RED")
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=0, net_id=1,
+                message_id="m1", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    fri_9am = int(datetime(2026, 9, 11, 9, 0, tzinfo=tz).timestamp())  # two days after the net
+
+    items = discord_notify.net_wrapup_provider(conn, fri_9am)
+    assert len(items) == 1
+    assert items[0]["key"] == "1:2026-09-09"
+
+
+def test_net_wrapup_provider_not_due_once_posted(conn):
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_player(conn, 1, "P", "RED")
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=0, net_id=1,
+                message_id="m1", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    fri_9am = int(datetime(2026, 9, 11, 9, 0, tzinfo=tz).timestamp())
+    conn.execute(
+        "INSERT INTO discord_outbox(kind, key, payload, created_at) "
+        "VALUES ('net_wrapup:1', '1:2026-09-09', '{}', ?)",
+        (fri_9am,),
+    )
+
+    assert discord_notify.net_wrapup_provider(conn, fri_9am) == []
 
 
 def test_net_wrapup_new_net_added_at_runtime_gets_wrapups_with_no_code_change(conn):
