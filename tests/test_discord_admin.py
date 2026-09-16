@@ -933,3 +933,155 @@ def test_post_discord_roles_reconcile_requires_role(db_path):
     client = _client_for(account_id)
     resp = client.post("/api/admin/discord/roles/reconcile", json={})
     assert resp.status_code == 401
+
+
+# ---- POST /api/admin/discord/team-channel ---------------------------------
+#
+# app/discord_bot.py's ensure_team_channels() refuses to guess when more
+# than one channel in the configured category normalizes to the same
+# team name (its own `ambiguous` bucket -- see that function's own
+# docstring) -- this route is the admin's manual way to resolve one:
+# pick a channel id by hand, validated against a fresh (mocked) GET of
+# the live guild's channel list. discord_bot._list_guild_channels is
+# monkeypatched throughout, same "route wiring only, not Discord's own
+# behavior" boundary the roles/ensure and roles/reconcile tests above
+# already draw for ensure_team_roles()/reconcile_all().
+
+_TEST_GUILD_ID = "555000111"
+
+
+def _enable_team_channels_for_admin(db_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "discord_bot_token", _TEST_BOT_TOKEN)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE discord_config SET roles_enabled = 1, guild_id = ?, "
+        " team_channels_enabled = 1, team_category_name = 'Teams' WHERE id = 1",
+        (_TEST_GUILD_ID,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_post_discord_team_channel_sets_a_valid_text_channel(db_path, monkeypatch):
+    _enable_team_channels_for_admin(db_path, monkeypatch)
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_list_channels(guild_id, *, http_client=None):
+        assert guild_id == _TEST_GUILD_ID
+        return [{"id": "red-chan-id", "type": discord_bot._CHANNEL_TYPE_TEXT, "name": "red🟥", "parent_id": "cat-1"}]
+
+    monkeypatch.setattr(admin_ops.discord_bot, "_list_guild_channels", fake_list_channels)
+
+    resp = client.post("/api/admin/discord/team-channel", json={"team": "RED", "channel_id": "red-chan-id"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["team_role"]["channel_id"] == "red-chan-id"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT channel_id FROM discord_team_role WHERE team = 'RED'").fetchone()
+    action = conn.execute(
+        "SELECT detail FROM admin_action_log WHERE action = 'discord_team_channel_set'"
+    ).fetchone()
+    conn.close()
+    assert row["channel_id"] == "red-chan-id"
+    assert action is not None and "team=RED" in action["detail"]
+
+
+def test_post_discord_team_channel_rejects_unknown_channel_id(db_path, monkeypatch):
+    _enable_team_channels_for_admin(db_path, monkeypatch)
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_list_channels(guild_id, *, http_client=None):
+        return []  # nothing in the guild has this id
+
+    monkeypatch.setattr(admin_ops.discord_bot, "_list_guild_channels", fake_list_channels)
+
+    resp = client.post("/api/admin/discord/team-channel", json={"team": "RED", "channel_id": "no-such-id"})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT channel_id FROM discord_team_role WHERE team = 'RED'").fetchone()
+    conn.close()
+    assert row is None  # nothing was ever written
+
+
+def test_post_discord_team_channel_rejects_non_text_channel(db_path, monkeypatch):
+    _enable_team_channels_for_admin(db_path, monkeypatch)
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_list_channels(guild_id, *, http_client=None):
+        return [{"id": "cat-1", "type": discord_bot._CHANNEL_TYPE_CATEGORY, "name": "Teams", "parent_id": None}]
+
+    monkeypatch.setattr(admin_ops.discord_bot, "_list_guild_channels", fake_list_channels)
+
+    resp = client.post("/api/admin/discord/team-channel", json={"team": "RED", "channel_id": "cat-1"})
+    assert resp.status_code == 400
+    assert "not a text channel" in resp.json()["error"]
+
+
+def test_post_discord_team_channel_clears_with_null(db_path, monkeypatch):
+    _enable_team_channels_for_admin(db_path, monkeypatch)
+    account_id = _make_account(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO discord_team_role(team, role_id, channel_id, updated_at) VALUES ('RED', 'role-red', 'red-chan-id', ?)",
+        (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    def fail_list_channels(*a, **k):
+        raise AssertionError("clearing must never need a live guild lookup")
+
+    monkeypatch.setattr(admin_ops.discord_bot, "_list_guild_channels", fail_list_channels)
+
+    resp = client.post("/api/admin/discord/team-channel", json={"team": "RED", "channel_id": None})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["team_role"]["channel_id"] is None
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT channel_id, role_id FROM discord_team_role WHERE team = 'RED'").fetchone()
+    conn.close()
+    assert row["channel_id"] is None
+    assert row["role_id"] == "role-red"  # untouched
+
+
+def test_post_discord_team_channel_rejects_unknown_team(db_path, monkeypatch):
+    _enable_team_channels_for_admin(db_path, monkeypatch)
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord/team-channel", json={"team": "MAGENTA", "channel_id": None})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_post_discord_team_channel_400_when_not_configured(db_path, monkeypatch):
+    # team_channels_enabled left at its column default (0).
+    monkeypatch.setattr(settings, "discord_bot_token", _TEST_BOT_TOKEN)
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    def fail_list_channels(*a, **k):
+        raise AssertionError("must not call Discord when not configured")
+
+    monkeypatch.setattr(admin_ops.discord_bot, "_list_guild_channels", fail_list_channels)
+
+    resp = client.post("/api/admin/discord/team-channel", json={"team": "RED", "channel_id": "red-chan-id"})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_post_discord_team_channel_requires_role(db_path):
+    _make_account(db_path, role="admin")
+    account_id = _make_account(db_path, role=None, with_totp=False)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/team-channel", json={"team": "RED", "channel_id": None})
+    assert resp.status_code == 401

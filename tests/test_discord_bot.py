@@ -798,7 +798,7 @@ def test_ensure_team_channels_creates_category_and_one_channel_per_team(db_path)
         assert channel_rows[team] == f"chan-{team.lower()}"
 
 
-def test_ensure_team_channels_reuses_existing_same_named_category_and_channel(db_path):
+def test_ensure_team_channels_adopts_existing_same_named_category_and_channel(db_path):
     _enable_team_channels(db_path)
     _set_team_role_file(db_path, "GREEN", "role-green")
 
@@ -818,7 +818,7 @@ def test_ensure_team_channels_reuses_existing_same_named_category_and_channel(db
             return httpx.Response(200, json={"ok": True})
         if request.method == "POST":
             post_paths.append(path)
-            raise AssertionError("no create expected -- an existing category/channel must be reused")
+            raise AssertionError("no create expected -- an existing category/channel must be adopted")
         raise AssertionError(f"unexpected call: {request.method} {path}")
 
     async def go():
@@ -828,7 +828,7 @@ def test_ensure_team_channels_reuses_existing_same_named_category_and_channel(db
     result = _run(go())
     assert result["ok"] is True
     assert not post_paths
-    assert result["reused"] == ["GREEN"]
+    assert result["adopted"] == ["GREEN"]
     assert _team_category_id(db_path) == "existing-cat"
     assert _team_channel_rows(db_path)["GREEN"] == "existing-green-chan"
 
@@ -1091,3 +1091,234 @@ def test_ensure_team_channels_error_never_contains_the_token(db_path):
     result = _run(go())
     assert result["ok"] is False
     assert _BOT_TOKEN not in result["reason"]
+
+
+# ---- ensure_team_channels(): adoption of an operator's own channels ------
+#
+# The scenario that motivated _normalize_channel_name() (see this
+# module's own docstring's ADOPTION section): an owner's guild already
+# has a category and channels named and decorated their own way --
+# `[Team Chat]` holding `red🟥`, `orange🟧`, etc -- and the old
+# exact-string match could see none of it. These tests drive
+# _ensure_category()/_ensure_team_channel() through real (mocked)
+# Discord responses shaped like that guild, rather than one this bot
+# built itself.
+
+
+def test_ensure_team_channels_adopts_a_differently_named_category(db_path):
+    """team_category_name is "Team Chat" (what an admin typed into the
+    config field); the guild's own category is "[Team Chat]" -- normalize
+    strips the brackets and the space, so both become "teamchat" and this
+    must be found and adopted, never duplicated.
+    """
+    _enable_team_channels(db_path, category_name="Team Chat")
+    _set_team_role_file(db_path, "GREEN", "role-green")
+
+    channels_list = [
+        {"id": "owner-cat", "type": discord_bot._CHANNEL_TYPE_CATEGORY, "name": "[Team Chat]", "parent_id": None},
+        {"id": "owner-green-chan", "type": discord_bot._CHANNEL_TYPE_TEXT, "name": "green", "parent_id": "owner-cat"},
+    ]
+    post_paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method != "DELETE"
+        path = request.url.path
+        if request.method == "GET" and path == "/api/v10/users/@me":
+            return httpx.Response(200, json={"id": _BOT_USER_ID})
+        if request.method == "GET" and path == f"/api/v10/guilds/{_GUILD_ID}/channels":
+            return httpx.Response(200, json=channels_list)
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"ok": True})
+        if request.method == "POST":
+            post_paths.append(path)
+            raise AssertionError("no create expected -- the category must be adopted by normalized name")
+        raise AssertionError(f"unexpected call: {request.method} {path}")
+
+    async def go():
+        async with _mock_client(handler) as client:
+            return await discord_bot.ensure_team_channels(http_client=client)
+
+    result = _run(go())
+    assert result["ok"] is True
+    assert not post_paths
+    assert _team_category_id(db_path) == "owner-cat"
+
+
+def test_ensure_team_channels_adopts_an_emoji_suffixed_channel(db_path):
+    """`red🟥` is RED's own channel in the owner's guild -- normalize
+    strips the emoji, matches "red", and this must be adopted (its
+    overwrites reasserted) with NO create call at all for RED.
+    """
+    _enable_team_channels(db_path)
+    _set_team_role_file(db_path, "RED", "role-red")
+
+    channels_list = [
+        {"id": "owner-cat", "type": discord_bot._CHANNEL_TYPE_CATEGORY, "name": "Teams", "parent_id": None},
+        {"id": "red-chan-id", "type": discord_bot._CHANNEL_TYPE_TEXT, "name": "red🟥", "parent_id": "owner-cat"},
+    ]
+    post_paths = []
+    patched = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method != "DELETE"
+        path = request.url.path
+        if request.method == "GET" and path == "/api/v10/users/@me":
+            return httpx.Response(200, json={"id": _BOT_USER_ID})
+        if request.method == "GET" and path == f"/api/v10/guilds/{_GUILD_ID}/channels":
+            return httpx.Response(200, json=channels_list)
+        if request.method == "PATCH":
+            import json as _json
+            patched[path] = _json.loads(request.content)
+            return httpx.Response(200, json={"ok": True})
+        if request.method == "POST":
+            post_paths.append(path)
+            raise AssertionError("no create expected -- red\U0001f7e5 must be adopted, not duplicated")
+        raise AssertionError(f"unexpected call: {request.method} {path}")
+
+    async def go():
+        async with _mock_client(handler) as client:
+            return await discord_bot.ensure_team_channels(http_client=client)
+
+    result = _run(go())
+    assert result["ok"] is True
+    assert not post_paths
+    assert result["adopted"] == ["RED"]
+    assert _team_channel_rows(db_path)["RED"] == "red-chan-id"
+
+    # Test 5: never renamed -- no PATCH body anywhere carries a `name`.
+    for body in patched.values():
+        assert "name" not in body
+
+    # Test 6: overwrites ARE applied to the adopted channel, same full
+    # authoritative list a freshly created channel would get.
+    assert patched["/api/v10/channels/red-chan-id"]["permission_overwrites"] == [
+        _everyone_deny(), _team_allow("role-red"), _bot_allow(),
+    ]
+
+
+def test_ensure_team_channels_creates_for_a_team_with_no_match(db_path):
+    """GREEN has no stored channel id and nothing in the category
+    normalizes to "green" -- the fallback create path, inside the
+    category that WAS found (not a second, duplicate one).
+    """
+    _enable_team_channels(db_path)
+    _set_team_role_file(db_path, "GREEN", "role-green")
+
+    channels_list = [
+        {"id": "owner-cat", "type": discord_bot._CHANNEL_TYPE_CATEGORY, "name": "Teams", "parent_id": None},
+        {"id": "red-chan-id", "type": discord_bot._CHANNEL_TYPE_TEXT, "name": "red🟥", "parent_id": "owner-cat"},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method != "DELETE"
+        path = request.url.path
+        if request.method == "GET" and path == "/api/v10/users/@me":
+            return httpx.Response(200, json={"id": _BOT_USER_ID})
+        if request.method == "GET" and path == f"/api/v10/guilds/{_GUILD_ID}/channels":
+            return httpx.Response(200, json=channels_list)
+        if request.method == "PATCH" and path == "/api/v10/channels/owner-cat":
+            return httpx.Response(200, json={"ok": True})
+        if request.method == "POST" and path == f"/api/v10/guilds/{_GUILD_ID}/channels":
+            import json as _json
+            body = _json.loads(request.content)
+            assert body["parent_id"] == "owner-cat"
+            assert body["name"] == "green"
+            return httpx.Response(200, json={"id": "new-green-chan", **body})
+        raise AssertionError(f"unexpected call: {request.method} {path}")
+
+    async def go():
+        async with _mock_client(handler) as client:
+            return await discord_bot.ensure_team_channels(http_client=client)
+
+    result = _run(go())
+    assert result["ok"] is True
+    assert result["created"] == ["GREEN"]
+    assert _team_channel_rows(db_path)["GREEN"] == "new-green-chan"
+
+
+def test_ensure_team_channels_ambiguous_match_touches_nothing(db_path):
+    """Two channels in the category both normalize to "red" -- this
+    function must refuse to guess: no create, no overwrite PATCH for
+    RED, and its stored channel_id (none yet) is left alone. The team is
+    reported in the `ambiguous` bucket with both candidate names.
+    """
+    _enable_team_channels(db_path)
+    _set_team_role_file(db_path, "RED", "role-red")
+
+    channels_list = [
+        {"id": "owner-cat", "type": discord_bot._CHANNEL_TYPE_CATEGORY, "name": "Teams", "parent_id": None},
+        {"id": "red-chan-1", "type": discord_bot._CHANNEL_TYPE_TEXT, "name": "red🟥", "parent_id": "owner-cat"},
+        {"id": "red-chan-2", "type": discord_bot._CHANNEL_TYPE_TEXT, "name": "Red", "parent_id": "owner-cat"},
+    ]
+    touched_channel_ids = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method != "DELETE"
+        path = request.url.path
+        if request.method == "GET" and path == "/api/v10/users/@me":
+            return httpx.Response(200, json={"id": _BOT_USER_ID})
+        if request.method == "GET" and path == f"/api/v10/guilds/{_GUILD_ID}/channels":
+            return httpx.Response(200, json=channels_list)
+        if request.method == "PATCH" and path == "/api/v10/channels/owner-cat":
+            return httpx.Response(200, json={"ok": True})
+        if request.method == "PATCH" and path in ("/api/v10/channels/red-chan-1", "/api/v10/channels/red-chan-2"):
+            touched_channel_ids.append(path)
+            raise AssertionError("must not edit either ambiguous candidate")
+        if request.method == "POST" and path == f"/api/v10/guilds/{_GUILD_ID}/channels":
+            raise AssertionError("must not create when the match is ambiguous")
+        raise AssertionError(f"unexpected call: {request.method} {path}")
+
+    async def go():
+        async with _mock_client(handler) as client:
+            return await discord_bot.ensure_team_channels(http_client=client)
+
+    result = _run(go())
+    assert result["ok"] is True
+    assert not touched_channel_ids
+    assert result["created"] == []
+    assert result["adopted"] == []
+    assert result["ambiguous"] == [{"team": "RED", "candidates": ["Red", "red🟥"]}]
+    assert _team_channel_rows(db_path)["RED"] is None
+
+
+def test_ensure_team_channels_stored_id_wins_even_if_renamed(db_path):
+    """RED's tracked channel_id still exists in the guild, but an
+    operator renamed it to something that no longer matches "red" at
+    all -- step 1 of the adoption order (this module's own docstring)
+    must use it anyway, by id, and never go looking for a name match.
+    """
+    _enable_team_channels(db_path)
+    _set_team_role_file(db_path, "RED", "role-red")
+    _set_team_channel_file(db_path, "RED", "red-chan-id")
+    _set_team_category_id_file(db_path, "owner-cat")
+
+    channels_list = [
+        {"id": "owner-cat", "type": discord_bot._CHANNEL_TYPE_CATEGORY, "name": "Teams", "parent_id": None},
+        {"id": "red-chan-id", "type": discord_bot._CHANNEL_TYPE_TEXT, "name": "totally-renamed-channel", "parent_id": "owner-cat"},
+    ]
+    patched = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method != "DELETE"
+        path = request.url.path
+        if request.method == "GET" and path == "/api/v10/users/@me":
+            return httpx.Response(200, json={"id": _BOT_USER_ID})
+        if request.method == "GET" and path == f"/api/v10/guilds/{_GUILD_ID}/channels":
+            return httpx.Response(200, json=channels_list)
+        if request.method == "PATCH":
+            import json as _json
+            patched[path] = _json.loads(request.content)
+            return httpx.Response(200, json={"ok": True})
+        if request.method == "POST":
+            raise AssertionError("no create expected -- the stored id is still valid")
+        raise AssertionError(f"unexpected call: {request.method} {path}")
+
+    async def go():
+        async with _mock_client(handler) as client:
+            return await discord_bot.ensure_team_channels(http_client=client)
+
+    result = _run(go())
+    assert result["ok"] is True
+    assert result["unchanged"] == ["RED"]
+    assert _team_channel_rows(db_path)["RED"] == "red-chan-id"
+    assert "name" not in patched["/api/v10/channels/red-chan-id"]

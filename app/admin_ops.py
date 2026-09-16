@@ -2196,6 +2196,106 @@ async def admin_discord_roles_reconcile(request: Request):
     return JSONResponse(result)
 
 
+@router.post("/api/admin/discord/team-channel")
+async def admin_discord_team_channel_set(request: Request):
+    """Hand-pick one team's Discord channel -- the admin's own way out
+    of app/discord_bot.py's ensure_team_channels() `ambiguous` bucket:
+    when more than one channel in the configured category normalizes
+    (see that module's _normalize_channel_name()) to the same team name
+    -- e.g. an owner's server has both `red-old` and `red🟥` -- that
+    function refuses to guess, touches neither channel, and reports the
+    team here instead. This route is the deliberate, one-time human
+    judgment call that unblocks it.
+
+    `channel_id` (a Discord snowflake string) is validated against a
+    FRESH GET of the live guild's own channel list (the same call
+    ensure_team_channels() itself makes) -- it must both exist and be a
+    text channel (type 0, discord_bot._CHANNEL_TYPE_TEXT); a category, a
+    voice channel, or an id that doesn't exist at all is rejected with a
+    clear message rather than silently stored as a value the next ensure
+    run could never actually use. `channel_id: null` clears the mapping
+    instead -- no live check needed, since clearing can never be wrong --
+    letting an operator undo a bad pick or fall back to ensure's own
+    adopt-or-create logic on the next run.
+
+    Requires team channels to actually be configured (same
+    discord_bot._channels_ready() precondition ensure_team_channels()
+    itself is gated on -- roles_enabled, a bot token, a guild id, AND
+    team_channels_enabled) before attempting the live lookup: there is no
+    guild to check a channel id against otherwise. Clearing a mapping
+    (channel_id: null) is exempt from this check -- forgetting a stored
+    id is always safe, configured or not.
+
+    Writes straight into discord_team_role.channel_id -- the exact same
+    column _upsert_team_channel() (app/discord_bot.py) writes -- so nothing
+    about the next ensure_team_channels() run needs to know whether a
+    given team's channel id came from that function's own adoption logic
+    or from an admin's deliberate pick here; a still-valid stored id is
+    step one of that function's own adoption order either way (see that
+    function's own docstring), and role_id is left completely untouched.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    team = (body.get("team") or "").strip()
+    if team not in discord_bot._TEAM_COLORS:
+        return JSONResponse({"error": "unknown team"}, status_code=400)
+    if "channel_id" not in body:
+        return JSONResponse({"error": "channel_id is required (or null to clear)"}, status_code=400)
+    channel_id = body.get("channel_id")
+    if channel_id is not None:
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            return JSONResponse({"error": "channel_id must be a string, or null to clear"}, status_code=400)
+        channel_id = channel_id.strip()
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        if channel_id is not None:
+            cfg = discord_notify.load_discord_config(conn)
+            if not discord_bot._channels_ready(cfg):
+                return JSONResponse(
+                    {"error": "team channels are not enabled or not fully configured"}, status_code=400,
+                )
+            guild_id = cfg["guild_id"]
+            try:
+                channels = await discord_bot._list_guild_channels(guild_id)
+            except discord_bot.DiscordAPIError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            match = next((c for c in channels if c.get("id") == channel_id), None)
+            if match is None:
+                return JSONResponse({"error": "no channel with that id in this guild"}, status_code=400)
+            if match.get("type") != discord_bot._CHANNEL_TYPE_TEXT:
+                return JSONResponse({"error": "that channel is not a text channel"}, status_code=400)
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO discord_team_role(team, role_id, channel_id, updated_at) VALUES (?, '', ?, ?) "
+            "ON CONFLICT(team) DO UPDATE SET channel_id = excluded.channel_id, updated_at = excluded.updated_at",
+            (team, channel_id, now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_team_channel_set",
+            detail=f"team={team} channel_id={channel_id}", now=now,
+        )
+        conn.execute("COMMIT")
+        row = conn.execute(
+            "SELECT team, role_id, channel_id, updated_at FROM discord_team_role WHERE team = ?", (team,)
+        ).fetchone()
+    finally:
+        conn.close()
+    log.info("admin: discord team-channel set (team=%s channel_id=%s)", team, channel_id)
+    return JSONResponse({"team_role": dict(row)})
+
+
 @router.post("/api/admin/month/freeze")
 async def admin_month_freeze(request: Request):
     """Freeze or re-freeze one month's result.

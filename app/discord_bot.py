@@ -41,6 +41,29 @@ players holding that team's role. This is still identity-tier, same as
 the role itself -- a channel's membership list is exactly "everyone
 holding this team's role," nothing about location.
 
+ADOPTION, NOT JUST CREATION: the first version of this feature only
+ever matched a category named EXACTLY discord_config.team_category_name
+and a channel named EXACTLY the team name lowercased -- fine for a
+guild this bot set up from nothing, wrong for the common case of an
+owner who already ran their server by hand. One real guild had
+`[Team Chat]` (not "Teams") holding `red🟥`, `orange🟧`, `yellow🟨`,
+`blue🟦`, `purple🟪`, `pink🩷` (no green at all, and every name carried
+an emoji this bot's exact-string match could never see past) -- the old
+code found none of that, decided nothing existed yet, and created a
+second, empty, parallel "Teams" category with all seven channels
+duplicated. _normalize_channel_name() below (lowercase, strip
+everything but [a-z0-9]) is the fix: `red🟥` and `Team-Red!` both
+normalize to a name this bot CAN match against a team's own name or
+discord_config.team_category_name, so adopting what an operator already
+built is the normal path through _ensure_category()/
+_ensure_team_channel() below, and creating a brand new channel is only
+the last-resort fallback when nothing in the category matches at all.
+An operator's own naming (emoji included) is never touched -- see
+_ensure_team_channel()'s own docstring for why an adopted channel is
+never renamed, and for the `ambiguous` bucket that refuses to guess (and
+touches nothing) when two channels in the category normalize to the
+same team name.
+
 CONFIG: DISCORD_BOT_TOKEN (app/config.py's discord_bot_token) is a
 SECRET, held in the environment only -- never the database, never
 returned by any route, never logged -- the exact same treatment
@@ -95,6 +118,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 
 import httpx
@@ -542,6 +566,26 @@ def _team_channel_overwrites(guild_id: str, role_id: str, bot_user_id: str) -> l
     ]
 
 
+def _normalize_channel_name(name: str) -> str:
+    """Lowercase, then strip everything that isn't `[a-z0-9]` -- so
+    `red🟥` and `Team-Red!` both become `red`/`teamred`, matchable
+    against a plain team name or discord_config.team_category_name
+    regardless of an operator's own emoji, punctuation, or capitalization
+    choices in Discord itself. See this module's own docstring's
+    ADOPTION section for why this exists: the previous exact-string
+    match could never see past a single emoji, and treated every
+    hand-decorated channel as not existing at all.
+
+    Deliberately ASCII-only (`[a-z0-9]`, not a unicode-aware `\\w`) --
+    this only ever needs to compare against team names and
+    team_category_name, both of which are plain ASCII in this codebase,
+    so anything outside that range (emoji, accented letters, whatever)
+    is exactly the kind of decoration this should strip, never a
+    character this needs to preserve or fold case-insensitively.
+    """
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
 async def _ensure_category(
     guild_id: str,
     category_name: str,
@@ -552,11 +596,13 @@ async def _ensure_category(
     http_client: httpx.AsyncClient | None = None,
 ) -> str:
     """Ensure the one shared team-channel category exists, returning its
-    id. Same three-tier "id, then exact name, then create" order
+    id. Same three-tier "id, then name, then create" order
     ensure_team_roles() above already uses for a team role: the stored
-    id is tried first (still present in `channels`?), then an exact
-    name match (an operator, or a past run before the id was recorded,
-    may already have one), and only then is a new category created.
+    id is tried first (still present in `channels`?), then a NORMALIZED
+    name match (see _normalize_channel_name() above -- an operator's
+    `[Team Chat]` matches a configured "Team Chat" the same as it would
+    match "team chat", and a past run before the id was recorded may
+    already have one too), and only then is a new category created.
     Either of the first two branches re-asserts this category's full
     overwrite list with a PATCH (see _set_channel_overwrites()'s own
     docstring for why that's a full replace, not a diff) -- a category
@@ -568,8 +614,9 @@ async def _ensure_category(
     if stored_category_id and stored_category_id in categories_by_id:
         await _set_channel_overwrites(stored_category_id, overwrites, http_client=http_client)
         return stored_category_id
+    target = _normalize_channel_name(category_name)
     for c in channels:
-        if c.get("type") == _CHANNEL_TYPE_CATEGORY and c.get("name") == category_name:
+        if c.get("type") == _CHANNEL_TYPE_CATEGORY and _normalize_channel_name(c.get("name") or "") == target:
             await _set_channel_overwrites(c["id"], overwrites, http_client=http_client)
             return c["id"]
     created = await _create_guild_channel(
@@ -589,15 +636,43 @@ async def _ensure_team_channel(
     channels: list[dict],
     *,
     http_client: httpx.AsyncClient | None = None,
-) -> tuple[str, str]:
+) -> tuple[str | None, str, list[str] | None]:
     """Ensure `team`'s private text channel exists inside `category_id`,
-    returning (channel_id, bucket) where bucket is one of "created",
-    "recreated", "reused", "unchanged" -- the exact same four buckets,
-    same meanings, ensure_team_roles() above returns for a role. Same
-    "id, then exact name (scoped to THIS category), then create" order
-    _ensure_category() above uses; the name match is scoped to
-    `category_id` specifically so a same-named text channel living
-    anywhere else in the guild is never mistaken for this team's own.
+    returning (channel_id, bucket, candidate_names). `channel_id` is
+    None only for bucket "ambiguous" (see below); `candidate_names` is
+    non-None only for that same bucket. Bucket is one of "unchanged",
+    "adopted", "created", "recreated", or "ambiguous" -- see this
+    module's own docstring's ADOPTION section for why adopting an
+    existing channel is the normal path here, creating a new one the
+    last resort.
+
+    Adoption order, checked in this exact sequence:
+
+      1. `stored_channel_id` (discord_team_role.channel_id, from a past
+         run or an admin's own POST /api/admin/discord/team-channel) is
+         still a real channel in `channels` -> use it AS-IS. Its own
+         overwrites are still reasserted (see _set_channel_overwrites()'s
+         own docstring for why that's an ongoing repair, not a one-time
+         set), but its NAME is never touched -- an operator's own
+         `red🟥` must survive forever once this bot has adopted it.
+         Bucket "unchanged".
+      2. No usable stored id -- look at every text channel inside
+         `category_id` whose _normalize_channel_name() equals `team`'s
+         own name lowercased.
+           - Exactly one match -> adopt it (same "use as-is, reassert
+             overwrites, never rename" treatment as step 1) and record
+             its id. Bucket "adopted".
+           - More than one match -> this function CANNOT guess which one
+             is `team`'s -- no create, no overwrite PATCH, channel_id
+             untouched in the database. Bucket "ambiguous", with every
+             matching channel's own (real, un-normalized) name returned
+             so an admin can pick one by hand.
+      3. No match at all -> create a brand new text channel named
+         `team`'s name lowercased (plain, no emoji -- there is nothing
+         to adopt the styling of). Bucket "recreated" when
+         `stored_channel_id` was set (a previously tracked channel is
+         gone and no same-named replacement was found either), else
+         "created".
     """
     name = team.lower()
     overwrites = _team_channel_overwrites(guild_id, role_id, bot_user_id)
@@ -605,22 +680,26 @@ async def _ensure_team_channel(
 
     if stored_channel_id and stored_channel_id in channels_by_id:
         await _set_channel_overwrites(stored_channel_id, overwrites, http_client=http_client)
-        return stored_channel_id, "unchanged"
+        return stored_channel_id, "unchanged", None
 
-    for c in channels:
-        if (
-            c.get("type") == _CHANNEL_TYPE_TEXT
-            and c.get("name") == name
-            and c.get("parent_id") == category_id
-        ):
-            await _set_channel_overwrites(c["id"], overwrites, http_client=http_client)
-            return c["id"], ("recreated" if stored_channel_id else "reused")
+    candidates = [
+        c for c in channels
+        if c.get("type") == _CHANNEL_TYPE_TEXT
+        and c.get("parent_id") == category_id
+        and _normalize_channel_name(c.get("name") or "") == name
+    ]
+    if len(candidates) == 1:
+        chan = candidates[0]
+        await _set_channel_overwrites(chan["id"], overwrites, http_client=http_client)
+        return chan["id"], "adopted", None
+    if len(candidates) > 1:
+        return None, "ambiguous", sorted(c.get("name") or "" for c in candidates)
 
     created = await _create_guild_channel(
         guild_id, name=name, channel_type=_CHANNEL_TYPE_TEXT, parent_id=category_id,
         permission_overwrites=overwrites, http_client=http_client,
     )
-    return created["id"], ("recreated" if stored_channel_id else "created")
+    return created["id"], ("recreated" if stored_channel_id else "created"), None
 
 
 async def _upsert_team_role(team: str, role_id: str, now: int) -> None:
@@ -768,14 +847,18 @@ async def ensure_team_channels(*, http_client: httpx.AsyncClient | None = None) 
     is nothing to gate a channel on until that role exists.
 
     ONLY EVER touches: the one category named
-    discord_config.team_category_name (found by its stored id, else by
-    an exact name match, else created -- see _ensure_category()), and
+    discord_config.team_category_name (found by its stored id, else by a
+    NORMALIZED name match, else created -- see _ensure_category()), and
     the channels already recorded in discord_team_role.channel_id, or,
-    for a team with no recorded channel id yet, a channel found by an
-    exact name match (the team name lowercased) SCOPED to that one
-    category (see _ensure_team_channel()). No other channel or category
-    in the guild is ever read for a match, modified, or -- see below --
-    deleted.
+    for a team with no usable recorded channel id, a channel found by a
+    normalized name match (see _normalize_channel_name()) SCOPED to that
+    one category (see _ensure_team_channel()). No other channel or
+    category in the guild is ever read for a match, modified, or -- see
+    below -- deleted. A team whose normalized match is AMBIGUOUS (more
+    than one channel in the category normalizes to its name) is skipped
+    entirely for the rest of this function's work -- no create, no
+    overwrite PATCH, its stored channel_id (if any) left exactly as it
+    was -- see _ensure_team_channel()'s own docstring.
 
     Permission overwrites are the full, authoritative list on every
     single call, both on create and reasserted with a whole-array PATCH
@@ -785,27 +868,40 @@ async def ensure_team_channels(*, http_client: httpx.AsyncClient | None = None) 
     Discord itself (an operator removing the @everyone deny, say) is
     corrected on the very next run, the same "state lives in Discord,
     this app is just the enforcer" philosophy sync_member() above already
-    applies to role membership.
+    applies to role membership. This applies EQUALLY to an adopted
+    channel as to one this bot created itself -- adopting an operator's
+    own, previously public `red🟥` necessarily makes it team-only from
+    that point on, the same as any other channel this function manages;
+    that is the intended behaviour of turning a channel into one of
+    Herald's team channels at all, not a side effect to work around.
 
-    NEVER deletes a channel, even for a team that has disappeared from
-    _TEAM_COLORS entirely -- that channel's message history belongs to
-    the players who used it, not to this app to discard. A team no
-    longer in _TEAM_COLORS is simply not iterated below; its channel and
+    NEVER deletes a channel, and NEVER renames one -- not a channel this
+    function creates fresh (always named the team's own plain lowercase
+    name, see _ensure_team_channel()), and especially not one it adopts:
+    an operator's own `red🟥`/`Team-Red!` naming survives forever once
+    adopted, exactly as it was. A team that has disappeared from
+    _TEAM_COLORS entirely is simply not iterated below; its channel and
     stored channel_id are left exactly as they are, forever, until a
     human deletes the channel by hand.
 
     Returns {"ok": True, "created": [...], "recreated": [...],
-    "reused": [...], "unchanged": [...]} (team names, same four buckets
-    and meanings ensure_team_roles() returns), or {"ok": False,
-    "reason": ...} -- with NO API call made at all when this feature
-    isn't configured (_channels_ready() False), or with the specific
-    Discord call's own failure message (see _check_channel_ok() for the
-    403-names-a-permission case) when one does fail partway through.
-    Every failure is caught and returned as a reason here rather than
-    left to raise DiscordAPIError out of this function: an operator
-    clicking the ensure button must always get an answer, never a
-    crashed request, even when Herald's own permissions in the guild are
-    wrong.
+    "reused": [...], "adopted": [...], "unchanged": [...],
+    "ambiguous": [...]} (team names in every bucket except "ambiguous",
+    which holds {"team": ..., "candidates": [channel name, ...]} dicts --
+    see _ensure_team_channel()'s own docstring for what puts a team in
+    each bucket; "reused" is never populated by this function -- kept
+    here only for the same bucket-name shape ensure_team_roles() returns
+    -- since a normalized name match is now always reported as
+    "adopted" regardless of whether a stale stored id preceded it), or
+    {"ok": False, "reason": ...} -- with NO API call made at all when
+    this feature isn't configured (_channels_ready() False), or with the
+    specific Discord call's own failure message (see _check_channel_ok()
+    for the 403-names-a-permission case) when one does fail partway
+    through. Every failure is caught and returned as a reason here
+    rather than left to raise DiscordAPIError out of this function: an
+    operator clicking the ensure button must always get an answer, never
+    a crashed request, even when Herald's own permissions in the guild
+    are wrong.
     """
     conn = connect()
     try:
@@ -826,7 +922,9 @@ async def ensure_team_channels(*, http_client: httpx.AsyncClient | None = None) 
     created: list[str] = []
     recreated: list[str] = []
     reused: list[str] = []
+    adopted: list[str] = []
     unchanged: list[str] = []
+    ambiguous: list[dict] = []
 
     try:
         bot_user_id = await _cached_bot_user_id(http_client=http_client)
@@ -844,17 +942,26 @@ async def ensure_team_channels(*, http_client: httpx.AsyncClient | None = None) 
                 continue  # no team role yet -- ensure_team_roles() hasn't created/adopted one
             stored_channel_id = row.get("channel_id") or None
 
-            channel_id, bucket = await _ensure_team_channel(
+            channel_id, bucket, candidates = await _ensure_team_channel(
                 guild_id, team, row["role_id"], category_id, stored_channel_id, bot_user_id, channels,
                 http_client=http_client,
             )
+            if bucket == "ambiguous":
+                ambiguous.append({"team": team, "candidates": candidates})
+                continue
             if channel_id != stored_channel_id:
                 await _upsert_team_channel(team, channel_id, now)
-            {"created": created, "recreated": recreated, "reused": reused, "unchanged": unchanged}[bucket].append(team)
+            {
+                "created": created, "recreated": recreated, "reused": reused,
+                "adopted": adopted, "unchanged": unchanged,
+            }[bucket].append(team)
     except DiscordAPIError as e:
         return {"ok": False, "reason": str(e)}
 
-    return {"ok": True, "created": created, "recreated": recreated, "reused": reused, "unchanged": unchanged}
+    return {
+        "ok": True, "created": created, "recreated": recreated, "reused": reused,
+        "adopted": adopted, "unchanged": unchanged, "ambiguous": ambiguous,
+    }
 
 
 async def sync_member(

@@ -2096,9 +2096,14 @@ function renderDiscordForm(cfg) {
   document.getElementById('dc-team-category-name').value = cfg.team_category_name || '';
 }
 
-// Team roles (app/discord_bot.py) -- discord_team_role rows, purely
-// informational here (an operator repairs them with the buttons below,
-// never edits a role id or channel id by hand).
+// Team roles (app/discord_bot.py) -- discord_team_role rows. role_id
+// stays informational (repaired only by the buttons below); channel_id
+// is now editable per row, POSTing to /api/admin/discord/team-channel --
+// this is the operator's own way to resolve one of
+// ensure_team_channels()'s `ambiguous` entries (see
+// renderAmbiguousChannels() below) by hand-picking the right channel id,
+// or to clear a bad pick back to empty (which lets the next "Create /
+// repair" run adopt or create one on its own again).
 function renderTeamRoles(teamRoles) {
   const host = document.getElementById('dc-team-roles');
   host.replaceChildren();
@@ -2111,12 +2116,50 @@ function renderTeamRoles(teamRoles) {
     const info = el('div', { className: 'adm-row-info' });
     info.appendChild(el('strong', { className: 'adm-mono', text: r.team }));
     info.appendChild(el('span', { className: 'adm-mono', text: r.role_id }));
-    info.appendChild(el('span', {
-      className: 'adm-mono',
-      text: r.channel_id ? r.channel_id : 'no channel yet',
-    }));
     row.appendChild(info);
+
+    const form = el('div', { className: 'adm-row-actions' });
+    const channelInput = el('input', { type: 'text', placeholder: 'channel id (blank = none)' });
+    channelInput.className = 'adm-mono';
+    channelInput.autocomplete = 'off';
+    channelInput.value = r.channel_id || '';
+    form.appendChild(channelInput);
+    const rowOut = el('span', { className: 'adm-hint' });
+    form.appendChild(btn('Save', 'adm-btn-quiet', async (b) => {
+      b.disabled = true;
+      rowOut.textContent = '';
+      try {
+        const value = channelInput.value.trim();
+        await post('/api/admin/discord/team-channel', { team: r.team, channel_id: value ? value : null });
+        await loadDiscord();
+      } catch (e) {
+        rowOut.textContent = 'Failed: ' + e.message;
+      }
+      b.disabled = false;
+    }));
+    form.appendChild(rowOut);
+    row.appendChild(form);
+
     host.appendChild(row);
+  });
+}
+
+// ensure_team_channels()'s `ambiguous` bucket (app/discord_bot.py): a
+// team where more than one channel in the configured category
+// normalizes to its name -- that function refuses to guess, so this
+// just lists the candidate (real, un-normalized) channel names and
+// points at the per-row channel id field above, the only way to
+// actually resolve one. Rendered fresh after every "Create / repair"
+// click (see ensureDiscordRoles() below) -- purely informational,
+// cleared to empty (nothing shown) once ensure reports no ambiguous
+// teams at all, rather than left showing a stale prior result.
+function renderAmbiguousChannels(ambiguous) {
+  const host = document.getElementById('dc-roles-ambiguous');
+  host.replaceChildren();
+  if (!ambiguous || !ambiguous.length) return;
+  host.appendChild(el('p', { className: 'adm-hint adm-status-bad', text: 'Could not tell which channel is which for these teams -- pick one by hand in the channel id field above, then Save:' }));
+  ambiguous.forEach((a) => {
+    host.appendChild(el('p', { className: 'adm-hint', text: a.team + ': ' + a.candidates.join(', ') }));
   });
 }
 
@@ -2328,6 +2371,7 @@ async function retryDiscordOutboxRow(b, id) {
 async function ensureDiscordRoles(b) {
   const out = document.getElementById('dc-roles-result');
   out.replaceChildren();
+  document.getElementById('dc-roles-ambiguous').replaceChildren();
   b.disabled = true;
   try {
     const r = await post('/api/admin/discord/roles/ensure', {});
@@ -2343,7 +2387,11 @@ async function ensureDiscordRoles(b) {
     if (c && c.ok) {
       text += ' Channels -- created: ' + (c.created.join(', ') || 'none')
         + '. Recreated: ' + (c.recreated.join(', ') || 'none')
-        + '. Reused: ' + (c.reused.join(', ') || 'none') + '.';
+        + '. Adopted: ' + (c.adopted.join(', ') || 'none') + '.';
+      // "ambiguous" gets its own block below rather than folded into
+      // this one-line summary -- each entry carries candidate channel
+      // names an operator needs to actually read, not just a team list.
+      renderAmbiguousChannels(c.ambiguous);
     } else if (c) {
       text += ' Channels: ' + (c.reason || 'not configured.');
     }
