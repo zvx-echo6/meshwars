@@ -2251,18 +2251,34 @@ CREATE TABLE IF NOT EXISTS discord_config (
     username                   TEXT NOT NULL DEFAULT '',
     team_emoji                 TEXT NOT NULL DEFAULT '',
     announce_month_honors      INTEGER NOT NULL DEFAULT 1,
-    -- Per-kind gates for the two announcement kinds added alongside
-    -- season closes (app/mc_scoring.py's maybe_roll_season()) and
-    -- notable place activations (app/place_scoring.py's credit_places())
-    -- -- same "separate from `enabled`, on by default" shape
-    -- announce_month_honors already established: an operator who never
-    -- visits /api/admin/discord to turn a new kind off keeps getting it,
-    -- and either can be switched off without touching the webhook or any
-    -- other kind. See MIGRATIONS below -- discord_config already existed
-    -- in every deployment before these two columns did, so an ALTER is
-    -- also required there, not just here.
+    -- Per-kind gate for season closes (app/mc_scoring.py's
+    -- maybe_roll_season()) -- same "separate from `enabled`, on by
+    -- default" shape announce_month_honors already established: an
+    -- operator who never visits /api/admin/discord to turn a new kind
+    -- off keeps getting it, and either can be switched off without
+    -- touching the webhook or any other kind. See MIGRATIONS below --
+    -- discord_config already existed in every deployment before this
+    -- column did, so an ALTER is also required there, not just here.
     announce_season_close      INTEGER NOT NULL DEFAULT 1,
+    -- SUPERSEDED 2026-09-16 by announce_weekly_recap below: this used to
+    -- gate a per-activation "notable place activation" announcement
+    -- (app/place_scoring.py's credit_places(), app/discord_notify.py's
+    -- since-removed build_place_activation_embed()/
+    -- place_activation_notability()), retired for being too frequent
+    -- (~373/month) and for announcing a player's location within minutes
+    -- of them reaching it -- see credit_places()'s own comment on the
+    -- removal. Column LEFT IN PLACE, per this codebase's "never drop a
+    -- column" rule (place_activation.points_reason's own comment states
+    -- the same rule for a different table) -- but nothing reads it any
+    -- more; app/discord_notify.py's load_discord_config() no longer even
+    -- selects it, and no admin route accepts or returns it.
     announce_place_activation  INTEGER NOT NULL DEFAULT 1,
+    -- The Sunday weekly recap (app/discord_notify.py's
+    -- weekly_recap_provider(), a TIME_DRIVEN_PROVIDERS entry) that
+    -- replaced announce_place_activation's old per-event announcement
+    -- above -- same independent, on-by-default, separate-from-`enabled`
+    -- shape as every other per-kind gate in this table.
+    announce_weekly_recap      INTEGER NOT NULL DEFAULT 1,
     updated_at                 INTEGER NOT NULL DEFAULT 0
 );
 
@@ -2849,6 +2865,13 @@ MIGRATIONS = [
     # existing announcement kind already has.
     "ALTER TABLE discord_config ADD COLUMN announce_season_close INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE discord_config ADD COLUMN announce_place_activation INTEGER NOT NULL DEFAULT 1",
+    # announce_weekly_recap: same "added after discord_config already
+    # shipped, so an ALTER is required" situation as the two columns just
+    # above -- see this column's own comment on the CREATE TABLE above
+    # for what it replaced (announce_place_activation's old per-event
+    # announcement) and why. Default 1 (on), same "opt-out, not opt-in"
+    # reasoning as every other announcement kind.
+    "ALTER TABLE discord_config ADD COLUMN announce_weekly_recap INTEGER NOT NULL DEFAULT 1",
 ]
 
 PRAGMAS = [

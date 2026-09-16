@@ -1756,17 +1756,23 @@ async def admin_discord(request: Request):
 @router.post("/api/admin/discord")
 async def admin_discord_update(request: Request):
     """Update the Discord announcement config singleton. Takes effect
-    on the very next freeze/roll/activation (build_month_honors_embed()/
-    build_season_close_embed()/build_place_activation_embed(), all via
-    enqueue()) or drain cycle -- all read discord_config fresh every
+    on the very next freeze/roll/weekly-recap due-check
+    (build_month_honors_embed()/build_season_close_embed()/
+    build_weekly_recap_embed(), all via enqueue()) or drain cycle -- all
+    read discord_config fresh every
     time (load_discord_config), never settings.py.
 
     announce_month_honors, announce_season_close, and
-    announce_place_activation are three INDEPENDENT per-kind gates,
-    same plain bool(body.get(...)) shape as `enabled` itself -- unlike
+    announce_weekly_recap are three INDEPENDENT per-kind gates, same
+    plain bool(body.get(...)) shape as `enabled` itself -- unlike
     webhook_url below, there is no "omit to keep the current value"
     special case for any of them, so the admin form always submits all
-    three explicitly.
+    three explicitly. (announce_place_activation is no longer one of
+    them: the per-event place announcement it gated was retired
+    2026-09-16 in favour of announce_weekly_recap's Sunday recap -- see
+    that column's own comment in app/db.py. The column itself still
+    exists, per this codebase's "never drop a column" rule, but this
+    route no longer reads, writes, or returns it.)
 
     webhook_url is a SECRET (see discord_config's own comment in
     app/db.py): an ABSENT or empty-string webhook_url in the body
@@ -1794,7 +1800,7 @@ async def admin_discord_update(request: Request):
     team_emoji = (body.get("team_emoji") or "").strip()
     announce_month_honors = bool(body.get("announce_month_honors"))
     announce_season_close = bool(body.get("announce_season_close"))
-    announce_place_activation = bool(body.get("announce_place_activation"))
+    announce_weekly_recap = bool(body.get("announce_weekly_recap"))
 
     now = int(time.time())
     conn = connect()
@@ -1812,7 +1818,7 @@ async def admin_discord_update(request: Request):
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "INSERT INTO discord_config(id, enabled, webhook_url, username, team_emoji, "
-            " announce_month_honors, announce_season_close, announce_place_activation, "
+            " announce_month_honors, announce_season_close, announce_weekly_recap, "
             " updated_at) "
             "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
@@ -1820,12 +1826,12 @@ async def admin_discord_update(request: Request):
             "  username = excluded.username, team_emoji = excluded.team_emoji, "
             "  announce_month_honors = excluded.announce_month_honors, "
             "  announce_season_close = excluded.announce_season_close, "
-            "  announce_place_activation = excluded.announce_place_activation, "
+            "  announce_weekly_recap = excluded.announce_weekly_recap, "
             "  updated_at = excluded.updated_at",
             (
                 int(enabled), webhook_url, username, team_emoji,
                 int(announce_month_honors), int(announce_season_close),
-                int(announce_place_activation), now,
+                int(announce_weekly_recap), now,
             ),
         )
         _log_admin_action(
@@ -1833,7 +1839,7 @@ async def admin_discord_update(request: Request):
             detail=(
                 f"enabled={enabled} announce_month_honors={announce_month_honors} "
                 f"announce_season_close={announce_season_close} "
-                f"announce_place_activation={announce_place_activation}"
+                f"announce_weekly_recap={announce_weekly_recap}"
             ), now=now,
         )
         conn.execute("COMMIT")

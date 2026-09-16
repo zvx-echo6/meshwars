@@ -31,8 +31,13 @@ credential, so a snippet of it is included to make a bad announcement
 diagnosable. See _post()'s own docstring for the line between the two.
 
 Configuration (enabled, webhook_url, username, team_emoji,
-announce_month_honors, announce_season_close, announce_place_activation)
-lives in the DB, not settings.py directly --
+announce_month_honors, announce_season_close, announce_weekly_recap)
+lives in the DB, not settings.py directly -- (announce_place_activation
+is still a real column, kept per this codebase's "never drop a column"
+rule, but is no longer read anywhere: the per-event place announcement
+it gated was retired 2026-09-16 in favour of the weekly recap's
+Exploration section -- see credit_places()'s own comment in
+app/place_scoring.py and weekly_recap_provider()'s docstring below.)
 app/db.py's discord_config singleton, read fresh by
 load_discord_config() below every time it is needed, the same
 DB-backed, admin-editable runtime config app/freqmapper_ingest.py's
@@ -65,6 +70,8 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -314,16 +321,23 @@ def _total_embed_chars(embeds: list) -> int:
 def load_discord_config(conn) -> dict:
     """Fresh, uncached read of the discord_config singleton (app/db.py)
     -- enabled, webhook_url, username, team_emoji, announce_month_honors,
-    announce_season_close, announce_place_activation, updated_at. Read
-    on every enqueue() call, every drain cycle (_drain_once()), by
+    announce_season_close, announce_weekly_recap, updated_at. Read on
+    every enqueue() call, every drain cycle (_drain_once()), by
     build_month_honors_embed()/build_season_close_embed()/
-    build_place_activation_embed(), and by every admin route that needs
-    the current values (app/admin_ops.py) -- never cached anywhere in
-    the process. Exactly the pattern app/freqmapper_ingest.py's
+    build_weekly_recap_embed(), and by every admin route that needs the
+    current values (app/admin_ops.py) -- never cached anywhere in the
+    process. Exactly the pattern app/freqmapper_ingest.py's
     load_freqmapper_config() uses for freqmapper_config, for the same
     reason: an admin edit through /api/admin/discord must take effect on
     the very next freeze/roll/activation or drain cycle, not after a
     restart.
+
+    Deliberately does NOT select discord_config.announce_place_activation
+    any more: that column still exists (this codebase never drops a
+    column -- see the CREATE TABLE's own comment in app/db.py) but the
+    kind it gated was retired 2026-09-16, so nothing reads it going
+    forward; a caller that still wants to see its stored value can query
+    the column directly.
 
     Falls back to config.py's original settings if the row is somehow
     missing (a database whose migrations have not run yet) rather than
@@ -336,15 +350,15 @@ def load_discord_config(conn) -> dict:
     webhook being configured at all WAS the on/off switch before this
     table existed, so the fallback reconstructs the same state a real
     column would hold. announce_month_honors/announce_season_close/
-    announce_place_activation all default True in the fallback too --
-    the same CREATE TABLE default every one of them carries, so a
-    missing row degrades to exactly the schema's own defaults rather
-    than inventing a different answer.
+    announce_weekly_recap all default True in the fallback too -- the
+    same CREATE TABLE default every one of them carries, so a missing
+    row degrades to exactly the schema's own defaults rather than
+    inventing a different answer.
     """
     row = conn.execute(
         "SELECT enabled, webhook_url, username, team_emoji, "
         "       announce_month_honors, announce_season_close, "
-        "       announce_place_activation, updated_at "
+        "       announce_weekly_recap, updated_at "
         "  FROM discord_config WHERE id = 1"
     ).fetchone()
     if row is None:
@@ -355,14 +369,14 @@ def load_discord_config(conn) -> dict:
             "team_emoji": settings.discord_team_emoji,
             "announce_month_honors": True,
             "announce_season_close": True,
-            "announce_place_activation": True,
+            "announce_weekly_recap": True,
             "updated_at": 0,
         }
     d = dict(row)
     d["enabled"] = bool(d["enabled"])
     d["announce_month_honors"] = bool(d["announce_month_honors"])
     d["announce_season_close"] = bool(d["announce_season_close"])
-    d["announce_place_activation"] = bool(d["announce_place_activation"])
+    d["announce_weekly_recap"] = bool(d["announce_weekly_recap"])
     return d
 
 
@@ -610,12 +624,15 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> bool:
     `enabled`, so an operator can leave the webhook enabled (letting a
     manual kind="test" announcement from POST /api/admin/discord/test
     still go out) while turning off the automatic end-of-month post on
-    its own. kind="season_close" and kind="place_activation" have the
-    exact same per-kind shape, gated by announce_season_close and
-    announce_place_activation respectively -- three independent
-    on/off switches, each of which can be flipped without touching
-    `enabled` or either of the other two. No other kind is gated by any
-    of them.
+    its own. kind="season_close" and kind="weekly_recap" have the exact
+    same per-kind shape, gated by announce_season_close and
+    announce_weekly_recap respectively -- three independent on/off
+    switches, each of which can be flipped without touching `enabled` or
+    either of the other two. No other kind is gated by any of them.
+    (kind="place_activation" used to be the third -- see
+    announce_place_activation's own comment in app/db.py's CREATE
+    TABLE -- but nothing enqueues that kind any more, so this function no
+    longer branches on it.)
 
     Also a no-op when discord_channel's per-kind routing
     (resolve_discord_webhook(), against _channel_kind_candidates(kind))
@@ -641,7 +658,7 @@ def enqueue(conn, kind: str, key: str, payload: dict, now: int) -> bool:
         return False
     if kind == "season_close" and not cfg["announce_season_close"]:
         return False
-    if kind == "place_activation" and not cfg["announce_place_activation"]:
+    if kind == "weekly_recap" and not cfg["announce_weekly_recap"]:
         return False
     channels = load_discord_channels(conn)
     if resolve_discord_webhook(cfg, channels, kind) is None:
@@ -1139,134 +1156,6 @@ def build_season_close_embed(conn, protocol: str, season_row, tallies: list[dict
     }
 
 
-# ---------------------------------------------------------------------
-# Notable place activations (app/place_scoring.py's credit_places(),
-# app/db.py's place/place_activation tables).
-#
-# Live volume is ~373 activations a month across ~61 players (roughly a
-# dozen a day) -- announcing every single one would bury everything else
-# this module posts, so only a NOTABLE activation is announced at all.
-# THIS is the one, clearly-commented place all three notability rules
-# live -- add, remove, or retune a rule HERE, never by reaching into
-# _PLACE_NOTABILITY_LABELS or build_place_activation_embed() below,
-# which only render whatever this function decided:
-#
-#   1. A SUMMIT activation (place.ref_type == 'summit' -- the schema's
-#      own name for the category, not an invented label; 'park' and
-#      'landmark' are the other two ref_types and neither is notable by
-#      type alone).
-#   2. The FIRST EVER activation of this place -- no earlier
-#      place_activation row exists for this place_id (checked against
-#      every OTHER activation row for the same place, never just this
-#      week's or this player's own history).
-#   3. A NEW HIGHEST-ELEVATION activation for the whole deployment --
-#      this place's elevation_ft exceeds every OTHER activated place's
-#      elevation_ft on file (place.elevation_ft is set only for
-#      summits; a place with no elevation on file can never trigger or
-#      be beaten by this rule).
-#
-# Any one of the three is enough to notify; they are not exclusive, and
-# build_place_activation_embed() below lists every rule this activation
-# actually matched.
-def place_activation_notability(conn, *, place_id: int, ref_type: str, elevation_ft, activation_id: int) -> list[str]:
-    """Which of the rules above `activation_id` (place_activation's own
-    row id, already inserted by the caller on the same connection)
-    matches, as a list of reason keys in no particular order -- empty
-    when none apply, meaning the caller must not announce this
-    activation at all. Every check here is scoped to EXCLUDE
-    `activation_id` itself (`id != ?`), since the row this function is
-    asked about already exists by the time it runs -- without that
-    exclusion, "first ever" and "highest elevation" would always see
-    themselves and never fire.
-    """
-    reasons = []
-    if ref_type == "summit":
-        reasons.append("summit")
-
-    prior = conn.execute(
-        "SELECT 1 FROM place_activation WHERE place_id = ? AND id != ? LIMIT 1",
-        (place_id, activation_id),
-    ).fetchone()
-    if prior is None:
-        reasons.append("first_ever")
-
-    if elevation_ft is not None:
-        prev_max = conn.execute(
-            "SELECT MAX(p.elevation_ft) FROM place_activation pa "
-            "  JOIN place p ON p.id = pa.place_id "
-            " WHERE pa.id != ? AND p.elevation_ft IS NOT NULL",
-            (activation_id,),
-        ).fetchone()[0]
-        if prev_max is None or elevation_ft > prev_max:
-            reasons.append("elevation_record")
-
-    return reasons
-
-
-# Human labels for place_activation_notability()'s reason keys, in a
-# FIXED display order (a summit that is also this deployment's first
-# ever activation of it always reads "Summit · First activation ever",
-# never the reverse) -- kept as one ordered list rather than a plain
-# dict so build_place_activation_embed() below never has to guess at an
-# order the set/dict iteration itself does not guarantee.
-_PLACE_NOTABILITY_LABELS = [
-    ("summit", "Summit"),
-    ("first_ever", "First activation ever"),
-    ("elevation_record", "New elevation record"),
-]
-
-
-def build_place_activation_embed(conn, protocol: str, place, player, reasons: list[str]) -> dict:
-    """One compact Discord embed for a single notable place activation
-    (app/place_scoring.py's credit_places(), called on the same
-    connection and inside the same transaction as the place_activation
-    INSERT itself -- see that call site's own comment for why). Kept
-    deliberately SHORT: this is the only announcement kind that can fire
-    several times a day (see this section's own module-level comment on
-    volume), so unlike build_month_honors_embed()/
-    build_season_close_embed() there is no multi-field breakdown here,
-    just who, which place, the team dot, and why it was notable.
-
-    `place` is a place row (id, name, ref_type, points, elevation_ft --
-    at minimum); `player` is a player row (display_name, team). `reasons`
-    is place_activation_notability()'s own return -- a non-empty list,
-    since the caller only ever builds this embed for an activation that
-    already matched at least one rule.
-    """
-    cfg = load_discord_config(conn)
-    proto_label = _PROTOCOL_NAMES.get(protocol, protocol)
-    emoji = _parse_team_emoji(cfg["team_emoji"])
-    dot = _team_dot(emoji, player["team"])
-
-    reason_line = _SEP.join(label for key, label in _PLACE_NOTABILITY_LABELS if key in reasons)
-
-    fields = [{"name": "Points", "value": f"**{_fmt_number(place['points'])}**", "inline": True}]
-    if place["elevation_ft"] is not None:
-        # Shown only when this place actually carries elevation data
-        # (summits only, today) -- a park/landmark's elevation_ft is
-        # always NULL, and a blank/zero figure here would be worse than
-        # just leaving the field out.
-        fields.append({
-            "name": "Elevation",
-            "value": f"**{_fmt_number(place['elevation_ft'])}** *ft*",
-            "inline": True,
-        })
-
-    embed = {
-        "title": f"{proto_label}: {place['name']}",
-        "description": f"{dot}{player['display_name']}{_SEP}{reason_line}",
-        "fields": fields,
-    }
-    color = _team_color(player["team"])
-    if color is not None:
-        embed["color"] = color
-
-    return {
-        "username": cfg["username"] or "MeshWars",
-        "embeds": [embed],
-    }
-
-
 async def _drain_once(*, http_client: httpx.AsyncClient | None = None) -> None:
     """One pass over the pending rows in discord_outbox -- the unit
     run_forever() repeats on its own interval, pulled out on its own so
@@ -1384,9 +1273,11 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 #
 # month_honors hangs off a real event: app/results.py's freeze_month()
 # calls enqueue() itself, inside its own write transaction, the moment a
-# month closes. Some future kinds -- a weekly recap, a per-net wrap-up
-# posted the day after a net -- have no such event; nothing else in this
-# app ever calls a function at "the day after Tuesday's net." This app
+# month closes. Some kinds -- the Sunday weekly recap (weekly_recap_
+# provider() below, this module's first real provider), a per-net
+# wrap-up posted the day after a net (still a worked example only, see
+# below) -- have no such event; nothing else in this app ever calls a
+# function at "the day after Tuesday's net." This app
 # has NO scheduler by design and must not grow one (no cron, no APScheduler,
 # no extra background task per kind) -- so instead, the ALREADY-RUNNING
 # drain loop (run_forever(), polling every discord_outbox_poll_interval_
@@ -1416,12 +1307,13 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 #   [{"kind": str, "key": str, "payload": dict}, ...]
 #
 # A provider decides for itself how many items that is. A fixed weekly
-# thing returns at most one item (usually zero: due only once a week).
-# THE REASON this is a list of PROVIDERS rather than a single static
-# registry entry: a provider can be NET-DERIVED, returning one item per
+# thing returns at most one item (usually zero: due only once a week) --
+# weekly_recap_provider() below is exactly this shape. THE REASON this is
+# a list of PROVIDERS rather than a single static registry entry: a
+# provider can instead be NET-DERIVED, returning one item per
 # currently-due row of a table that itself changes over time -- see the
 # worked example below, which this module ships the MACHINERY for but
-# implements NO real provider for yet (that is a later task).
+# implements NO real provider for yet (that remains a later task).
 #
 # "kind" is discord_outbox's routing key -- resolve_discord_webhook()
 # resolves it via _channel_kind_candidates() exactly like any other
@@ -1492,8 +1384,393 @@ async def _mark_failed(row_id: int, prior_attempts: int, error: str) -> None:
 # decision elsewhere and read only the cheap, already-decided state in
 # this function.
 #
-# Ship EMPTY: this task adds the mechanism only, no real entries.
-TIME_DRIVEN_PROVIDERS: list = []
+# weekly_recap_provider() below is a DELIBERATE, NARROW exception to the
+# "never query a large table" rule just above -- see its own docstring
+# for exactly why that is safe here: the due-check itself
+# (_weekly_recap_due()) is pure date arithmetic, so the heavy query path
+# is only ever reached on a Sunday, and even then only once per ISO week
+# (a cheap discord_outbox lookup short-circuits every later cycle that
+# same day). No other provider gets this exception without the same
+# reasoning holding for it.
+_WEEKLY_RECAP_PROTOCOL = "mc"
+
+# Cap on how many players' first-count or streak lines the Exploration/
+# Nets sections of the weekly recap list -- a busy week must never blow
+# Discord's field-value budget. "Top 5": qualifying_place_firsts()'s own
+# measured volume is ~82 qualifying firsts a MONTH (about 2 a day), so
+# even the busiest realistic week touches only a handful of distinct
+# players and this is headroom, not a truncation that fires in practice.
+_MAX_WEEKLY_RECAP_PLAYERS = 5
+
+
+def _season_id_for_ts(conn, protocol: str, ts: int) -> int | None:
+    """The mc_season row covering `ts` for `protocol`, half-open
+    [started_at, ends_at) -- the same time-based season resolution
+    app/mc_scoring.py's team_place_points() already applies from a KNOWN
+    season_id outward to its own boundary (place_activation has no
+    season_id column -- see that function's docstring, and
+    qualifying_place_firsts()'s in app/place_scoring.py, for why a place
+    credit is scoped by TIME against mc_season instead). This is the
+    same idea run in the other direction: given a timestamp with no
+    season_id yet, find which season it falls in.
+
+    Unlike app/results.py's ownership_at() -- which only checks
+    started_at against a chain of seasons it assumes are CONTIGUOUS, and
+    so never needs an ends_at bound at all -- this checks both ends of
+    the interval explicitly, because a weekly recap's window could in
+    principle land in a gap between seasons (or before the first one
+    ever started). Returns None in that case rather than guessing at the
+    nearest season.
+    """
+    row = conn.execute(
+        "SELECT id FROM mc_season WHERE protocol = ? AND started_at <= ? AND ends_at > ? "
+        "ORDER BY started_at DESC LIMIT 1",
+        (protocol, ts, ts),
+    ).fetchone()
+    return row["id"] if row is not None else None
+
+
+def _weekly_recap_due(now: int) -> tuple[str, int, int] | None:
+    """None when `now` is not Sunday in settings.checkin_net_timezone --
+    the same app-wide local clock a month (app/results.py's _tz()), a
+    net date (app/checkin.py's net_date_for_net()), and a place
+    activation's week_start (app/place_rotation.py's week_start_for_ts())
+    all already use. Otherwise, (period_key, start_ts, end_ts) for the
+    week that just ended.
+
+    The window is the SEVEN DAYS ENDING at today's local midnight --
+    last Sunday's midnight (inclusive) through today's midnight
+    (exclusive) -- built from local calendar boundaries the same way
+    app/results.py's month_bounds() builds a month, not a fixed
+    7 * 86400 offset, so a week that crosses a daylight-saving change is
+    still exactly seven calendar days, never an hour short or long.
+
+    The period key is the ISO week of TODAY (the Sunday this fires on),
+    e.g. "2026-W37". discord_outbox's own UNIQUE(kind, key) index is
+    what actually makes this "once a week": this function returns the
+    SAME key on every one of Sunday's ~2,880 thirty-second poll cycles,
+    so enqueue()'s INSERT OR IGNORE (reached via check_due_time_driven())
+    silently drops every call after the first one that actually gets
+    that far -- and a Sunday the app happened to be down for is simply
+    caught on the next poll once it is back up (subject to
+    discord_outbox_max_age_hours, same as any other announcement). No
+    separate "did we already run today" table exists to ever drift out
+    of step with that guarantee.
+    """
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    local = datetime.fromtimestamp(now, tz=tz)
+    if local.weekday() != 6:  # datetime.weekday(): Monday=0 .. Sunday=6
+        return None
+    midnight = datetime(local.year, local.month, local.day, tzinfo=tz)
+    end_ts = int(midnight.timestamp())
+    start_ts = end_ts - 7 * 86400
+    iso_year, iso_week, _ = local.isocalendar()
+    key = f"{iso_year}-W{iso_week:02d}"
+    return key, start_ts, end_ts
+
+
+def _weekly_placement_section(conn, protocol: str, start_ts: int, end_ts: int,
+                               emoji: dict[str, str]) -> str | None:
+    """"Placement changes": how many squares each team gained or lost
+    over the window, one line per team that held ground at either end of
+    it, ordered by CURRENT (end-of-window) standing -- the same order
+    build_month_honors_embed()'s own standings_text is drawn in, so a
+    reader scanning both posts sees teams in the same order.
+
+    Reuses app/results.py's ownership_at() -- the exact function
+    compute_month() itself calls to answer "who holds what right now"
+    (see that function's own docstring) -- at the window's two
+    endpoints, rather than writing a second standings query: squares
+    held at start_ts - 1 (the instant BEFORE this window opened, i.e.
+    last week's own close) versus at end_ts - 1 (this window's own
+    close, the same "end is exclusive, the close is end - 1" convention
+    compute_month() uses). Both are point-in-time snapshots every
+    existing standings page already trusts; a team's "change" is nothing
+    more than their difference, so there is no second scoring path here
+    to ever fall out of sync with the first.
+
+    Returns None when no team holds any ground at either end of the
+    window (a brand-new or reset board) -- "no standings recorded" is
+    not something a week's own Discord message needs to say.
+    """
+    from . import results
+
+    def _by_team(rows) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for r in rows:
+            counts[r["team"]] = counts.get(r["team"], 0) + 1
+        return counts
+
+    before = _by_team(results.ownership_at(conn, protocol, start_ts - 1))
+    after = _by_team(results.ownership_at(conn, protocol, end_ts - 1))
+    teams = set(before) | set(after)
+    if not teams:
+        return None
+
+    ordered = sorted(teams, key=lambda t: (-after.get(t, 0), t))
+    lines = []
+    for t in ordered:
+        delta = after.get(t, 0) - before.get(t, 0)
+        # _fmt_number() already renders a negative number with its own
+        # leading "-" (Python's own comma formatting does that natively)
+        # -- only the positive/zero case needs an explicit sign added,
+        # so a gain reads "+12" rather than a bare, easy-to-miss "12".
+        sign = "+" if delta > 0 else ""
+        lines.append(f"{_team_dot(emoji, t)}{t} **{sign}{_fmt_number(delta)}**")
+    return _join_team_field(lines, "squares this week")
+
+
+def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
+                                 start_ts: int, end_ts: int, emoji: dict[str, str]) -> str | None:
+    """"Exploration": app/place_scoring.py's qualifying_place_firsts()
+    own aggregate counts, one unattributed elevation figure, and a bare
+    per-player COUNT of firsts -- see that function's own HARD PRIVACY
+    WARNING for why a PLACE NAME never appears anywhere in this section,
+    attributed or not: only ref_type/elevation_ft (aggregated, never
+    tied to one player) and player_name/team (tied only to a COUNT) are
+    ever read off of its rows.
+
+    None when there is no active season for `protocol` covering this
+    window (season_id is None -- see _season_id_for_ts()) or no
+    qualifying activation at all inside it -- a quiet week's Exploration
+    section is simply omitted, never rendered as "0 firsts."
+    """
+    if season_id is None:
+        return None
+    from . import place_scoring
+
+    rows = place_scoring.qualifying_place_firsts(
+        conn, protocol=protocol, season_id=season_id, start_ts=start_ts, end_ts=end_ts,
+    )
+    if not rows:
+        return None
+
+    n_summits = sum(1 for r in rows if r["ref_type"] == "summit")
+    n_parks = sum(1 for r in rows if r["ref_type"] == "park")
+    lines = [
+        f"**{_fmt_number(n_summits)}** first summit{'' if n_summits == 1 else 's'} "
+        f"and **{_fmt_number(n_parks)}** first park{'' if n_parks == 1 else 's'} claimed"
+    ]
+
+    # ONE unattributed elevation figure -- deliberately no player name
+    # anywhere near it, even though every row it is drawn from has one.
+    # See this function's own docstring and qualifying_place_firsts()'s
+    # HARD PRIVACY WARNING.
+    summit_elevations = [
+        r["elevation_ft"] for r in rows
+        if r["ref_type"] == "summit" and r["elevation_ft"] is not None
+    ]
+    if summit_elevations:
+        lines.append(f"Highest new summit: **{_fmt_number(max(summit_elevations))}** *ft*")
+
+    # Per-player COUNT of firsts -- never a place name -- capped to
+    # _MAX_WEEKLY_RECAP_PLAYERS, sorted by count desc then name asc so a
+    # tie has a stable, deterministic order.
+    counts: dict[int, int] = {}
+    info: dict[int, tuple[str, str]] = {}
+    for r in rows:
+        pid = r["player_id"]
+        counts[pid] = counts.get(pid, 0) + 1
+        info[pid] = (r["player_name"], r["team"])
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], info[kv[0]][0]))
+    for pid, count in ranked[:_MAX_WEEKLY_RECAP_PLAYERS]:
+        name, team = info[pid]
+        lines.append(
+            f"{_team_dot(emoji, team)}{name}{_SEP}"
+            f"**{_fmt_number(count)}** *first{'' if count == 1 else 's'}*"
+        )
+
+    value = "\n".join(lines)
+    # Belt-and-suspenders hard cap -- the player cap above already keeps
+    # this well short in every realistic week, but this must never hand
+    # Discord an over-long field value regardless (see
+    # _MAX_FIELD_VALUE_CHARS's own comment on why that would 400 the
+    # whole message).
+    return value if len(value) <= _MAX_FIELD_VALUE_CHARS else value[:_MAX_FIELD_VALUE_CHARS]
+
+
+def _weekly_nets_section(conn, start_ts: int, end_ts: int, emoji: dict[str, str]) -> str | None:
+    """"Nets": check-in activity for the window, from mc_checkin_award --
+    how many check-ins, across which nets (checkin_net.label, BOTH
+    boards' nets alike -- a check-in event names no location, so unlike
+    Exploration above this section carries no protocol filter and none
+    of qualifying_place_firsts()'s privacy concern), and any notable
+    streak. Streaks are READ BACK from mc_checkin_award.streak, already
+    computed and stored at award time by app/checkin.py's
+    checkin_streak() -- never recomputed here.
+
+    None when nobody checked in at all during the window.
+    """
+    rows = conn.execute(
+        "SELECT a.player_id, a.streak, pl.display_name AS player_name, pl.team AS team, "
+        "       COALESCE(n.label, 'an unlabeled net') AS net_label "
+        "  FROM mc_checkin_award a "
+        "  JOIN player pl ON pl.player_id = a.player_id "
+        "  LEFT JOIN checkin_net n ON n.id = a.net_id "
+        " WHERE a.awarded_at >= ? AND a.awarded_at < ?",
+        (start_ts, end_ts),
+    ).fetchall()
+    if not rows:
+        return None
+
+    nets = sorted({r["net_label"] for r in rows})
+    lines = [
+        f"**{_fmt_number(len(rows))}** check-in{'' if len(rows) == 1 else 's'} across "
+        f"**{_fmt_number(len(nets))}** net{'' if len(nets) == 1 else 's'}"
+        f"{_SEP}{', '.join(nets)}"
+    ]
+
+    # A "notable" streak is 2 or more consecutive nets -- a single
+    # check-in has a streak of 1 by definition (app/checkin.py's
+    # checkin_streak()) and is not itself news. Keeps the LONGEST streak
+    # seen per player this window (a player can check into more than one
+    # net inside seven days), capped and ordered the same way the
+    # Exploration section's player list is above.
+    best: dict[int, tuple[int, str, str]] = {}
+    for r in rows:
+        streak = r["streak"] or 0
+        if streak < 2:
+            continue
+        pid = r["player_id"]
+        if pid not in best or streak > best[pid][0]:
+            best[pid] = (streak, r["player_name"], r["team"])
+    ranked = sorted(best.values(), key=lambda v: (-v[0], v[1]))
+    for streak, name, team in ranked[:_MAX_WEEKLY_RECAP_PLAYERS]:
+        lines.append(f"{_team_dot(emoji, team)}{name}{_SEP}**{_fmt_number(streak)}**-net streak")
+
+    value = "\n".join(lines)
+    return value if len(value) <= _MAX_FIELD_VALUE_CHARS else value[:_MAX_FIELD_VALUE_CHARS]
+
+
+def build_weekly_recap_embed(conn, protocol: str, start_ts: int, end_ts: int) -> dict | None:
+    """The full Discord webhook JSON body for one week's recap -- three
+    sections (Placement changes, Exploration, Nets -- see
+    weekly_recap_provider() for the window this covers and why), each
+    its own field in a single embed, using every rendering rule already
+    established elsewhere in this module: team dots from
+    discord_config.team_emoji with the plain-text fallback (_team_dot()),
+    bold numbers (_fmt_number()), italic units, _SEP between tokens,
+    never a "--" separator, an absolute-or-omitted `url`, and Discord's
+    own field-count/field-value/total-char budgets.
+
+    A section with nothing to report for the window is OMITTED, not
+    rendered empty (see each _weekly_*_section() helper's own docstring
+    for what "nothing to report" means for it) -- and when all three are
+    empty, this returns None so weekly_recap_provider() enqueues
+    nothing: an empty week gets NO message at all, never a Discord post
+    that says so.
+    """
+    cfg = load_discord_config(conn)
+    emoji = _parse_team_emoji(cfg["team_emoji"])
+    season_id = _season_id_for_ts(conn, protocol, start_ts)
+
+    fields = []
+    placement = _weekly_placement_section(conn, protocol, start_ts, end_ts, emoji)
+    if placement:
+        fields.append({"name": "Placement changes", "value": placement, "inline": False})
+    exploration = _weekly_exploration_section(conn, protocol, season_id, start_ts, end_ts, emoji)
+    if exploration:
+        fields.append({"name": "Exploration", "value": exploration, "inline": False})
+    nets = _weekly_nets_section(conn, start_ts, end_ts, emoji)
+    if nets:
+        fields.append({"name": "Nets", "value": nets, "inline": False})
+    if not fields:
+        return None
+    fields = fields[:_MAX_EMBED_FIELDS]
+
+    proto_label = _PROTOCOL_NAMES.get(protocol, protocol)
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    start_date = datetime.fromtimestamp(start_ts, tz=tz).date().isoformat()
+    end_date = datetime.fromtimestamp(end_ts - 1, tz=tz).date().isoformat()
+    embed = {
+        "title": f"{proto_label} — Weekly Recap ({start_date} to {end_date})",
+        "fields": fields,
+    }
+    # Same absolute-or-omitted rule as every other embed's own `url` in
+    # this module -- a relative path here would make Discord reject the
+    # ENTIRE message with an HTTP 400, not just drop the link.
+    base_url = (settings.oauth_public_base_url or "").rstrip("/")
+    if base_url:
+        embed["url"] = f"{base_url}/results"
+
+    embeds = [embed]
+    if _total_embed_chars(embeds) > _MAX_TOTAL_EMBED_CHARS:
+        # Should not happen in practice -- each section's own value is
+        # already capped well under _MAX_FIELD_VALUE_CHARS above -- but
+        # never hand Discord a payload that would 400 the whole message.
+        # Drop the least-critical section first (Nets, then
+        # Exploration), the same "drop a whole piece rather than
+        # truncate it" philosophy build_month_honors_embed() already
+        # applies to its own "By team" embed.
+        for name in ("Nets", "Exploration"):
+            fields = [f for f in fields if f["name"] != name]
+            embed["fields"] = fields
+            if _total_embed_chars(embeds) <= _MAX_TOTAL_EMBED_CHARS:
+                break
+
+    return {
+        "username": cfg["username"] or "MeshWars",
+        "embeds": embeds,
+    }
+
+
+def weekly_recap_provider(conn, now: int) -> list[dict]:
+    """TIME_DRIVEN_PROVIDERS entry for the Sunday weekly recap -- see
+    _weekly_recap_due() for exactly when this fires and what window it
+    covers, and build_weekly_recap_embed() for the message itself.
+
+    This is the one provider in this list allowed to touch big, growing
+    tables (mc_tile_capture_log via app/results.py's ownership_at(),
+    place_activation via qualifying_place_firsts(), mc_checkin_award) --
+    a deliberate, narrow exception to TIME_DRIVEN_PROVIDERS's own "never
+    query a large table" rule (see that list's own docstring), safe here
+    because this does NOT pay that cost on every ~30-second poll cycle:
+    _weekly_recap_due() itself is pure date/timezone arithmetic with no
+    DB access at all, and returns None on six days out of seven -- so
+    the heavy path below is only ever reached on a Sunday. And even on a
+    Sunday, this checks discord_outbox directly for THIS WEEK'S
+    (kind, key) BEFORE building the payload -- one indexed lookup on
+    discord_outbox's own UNIQUE(kind, key) index -- so once the first
+    Sunday poll cycle has actually enqueued the week's row, every
+    remaining cycle that same day exits right here. In the ordinary
+    case, the heavy computation below runs at most ONCE per ISO week,
+    not once per poll cycle.
+
+    (A genuinely empty week -- build_weekly_recap_embed() returning None
+    -- never produces a row, so this early-exit cannot kick in for it;
+    every remaining Sunday cycle re-runs the heavy computation for as
+    long as the week stays empty. Accepted: an empty week is not the
+    normal state of an active season, and the alternative -- a second
+    "we checked and it was empty" marker table -- is exactly the kind of
+    second source of truth TIME_DRIVEN_PROVIDERS's own docstring already
+    argues against.)
+    """
+    due = _weekly_recap_due(now)
+    if due is None:
+        return []
+    key, start_ts, end_ts = due
+
+    # Cheap pre-checks only -- enqueue() (via check_due_time_driven())
+    # remains the real, authoritative gate for both `enabled` and
+    # announce_weekly_recap; this is purely to avoid re-running the
+    # heavy build below every cycle when the answer is already known.
+    cfg = load_discord_config(conn)
+    if not announcements_enabled(cfg) or not cfg.get("announce_weekly_recap"):
+        return []
+    already = conn.execute(
+        "SELECT 1 FROM discord_outbox WHERE kind = 'weekly_recap' AND key = ?",
+        (key,),
+    ).fetchone()
+    if already is not None:
+        return []
+
+    payload = build_weekly_recap_embed(conn, _WEEKLY_RECAP_PROTOCOL, start_ts, end_ts)
+    if payload is None:
+        return []
+    return [{"kind": "weekly_recap", "key": key, "payload": payload}]
+
+
+TIME_DRIVEN_PROVIDERS: list = [weekly_recap_provider]
 
 
 def check_due_time_driven(conn, now: int) -> int:

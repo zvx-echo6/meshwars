@@ -8,22 +8,10 @@ import time
 
 from app.grid import cell_id
 from app.place_rotation import week_start_for_ts
-from app.place_scoring import WEEKLY_CAP_POINTS, credit_places
+from app.place_scoring import WEEKLY_CAP_POINTS, credit_places, qualifying_place_firsts
 
 NOW = int(time.time())
 WEEK = week_start_for_ts(NOW)
-
-
-def _enable_discord(conn) -> None:
-    """Same DB-backed config as tests/test_discord_notify.py's own
-    _enable_discord() -- discord_notify.enqueue() is a no-op while
-    announcements are disabled (discord_config's own default), and the
-    whole point of the tests below is to prove credit_places() is not a
-    no-op here."""
-    conn.execute(
-        "UPDATE discord_config SET enabled = 1, "
-        " webhook_url = 'https://discord.test/api/webhooks/1/x' WHERE id = 1"
-    )
 
 
 def _player(conn, player_id, team="RED"):
@@ -366,61 +354,217 @@ def test_existing_stacked_history_is_never_rewritten(conn):
     assert after == before, "historic activation rows must not change"
 
 
-# ---- Discord "notable activation" announcement ---------------------------
+# ---- Discord: credit_places() never announces anything itself ------------
+#
+# credit_places() used to enqueue a per-activation "notable activation"
+# Discord announcement directly (build_place_activation_embed()/
+# place_activation_notability(), app/discord_notify.py) -- removed
+# 2026-09-16: too frequent (~373/month) and it announced a player's
+# location within minutes of them reaching it. Notable activations are
+# now folded into the Sunday weekly recap instead (see this module's own
+# qualifying_place_firsts(), tested further below in this file, and
+# app/discord_notify.py's weekly_recap_provider(), tested in
+# tests/test_discord_notify.py). This is a regression guard, not a
+# feature test:
+# it proves credit_places() stays silent on discord_outbox even with a
+# webhook fully configured and enabled, for exactly the notable shapes
+# (first-ever summit) the old per-event announcement used to fire on.
 
 
-def test_credit_places_enqueues_discord_announcement_for_a_notable_activation(conn):
-    """A summit -- notable by ref_type alone, and also this deployment's
-    first ever activation of it -- must enqueue a place_activation
-    announcement, keyed on the new place_activation row's own id."""
-    _enable_discord(conn)
+def test_credit_places_never_touches_discord_outbox(conn):
+    """A summit activation -- the old per-event announcement's own
+    "notable by ref_type alone" case -- must credit the points exactly
+    as before, and discord_outbox must stay completely empty regardless
+    of whether a webhook is even configured."""
+    conn.execute(
+        "UPDATE discord_config SET enabled = 1, "
+        " webhook_url = 'https://discord.test/api/webhooks/1/x' WHERE id = 1"
+    )
     _player(conn, 40)
     cid = _place_on(conn, 1, "summit", 43.5, -116.5, points=100)
 
     credited = credit_places(conn, player_id=40, cell_id=cid, ts=NOW, paint_outcome="captured")
     assert credited == [(1, 100)]
-
-    activation_id = conn.execute(
-        "SELECT id FROM place_activation WHERE place_id = 1 AND player_id = 40"
-    ).fetchone()[0]
-    rows = conn.execute(
-        "SELECT kind, key FROM discord_outbox WHERE kind = 'place_activation'"
-    ).fetchall()
-    assert [(r["kind"], r["key"]) for r in rows] == [("place_activation", str(activation_id))]
-
-
-def test_credit_places_does_not_enqueue_for_a_non_notable_activation(conn):
-    """A plain landmark that has already been activated before (so
-    'first ever' does not apply either) matches none of the three
-    notability rules -- credit_places() must still credit the points,
-    but must not enqueue anything: this is the ordinary, non-notable
-    case that makes up the overwhelming majority of ~373 monthly
-    activations."""
-    _enable_discord(conn)
-    _player(conn, 41)
-    _player(conn, 42)
-    cid = _place_on(conn, 1, "landmark", 43.6, -116.6, points=10)
-
-    # A prior activation of this SAME place, a different week, so the
-    # place is no longer this deployment's "first ever" for it.
-    old_week = week_start_for_ts(NOW - 14 * 86400)
-    conn.execute(
-        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
-        "VALUES (1, 41, ?, 10, ?)", (old_week, NOW - 14 * 86400),
-    )
-
-    credited = credit_places(conn, player_id=42, cell_id=cid, ts=NOW, paint_outcome="captured")
-    assert credited == [(1, 10)]
     assert conn.execute("SELECT * FROM discord_outbox").fetchall() == []
 
 
-def test_credit_places_no_op_when_discord_disabled(conn):
-    """discord_config defaults to disabled -- crediting a summit must
-    still work exactly as before, and must not accumulate an outbox
-    backlog no webhook will ever drain."""
-    _player(conn, 43)
-    cid = _place_on(conn, 1, "summit", 43.7, -116.7, points=100)
+# ---- qualifying_place_firsts() --------------------------------------------
+#
+# Read-only query, no relation to credit_places() above -- see this
+# function's own docstring (HARD PRIVACY WARNING included) for the
+# qualifying rule and the season-wide "first" semantics these tests
+# exercise directly against place/place_activation/mc_season rows,
+# rather than through a real scoring ping.
 
-    credited = credit_places(conn, player_id=43, cell_id=cid, ts=NOW, paint_outcome="captured")
-    assert credited == [(1, 100)]
+
+def _season(conn, season_id, *, protocol="mc", started_at, ends_at):
+    conn.execute(
+        "INSERT INTO mc_season(id, protocol, started_at, ends_at, status) "
+        "VALUES (?, ?, ?, ?, 'active')",
+        (season_id, protocol, started_at, ends_at),
+    )
+
+
+def _place_reason(conn, place_id, ref_type, points_reason, points=25):
+    """Same shape as this file's own _place() above, but also sets
+    points_reason -- qualifying_place_firsts() matches on that column's
+    PREFIX, not on ref_type or points alone, so the tests below need to
+    control it directly."""
+    conn.execute(
+        "INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, "
+        "points_reason, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,1,?)",
+        (place_id, ref_type, f"ref-{place_id}", f"place-{place_id}",
+         43.0 + place_id * 0.01, -116.0 + place_id * 0.01, points, "TEST", points_reason, NOW),
+    )
+
+
+def _activation(conn, *, place_id, player_id, awarded_at, week_start=None, points=25, protocol="mc"):
+    # week_start defaults to the REAL week awarded_at falls in (not a
+    # fixed constant) -- place_activation's own UNIQUE(place_id,
+    # player_id, week_start) means two activations of the same place by
+    # the same player in the tests below (an "earlier" one and a
+    # "this window" one) need two different week_start values whenever
+    # they are more than a week apart, exactly like a real credit_places()
+    # insert would produce.
+    if week_start is None:
+        week_start = week_start_for_ts(awarded_at)
+    conn.execute(
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (place_id, player_id, week_start, points, awarded_at, protocol),
+    )
+
+
+_SEASON_START = NOW - 1_000_000
+_SEASON_END = NOW + 1_000_000
+_WINDOW_START = NOW
+_WINDOW_END = NOW + 7 * 86400
+
+
+def _base_season_and_players(conn):
+    _season(conn, 1, started_at=_SEASON_START, ends_at=_SEASON_END)
+    _player(conn, 50, team="RED")
+    _player(conn, 51, team="GREEN")
+
+
+def test_qualifying_place_firsts_summit_qualifies(conn):
+    _base_season_and_players(conn)
+    _place_reason(conn, 10, "summit", "remote_scaled", points=80)
+    _activation(conn, place_id=10, player_id=50, awarded_at=_WINDOW_START + 10)
+
+    rows = qualifying_place_firsts(conn, protocol="mc", season_id=1,
+                                    start_ts=_WINDOW_START, end_ts=_WINDOW_END)
+    assert [r["place_id"] for r in rows] == [10]
+
+
+def test_qualifying_place_firsts_remote_park_qualifies(conn):
+    _base_season_and_players(conn)
+    _place_reason(conn, 11, "park", "remote", points=25)
+    _activation(conn, place_id=11, player_id=50, awarded_at=_WINDOW_START + 10)
+
+    rows = qualifying_place_firsts(conn, protocol="mc", season_id=1,
+                                    start_ts=_WINDOW_START, end_ts=_WINDOW_END)
+    assert [r["place_id"] for r in rows] == [11]
+
+
+def test_qualifying_place_firsts_city_park_excluded(conn):
+    _base_season_and_players(conn)
+    _place_reason(conn, 12, "park", "in_city", points=5)
+    _place_reason(conn, 13, "park", "in_city_by_area", points=5)
+    _activation(conn, place_id=12, player_id=50, awarded_at=_WINDOW_START + 10)
+    _activation(conn, place_id=13, player_id=50, awarded_at=_WINDOW_START + 20)
+
+    rows = qualifying_place_firsts(conn, protocol="mc", season_id=1,
+                                    start_ts=_WINDOW_START, end_ts=_WINDOW_END)
+    assert rows == []
+
+
+def test_qualifying_place_firsts_landmark_never_qualifies(conn):
+    """Landmarks never qualify regardless of points_reason -- unlike
+    park, ref_type == 'landmark' is excluded outright."""
+    _base_season_and_players(conn)
+    _place_reason(conn, 14, "landmark", "remote", points=10)
+    _activation(conn, place_id=14, player_id=50, awarded_at=_WINDOW_START + 10)
+
+    rows = qualifying_place_firsts(conn, protocol="mc", season_id=1,
+                                    start_ts=_WINDOW_START, end_ts=_WINDOW_END)
+    assert rows == []
+
+
+def test_qualifying_place_firsts_repeat_same_place_player_season_excluded(conn):
+    """A player returning to a place they already first-activated
+    earlier in the SAME season must not reappear as a first, even though
+    that earlier activation falls outside this window."""
+    _base_season_and_players(conn)
+    _place_reason(conn, 11, "park", "remote", points=25)
+    # Just after the season started -- within season 1's own boundary
+    # (unlike a fixed "14 days before the window" offset, which can fall
+    # BEFORE the season even started and so never count as "earlier in
+    # season" at all) and, at ~11.5 days before the window, a different
+    # week_start than the "this window" activation below (place_
+    # activation's own UNIQUE(place_id, player_id, week_start) forbids
+    # two rows in the SAME week anyway, so a real repeat-in-season case
+    # is always at least a week apart).
+    _activation(conn, place_id=11, player_id=50, awarded_at=_SEASON_START + 100)  # earlier, same season
+    _activation(conn, place_id=11, player_id=50, awarded_at=_WINDOW_START + 10)   # this window
+
+    rows = qualifying_place_firsts(conn, protocol="mc", season_id=1,
+                                    start_ts=_WINDOW_START, end_ts=_WINDOW_END)
+    assert rows == []
+
+
+def test_qualifying_place_firsts_different_place_same_player_qualifies(conn):
+    """A player who already used up their 'first' on one place this
+    season still qualifies for a genuinely NEW place."""
+    _base_season_and_players(conn)
+    _place_reason(conn, 11, "park", "remote", points=25)
+    _place_reason(conn, 15, "park", "remote", points=25)
+    _activation(conn, place_id=11, player_id=50, awarded_at=_SEASON_START + 100)  # old first, place 11
+    _activation(conn, place_id=15, player_id=50, awarded_at=_WINDOW_START + 10)   # new first, place 15
+
+    rows = qualifying_place_firsts(conn, protocol="mc", season_id=1,
+                                    start_ts=_WINDOW_START, end_ts=_WINDOW_END)
+    assert [r["place_id"] for r in rows] == [15]
+
+
+def test_qualifying_place_firsts_same_place_different_season_qualifies(conn):
+    """A first from a PRIOR season does not suppress a genuine first in
+    the season this call is scoped to -- season boundaries reset the
+    "first" check, place ids do not."""
+    season2_start = _SEASON_END
+    season2_end = season2_start + 1_000_000
+    _season(conn, 1, started_at=_SEASON_START, ends_at=_SEASON_END)
+    _season(conn, 2, started_at=season2_start, ends_at=season2_end)
+    _player(conn, 50, team="RED")
+    _place_reason(conn, 11, "park", "remote", points=25)
+    _activation(conn, place_id=11, player_id=50, awarded_at=_SEASON_START + 10)  # first, season 1
+
+    window_start = season2_start + 100
+    window_end = window_start + 7 * 86400
+    _activation(conn, place_id=11, player_id=50, awarded_at=window_start + 10)  # first, season 2
+
+    rows = qualifying_place_firsts(conn, protocol="mc", season_id=2,
+                                    start_ts=window_start, end_ts=window_end)
+    assert [r["place_id"] for r in rows] == [11]
+
+
+def test_qualifying_place_firsts_outside_window_excluded(conn):
+    _base_season_and_players(conn)
+    _place_reason(conn, 11, "park", "remote", points=25)
+    _activation(conn, place_id=11, player_id=50, awarded_at=_WINDOW_END + 10)  # after the window
+
+    rows = qualifying_place_firsts(conn, protocol="mc", season_id=1,
+                                    start_ts=_WINDOW_START, end_ts=_WINDOW_END)
+    assert rows == []
+
+
+def test_qualifying_place_firsts_enqueues_nothing(conn):
+    """Purely a read -- must never write to discord_outbox, or any other
+    table."""
+    _base_season_and_players(conn)
+    _place_reason(conn, 10, "summit", "remote_scaled", points=80)
+    _activation(conn, place_id=10, player_id=50, awarded_at=_WINDOW_START + 10)
+
+    qualifying_place_firsts(conn, protocol="mc", season_id=1,
+                             start_ts=_WINDOW_START, end_ts=_WINDOW_END)
     assert conn.execute("SELECT * FROM discord_outbox").fetchall() == []
