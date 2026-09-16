@@ -219,8 +219,11 @@ def test_build_month_honors_embed_renders_labels_and_standings(conn):
     # not the raw "YYYY-MM" key -- see _month_title().
     assert "August 2026" in text
     assert "2026-08" not in text
-    assert "RED: 120 squares held" in text
-    assert "BLUE: 80 squares held" in text
+    assert "RED **120**" in text
+    assert "BLUE **80**" in text
+    # The unit is stated once, in the standings embed's footer -- not
+    # repeated on every standings line any more.
+    assert embed["embeds"][0]["footer"]["text"] == discord_notify._STANDINGS_UNIT
     assert "Largest Territory" in text
     assert "Empire Builder" in text
     assert "zippy" in text
@@ -345,8 +348,10 @@ def test_build_month_honors_embed_deduplicates_number_already_in_detail(conn):
     renderHonors() shows value and detail in two separate visual
     columns, so quick_fingers' hand-written detail already restating
     its own number (value=169.0, detail="169 s after the net opened")
-    shows no visible duplication there. A Discord field value is one
-    line of text, so the number must not be prepended a second time."""
+    shows no visible duplication there. In the new two-line rendering
+    the bold number must not appear a second time in front of a detail
+    that already restates it -- the second line is just the italic
+    detail, with no bold number and no empty "****"."""
     result = _sample_result()
     result["awards"] = [{
         "award": "quick_fingers", "label": "Quick Fingers", "scope": "",
@@ -354,15 +359,20 @@ def test_build_month_honors_embed_deduplicates_number_already_in_detail(conn):
         "value": 169.0, "detail": "169 s after the net opened",
     }]
     embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
-    text = json.dumps(embed)
-    assert "Littleaton -- 169 s after the net opened" in text
-    assert "169 169" not in text
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    value = honors["fields"][0]["value"]
+    assert value == "Littleaton\n*169 s after the net opened*"
+    assert "169 169" not in value
+    assert "**" not in value
+    assert "****" not in value
+    assert "--" not in json.dumps(embed)
 
 
 def test_build_month_honors_embed_number_detail_normal_path_unbroken(conn):
     """The common case -- a detail that does NOT restate the number --
     must still render both value and detail, unchanged by the
-    de-duplication added for quick_fingers-shaped awards."""
+    de-duplication added for quick_fingers-shaped awards. Bold number,
+    italic unit, on the second of two lines -- no "--" separator."""
     result = _sample_result()
     result["awards"] = [{
         "award": "largest_territory", "label": "Largest Territory", "scope": "",
@@ -370,14 +380,17 @@ def test_build_month_honors_embed_number_detail_normal_path_unbroken(conn):
         "value": 6005.0, "detail": "squares held",
     }]
     embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
-    assert "GREEN -- 6,005 squares held" in json.dumps(embed)
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    value = honors["fields"][0]["value"]
+    assert value == "GREEN\n**6,005** *squares held*"
+    assert "--" not in json.dumps(embed)
 
 
 def test_build_month_honors_embed_near_miss_number_not_falsely_deduplicated(conn):
     """A detail beginning with a LONGER number than value must not be
     mistaken for a duplicate: "169" is a string-prefix of "1690", but
-    "169 " (number-then-space) is not, so both the value and the full
-    detail must still render."""
+    "169 " (number-then-space) is not, so both the bold value and the
+    full italic detail must still render."""
     result = _sample_result()
     result["awards"] = [{
         "award": "some_award", "label": "Some Award", "scope": "",
@@ -385,13 +398,19 @@ def test_build_month_honors_embed_near_miss_number_not_falsely_deduplicated(conn
         "value": 169.0, "detail": "1690 squares past the towns",
     }]
     embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
-    assert "169 1690 squares past the towns" in json.dumps(embed)
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    value = honors["fields"][0]["value"]
+    assert value == "RED\n**169** *1690 squares past the towns*"
 
 
 def test_build_month_honors_embed_team_award_line_also_deduplicates(conn):
-    """The same de-duplication must apply to a per-team (scoped) award
-    line via _team_award_line(), not just the headline _award_line()
-    path -- both share the fix through one helper."""
+    """A per-team (scoped) award line (_team_award_line()) never prints
+    its detail at all any more -- just "TEAM **<number>**" -- so the
+    old per-line 169/169 stutter this test used to guard against cannot
+    recur structurally. What remains to guard: the award's `detail`
+    still surfaces exactly once, as the field's own trailing italic
+    unit line (_join_team_field()), and the per-team line itself stays
+    just the bold number with no "--" and no restated detail text."""
     result = _sample_result()
     result["awards"] = [{
         "award": "quick_fingers", "label": "Quick Fingers", "scope": "TEAM0",
@@ -399,9 +418,11 @@ def test_build_month_honors_embed_team_award_line_also_deduplicates(conn):
         "value": 169.0, "detail": "169 s after the net opened",
     }]
     embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
-    text = json.dumps(embed)
-    assert "TEAM0: 169 s after the net opened" in text
-    assert "169 169" not in text
+    by_team = next(e for e in embed["embeds"] if e["title"] == "By team")
+    value = by_team["fields"][0]["value"]
+    assert value == "TEAM0 **169**\n\n*169 s after the net opened*"
+    assert "169 169" not in value
+    assert "--" not in value
 
 
 def test_build_month_honors_embed_url_absolute_or_omitted(conn, monkeypatch):
@@ -425,13 +446,17 @@ def test_build_month_honors_embed_standings_use_thousands_separator(conn):
     (f"{squares} squares held"), never routing it through _fmt_number()
     the way the award fields do -- so one real message printed "6005"
     in the description right above "6,005" in a field, disagreeing with
-    itself. Standings must use the same formatter."""
+    itself. Standings must use the same formatter, bolded, with the
+    unit stated once in the embed's footer rather than on the line."""
     result = _sample_result()
     result["standings"] = [{"team": "GREEN", "squares": 6005}]
     embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
-    description = embed["embeds"][0]["description"]
-    assert "GREEN: 6,005 squares held" in description
-    assert "GREEN: 6005 squares held" not in description
+    standings_embed = embed["embeds"][0]
+    description = standings_embed["description"]
+    assert description == "GREEN **6,005**"
+    assert "6005" not in description
+    assert "squares held" not in description
+    assert standings_embed["footer"]["text"] == "squares held"
 
 
 # ---- team emoji dots ---------------------------------------------------
@@ -477,7 +502,7 @@ def test_standings_line_starts_with_team_emoji_dot(conn):
     result["standings"] = [{"team": "GREEN", "squares": 200}]
     embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
     description = embed["embeds"][0]["description"]
-    assert description.startswith("<:mw_green:222> GREEN: ")
+    assert description == "<:mw_green:222> GREEN **200**"
 
 
 def test_headline_player_award_value_carries_teams_dot(conn):
@@ -541,8 +566,8 @@ def test_partial_emoji_config_missing_team_renders_plainly(conn):
     lines = embed["embeds"][0]["description"].split("\n")
     green_line = next(l for l in lines if "GREEN" in l)
     red_line = next(l for l in lines if "RED" in l)
-    assert green_line.startswith("<:mw_green:222> GREEN")
-    assert red_line == "RED: 100 squares held"
+    assert green_line == "<:mw_green:222> GREEN **200**"
+    assert red_line == "RED **100**"
 
 
 def test_standings_description_no_longer_has_standings_prefix(conn):
@@ -627,6 +652,113 @@ def test_build_month_honors_embed_drops_by_team_over_char_budget(conn, monkeypat
     assert titles == ["MeshCore — August 2026", "Honors"]
     honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
     assert len(honors["fields"]) == 10
+
+
+# ---- markdown spacing/emphasis (owner: "needs spacing and bold and -----
+# ---- italics of some kind to really drive it") -------------------------
+
+
+def test_build_month_honors_embed_never_contains_double_dash_separator(conn):
+    """The old '--' separator is gone everywhere -- standings,
+    headline honors, and by-team lines alike -- across a realistic
+    payload carrying all three embeds at once."""
+    embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", _real_world_month_result())
+    assert "--" not in json.dumps(embed)
+
+
+def test_build_month_honors_embed_standings_line_bold_number_unit_in_footer(conn):
+    """A standings line is exactly '<dot> TEAM **<number>**', and the
+    unit ("squares held") appears in the embed's footer, never on the
+    line itself."""
+    conn.execute("UPDATE discord_config SET team_emoji = ? WHERE id = 1", (_emoji_setting(),))
+    result = _sample_result()
+    result["standings"] = [{"team": "GREEN", "squares": 6005}]
+    embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
+    standings_embed = embed["embeds"][0]
+    assert standings_embed["description"] == "<:mw_green:222> GREEN **6,005**"
+    assert standings_embed["footer"] == {"text": "squares held"}
+    assert "squares held" not in standings_embed["description"]
+
+
+def test_build_month_honors_embed_headline_value_bold_number_italic_unit(conn):
+    """A headline award's field value is two lines: the winner, then a
+    bold number and an italic unit."""
+    result = _sample_result()
+    result["awards"] = [{
+        "award": "largest_territory", "label": "Largest Territory", "scope": "",
+        "player_id": None, "player": None, "team": "GREEN",
+        "value": 6005.0, "detail": "squares held",
+    }]
+    embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    value = honors["fields"][0]["value"]
+    lines = value.split("\n")
+    assert lines[0] == "GREEN"
+    assert lines[1] == "**6,005** *squares held*"
+
+
+def test_build_month_honors_embed_quick_fingers_dedup_no_empty_bold(conn):
+    """quick_fingers-shaped de-duplication (detail already restates the
+    number) still holds under the new two-line rendering, and never
+    emits an empty '****' where the bold number would have gone."""
+    result = _sample_result()
+    result["awards"] = [{
+        "award": "quick_fingers", "label": "Quick Fingers", "scope": "",
+        "player_id": 3, "player": "Littleaton", "team": "RED",
+        "value": 169.0, "detail": "169 s after the net opened",
+    }]
+    embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    value = honors["fields"][0]["value"]
+    assert value == "Littleaton\n*169 s after the net opened*"
+    assert "****" not in value
+    assert "**" not in value
+
+
+def test_build_month_honors_embed_by_team_field_ends_with_single_unit_line(conn):
+    """A by-team field's value ends with exactly one italic unit line,
+    and that unit text does not appear on any of the individual team
+    lines above it."""
+    result = _sample_result()
+    result["standings"] = [{"team": "RED", "squares": 120}, {"team": "GREEN", "squares": 80}]
+    result["awards"] = [
+        _team_award("team_attacker", "Top Attacker", "RED", 207.0),
+        _team_award("team_attacker", "Top Attacker", "GREEN", 40.0),
+    ]
+    embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
+    by_team = next(e for e in embed["embeds"] if e["title"] == "By team")
+    value = by_team["fields"][0]["value"]
+    lines = value.split("\n")
+    assert lines[-1] == "*squares held*"
+    assert lines[-2] == ""
+    team_lines = lines[:-2]
+    assert len(team_lines) == 2
+    for line in team_lines:
+        assert "squares held" not in line
+    assert value.count("squares held") == 1
+
+
+def test_build_month_honors_embed_by_team_field_never_exceeds_1024_chars(conn):
+    """A by-team field with many long team/player names must never be
+    handed to Discord over its hard 1024-character field-value limit --
+    trailing lines are dropped and replaced with a plain truncation
+    marker instead."""
+    result = _sample_result()
+    long_teams = [f"TEAM-{n}-{'X' * 40}" for n in range(60)]
+    result["standings"] = [{"team": t, "squares": 100 - n} for n, t in enumerate(long_teams)]
+    result["awards"] = [
+        {
+            "award": "team_attacker", "label": "Top Attacker", "scope": t,
+            "player_id": None, "player": f"Player-{'Y' * 40}-{n}", "team": t,
+            "value": float(1000 + n), "detail": "squares taken from other teams",
+        }
+        for n, t in enumerate(long_teams)
+    ]
+    embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
+    by_team = next(e for e in embed["embeds"] if e["title"] == "By team")
+    value = by_team["fields"][0]["value"]
+    assert len(value) <= 1024
+    assert value.endswith(discord_notify._TRUNCATION_MARKER)
 
 
 # ---- _month_title -----------------------------------------------------

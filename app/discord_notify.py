@@ -88,6 +88,15 @@ _PROTOCOL_NAMES = {"mc": "MeshCore", "mt": "Meshtastic"}
 # applies regardless of what a future award shape produces.
 _MAX_EMBED_FIELDS = 25
 
+# The unit for every standings/territory figure this module renders --
+# named ONCE here rather than as an inline literal so the standings
+# line (build_month_honors_embed()'s standings_text, no longer where
+# this word appears now that Change 2 moved it) and the standings
+# embed's own `footer` (the ONE place it now renders -- see that
+# embed's construction below) can never drift apart or say two
+# different things for the same figure.
+_STANDINGS_UNIT = "squares held"
+
 # Discord's own documented hard limit on the TOTAL character count
 # across every embed in one message -- title + description + each
 # field's name + value, summed across ALL embeds, not per embed (see
@@ -101,6 +110,22 @@ _MAX_EMBED_FIELDS = 25
 # and the headline Honors embed still gets the full story for the
 # month, while per-team breakdowns are supplementary detail.
 _MAX_TOTAL_EMBED_CHARS = 6000
+
+# Discord's own documented hard limit on a single field's `value`
+# string -- separate from, and much tighter than, the two budgets
+# above. The "By team" fields are the longest values this module ever
+# builds (one line per team, up to a whole season's roster) and now
+# carry bold-number markup on every line on top of that, so they are
+# the only fields this module actively guards against it: see
+# _join_team_field() below, which drops trailing team lines and ends
+# on a plain truncation marker rather than ever handing Discord an
+# over-long field value that would 400 the ENTIRE message.
+_MAX_FIELD_VALUE_CHARS = 1024
+
+# Plain text, deliberately un-emphasised (no bold/italic) -- it is
+# reporting a truncation, not a piece of the month's data, so it must
+# never be mistaken for a real trailing line of standings.
+_TRUNCATION_MARKER = "(truncated)"
 
 # Team colours, mirrored from frontend/theme.css's own canonical
 # definitions (~line 100) as INTEGERS -- Discord's embed `color` field
@@ -237,17 +262,23 @@ def _month_title(month: str) -> str:
 
 
 def _total_embed_chars(embeds: list) -> int:
-    """Sum of title + description + each field's name/value, across
-    every embed given -- the same text Discord counts toward its own
-    6000-character total-embed budget (_MAX_TOTAL_EMBED_CHARS above).
-    Author/footer/thumbnail text also count on Discord's side, but this
-    module never sets any of those, so they would only ever contribute
-    zero and are left out of the sum entirely.
+    """Sum of title + description + footer text + each field's
+    name/value, across every embed given -- the same text Discord
+    counts toward its own 6000-character total-embed budget
+    (_MAX_TOTAL_EMBED_CHARS above). Author/thumbnail text also count on
+    Discord's side, but this module never sets either, so they would
+    only ever contribute zero and are left out of the sum entirely.
+    footer IS counted now: the standings embed carries one (see its own
+    construction in build_month_honors_embed()), and the field-count/
+    total-char guards below must see the real, post-markup total, not
+    an undercount that would let a message through that Discord itself
+    then rejects.
     """
     total = 0
     for embed in embeds:
         total += len(embed.get("title") or "")
         total += len(embed.get("description") or "")
+        total += len((embed.get("footer") or {}).get("text") or "")
         for f in embed.get("fields") or []:
             total += len(f.get("name") or "")
             total += len(f.get("value") or "")
@@ -481,78 +512,148 @@ def _fmt_number(value) -> str:
     return f"{n:,.1f}"
 
 
-def _value_detail_tail(value, detail) -> str:
-    """Join a formatted `value` with its `detail`, for one award --
-    shared by _award_line() and _team_award_line() so both render the
-    same way.
+def _detail_restates_value(value, detail) -> bool:
+    """True when `detail` already begins with `value`'s own number --
+    e.g. value=169.0, detail="169 s after the net opened" for
+    'quick_fingers'. frontend/results.js's renderHonors() shows `value`
+    and `detail` in two separate visual columns, so this shows no
+    visible duplication there; a Discord field value is a single line
+    (now two, see _value_unit_line() below), so printing both verbatim
+    would read as a stutter: "**169** *169 s after the net opened*".
 
-    frontend/results.js's renderHonors() shows `value` and `detail` in
-    two separate visual columns, so an award whose hand-written detail
-    already restates its own number -- e.g. value=169.0,
-    detail="169 s after the net opened" for 'quick_fingers' -- shows no
-    visible duplication there; the number is simply repeated in two
-    places on screen. A Discord field value is a single line of text
-    though, so the same data reads as a stutter: "169 169 s after the
-    net opened". This checks whether `detail` already begins with the
-    number -- either _fmt_number()'s comma-formatted form or the plain
-    integer string, since a hand-written detail will never carry a
-    thousands separator -- and drops the duplicate numeric prefix when
-    it does. The match only fires at the start of `detail` and only
-    when followed by a space or end-of-string, so "9763 ft" matches
-    value=9763 but "1690 squares past the towns" does NOT falsely match
-    value=169 (169 is a prefix of "1690", but "169 " is not).
+    The match only fires at the START of `detail` and only when
+    followed by a space or end-of-string, checked against both
+    _fmt_number()'s comma-formatted form and the plain integer string
+    (a hand-written detail will never carry a thousands separator), so
+    "9763 ft" matches value=9763 but "1690 squares past the towns" does
+    NOT falsely match value=169 (169 is a STRING-prefix of "1690", but
+    "169 " is not).
 
     Deliberately generic rather than keyed on the 'quick_fingers' award
     name: any future award whose detail embeds its own number would hit
     the exact same stutter here.
     """
-    formatted = _fmt_number(value) if value is not None else None
-    if formatted and detail:
-        prefixes = {formatted}
-        n = float(value)
-        if n == int(n):
-            prefixes.add(str(int(n)))
-        if any(detail == p or detail.startswith(p + " ") for p in prefixes):
-            return detail
-    return " ".join(x for x in (formatted, detail) if x)
+    if value is None or not detail:
+        return False
+    formatted = _fmt_number(value)
+    prefixes = {formatted}
+    n = float(value)
+    if n == int(n):
+        prefixes.add(str(int(n)))
+    return any(detail == p or detail.startswith(p + " ") for p in prefixes)
+
+
+def _value_unit_line(value, detail) -> str:
+    """The second line of a headline award's two-line rendering (owner
+    feedback: "needs spacing and bold and italics ... to really drive
+    it" -- a wrapping "Largest Territory -> GREEN -- 6,005 squares
+    held" in a narrow inline column read as a wall of plain text):
+    "**<number>** *<unit>*", bold number and italic unit, e.g.
+    "**6,005** *squares held*".
+
+    When `detail` already restates the number (_detail_restates_value()
+    -- quick_fingers-shaped), the bold number is dropped entirely and
+    this is just "*<detail>*", to avoid a doubled
+    "**169** *169 s after the net opened*". Returns "" when there is
+    neither a value nor a detail to show (an award line with only a
+    `who`), so the caller never emits a bare "\\n" or an empty "****".
+    """
+    if _detail_restates_value(value, detail):
+        return f"*{detail}*"
+    parts = []
+    if value is not None:
+        parts.append(f"**{_fmt_number(value)}**")
+    if detail:
+        parts.append(f"*{detail}*")
+    return " ".join(parts)
 
 
 def _award_line(a: dict) -> str:
-    """who -- value detail, for one non-placeholder award. Renders all
-    three of who, the number, and its unit -- frontend/results.js's own
-    renderHonors() shows all three for the same reason its comment
+    """Two lines for one non-placeholder headline award:
+    "<winner>\\n**<number>** *<unit>*" (see _value_unit_line() for the
+    second line, including the quick_fingers de-duplication). Renders
+    all three of who, the number, and its unit -- frontend/results.js's
+    own renderHonors() shows all three for the same reason its comment
     gives: "Top NetOp 130" without a unit is the exact ambiguity the
     detail exists to fix, and a bare who with no number at all (this
-    module's old bug) is that same ambiguity made worse. See
-    _value_detail_tail() for why a detail that already restates the
-    number (quick_fingers) is de-duplicated here even though the site
-    shows both -- a Discord field is one line, not two columns.
+    module's old bug) is that same ambiguity made worse. Falls back to
+    just `who` when there is nothing else to show.
     """
     who = a.get("player") or a.get("team") or "Unknown"
-    tail = _value_detail_tail(a.get("value"), a.get("detail"))
-    return f"{who} -- {tail}" if tail else who
+    tail = _value_unit_line(a.get("value"), a.get("detail"))
+    return f"{who}\n{tail}" if tail else who
 
 
 def _team_award_line(a: dict, emoji: dict[str, str]) -> str:
-    """One compact line inside a grouped per-team field: "TEAM: <rest>",
-    prefixed with that team's coloured dot (_team_dot()) when
-    configured. Most per-team awards (team_attacker, team_defender,
-    ...) are a property of the team itself, so `who` (player() or
-    team()) is just the scope team again -- "GREEN: GREEN -- 40 squares
-    taken" says GREEN twice for nothing, so the leading "TEAM: " prefix
-    stands in for `who` and _award_line's own who is dropped in that
-    case. A per-team award that DOES name a player distinct from its
-    scope (a team's own top scorer, say) keeps that player's name after
-    the team prefix instead -- but the dot is always keyed on `scope`
-    (the team the line is grouped under), never the player.
+    """One compact line inside a grouped per-team field: "TEAM <winner>
+    **<number>**", prefixed with that team's coloured dot (_team_dot())
+    when configured -- no ":" after the team, no separator, and no
+    per-line unit (the owner's "wallish" complaint: the same unit
+    phrase repeated on all 7 lines of a by-team block). The unit is
+    appended ONCE for the whole field instead -- see _join_team_field()
+    below, which this function's caller feeds these lines into.
+
+    Most per-team awards (team_attacker, team_defender, ...) are a
+    property of the team itself, so `who` (player() or team()) is just
+    the scope team again -- "GREEN GREEN **40**" says GREEN twice for
+    nothing, so the leading "TEAM" stands in for `who` and is dropped
+    in that case. A per-team award that DOES name a player distinct
+    from its scope (a team's own top scorer, say) keeps that player's
+    name after the team instead -- but the dot is always keyed on
+    `scope` (the team the line is grouped under), never the player.
     """
     scope = a.get("scope") or ""
     who = a.get("player") or a.get("team") or "Unknown"
     dot = _team_dot(emoji, scope)
+    value = a.get("value")
+    bold = f" **{_fmt_number(value)}**" if value is not None else ""
     if who == scope:
-        tail = _value_detail_tail(a.get("value"), a.get("detail"))
-        return f"{dot}{scope}: {tail}" if tail else f"{dot}{scope}"
-    return f"{dot}{scope}: {_award_line(a)}"
+        return f"{dot}{scope}{bold}"
+    return f"{dot}{scope} {who}{bold}"
+
+
+def _join_team_field(lines: list[str], unit: str | None) -> str:
+    """Assemble one "By team" field's full value: every team's line
+    (_team_award_line()'s own output, one per team, already in
+    standings order), then -- when `unit` is given -- a blank line and
+    the unit ONCE, italicised: "*squares held*". This is the other half
+    of the de-densifying this module's Change 4 makes: six of the seven
+    repetitions of the unit phrase are simply gone, replaced by this one
+    trailing line.
+
+    Guards Discord's own hard 1024-character-per-field-value limit
+    (_MAX_FIELD_VALUE_CHARS) -- unlike the 25-field and 6000-char
+    budgets elsewhere in this module, which drop a whole embed, this
+    trims from the END of `lines` (dropping the lowest-ranked teams
+    first, since `lines` arrives in standings order) one at a time,
+    replacing the trailing unit line with a single plain
+    _TRUNCATION_MARKER line, until the assembled value fits. A field
+    that still doesn't fit with zero team lines left (pathological: the
+    marker text itself would somehow exceed the limit) is hard-cut to
+    the limit as a last resort -- this should never happen in practice
+    but must never hand Discord an over-long value that 400s the whole
+    message.
+    """
+    def render(ls: list[str], *, truncated: bool) -> str:
+        parts = list(ls)
+        if truncated:
+            parts.append(_TRUNCATION_MARKER)
+        elif unit:
+            parts.append("")
+            parts.append(f"*{unit}*")
+        return "\n".join(parts)
+
+    value = render(lines, truncated=False)
+    if len(value) <= _MAX_FIELD_VALUE_CHARS:
+        return value
+
+    remaining = list(lines)
+    while remaining:
+        remaining.pop()
+        value = render(remaining, truncated=True)
+        if len(value) <= _MAX_FIELD_VALUE_CHARS:
+            return value
+    return _TRUNCATION_MARKER[:_MAX_FIELD_VALUE_CHARS]
 
 
 def build_month_honors_embed(conn, month: str, protocol: str, result: dict) -> dict:
@@ -590,9 +691,15 @@ def build_month_honors_embed(conn, month: str, protocol: str, result: dict) -> d
         key=lambda s: (-(s.get("squares") or 0), s.get("team") or ""),
     )
     if standings:
+        # "<dot> TEAM **<number>**" -- team name plain (the coloured dot
+        # already identifies it), number bold. The unit
+        # (_STANDINGS_UNIT) is deliberately NOT repeated on every one of
+        # these lines any more -- see standings_embed's own `footer`
+        # below, where it is stated exactly once for the whole embed
+        # instead.
         standings_text = "\n".join(
-            f"{_team_dot(emoji, s.get('team'))}{s.get('team')}: "
-            f"{_fmt_number(s.get('squares', 0))} squares held"
+            f"{_team_dot(emoji, s.get('team'))}{s.get('team')} "
+            f"**{_fmt_number(s.get('squares', 0))}**"
             for s in standings
         )
     else:
@@ -655,12 +762,19 @@ def build_month_honors_embed(conn, month: str, protocol: str, result: dict) -> d
         # every ranked team.
         group.sort(key=lambda a: (team_rank.get(a.get("scope"), len(team_rank)), a.get("scope") or ""))
         label = group[0].get("label") or results.AWARD_LABELS.get(key, key)
-        lines = "\n".join(_team_award_line(a, emoji) for a in group)
+        lines = [_team_award_line(a, emoji) for a in group]
+        # The unit is a property of the award KEY (every team in one
+        # group is winning the same kind of award, e.g. "squares taken
+        # from other teams"), not of any one team's line any more --
+        # see _team_award_line()'s own comment. Taken from whichever
+        # group member has a non-empty `detail`, first one found, since
+        # in practice every member of a group shares the same wording.
+        unit = next((a.get("detail") for a in group if a.get("detail")), None)
         # inline=False, deliberately unlike headline_fields above: each
         # of these values is a multi-line list (one line per team), and
         # squeezing a multi-line list into a third of the message width
         # would be unreadable rather than merely dense.
-        team_fields.append({"name": label, "value": lines, "inline": False})
+        team_fields.append({"name": label, "value": _join_team_field(lines, unit), "inline": False})
 
     # Belt-and-suspenders, PER EMBED: whatever the grouping above
     # produces, never hand Discord more fields in one embed than its
@@ -678,6 +792,14 @@ def build_month_honors_embed(conn, month: str, protocol: str, result: dict) -> d
         "title": f"{proto_label} — {_month_title(month)}",
         "description": standings_text,
     }
+    # The unit for every line above, stated ONCE for the whole embed --
+    # see _STANDINGS_UNIT's own comment for why this is a named
+    # constant rather than a second inline literal. Omitted when there
+    # are no standings at all (standings_text is the plain
+    # "No standings recorded." sentence, not a list of figures the
+    # footer would be labelling).
+    if standings:
+        standings_embed["footer"] = {"text": _STANDINGS_UNIT}
     # A Discord embed's "url" must be an ABSOLUTE url -- a relative one
     # (e.g. "/results") makes Discord reject the ENTIRE message with an
     # HTTP 400, not just drop the link. So when OAUTH_PUBLIC_BASE_URL
