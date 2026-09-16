@@ -17,6 +17,7 @@ from .db import connect, init_db
 from . import discord_notify
 from .freqmapper_ingest import FreqMapperIngestor, load_freqmapper_config
 from .ingest import Ingestor
+from .log_redact import DiscordWebhookRedactionFilter
 from .mc_ingest import McIngestor
 from .meshview_client import MeshviewClient
 from .mqtt_subscriber import MqttSubscriber
@@ -26,6 +27,13 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# httpx logs every request it makes at INFO, including the full URL --
+# and a Discord webhook/interaction-followup URL carries its own bearer
+# token in the path (app/discord_notify.py, app/discord_interactions.py).
+# Redact that token in place rather than silencing or lowering the
+# level on the httpx logger: its other lines are operationally useful.
+# See app/log_redact.py's own module docstring.
+logging.getLogger("httpx").addFilter(DiscordWebhookRedactionFilter())
 log = logging.getLogger("main")
 
 

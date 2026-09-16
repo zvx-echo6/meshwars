@@ -16,9 +16,9 @@ SAME connection and inside the SAME transaction as the freeze itself
 actually walks the outbox and posts, on its own schedule, with its own
 retry and give-up rules.
 
-Nothing here ever logs or stores the webhook URL itself: it is a bearer
-credential (a Discord webhook URL embeds its own auth token in the
-path -- anyone holding it can post to the channel as this app, no
+This module itself never logs or stores the webhook URL: it is a
+bearer credential (a Discord webhook URL embeds its own auth token in
+the path -- anyone holding it can post to the channel as this app, no
 further authentication), the same "a secret, never returned or logged"
 treatment app/config.py already gives freqmapper_api_key and
 admin_token. _post() below is the one place that ever touches the
@@ -29,6 +29,13 @@ HTTP response is a different case: the RESPONSE body is Discord
 describing what was wrong with the payload it received, not a
 credential, so a snippet of it is included to make a bad announcement
 diagnosable. See _post()'s own docstring for the line between the two.
+_post() still hands the full URL to httpx.AsyncClient.post(), and
+httpx's own "httpx" logger records every request (method, full URL,
+status) at INFO regardless of anything this module does -- that path
+is closed not here but by the redaction filter in app/log_redact.py,
+which app/main.py attaches to the "httpx" logger at startup and which
+rewrites the token out of any logged webhook URL before it reaches a
+handler.
 
 Configuration (enabled, webhook_url, username, team_emoji,
 announce_month_honors, announce_season_close, announce_weekly_recap,
