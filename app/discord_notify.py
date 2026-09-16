@@ -111,6 +111,78 @@ _TEAM_COLORS = {
 }
 
 
+def _parse_team_emoji(raw: str) -> dict[str, str]:
+    """Parse settings.discord_team_emoji into a {TEAM: token} map.
+
+    Format is comma-separated TEAM=token entries, where the token is
+    exactly what Discord itself echoes back for a custom emoji (see
+    that setting's own comment in app/config.py for how an operator
+    gets one) -- it contains its own ":" and "<>" characters but never
+    "=", so each entry is split on the FIRST "=" only. The team key is
+    uppercased and both sides are stripped of surrounding whitespace,
+    so "green = <:mw_green:222>" and "GREEN=<:mw_green:222>" parse
+    identically.
+
+    A malformed entry (no "=", or either side empty after stripping) is
+    silently skipped rather than raising -- a typo in this setting must
+    never break the whole announcement, only lose that one team's dot.
+    Skipped entries are counted and logged once at WARNING with only
+    the count, never the raw setting value: DISCORD_TEAM_EMOJI is not a
+    secret, but there is no reason to echo an operator's possibly-messy
+    input back into the log either.
+
+    Empty/unset `raw` yields {}, same "empty means off" contract every
+    other optional setting in this file's config section uses.
+    """
+    if not raw:
+        return {}
+    emoji: dict[str, str] = {}
+    skipped = 0
+    for entry in raw.split(","):
+        if "=" not in entry:
+            skipped += 1
+            continue
+        team, token = entry.split("=", 1)
+        team = team.strip().upper()
+        token = token.strip()
+        if not team or not token:
+            skipped += 1
+            continue
+        emoji[team] = token
+    if skipped:
+        log.warning(
+            "discord team emoji: skipped %d malformed entr%s in DISCORD_TEAM_EMOJI",
+            skipped, "y" if skipped == 1 else "ies",
+        )
+    return emoji
+
+
+def _team_emoji_token(emoji: dict[str, str], team: str | None) -> str:
+    """The configured custom-emoji token for `team`, out of an
+    already-parsed {TEAM: token} map (_parse_team_emoji()'s return), or
+    "" when `team` is blank/None or has no entry in the map -- never
+    raises. See _team_dot() for how a caller turns this into a leading
+    dot on a team name/value, with the mandatory plain-text fallback
+    this function's own "" return makes trivial.
+    """
+    if not team:
+        return ""
+    return emoji.get(team, "")
+
+
+def _team_dot(emoji: dict[str, str], team: str | None) -> str:
+    """`team`'s emoji token plus exactly one trailing space, ready to
+    prepend directly onto a team name or an award value -- or "" when
+    the team has no emoji configured. This "" case is the mandatory
+    fallback: a deployment with DISCORD_TEAM_EMOJI unset (or a team
+    simply missing from it) must render with no leading space, no empty
+    placeholder, and no stray "<:name:id>" text -- exactly as it did
+    before this feature existed.
+    """
+    token = _team_emoji_token(emoji, team)
+    return f"{token} " if token else ""
+
+
 def _team_color(team: str | None) -> int | None:
     """The team's Discord embed colour, or None for a blank/unknown
     team name -- never raises. build_month_honors_embed() uses this to
@@ -339,23 +411,26 @@ def _award_line(a: dict) -> str:
     return f"{who} -- {tail}" if tail else who
 
 
-def _team_award_line(a: dict) -> str:
-    """One compact line inside a grouped per-team field: "TEAM: <rest>".
-    Most per-team awards (team_attacker, team_defender, ...) are a
-    property of the team itself, so `who` (player() or team()) is just
-    the scope team again -- "GREEN: GREEN -- 40 squares taken" says
-    GREEN twice for nothing, so the leading "TEAM: " prefix stands in
-    for `who` and _award_line's own who is dropped in that case. A
-    per-team award that DOES name a player distinct from its scope
-    (a team's own top scorer, say) keeps that player's name after the
-    team prefix instead.
+def _team_award_line(a: dict, emoji: dict[str, str]) -> str:
+    """One compact line inside a grouped per-team field: "TEAM: <rest>",
+    prefixed with that team's coloured dot (_team_dot()) when
+    configured. Most per-team awards (team_attacker, team_defender,
+    ...) are a property of the team itself, so `who` (player() or
+    team()) is just the scope team again -- "GREEN: GREEN -- 40 squares
+    taken" says GREEN twice for nothing, so the leading "TEAM: " prefix
+    stands in for `who` and _award_line's own who is dropped in that
+    case. A per-team award that DOES name a player distinct from its
+    scope (a team's own top scorer, say) keeps that player's name after
+    the team prefix instead -- but the dot is always keyed on `scope`
+    (the team the line is grouped under), never the player.
     """
     scope = a.get("scope") or ""
     who = a.get("player") or a.get("team") or "Unknown"
+    dot = _team_dot(emoji, scope)
     if who == scope:
         tail = _value_detail_tail(a.get("value"), a.get("detail"))
-        return f"{scope}: {tail}" if tail else scope
-    return f"{scope}: {_award_line(a)}"
+        return f"{dot}{scope}: {tail}" if tail else f"{dot}{scope}"
+    return f"{dot}{scope}: {_award_line(a)}"
 
 
 def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
@@ -363,8 +438,14 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     three embeds -- Standings, Honors, By team; see below for when the
     latter two are omitted) for one frozen month's result, as returned
     by app/results.py's compute_month()/freeze_month() -- standings and
-    awards. Plain text only, no emoji anywhere, matching this module's
-    own no-emoji rule.
+    awards. Plain text throughout, with exactly one deliberate
+    exception: a per-team coloured-dot custom emoji (settings.
+    discord_team_emoji, parsed by _parse_team_emoji()) prefixed onto
+    every line that names a team, when an operator has configured one
+    for that team -- see _team_dot()'s own comment for the fallback
+    that keeps a deployment without one rendering exactly as before.
+    This is the ONLY emoji this module ever emits; nothing else here
+    invents its own.
 
     Awards use results.AWARD_LABELS (via each award dict's own `label`,
     already set by compute_month()) so this never invents its own
@@ -379,6 +460,7 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     from . import results
 
     proto_label = _PROTOCOL_NAMES.get(protocol, protocol)
+    emoji = _parse_team_emoji(settings.discord_team_emoji)
 
     standings = sorted(
         result.get("standings") or [],
@@ -386,7 +468,9 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     )
     if standings:
         standings_text = "\n".join(
-            f"{s.get('team')}: {_fmt_number(s.get('squares', 0))} squares held" for s in standings
+            f"{_team_dot(emoji, s.get('team'))}{s.get('team')}: "
+            f"{_fmt_number(s.get('squares', 0))} squares held"
+            for s in standings
         )
     else:
         standings_text = "No standings recorded."
@@ -430,7 +514,12 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
             # Discord lays these out three-across instead of stacking
             # each one the full width of the message -- the owner's own
             # "DENSE" complaint about the old shape.
-            headline_fields.append({"name": label, "value": _award_line(a), "inline": True})
+            # The award's own `team` field says which team the winner
+            # belongs to (a player award carries both `player` and
+            # `team`) -- that, not the award's scope (headline awards
+            # have none), is what the dot is keyed on.
+            dot = _team_dot(emoji, a.get("team"))
+            headline_fields.append({"name": label, "value": f"{dot}{_award_line(a)}", "inline": True})
 
     team_fields = []
     for key in team_award_order:
@@ -443,7 +532,7 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
         # every ranked team.
         group.sort(key=lambda a: (team_rank.get(a.get("scope"), len(team_rank)), a.get("scope") or ""))
         label = group[0].get("label") or results.AWARD_LABELS.get(key, key)
-        lines = "\n".join(_team_award_line(a) for a in group)
+        lines = "\n".join(_team_award_line(a, emoji) for a in group)
         # inline=False, deliberately unlike headline_fields above: each
         # of these values is a multi-line list (one line per team), and
         # squeezing a multi-line list into a third of the message width
@@ -464,7 +553,7 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
 
     standings_embed = {
         "title": f"{proto_label} — {_month_title(month)}",
-        "description": f"Standings:\n{standings_text}",
+        "description": standings_text,
     }
     # A Discord embed's "url" must be an ABSOLUTE url -- a relative one
     # (e.g. "/results") makes Discord reject the ENTIRE message with an

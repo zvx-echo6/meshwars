@@ -1125,6 +1125,37 @@ class Settings(BaseSettings):
     # every poll interval, for the life of the deployment.
     discord_outbox_max_attempts: int = 10
 
+    # Per-team coloured-dot custom emoji for Discord announcements
+    # (app/discord_notify.py) -- see the owner feedback that led here in
+    # that module's own comment: the embed `color` bar alone read as
+    # "still no color", and Discord's built-in ANSI code-block palette
+    # was rejected outright (yellow reads brown, orange reads brown too,
+    # pink and purple look too similar). A custom Discord emoji is the
+    # only remaining way to put an actual team colour next to a team's
+    # name in Discord's own rendering.
+    #
+    # Deliberately NOT hardcoded: a custom emoji's ID is specific to the
+    # ONE Discord server it was uploaded to. This repository is public
+    # and AGPL (see meshwars-agpl-relicense) -- baking in this
+    # deployment's own emoji IDs would post literal, broken text like
+    # "<:mw_green:1234567890>" in every OTHER operator's channel, who
+    # has no such emoji and never will unless they upload their own.
+    #
+    # Format: comma-separated TEAM=token pairs, where the token is
+    # EXACTLY what Discord itself produces for a custom emoji -- get one
+    # by typing "\:mw_green:" (with the leading backslash) in any
+    # channel on the server that owns the emoji and sending it; Discord
+    # echoes back the raw <:name:id> (or <a:name:id> if animated) form,
+    # which is what belongs here. Example:
+    # DISCORD_TEAM_EMOJI=RED=<:mw_red:111>,GREEN=<:mw_green:222>
+    #
+    # Empty means off, same "empty means off, never open" contract every
+    # other optional setting in this section uses: a team missing from
+    # this map (or the whole setting left unset) renders exactly as it
+    # did before this feature existed -- no dot, no leading space, no
+    # stray placeholder text. See discord_notify._parse_team_emoji().
+    discord_team_emoji: str = ""
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

@@ -126,6 +126,14 @@ services:
       # Not a secret. Falls back to "MeshWars" if left blank (see that
       # setting's own comment in app/config.py).
       DISCORD_WEBHOOK_USERNAME: "${DISCORD_WEBHOOK_USERNAME:-}"
+      # Per-team coloured-dot custom emoji for an announcement -- empty
+      # means no dots, rendered exactly as before this setting existed.
+      # See .env.example for how an operator gets these tokens from
+      # their own Discord server. Compose does not pass .env through
+      # wholesale, so -- same trap as DISCORD_WEBHOOK_ANNOUNCEMENTS above
+      # -- a missing line here means the value sits correctly in .env
+      # and silently never reaches the app.
+      DISCORD_TEAM_EMOJI: "${DISCORD_TEAM_EMOJI:-}"
     volumes:
       # The game database, in a directory beside this compose file. A
       # plain directory rather than a named volume so the operator can

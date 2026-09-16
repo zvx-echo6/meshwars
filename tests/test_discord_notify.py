@@ -370,6 +370,123 @@ def test_build_month_honors_embed_standings_use_thousands_separator():
     assert "GREEN: 6005 squares held" not in description
 
 
+# ---- team emoji dots ---------------------------------------------------
+
+
+def _emoji_setting() -> str:
+    """A well-formed 7-entry DISCORD_TEAM_EMOJI covering every team
+    _TEAM_COLORS knows, in the exact TEAM=token comma-separated shape
+    an operator would paste in from .env.example."""
+    return (
+        "RED=<:mw_red:111>,GREEN=<:mw_green:222>,BLUE=<:mw_blue:333>,"
+        "PURPLE=<:mw_purple:444>,YELLOW=<:mw_yellow:555>,"
+        "ORANGE=<:mw_orange:666>,PINK=<:mw_pink:777>"
+    )
+
+
+def test_parse_team_emoji_well_formed_seven_entries():
+    parsed = discord_notify._parse_team_emoji(_emoji_setting())
+    assert len(parsed) == 7
+    assert parsed["GREEN"] == "<:mw_green:222>"
+    assert parsed["RED"] == "<:mw_red:111>"
+
+
+def test_parse_team_emoji_skips_malformed_entry_but_keeps_good_ones(caplog):
+    raw = "RED=<:mw_red:111>,GARBAGE_NO_EQUALS,GREEN=<:mw_green:222>"
+    with caplog.at_level("WARNING"):
+        parsed = discord_notify._parse_team_emoji(raw)
+    assert parsed == {"RED": "<:mw_red:111>", "GREEN": "<:mw_green:222>"}
+    # Logged once at WARNING naming the count -- never the raw entry text.
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "1" in warnings[0].message
+    assert "GARBAGE_NO_EQUALS" not in warnings[0].message
+
+
+def test_parse_team_emoji_empty_string_yields_empty_dict():
+    assert discord_notify._parse_team_emoji("") == {}
+
+
+def test_standings_line_starts_with_team_emoji_dot(monkeypatch):
+    monkeypatch.setattr(settings, "discord_team_emoji", _emoji_setting())
+    result = _sample_result()
+    result["standings"] = [{"team": "GREEN", "squares": 200}]
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    description = embed["embeds"][0]["description"]
+    assert description.startswith("<:mw_green:222> GREEN: ")
+
+
+def test_headline_player_award_value_carries_teams_dot(monkeypatch):
+    """The headline award's own `team` field (not its scope, which is
+    empty for a headline award) says which team the winner belongs to
+    -- the value is prefixed with THAT team's dot."""
+    monkeypatch.setattr(settings, "discord_team_emoji", _emoji_setting())
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _sample_result())
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    empire = next(f for f in honors["fields"] if f["name"] == "Empire Builder")
+    # _sample_result()'s empire_builder award: player "zippy", team "RED".
+    assert empire["value"].startswith("<:mw_red:111> zippy")
+
+
+def test_per_team_grouped_lines_each_carry_their_own_dot(monkeypatch):
+    monkeypatch.setattr(settings, "discord_team_emoji", _emoji_setting())
+    result = _sample_result()
+    result["standings"] = [{"team": "RED", "squares": 120}, {"team": "GREEN", "squares": 80}]
+    result["awards"].append(_team_award("team_attacker", "Top Attacker", "RED", 5.0))
+    result["awards"].append(_team_award("team_attacker", "Top Attacker", "GREEN", 3.0))
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    by_team = next(e for e in embed["embeds"] if e["title"] == "By team")
+    attacker = next(f for f in by_team["fields"] if f["name"] == "Top Attacker")
+    lines = attacker["value"].split("\n")
+    red_line = next(l for l in lines if "RED" in l)
+    green_line = next(l for l in lines if "GREEN" in l)
+    assert red_line.startswith("<:mw_red:111> RED")
+    assert green_line.startswith("<:mw_green:222> GREEN")
+
+
+def test_no_emoji_configured_renders_identical_to_before(monkeypatch):
+    """The mandatory fallback: with DISCORD_TEAM_EMOJI unset, output
+    must be byte-identical to the no-emoji rendering -- no leading
+    space and no "<:" custom-emoji syntax anywhere, on a realistic
+    shape with standings, headline awards, and per-team awards all
+    present at once."""
+    monkeypatch.setattr(settings, "discord_team_emoji", "")
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _real_world_month_result())
+    text = json.dumps(embed)
+    assert "<:" not in text
+    description = embed["embeds"][0]["description"]
+    for line in description.split("\n"):
+        assert not line.startswith(" ")
+    honors = next(e for e in embed["embeds"] if e["title"] == "Honors")
+    for f in honors["fields"]:
+        assert not f["value"].startswith(" ")
+    by_team = next(e for e in embed["embeds"] if e["title"] == "By team")
+    for f in by_team["fields"]:
+        for line in f["value"].split("\n"):
+            assert not line.startswith(" ")
+
+
+def test_partial_emoji_config_missing_team_renders_plainly(monkeypatch):
+    """A team absent from a partially-configured emoji map must render
+    exactly as if no emoji were configured at all for that team, while
+    a team that IS in the map still gets its dot -- a gap in the config
+    must not break the teams that ARE configured."""
+    monkeypatch.setattr(settings, "discord_team_emoji", "GREEN=<:mw_green:222>")
+    result = _sample_result()
+    result["standings"] = [{"team": "GREEN", "squares": 200}, {"team": "RED", "squares": 100}]
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    lines = embed["embeds"][0]["description"].split("\n")
+    green_line = next(l for l in lines if "GREEN" in l)
+    red_line = next(l for l in lines if "RED" in l)
+    assert green_line.startswith("<:mw_green:222> GREEN")
+    assert red_line == "RED: 100 squares held"
+
+
+def test_standings_description_no_longer_has_standings_prefix():
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _sample_result())
+    assert "Standings:" not in embed["embeds"][0]["description"]
+
+
 # ---- three embeds, team colour, density -----------------------------------
 
 
