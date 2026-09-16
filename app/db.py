@@ -2150,6 +2150,55 @@ CREATE TABLE IF NOT EXISTS site_referrer_daily (
     views           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, referrer)
 );
+
+-- ---------------------------------------------------------------------
+-- Discord outbound announcements (app/discord_notify.py): end-of-month
+-- honors posted to a Discord webhook, through a durable outbox rather
+-- than a direct HTTP call at freeze time. Two things a direct call
+-- cannot give that this table exists for:
+--
+-- 1. EXACTLY ONCE, across restarts. `kind` names what is being
+--    announced ("month_honors" today, room for more later) and `key` is
+--    that announcement's own natural key ("2026-08:mc" -- month and
+--    protocol) -- the UNIQUE index on (kind, key) is what makes
+--    enqueue()'s INSERT OR IGNORE a no-op on a duplicate rather than a
+--    second post. Without it, a process restarting mid-drain, or the
+--    admin re-freeze route (app/admin_ops.py's POST
+--    /api/admin/month/freeze) calling app/results.py's freeze_month()
+--    again for a month already announced, would repost the same honors
+--    to the Discord channel every time.
+--
+-- 2. ENQUEUED INSIDE THE FREEZE TRANSACTION, not after it commits.
+--    app/results.py's freeze_month() calls discord_notify.enqueue()
+--    with the SAME `conn` it just wrote month_result/month_standing/
+--    month_award through, before that transaction's caller commits
+--    (app/db.py's WriteSession, or the admin route's own BEGIN
+--    IMMEDIATE/COMMIT) -- so a freeze that raises and rolls back takes
+--    this row with it. A month that never actually froze can never be
+--    announced; there is no window where the outbox has a row for a
+--    result the database does not.
+--
+-- posted_at IS NULL means pending -- picked up by run_forever()'s poll
+-- loop, which does the actual HTTP POST OUTSIDE any WriteSession (a
+-- webhook call is not database work and must never hold the single
+-- global write lock while it waits on the network) and only takes the
+-- lock afterward, briefly, to record the outcome. attempts/last_error
+-- let a permanently-failing row (a revoked webhook, a deleted channel)
+-- stop retrying forever rather than spinning every poll interval --
+-- see settings.discord_outbox_max_attempts and
+-- discord_outbox_max_age_hours in app/config.py for the two independent
+-- reasons a pending row is skipped rather than posted.
+CREATE TABLE IF NOT EXISTS discord_outbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    posted_at   INTEGER,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discord_outbox_key ON discord_outbox(kind, key);
 """
 
 

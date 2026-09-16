@@ -743,7 +743,32 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
 
 
 def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) -> None:
-    """Write a finished month's result. Caller holds the write lock."""
+    """Write a finished month's result. Caller holds the write lock.
+
+    Also called directly by the admin re-freeze route
+    (app/admin_ops.py's POST /api/admin/month/freeze), to recompute a
+    month whose history was wrong or that closed while the service was
+    down -- not just from the ordinary catch-up path below
+    (maybe_roll_months()). Confirmed: that route holds no other write
+    path to month_result/month_standing/month_award, so every write
+    this function makes -- announcement included -- goes through here
+    every time, whether this is the month's first freeze or its tenth.
+
+    The Discord announcement enqueued below rides on that same fact.
+    discord_notify.enqueue()'s INSERT OR IGNORE is keyed on
+    (kind="month_honors", key=f"{month}:{protocol}") -- a re-freeze of
+    an already-announced month enqueues the identical key and is
+    silently dropped, so the admin re-freeze route can correct a
+    month's history as many times as it needs to without ever
+    reposting the same honors to Discord.
+    """
+    # Local import: app/discord_notify.py imports THIS module at module
+    # level (for AWARD_LABELS, in build_month_honors_embed) -- importing
+    # it back here at module level would be a circular import. Deferred
+    # to inside this function instead, which costs nothing: freeze_month
+    # runs at most a handful of times a month.
+    from . import discord_notify
+
     result = compute_month(conn, protocol, month, now)
     conn.execute("INSERT OR REPLACE INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
                  (month, protocol, now))
@@ -763,6 +788,19 @@ def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) 
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (month, protocol, a["award"], a["scope"], a["player_id"], a["team"], a["value"], a["detail"]),
         )
+
+    # Enqueued on THIS SAME conn, inside the caller's still-open
+    # transaction -- see app/db.py's discord_outbox comment and
+    # app/discord_notify.py's enqueue() docstring: a freeze that raises
+    # after this point rolls back the whole transaction, this row
+    # included, so a month that never actually froze can never be
+    # announced.
+    discord_notify.enqueue(
+        conn, kind="month_honors", key=f"{month}:{protocol}",
+        payload=discord_notify.build_month_honors_embed(month, protocol, result),
+        now=now,
+    )
+
     log.info("results: froze %s for %s (%d awards)", month, protocol, len(result["awards"]))
 
 

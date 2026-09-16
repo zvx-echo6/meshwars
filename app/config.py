@@ -1065,6 +1065,66 @@ class Settings(BaseSettings):
     account_totp_verify_challenge_rate_limit_attempts: int = 8
     account_totp_verify_challenge_rate_limit_window_seconds: int = 300
 
+    # ---- Discord announcements (app/discord_notify.py) --------------------
+    # Outbound end-of-month honors, posted to a Discord channel through a
+    # webhook -- see app/db.py's discord_outbox table comment for the
+    # durable-outbox design this backs. NOT the OAuth_DISCORD_CLIENT_ID/
+    # SECRET pair above (app/oauth.py) -- those authenticate a PLAYER
+    # signing in with their own Discord account; this authenticates the
+    # APP posting to one specific channel, an entirely separate Discord
+    # feature with its own credential.
+    #
+    # Empty means off, same "empty means off, never open" contract every
+    # other optional credential in this file uses (join_invite_code,
+    # smtp_host, ...) -- discord_notify.announcements_enabled() is the
+    # one place that checks this. A Discord webhook URL is itself a
+    # bearer credential (anyone who has it can post to the channel as
+    # this app, no further auth), so it is never logged and never
+    # returned from any route, same as freqmapper_api_key/admin_token
+    # above.
+    discord_webhook_announcements: str = ""
+
+    # The Discord display name a post appears under -- Discord otherwise
+    # falls back to whatever name the webhook happened to be created
+    # with in the channel's Integrations settings (Discord's own
+    # placeholder default, "Captain Hook", if nobody bothered to rename
+    # it), which has nothing to do with what app actually posted.
+    # discord_notify.build_month_honors_embed() puts this in the webhook
+    # body's own "username" field so a post always identifies itself as
+    # MeshWars regardless of how the webhook itself is named -- not a
+    # secret, and not empty-means-off like every other setting in this
+    # section: an empty override here falls back to "MeshWars" (see that
+    # function's own comment), never to omitting the field and letting
+    # Discord's placeholder show through.
+    discord_webhook_username: str = "MeshWars"
+
+    # How often run_forever()'s outbox drain loop wakes up -- same
+    # "cheap enough to run often" cadence checkin_poll_interval_seconds
+    # and freqmapper_poll_interval_seconds already use for their own
+    # background loops. A month closes at most a handful of times a
+    # year, so this only ever has real work on rare cycles; a short
+    # interval costs nothing and keeps the lag between "month froze" and
+    # "channel sees it" small.
+    discord_outbox_poll_interval_seconds: int = 30
+
+    # A pending row older than this is skipped, never posted -- the same
+    # "a long outage must never dump stale news" reasoning
+    # checkin_net_start_date and freqmapper_paint_from apply to their own
+    # backlogs, applied here to a queue instead of a feed. Without this,
+    # a webhook broken for a week (a deleted channel, a revoked URL
+    # nobody noticed) would, the moment it is fixed, immediately post
+    # every honor that piled up in the meantime, days late and out of
+    # context.
+    discord_outbox_max_age_hours: int = 72
+
+    # A row that has failed this many times stops being retried --
+    # attempts/last_error are recorded on the row itself (see
+    # discord_outbox's own comment in app/db.py) so an operator can see
+    # why, but the loop itself must eventually give up on a
+    # permanently-broken webhook rather than retrying it forever, once
+    # every poll interval, for the life of the deployment.
+    discord_outbox_max_attempts: int = 10
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]
