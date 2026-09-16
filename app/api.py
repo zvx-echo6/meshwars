@@ -52,9 +52,9 @@ from .auth import new_rate_limit_bucket, require_api_key_principal
 from .checkin_api import router as checkin_router
 from .client_ip import get_client_ip
 from .clientlog_api import router as clientlog_router
-from .discord_interactions import router as discord_interactions_router
 from .config import settings
 from .db import connect
+from .discord_interactions import router as discord_interactions_router
 from .join_api import router as join_router
 from .mc_api import router as mc_router
 from .mc_ingest import hash_secret, log_raw_batch
