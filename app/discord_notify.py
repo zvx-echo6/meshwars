@@ -323,7 +323,8 @@ def load_discord_config(conn) -> dict:
     """Fresh, uncached read of the discord_config singleton (app/db.py)
     -- enabled, webhook_url, username, team_emoji, announce_month_honors,
     announce_season_close, announce_weekly_recap, announce_net_wrapup,
-    updated_at. Read on every enqueue() call, every drain cycle
+    guild_id, roles_enabled, team_channels_enabled, team_category_name,
+    team_category_id, updated_at. Read on every enqueue() call, every drain cycle
     (_drain_once()), by build_month_honors_embed()/
     build_season_close_embed()/build_weekly_recap_embed()/
     build_net_wrapup_embed(), and by every admin route that needs the
@@ -361,7 +362,9 @@ def load_discord_config(conn) -> dict:
         "SELECT enabled, webhook_url, username, team_emoji, "
         "       announce_month_honors, announce_season_close, "
         "       announce_weekly_recap, announce_net_wrapup, "
-        "       guild_id, roles_enabled, updated_at "
+        "       guild_id, roles_enabled, "
+        "       team_channels_enabled, team_category_name, team_category_id, "
+        "       updated_at "
         "  FROM discord_config WHERE id = 1"
     ).fetchone()
     if row is None:
@@ -380,6 +383,14 @@ def load_discord_config(conn) -> dict:
             # "not configured yet" state a real row defaults to.
             "guild_id": settings.discord_guild_id,
             "roles_enabled": False,
+            # Private team channels (app/discord_bot.py's
+            # ensure_team_channels()) has no settings.py seed at all --
+            # same "not configured yet" fallback, matching the CREATE
+            # TABLE's own defaults exactly (off, category name 'Teams',
+            # no discovered category id yet).
+            "team_channels_enabled": False,
+            "team_category_name": "Teams",
+            "team_category_id": None,
             "updated_at": 0,
         }
     d = dict(row)
@@ -389,6 +400,7 @@ def load_discord_config(conn) -> dict:
     d["announce_weekly_recap"] = bool(d["announce_weekly_recap"])
     d["announce_net_wrapup"] = bool(d["announce_net_wrapup"])
     d["roles_enabled"] = bool(d["roles_enabled"])
+    d["team_channels_enabled"] = bool(d["team_channels_enabled"])
     return d
 
 

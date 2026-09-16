@@ -8,11 +8,16 @@ WHAT THIS DOES: a MeshWars player who has (a) linked a Discord account
 (app/oauth_api.py's Discord provider -- account_identity.subject is
 that Discord user's own snowflake id) and (b) is a member of the
 configured guild gets the Discord role that names their MeshWars team,
-and no other team's role. Nothing else: this bot is not a chat bot, it
-never reads or sends a message, and its only three permissions in the
-guild are Manage Roles, View Channels, and Pin Messages -- the second
-two are Discord requirements for a bot to exist in a server and see
-its own role list at all, not anything this module actually uses.
+and no other team's role. This bot is not a chat bot -- it never reads
+or sends a message a human wrote. Its role in the guild holds Manage
+Roles, Manage Channels, View Channels, Send Messages, Read Message
+History, and Pin Messages. Manage Roles is what the role sync above
+actually uses; Manage Channels is what ensure_team_channels() (below)
+uses to create/repair the private team channels and their permission
+overwrites; View Channels, Send Messages, Read Message History, and
+Pin Messages are Discord requirements for a bot to exist in a server,
+see its own channel list, and post into a channel it manages at all --
+this module never posts a message of its own into any of them.
 
 PRIVACY: a team role reveals a Discord user's MeshWars TEAM -- never
 their in-game player name, never a location, never anything about
@@ -28,6 +33,13 @@ same as a player's own choice to show a coloured dot next to their
 name), never the "location" tier, and the account-linking session that
 produced the underlying account_identity row is exactly the "requires
 a session" gate that rule already describes.
+
+TEAM CHANNELS: ensure_team_channels() (below, run right after
+ensure_team_roles() succeeds) is a second, later feature layered on top
+of the same role: a private text channel per team, visible only to
+players holding that team's role. This is still identity-tier, same as
+the role itself -- a channel's membership list is exactly "everyone
+holding this team's role," nothing about location.
 
 CONFIG: DISCORD_BOT_TOKEN (app/config.py's discord_bot_token) is a
 SECRET, held in the environment only -- never the database, never
@@ -122,6 +134,42 @@ _MAX_ERROR_BODY_CHARS = 200
 # "0" is the documented way to say "no permissions at all."
 _TEAM_ROLE_PERMISSIONS = "0"
 
+# Discord permission bits (API v10, discord.dev's own "Permissions"
+# reference) that ensure_team_channels() below actually sets on a
+# channel or category's permission overwrites. Named constants rather
+# than the raw literals so the overwrite-building code below reads as
+# what it means, not as three magic numbers OR'd together.
+_PERM_MANAGE_CHANNELS = 1 << 4
+_PERM_VIEW_CHANNEL = 1 << 10
+_PERM_SEND_MESSAGES = 1 << 11
+_PERM_READ_MESSAGE_HISTORY = 1 << 16
+
+# What a team's OWN role is allowed inside its channel -- see enough to
+# read and write there, nothing else (no Manage Channels, no touching
+# permissions).
+_TEAM_CHANNEL_MEMBER_PERMS = _PERM_VIEW_CHANNEL | _PERM_SEND_MESSAGES | _PERM_READ_MESSAGE_HISTORY
+
+# What THIS BOT'S OWN user overwrite grants it in every team channel and
+# the category, on top of the member perms above: Manage Channels, so it
+# can keep editing the channel's overwrites on every later run. Without
+# this, the very first @everyone-deny overwrite this bot writes would
+# lock itself out of the channel it just created, with no way back in
+# except a human re-inviting it in Discord's own UI -- see
+# _bot_allow_overwrite()'s own docstring below.
+_BOT_CHANNEL_PERMS = _TEAM_CHANNEL_MEMBER_PERMS | _PERM_MANAGE_CHANNELS
+
+# Discord's own permission-overwrite `type`: 0 for a role, 1 for a
+# guild member (discord.dev's "Overwrite Object"). Named here so the
+# overwrite-building helpers below never repeat a bare 0/1.
+_OVERWRITE_TYPE_ROLE = 0
+_OVERWRITE_TYPE_MEMBER = 1
+
+# Discord's own channel `type`: 4 is a category, 0 is a plain text
+# channel (discord.dev's "Channel Types"). ensure_team_channels() only
+# ever creates these two kinds.
+_CHANNEL_TYPE_CATEGORY = 4
+_CHANNEL_TYPE_TEXT = 0
+
 # How often maybe_reconcile_roles() actually runs reconcile_all(), out
 # of every call app/discord_notify.py's run_forever() makes to it (once
 # per its own 30s poll cycle). 15 minutes, NOT that 30s interval: a
@@ -168,6 +216,19 @@ def _roles_ready(cfg: dict) -> bool:
     callers use in app/discord_notify.py.
     """
     return bool(cfg.get("roles_enabled")) and bool(settings.discord_bot_token) and bool(cfg.get("guild_id"))
+
+
+def _channels_ready(cfg: dict) -> bool:
+    """True only when private team channels are actually configured to
+    run: discord_config.team_channels_enabled=1 ON TOP OF every
+    _roles_ready() gate (a bot token, a guild id, roles_enabled) --
+    channels are layered on team roles (a channel's own permission
+    overwrite names a team's role id), so this feature can never be
+    "on" while role sync itself is off or unconfigured. Checked FIRST by
+    ensure_team_channels(), same no-outbound-call, no-op-dict contract
+    _roles_ready() itself documents.
+    """
+    return bool(cfg.get("team_channels_enabled")) and _roles_ready(cfg)
 
 
 def _parse_retry_after(resp: httpx.Response) -> float:
@@ -272,6 +333,26 @@ def _check_ok(resp: httpx.Response, action: str) -> None:
     raise DiscordAPIError(f"discord api {action} returned HTTP {resp.status_code}{detail}")
 
 
+def _check_channel_ok(resp: httpx.Response, action: str, likely_missing_permission: str) -> None:
+    """Same non-2xx contract as _check_ok() above, except a 403
+    specifically is raised with `likely_missing_permission` named in
+    the message rather than whatever (often unhelpfully generic)
+    "Missing Permissions" text Discord's own body carries -- used only
+    by ensure_team_channels() below and its helpers, where a 403 has
+    exactly two likely causes (Manage Channels missing, for a create;
+    Manage Roles missing, for a permission-overwrite edit) and naming
+    the right one saves an operator a guessing game in Discord's own
+    role list. Every other status is unchanged, delegated straight to
+    _check_ok().
+    """
+    if resp.status_code == 403:
+        raise DiscordAPIError(
+            f'discord api {action} returned HTTP 403 -- Herald is likely missing the '
+            f'"{likely_missing_permission}" permission in this guild'
+        )
+    _check_ok(resp, action)
+
+
 async def _list_guild_roles(guild_id: str, *, http_client: httpx.AsyncClient | None = None) -> list[dict]:
     resp = await _request("GET", f"/guilds/{guild_id}/roles", http_client=http_client)
     _check_ok(resp, "list roles")
@@ -304,6 +385,244 @@ async def _create_guild_role(
     return resp.json()
 
 
+# ---- ensure_team_channels()'s own REST wrappers ---------------------------
+#
+# Same shape as _list_guild_roles()/_create_guild_role() above (a thin
+# wrapper over _request()+_check_ok()/_check_channel_ok()), kept
+# separate from the role ones above rather than generalized into one
+# shared helper: channels and roles are different Discord resources with
+# different failure-permission mappings, and the extra indirection a
+# shared helper would need buys nothing here.
+
+
+async def _get_bot_user(*, http_client: httpx.AsyncClient | None = None) -> dict:
+    """GET /users/@me -- this bot's own user object, id included. Never
+    permission-gated (a bot can always read its own identity), so this
+    goes through the plain _check_ok(), not _check_channel_ok().
+    """
+    resp = await _request("GET", "/users/@me", http_client=http_client)
+    _check_ok(resp, "get bot user")
+    return resp.json()
+
+
+# This bot's own Discord user id, cached process-local once fetched --
+# see _cached_bot_user_id() below for why (a bot's snowflake never
+# changes for a given token, so re-fetching it on every
+# ensure_team_channels() run would be a wasted call every single time).
+_bot_user_id: str | None = None
+
+
+async def _cached_bot_user_id(*, http_client: httpx.AsyncClient | None = None) -> str:
+    """The cached _bot_user_id above, fetching it via _get_bot_user()
+    exactly once per process lifetime (or per test, which monkeypatches
+    this module's _bot_user_id back to None between runs -- see
+    tests/test_discord_bot.py's own fixture). Every overwrite
+    ensure_team_channels() writes needs this id (see
+    _bot_allow_overwrite() below for why the bot must always hold its
+    own explicit allow), so this is called once per ensure_team_channels()
+    run and the result threaded through, never re-fetched per channel.
+    """
+    global _bot_user_id
+    if _bot_user_id is None:
+        me = await _get_bot_user(http_client=http_client)
+        _bot_user_id = me["id"]
+    return _bot_user_id
+
+
+async def _list_guild_channels(guild_id: str, *, http_client: httpx.AsyncClient | None = None) -> list[dict]:
+    resp = await _request("GET", f"/guilds/{guild_id}/channels", http_client=http_client)
+    _check_ok(resp, "list channels")
+    return resp.json()
+
+
+async def _create_guild_channel(
+    guild_id: str,
+    *,
+    name: str,
+    channel_type: int,
+    parent_id: str | None,
+    permission_overwrites: list[dict],
+    http_client: httpx.AsyncClient | None = None,
+) -> dict:
+    """POST /guilds/{guild_id}/channels -- `permission_overwrites` is set
+    RIGHT HERE, at creation, so a brand-new category or channel is never
+    even briefly public between being created and a follow-up PATCH (see
+    ensure_team_channels()'s own docstring for why the overwrite list is
+    otherwise reasserted with a separate PATCH only for a channel this
+    function FOUND already existing, not one it just made).
+    """
+    body: dict = {"name": name, "type": channel_type, "permission_overwrites": permission_overwrites}
+    if parent_id is not None:
+        body["parent_id"] = parent_id
+    resp = await _request("POST", f"/guilds/{guild_id}/channels", json_body=body, http_client=http_client)
+    _check_channel_ok(resp, f"create channel {name!r}", "Manage Channels")
+    return resp.json()
+
+
+async def _set_channel_overwrites(
+    channel_id: str, permission_overwrites: list[dict], *, http_client: httpx.AsyncClient | None = None
+) -> None:
+    """PATCH /channels/{channel_id} with a full `permission_overwrites`
+    array -- Discord replaces the channel's ENTIRE overwrite list with
+    exactly what's given here, which is exactly what "re-assert the full
+    list on every run, so a hand edit is repaired" (ensure_team_channels()'s
+    own docstring) needs: a single call that cannot leave a stray
+    overwrite an operator added by hand still in place.
+    """
+    resp = await _request(
+        "PATCH", f"/channels/{channel_id}",
+        json_body={"permission_overwrites": permission_overwrites},
+        http_client=http_client,
+    )
+    _check_channel_ok(resp, f"set permission overwrites on channel {channel_id}", "Manage Roles")
+
+
+def _everyone_deny_overwrite(guild_id: str) -> dict:
+    """@everyone -- Discord's documented convention is that the
+    @everyone role's overwrite id IS the guild's own id -- denied
+    VIEW_CHANNEL. Present on the category AND every team channel (never
+    just the category): see ensure_team_channels()'s own docstring for
+    why each channel repeats this rather than relying only on the
+    category's copy (a channel dragged out of its category must stay
+    private on its own).
+    """
+    return {"id": guild_id, "type": _OVERWRITE_TYPE_ROLE, "allow": "0", "deny": str(_PERM_VIEW_CHANNEL)}
+
+
+def _team_role_allow_overwrite(role_id: str) -> dict:
+    """The team's own role -- allowed to view, post, and read history in
+    its channel, nothing more (no Manage anything -- a team channel is
+    theirs to talk in, not to administer).
+    """
+    return {
+        "id": role_id, "type": _OVERWRITE_TYPE_ROLE,
+        "allow": str(_TEAM_CHANNEL_MEMBER_PERMS), "deny": "0",
+    }
+
+
+def _bot_allow_overwrite(bot_user_id: str) -> dict:
+    """This bot's own user -- the member perms above PLUS Manage
+    Channels. See _BOT_CHANNEL_PERMS's own comment for why Manage
+    Channels specifically: without an explicit allow of its own, the
+    very @everyone-deny overwrite this function writes would lock the
+    bot itself out of the channel it just created (or is repairing),
+    with no way back in short of a human re-granting it access by hand
+    in Discord's own UI.
+    """
+    return {
+        "id": bot_user_id, "type": _OVERWRITE_TYPE_MEMBER,
+        "allow": str(_BOT_CHANNEL_PERMS), "deny": "0",
+    }
+
+
+def _category_overwrites(guild_id: str, bot_user_id: str) -> list[dict]:
+    """The category's own overwrite list -- @everyone denied, the bot
+    allowed. Deliberately does NOT include any team role: the category
+    itself is never a place a team needs its own allow, since each
+    child channel carries its own complete list (see
+    _team_channel_overwrites() below) that a viewer's permissions
+    resolve against directly.
+    """
+    return [_everyone_deny_overwrite(guild_id), _bot_allow_overwrite(bot_user_id)]
+
+
+def _team_channel_overwrites(guild_id: str, role_id: str, bot_user_id: str) -> list[dict]:
+    """One team channel's full, authoritative overwrite list: @everyone
+    denied, that team's role allowed, the bot allowed -- see
+    ensure_team_channels()'s own docstring for why this complete list is
+    written to every team channel rather than left to inherit the
+    category's (a channel dragged out of its category must stay
+    private, and a channel's own overwrites are exactly what makes that
+    true regardless of where it lives).
+    """
+    return [
+        _everyone_deny_overwrite(guild_id),
+        _team_role_allow_overwrite(role_id),
+        _bot_allow_overwrite(bot_user_id),
+    ]
+
+
+async def _ensure_category(
+    guild_id: str,
+    category_name: str,
+    stored_category_id: str | None,
+    bot_user_id: str,
+    channels: list[dict],
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> str:
+    """Ensure the one shared team-channel category exists, returning its
+    id. Same three-tier "id, then exact name, then create" order
+    ensure_team_roles() above already uses for a team role: the stored
+    id is tried first (still present in `channels`?), then an exact
+    name match (an operator, or a past run before the id was recorded,
+    may already have one), and only then is a new category created.
+    Either of the first two branches re-asserts this category's full
+    overwrite list with a PATCH (see _set_channel_overwrites()'s own
+    docstring for why that's a full replace, not a diff) -- a category
+    this function just created already got the same list at creation
+    time and needs no follow-up call.
+    """
+    overwrites = _category_overwrites(guild_id, bot_user_id)
+    categories_by_id = {c["id"]: c for c in channels if c.get("type") == _CHANNEL_TYPE_CATEGORY}
+    if stored_category_id and stored_category_id in categories_by_id:
+        await _set_channel_overwrites(stored_category_id, overwrites, http_client=http_client)
+        return stored_category_id
+    for c in channels:
+        if c.get("type") == _CHANNEL_TYPE_CATEGORY and c.get("name") == category_name:
+            await _set_channel_overwrites(c["id"], overwrites, http_client=http_client)
+            return c["id"]
+    created = await _create_guild_channel(
+        guild_id, name=category_name, channel_type=_CHANNEL_TYPE_CATEGORY,
+        parent_id=None, permission_overwrites=overwrites, http_client=http_client,
+    )
+    return created["id"]
+
+
+async def _ensure_team_channel(
+    guild_id: str,
+    team: str,
+    role_id: str,
+    category_id: str,
+    stored_channel_id: str | None,
+    bot_user_id: str,
+    channels: list[dict],
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> tuple[str, str]:
+    """Ensure `team`'s private text channel exists inside `category_id`,
+    returning (channel_id, bucket) where bucket is one of "created",
+    "recreated", "reused", "unchanged" -- the exact same four buckets,
+    same meanings, ensure_team_roles() above returns for a role. Same
+    "id, then exact name (scoped to THIS category), then create" order
+    _ensure_category() above uses; the name match is scoped to
+    `category_id` specifically so a same-named text channel living
+    anywhere else in the guild is never mistaken for this team's own.
+    """
+    name = team.lower()
+    overwrites = _team_channel_overwrites(guild_id, role_id, bot_user_id)
+    channels_by_id = {c["id"]: c for c in channels if c.get("type") == _CHANNEL_TYPE_TEXT}
+
+    if stored_channel_id and stored_channel_id in channels_by_id:
+        await _set_channel_overwrites(stored_channel_id, overwrites, http_client=http_client)
+        return stored_channel_id, "unchanged"
+
+    for c in channels:
+        if (
+            c.get("type") == _CHANNEL_TYPE_TEXT
+            and c.get("name") == name
+            and c.get("parent_id") == category_id
+        ):
+            await _set_channel_overwrites(c["id"], overwrites, http_client=http_client)
+            return c["id"], ("recreated" if stored_channel_id else "reused")
+
+    created = await _create_guild_channel(
+        guild_id, name=name, channel_type=_CHANNEL_TYPE_TEXT, parent_id=category_id,
+        permission_overwrites=overwrites, http_client=http_client,
+    )
+    return created["id"], ("recreated" if stored_channel_id else "created")
+
+
 async def _upsert_team_role(team: str, role_id: str, now: int) -> None:
     """Record (or update) discord_team_role's one row for `team` --
     the ONLY table this module ever writes to, and a small enough write
@@ -327,7 +646,7 @@ async def ensure_team_roles(*, http_client: httpx.AsyncClient | None = None) -> 
     colour change there is automatically the colour the next call here
     creates/repairs a role with too) has exactly one Discord role, and
     that discord_team_role remembers its id. Safe to call repeatedly --
-    an operator's "Create / repair team roles" button in
+    an operator's "Create / repair team roles and channels" button in
     app/admin_ops.py, and nothing else, since this never runs on its
     own schedule.
 
@@ -400,6 +719,140 @@ async def ensure_team_roles(*, http_client: httpx.AsyncClient | None = None) -> 
             created.append(team)
         else:
             recreated.append(team)
+
+    return {"ok": True, "created": created, "recreated": recreated, "reused": reused, "unchanged": unchanged}
+
+
+async def _upsert_team_channel(team: str, channel_id: str, now: int) -> None:
+    """Record (or update) discord_team_role.channel_id for `team` -- the
+    matching per-team write for ensure_team_channels() below, same
+    per-row upsert shape _upsert_team_role() above uses for role_id, on
+    the SAME row (see that column's own comment in app/db.py for why
+    role id and channel id live together). Never touches role_id itself.
+    In practice this is always an UPDATE against a row ensure_team_roles()
+    already created (ensure_team_channels() only ever processes a team
+    that already has a role_id -- see that function's own docstring),
+    but ON CONFLICT keeps this safe regardless.
+    """
+    async with WriteSession() as conn:
+        conn.execute(
+            "INSERT INTO discord_team_role(team, role_id, channel_id, updated_at) VALUES (?, '', ?, ?) "
+            "ON CONFLICT(team) DO UPDATE SET channel_id = excluded.channel_id, updated_at = excluded.updated_at",
+            (team, channel_id, now),
+        )
+
+
+async def _save_team_category_id(category_id: str, now: int) -> None:
+    """Record the discovered/created team-category's id onto
+    discord_config.team_category_id -- the only discord_config write
+    ensure_team_channels() makes (every other field there is
+    admin-edited only, through app/admin_ops.py). Short-lived
+    WriteSession, same one-write-one-transaction shape
+    _upsert_team_role() above already uses.
+    """
+    async with WriteSession() as conn:
+        conn.execute(
+            "UPDATE discord_config SET team_category_id = ?, updated_at = ? WHERE id = 1",
+            (category_id, now),
+        )
+
+
+async def ensure_team_channels(*, http_client: httpx.AsyncClient | None = None) -> dict:
+    """Make sure every team in _TEAM_COLORS that already has a Discord
+    role (discord_team_role.role_id -- from ensure_team_roles() above)
+    has a private text channel, visible only to that team's own role,
+    inside one shared category. Called by app/admin_ops.py's "Create /
+    repair team roles and channels" button RIGHT AFTER ensure_team_roles()
+    itself succeeds, never before and never on its own schedule -- a
+    channel's own permission overwrite names a team's role id, so there
+    is nothing to gate a channel on until that role exists.
+
+    ONLY EVER touches: the one category named
+    discord_config.team_category_name (found by its stored id, else by
+    an exact name match, else created -- see _ensure_category()), and
+    the channels already recorded in discord_team_role.channel_id, or,
+    for a team with no recorded channel id yet, a channel found by an
+    exact name match (the team name lowercased) SCOPED to that one
+    category (see _ensure_team_channel()). No other channel or category
+    in the guild is ever read for a match, modified, or -- see below --
+    deleted.
+
+    Permission overwrites are the full, authoritative list on every
+    single call, both on create and reasserted with a whole-array PATCH
+    on a channel/category this function finds already existing (see
+    _set_channel_overwrites()'s own docstring) -- deliberate, ongoing
+    repair, not a one-time set: a hand edit to a channel's permissions in
+    Discord itself (an operator removing the @everyone deny, say) is
+    corrected on the very next run, the same "state lives in Discord,
+    this app is just the enforcer" philosophy sync_member() above already
+    applies to role membership.
+
+    NEVER deletes a channel, even for a team that has disappeared from
+    _TEAM_COLORS entirely -- that channel's message history belongs to
+    the players who used it, not to this app to discard. A team no
+    longer in _TEAM_COLORS is simply not iterated below; its channel and
+    stored channel_id are left exactly as they are, forever, until a
+    human deletes the channel by hand.
+
+    Returns {"ok": True, "created": [...], "recreated": [...],
+    "reused": [...], "unchanged": [...]} (team names, same four buckets
+    and meanings ensure_team_roles() returns), or {"ok": False,
+    "reason": ...} -- with NO API call made at all when this feature
+    isn't configured (_channels_ready() False), or with the specific
+    Discord call's own failure message (see _check_channel_ok() for the
+    403-names-a-permission case) when one does fail partway through.
+    Every failure is caught and returned as a reason here rather than
+    left to raise DiscordAPIError out of this function: an operator
+    clicking the ensure button must always get an answer, never a
+    crashed request, even when Herald's own permissions in the guild are
+    wrong.
+    """
+    conn = connect()
+    try:
+        cfg = load_discord_config(conn)
+        if not _channels_ready(cfg):
+            return {"ok": False, "reason": "team channels disabled, or role sync not fully configured"}
+        guild_id = cfg["guild_id"]
+        category_name = cfg["team_category_name"] or "Teams"
+        stored_category_id = cfg.get("team_category_id") or None
+        team_role_rows = {
+            r["team"]: dict(r)
+            for r in conn.execute("SELECT team, role_id, channel_id FROM discord_team_role").fetchall()
+        }
+    finally:
+        conn.close()
+
+    now = int(time.time())
+    created: list[str] = []
+    recreated: list[str] = []
+    reused: list[str] = []
+    unchanged: list[str] = []
+
+    try:
+        bot_user_id = await _cached_bot_user_id(http_client=http_client)
+        channels = await _list_guild_channels(guild_id, http_client=http_client)
+
+        category_id = await _ensure_category(
+            guild_id, category_name, stored_category_id, bot_user_id, channels, http_client=http_client,
+        )
+        if category_id != stored_category_id:
+            await _save_team_category_id(category_id, now)
+
+        for team in _TEAM_COLORS:
+            row = team_role_rows.get(team)
+            if row is None or not row.get("role_id"):
+                continue  # no team role yet -- ensure_team_roles() hasn't created/adopted one
+            stored_channel_id = row.get("channel_id") or None
+
+            channel_id, bucket = await _ensure_team_channel(
+                guild_id, team, row["role_id"], category_id, stored_channel_id, bot_user_id, channels,
+                http_client=http_client,
+            )
+            if channel_id != stored_channel_id:
+                await _upsert_team_channel(team, channel_id, now)
+            {"created": created, "recreated": recreated, "reused": reused, "unchanged": unchanged}[bucket].append(team)
+    except DiscordAPIError as e:
+        return {"ok": False, "reason": str(e)}
 
     return {"ok": True, "created": created, "recreated": recreated, "reused": reused, "unchanged": unchanged}
 

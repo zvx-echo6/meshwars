@@ -2299,6 +2299,32 @@ CREATE TABLE IF NOT EXISTS discord_config (
     -- same pair of columns for why.
     guild_id                   TEXT NOT NULL DEFAULT '',
     roles_enabled              INTEGER NOT NULL DEFAULT 0,
+    -- Private per-team text channels (app/discord_bot.py's
+    -- ensure_team_channels()), layered on TOP of role sync above --
+    -- pointless without a team role to gate a channel's overwrites on,
+    -- so this is gated by roles_enabled/guild_id/the bot token as well
+    -- as its own toggle (see that function's own docstring). Same
+    -- "defaults to 0 (OFF), needs an operator to actually run the
+    -- ensure step" reasoning roles_enabled's own comment above gives --
+    -- a database gaining this column must never start creating Discord
+    -- channels on its own.
+    team_channels_enabled      INTEGER NOT NULL DEFAULT 0,
+    -- The category (Discord's own "channel type 4," a folder of
+    -- channels) ensure_team_channels() creates/finds team channels
+    -- under. Non-secret, admin-editable, plain text -- same shape as
+    -- guild_id above. Defaults to 'Teams' so a deployment that turns
+    -- team_channels_enabled on without first visiting
+    -- /api/admin/discord to rename it still gets a sensible category.
+    team_category_name         TEXT NOT NULL DEFAULT 'Teams',
+    -- The category's discovered Discord id, remembered the exact same
+    -- "found or created once, reused forever after" way
+    -- discord_team_role.role_id already is for a team role -- see that
+    -- table's own comment. Nullable: NULL until ensure_team_channels()
+    -- has actually run once. Not admin-editable directly (an operator
+    -- edits team_category_name instead; this column is this app's own
+    -- bookkeeping, repaired automatically if the category is ever
+    -- renamed or deleted by hand).
+    team_category_id           TEXT,
     updated_at                 INTEGER NOT NULL DEFAULT 0
 );
 
@@ -2359,9 +2385,21 @@ CREATE TABLE IF NOT EXISTS discord_channel (
 -- (below) are the other two pieces of this feature's config; both live
 -- there rather than a third table, following that singleton's own
 -- existing "one config row per Discord feature" shape.
+--
+-- channel_id (nullable): the private team-channel app/discord_bot.py's
+-- ensure_team_channels() created (or adopted) for this team, once an
+-- operator has also turned on discord_config.team_channels_enabled --
+-- the SAME row that already remembers a team's role id remembers its
+-- channel id too, rather than a second table, since both are
+-- discovered/repaired by the same "find by id, else by name, else
+-- create" pass and always travel together. NULL until
+-- ensure_team_channels() has actually run for this team (a fresh
+-- install, or one that has only ever used role sync, never touches
+-- this column).
 CREATE TABLE IF NOT EXISTS discord_team_role (
     team        TEXT PRIMARY KEY,
     role_id     TEXT NOT NULL,
+    channel_id  TEXT,
     updated_at  INTEGER NOT NULL
 );
 """
@@ -2938,6 +2976,24 @@ MIGRATIONS = [
     # database happens to gain this column.
     "ALTER TABLE discord_config ADD COLUMN guild_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE discord_config ADD COLUMN roles_enabled INTEGER NOT NULL DEFAULT 0",
+    # team_channels_enabled / team_category_name / team_category_id:
+    # app/discord_bot.py's private-team-channels feature, added after
+    # discord_config already shipped -- same "an ALTER is required here
+    # too" situation as every column above. team_channels_enabled
+    # defaults to 0 (OFF), same "must never turn itself on the moment a
+    # database happens to gain this column" reasoning as roles_enabled's
+    # own migration entry above. team_category_name defaults to the same
+    # 'Teams' the CREATE TABLE default above uses. team_category_id is
+    # nullable -- see discord_config's own comment on the CREATE TABLE
+    # above for why (this app's own discovered-id bookkeeping, not an
+    # operator-set value).
+    "ALTER TABLE discord_config ADD COLUMN team_channels_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE discord_config ADD COLUMN team_category_name TEXT NOT NULL DEFAULT 'Teams'",
+    "ALTER TABLE discord_config ADD COLUMN team_category_id TEXT",
+    # discord_team_role.channel_id: the matching per-team migration for
+    # the column discord_team_role's own CREATE TABLE comment above
+    # describes -- nullable, same reasoning.
+    "ALTER TABLE discord_team_role ADD COLUMN channel_id TEXT",
 ]
 
 PRAGMAS = [

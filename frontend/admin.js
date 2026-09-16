@@ -2086,16 +2086,24 @@ function renderDiscordForm(cfg) {
   document.getElementById('dc-bot-token-hint').textContent = cfg.bot_token_set
     ? 'Bot token: configured'
     : 'Bot token: not set (DISCORD_BOT_TOKEN environment variable)';
+
+  // Team channels (app/discord_bot.py's ensure_team_channels()) -- a
+  // second feature layered on the roles above, saved together with the
+  // rest of this same form. team_category_id (this app's own
+  // discovered/created id) is never shown or edited here -- it's not
+  // admin-editable, see saveDiscord() below.
+  document.getElementById('dc-team-channels-enabled').checked = !!cfg.team_channels_enabled;
+  document.getElementById('dc-team-category-name').value = cfg.team_category_name || '';
 }
 
 // Team roles (app/discord_bot.py) -- discord_team_role rows, purely
 // informational here (an operator repairs them with the buttons below,
-// never edits a role id by hand).
+// never edits a role id or channel id by hand).
 function renderTeamRoles(teamRoles) {
   const host = document.getElementById('dc-team-roles');
   host.replaceChildren();
   if (!teamRoles.length) {
-    host.appendChild(el('p', { className: 'adm-hint', text: 'No team roles discovered yet -- use "Create / repair team roles" below.' }));
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No team roles discovered yet -- use "Create / repair team roles and channels" below.' }));
     return;
   }
   teamRoles.forEach((r) => {
@@ -2103,6 +2111,10 @@ function renderTeamRoles(teamRoles) {
     const info = el('div', { className: 'adm-row-info' });
     info.appendChild(el('strong', { className: 'adm-mono', text: r.team }));
     info.appendChild(el('span', { className: 'adm-mono', text: r.role_id }));
+    info.appendChild(el('span', {
+      className: 'adm-mono',
+      text: r.channel_id ? r.channel_id : 'no channel yet',
+    }));
     row.appendChild(info);
     host.appendChild(row);
   });
@@ -2262,6 +2274,8 @@ async function saveDiscord(b) {
     team_emoji: document.getElementById('dc-team-emoji').value.trim(),
     roles_enabled: document.getElementById('dc-roles-enabled').checked,
     guild_id: document.getElementById('dc-guild-id').value.trim(),
+    team_channels_enabled: document.getElementById('dc-team-channels-enabled').checked,
+    team_category_name: document.getElementById('dc-team-category-name').value.trim(),
   };
   // Blank means keep the existing webhook -- see app/admin_ops.py's
   // admin_discord_update, the same convention the Paint section's own
@@ -2317,9 +2331,23 @@ async function ensureDiscordRoles(b) {
   b.disabled = true;
   try {
     const r = await post('/api/admin/discord/roles/ensure', {});
-    out.textContent = 'Created: ' + (r.created.join(', ') || 'none')
+    let text = 'Roles -- created: ' + (r.created.join(', ') || 'none')
       + '. Recreated: ' + (r.recreated.join(', ') || 'none')
       + '. Reused: ' + (r.reused.join(', ') || 'none') + '.';
+    // Channels (app/discord_bot.py's ensure_team_channels(), run right
+    // after roles above): {"ok": false} here just means the feature
+    // isn't turned on, or a Discord permission was missing -- not a
+    // failure of the roles step above, which already succeeded by the
+    // time this ran, so it renders as its own line rather than an error.
+    const c = r.channels;
+    if (c && c.ok) {
+      text += ' Channels -- created: ' + (c.created.join(', ') || 'none')
+        + '. Recreated: ' + (c.recreated.join(', ') || 'none')
+        + '. Reused: ' + (c.reused.join(', ') || 'none') + '.';
+    } else if (c) {
+      text += ' Channels: ' + (c.reason || 'not configured.');
+    }
+    out.textContent = text;
     await loadDiscord();
   } catch (e) {
     out.textContent = 'Failed: ' + e.message;

@@ -811,7 +811,9 @@ def test_get_discord_lists_team_roles(db_path):
     resp = client.get("/api/admin/discord")
     assert resp.status_code == 200
     team_roles = resp.json()["team_roles"]
-    assert {"team": "RED", "role_id": "role-red", "updated_at": NOW} in team_roles
+    # channel_id is None until ensure_team_channels() has run for RED --
+    # see that column's own comment in app/db.py.
+    assert {"team": "RED", "role_id": "role-red", "channel_id": None, "updated_at": NOW} in team_roles
 
 
 def test_get_discord_includes_last_reconcile(db_path, monkeypatch):

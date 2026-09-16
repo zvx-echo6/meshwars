@@ -496,8 +496,20 @@
             <span class="adm-hint" id="dc-bot-token-hint"></span>
           </div>
           <p class="adm-hint">Enabled/Guild ID are saved together with the Save button above -- they're part of the same form.</p>
+
+          <h3 class="adm-h3">Team channels</h3>
+          <details class="adm-about">
+            <summary>About team channels</summary>
+            <p class="adm-hint">A private text channel per team, inside one shared category, visible only to players holding that team's role (and Herald itself). Layered on top of team roles above -- needs roles enabled, a bot token, and a guild ID before it can do anything.</p>
+          </details>
           <div class="adm-form">
-            <button type="button" id="dc-roles-ensure" class="adm-btn">Create / repair team roles</button>
+            <label class="adm-check-label"><input type="checkbox" id="dc-team-channels-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-field-label adm-field-label-wide">Category name<input type="text" id="dc-team-category-name" autocomplete="off" placeholder="Teams" /></label>
+          </div>
+          <p class="adm-hint">Saved together with the Save button above -- part of the same form as everything else on this page.</p>
+
+          <div class="adm-form">
+            <button type="button" id="dc-roles-ensure" class="adm-btn">Create / repair team roles and channels</button>
             <button type="button" id="dc-roles-reconcile" class="adm-btn adm-btn-quiet">Reconcile all now</button>
           </div>
           <div id="dc-roles-result" class="adm-result"></div>
@@ -524,7 +536,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260916-6"></script>
+  <script src="/static/admin.js?v=20260916-7"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

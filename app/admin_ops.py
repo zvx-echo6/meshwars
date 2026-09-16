@@ -1724,9 +1724,14 @@ async def admin_discord(request: Request):
     webhook field on this same response, except this one lives in the
     environment, not discord_config, so it isn't already covered by
     _scrub_discord_secrets(). `team_roles` is every discord_team_role
-    row (team, role_id, updated_at) -- a Discord role id is not a
-    credential (visible to anyone in the server who can see that role at
-    all), so it is returned as-is. `last_reconcile` is app/discord_bot.py's
+    row (team, role_id, channel_id, updated_at) -- neither a role id nor
+    a channel id is a credential (visible to anyone in the server who
+    can see that role/channel at all), so both are returned as-is;
+    channel_id is NULL/None until ensure_team_channels() has actually
+    run for that team. `config` also carries team_channels_enabled/
+    team_category_name/team_category_id straight through from
+    load_discord_config() -- none of the three is a secret either, same
+    reasoning as guild_id. `last_reconcile` is app/discord_bot.py's
     get_last_reconcile() -- the most recent reconcile pass, manual or
     scheduled, process-local (see that function's own docstring for why
     it doesn't survive a restart).
@@ -1753,7 +1758,7 @@ async def admin_discord(request: Request):
             " ORDER BY id DESC LIMIT 10"
         ).fetchall()
         team_roles = conn.execute(
-            "SELECT team, role_id, updated_at FROM discord_team_role ORDER BY team"
+            "SELECT team, role_id, channel_id, updated_at FROM discord_team_role ORDER BY team"
         ).fetchall()
     finally:
         conn.close()
@@ -1815,6 +1820,18 @@ async def admin_discord_update(request: Request):
     account_totp_encryption_key (see GET /api/admin/discord's own
     `bot_token_set` field for the one thing this app ever reveals about
     it).
+
+    team_channels_enabled and team_category_name (app/discord_bot.py's
+    private team channels, layered on top of role sync -- see that
+    module's ensure_team_channels()) are saved the same plain,
+    always-explicit way as roles_enabled/guild_id above -- neither is a
+    secret, a blank team_category_name is accepted as-is (
+    ensure_team_channels() itself falls back to "Teams" when this is
+    blank), and there is no "omit to keep current" case for either.
+    team_category_id is NEVER accepted here -- it is this app's own
+    discovered/created id, written only by ensure_team_channels() itself
+    (see that column's own comment in app/db.py); an admin form has no
+    business setting it directly.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -1836,6 +1853,8 @@ async def admin_discord_update(request: Request):
     announce_net_wrapup = bool(body.get("announce_net_wrapup"))
     roles_enabled = bool(body.get("roles_enabled"))
     guild_id = (body.get("guild_id") or "").strip()
+    team_channels_enabled = bool(body.get("team_channels_enabled"))
+    team_category_name = (body.get("team_category_name") or "").strip()
 
     now = int(time.time())
     conn = connect()
@@ -1854,8 +1873,9 @@ async def admin_discord_update(request: Request):
         conn.execute(
             "INSERT INTO discord_config(id, enabled, webhook_url, username, team_emoji, "
             " announce_month_honors, announce_season_close, announce_weekly_recap, "
-            " announce_net_wrapup, guild_id, roles_enabled, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " announce_net_wrapup, guild_id, roles_enabled, "
+            " team_channels_enabled, team_category_name, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "  enabled = excluded.enabled, webhook_url = excluded.webhook_url, "
             "  username = excluded.username, team_emoji = excluded.team_emoji, "
@@ -1864,12 +1884,15 @@ async def admin_discord_update(request: Request):
             "  announce_weekly_recap = excluded.announce_weekly_recap, "
             "  announce_net_wrapup = excluded.announce_net_wrapup, "
             "  guild_id = excluded.guild_id, roles_enabled = excluded.roles_enabled, "
+            "  team_channels_enabled = excluded.team_channels_enabled, "
+            "  team_category_name = excluded.team_category_name, "
             "  updated_at = excluded.updated_at",
             (
                 int(enabled), webhook_url, username, team_emoji,
                 int(announce_month_honors), int(announce_season_close),
                 int(announce_weekly_recap), int(announce_net_wrapup),
-                guild_id, int(roles_enabled), now,
+                guild_id, int(roles_enabled),
+                int(team_channels_enabled), team_category_name, now,
             ),
         )
         _log_admin_action(
@@ -1879,7 +1902,8 @@ async def admin_discord_update(request: Request):
                 f"announce_season_close={announce_season_close} "
                 f"announce_weekly_recap={announce_weekly_recap} "
                 f"announce_net_wrapup={announce_net_wrapup} "
-                f"roles_enabled={roles_enabled}"
+                f"roles_enabled={roles_enabled} "
+                f"team_channels_enabled={team_channels_enabled}"
             ), now=now,
         )
         conn.execute("COMMIT")
@@ -2081,15 +2105,29 @@ async def admin_discord_outbox_retry(request: Request):
 
 @router.post("/api/admin/discord/roles/ensure")
 async def admin_discord_roles_ensure(request: Request):
-    """"Create / repair team roles" -- app/discord_bot.py's
+    """"Create / repair team roles and channels" -- app/discord_bot.py's
     ensure_team_roles(), which makes sure every MeshWars team has
     exactly one Discord role (creating one, or adopting an existing
     same-named role, or recreating one deleted by hand) and records its
-    id in discord_team_role. Refuses with 400 when role sync isn't
-    actually configured (roles_enabled off, or no bot token, or no
-    guild id) -- same "don't report success for a button that did
-    nothing" reasoning POST /api/admin/discord/test already applies to
-    its own precondition check.
+    id in discord_team_role, followed -- only when that succeeds -- by
+    ensure_team_channels(), which does the same "find, adopt, or create,
+    and repair the permissions every run" for each team's private
+    channel (see that function's own docstring). Channels are gated on
+    roles succeeding first: a channel's own permission overwrite names a
+    team's role id, so running it against a guild where roles just
+    failed would have nothing to gate on.
+
+    Refuses with 400 when role sync itself isn't actually configured
+    (roles_enabled off, or no bot token, or no guild id) -- same "don't
+    report success for a button that did nothing" reasoning POST
+    /api/admin/discord/test already applies to its own precondition
+    check. ensure_team_channels() is NOT held to that same all-or-
+    nothing rule: when team channels aren't enabled (or channel creation
+    itself fails partway through, e.g. a missing permission), its own
+    {"ok": False, "reason": ...} is still returned to the caller under
+    `channels` rather than turning the whole request into a 400 -- the
+    role work above already genuinely succeeded and must be reported as
+    such.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -2101,6 +2139,7 @@ async def admin_discord_roles_ensure(request: Request):
             {"error": result.get("reason") or "role sync is not enabled or not fully configured"},
             status_code=400,
         )
+    channels_result = await discord_bot.ensure_team_channels()
     now = int(time.time())
     conn = connect()
     try:
@@ -2109,15 +2148,15 @@ async def admin_discord_roles_ensure(request: Request):
             conn, actor_account_id=session.account_id, action="discord_roles_ensure",
             detail=(
                 f"created={result['created']} recreated={result['recreated']} "
-                f"reused={result['reused']}"
+                f"reused={result['reused']} channels={channels_result}"
             ), now=now,
         )
         conn.execute("COMMIT")
     finally:
         conn.close()
-    log.info("admin: ensured discord team roles (created=%s recreated=%s reused=%s)",
-              result["created"], result["recreated"], result["reused"])
-    return JSONResponse(result)
+    log.info("admin: ensured discord team roles (created=%s recreated=%s reused=%s) channels=%s",
+              result["created"], result["recreated"], result["reused"], channels_result)
+    return JSONResponse({**result, "channels": channels_result})
 
 
 @router.post("/api/admin/discord/roles/reconcile")
