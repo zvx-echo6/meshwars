@@ -1197,6 +1197,25 @@ class Settings(BaseSettings):
     # redeploying.
     discord_guild_id: str = ""
 
+    # ---- Discord slash commands (app/discord_interactions.py) --------------
+    # A FOURTH, separate Discord integration: HTTP Interactions, not a
+    # gateway connection -- Discord POSTs each /command invocation
+    # straight to POST /api/discord/interactions and this app answers in
+    # the HTTP response itself. Neither value below is a secret (both
+    # are shown in Discord's own developer portal, under the
+    # application's General Information page, to anyone who can already
+    # see the application there) -- these are the SEED only, written
+    # once into discord_config.app_id/public_key by
+    # seed_discord_config_from_env() the same guarded-by-updated_at way
+    # discord_guild_id seeds discord_config.guild_id; an operator edits
+    # the live values afterward through /api/admin/discord. Registering
+    # the commands themselves (app/discord_bot.py's register_commands())
+    # uses discord_bot_token above, not a new credential -- this pair
+    # only identifies the application and verifies its request
+    # signatures, it never authenticates an outbound call.
+    discord_app_id: str = ""
+    discord_public_key: str = ""
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

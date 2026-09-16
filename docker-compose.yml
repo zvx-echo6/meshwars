@@ -154,6 +154,19 @@ services:
       # that setting's own comment in app/config.py); an operator edits
       # the live value afterward through /api/admin/discord.
       DISCORD_GUILD_ID: "${DISCORD_GUILD_ID:-}"
+      # Slash commands (app/discord_interactions.py) -- a FOURTH,
+      # separate Discord integration: an HTTPS endpoint Discord POSTs
+      # each /command invocation to directly, no bot gateway connection.
+      # Neither value is a secret (both are shown on the application's
+      # own General Information page in Discord's developer portal) --
+      # this is only the one-time SEED for discord_config.app_id/
+      # public_key; an operator edits the live values afterward through
+      # /api/admin/discord. Same forwarding-line trap as every other
+      # Discord setting above: compose does not pass .env through
+      # wholesale, so a missing line here means a value sitting in .env
+      # silently never reaches the container.
+      DISCORD_APP_ID: "${DISCORD_APP_ID:-}"
+      DISCORD_PUBLIC_KEY: "${DISCORD_PUBLIC_KEY:-}"
     volumes:
       # The game database, in a directory beside this compose file. A
       # plain directory rather than a named volume so the operator can

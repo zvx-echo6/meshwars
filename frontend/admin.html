@@ -516,6 +516,23 @@
           <div id="dc-roles-ambiguous"></div>
           <div id="dc-roles-reconcile-status" class="adm-hint"></div>
           <div id="dc-team-roles"></div>
+
+          <h3 class="adm-h3">Slash commands</h3>
+          <details class="adm-about">
+            <summary>About slash commands</summary>
+            <p class="adm-hint">A FOURTH, separate Discord integration: /me, /standings, /honors, /nextnet, and /player, answered by an HTTPS endpoint (no bot gateway connection). Neither the application id nor the public key below is a secret -- both are shown on the application's own General Information page in Discord's developer portal. Deploy this endpoint and turn Enabled on here BEFORE pasting the URL below into the developer portal's Interactions Endpoint URL field -- Discord verifies it immediately and refuses to save it otherwise.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-slash-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-field-label adm-field-label-wide">Application ID<input type="text" id="dc-app-id" autocomplete="off" placeholder="from the developer portal's General Information page" /></label>
+            <label class="adm-field-label adm-field-label-wide">Public key<input type="text" id="dc-public-key" autocomplete="off" placeholder="from the same page" /></label>
+          </div>
+          <p class="adm-hint">Saved together with the Save button above -- part of the same form as everything else on this page.</p>
+          <div class="adm-form">
+            <button type="button" id="dc-slash-register" class="adm-btn">Register slash commands</button>
+          </div>
+          <div id="dc-slash-result" class="adm-result"></div>
+          <p class="adm-hint">Interactions Endpoint URL (paste into the developer portal): <span id="dc-slash-endpoint-url" class="adm-mono"></span></p>
         </section>
 
         <section class="adm-section" data-section="keys" hidden>
@@ -537,7 +554,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260916-8"></script>
+  <script src="/static/admin.js?v=20260916-9"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

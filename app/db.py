@@ -2325,6 +2325,28 @@ CREATE TABLE IF NOT EXISTS discord_config (
     -- bookkeeping, repaired automatically if the category is ever
     -- renamed or deleted by hand).
     team_category_id           TEXT,
+    -- Discord slash commands (app/discord_interactions.py), HTTP
+    -- Interactions -- a FOURTH, separate Discord integration from the
+    -- three above (this table's own webhook/role/channel fields):
+    -- Discord POSTs each command straight to POST
+    -- /api/discord/interactions and this app answers in the HTTP
+    -- response, no gateway connection. Defaults to 0 (OFF), same
+    -- "must never turn itself on the moment a database happens to gain
+    -- this column" reasoning roles_enabled's own comment above gives --
+    -- an operator must deploy the endpoint AND enable it here BEFORE
+    -- pasting the interactions URL into Discord's developer portal,
+    -- since Discord verifies that URL immediately and refuses to save
+    -- it otherwise (see app/discord_interactions.py's own module
+    -- docstring). app_id and public_key are both non-secret (shown in
+    -- Discord's own developer portal to anyone who can see the
+    -- application) and seeded from DISCORD_APP_ID/DISCORD_PUBLIC_KEY
+    -- the same one-time way guild_id seeds from DISCORD_GUILD_ID. The
+    -- bot token used to REGISTER commands (app/discord_bot.py's
+    -- register_commands()) is discord_bot_token, environment-only,
+    -- same as every other use of it in this table -- never stored here.
+    slash_enabled               INTEGER NOT NULL DEFAULT 0,
+    app_id                      TEXT NOT NULL DEFAULT '',
+    public_key                  TEXT NOT NULL DEFAULT '',
     updated_at                 INTEGER NOT NULL DEFAULT 0
 );
 
@@ -2994,6 +3016,20 @@ MIGRATIONS = [
     # the column discord_team_role's own CREATE TABLE comment above
     # describes -- nullable, same reasoning.
     "ALTER TABLE discord_team_role ADD COLUMN channel_id TEXT",
+    # slash_enabled / app_id / public_key: app/discord_interactions.py's
+    # HTTP-Interactions slash commands, added after discord_config
+    # already shipped -- same "an ALTER is required here too" situation
+    # as every column above. slash_enabled defaults to 0 (OFF), same
+    # "must never turn itself on the moment a database happens to gain
+    # this column" reasoning as roles_enabled's own migration entry
+    # above -- see that column's own CREATE TABLE comment for why this
+    # one especially must stay an explicit opt-in (Discord verifies the
+    # endpoint URL the moment it is pasted into the developer portal).
+    # app_id/public_key are non-secret and nullable-as-empty-string,
+    # same shape as guild_id.
+    "ALTER TABLE discord_config ADD COLUMN slash_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE discord_config ADD COLUMN app_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE discord_config ADD COLUMN public_key TEXT NOT NULL DEFAULT ''",
 ]
 
 PRAGMAS = [

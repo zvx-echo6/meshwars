@@ -1764,6 +1764,7 @@ async def admin_discord(request: Request):
         conn.close()
     config_out = _scrub_discord_secrets(cfg)
     config_out["bot_token_set"] = bool(settings.discord_bot_token)
+    base_url = (settings.oauth_public_base_url or "").rstrip("/")
     return JSONResponse({
         "config": config_out,
         "channels": [_scrub_discord_channel(c) for _, c in sorted(channels.items())],
@@ -1775,6 +1776,17 @@ async def admin_discord(request: Request):
             "failed": failed,
             "recent": [dict(r) for r in rows],
         },
+        # The URL an operator pastes into Discord's developer portal
+        # (Interactions Endpoint URL) for app/discord_interactions.py's
+        # slash commands -- neither app_id nor public_key is a secret
+        # (both already pass through config_out above unscrubbed), so
+        # the only thing worth computing here is the absolute URL
+        # itself, same absolute-or-omitted rule as every embed `url`
+        # app/discord_notify.py builds (a relative path is meaningless
+        # to paste into a form outside this app). Empty when
+        # OAUTH_PUBLIC_BASE_URL isn't configured -- there is no URL to
+        # show yet in that case.
+        "interactions_endpoint_url": f"{base_url}/api/discord/interactions" if base_url else "",
     })
 
 
@@ -1832,6 +1844,14 @@ async def admin_discord_update(request: Request):
     discovered/created id, written only by ensure_team_channels() itself
     (see that column's own comment in app/db.py); an admin form has no
     business setting it directly.
+
+    slash_enabled, app_id, and public_key (app/discord_interactions.py's
+    slash commands -- a FOURTH, separate Discord integration) are saved
+    the same plain, always-explicit way as roles_enabled/guild_id above:
+    neither app_id nor public_key is a secret (see discord_config's own
+    comment in app/db.py), so there is no "omit to keep current" case
+    for either. Registering the commands themselves is a SEPARATE step
+    (POST /api/admin/discord/slash/register), not done here.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -1855,6 +1875,13 @@ async def admin_discord_update(request: Request):
     guild_id = (body.get("guild_id") or "").strip()
     team_channels_enabled = bool(body.get("team_channels_enabled"))
     team_category_name = (body.get("team_category_name") or "").strip()
+    # Slash commands (app/discord_interactions.py) -- neither app_id nor
+    # public_key is a secret (see discord_config's own comment in
+    # app/db.py), so both are saved the same plain, always-explicit way
+    # as guild_id above: no "omit to keep current" special case.
+    slash_enabled = bool(body.get("slash_enabled"))
+    app_id = (body.get("app_id") or "").strip()
+    public_key = (body.get("public_key") or "").strip()
 
     now = int(time.time())
     conn = connect()
@@ -1874,8 +1901,9 @@ async def admin_discord_update(request: Request):
             "INSERT INTO discord_config(id, enabled, webhook_url, username, team_emoji, "
             " announce_month_honors, announce_season_close, announce_weekly_recap, "
             " announce_net_wrapup, guild_id, roles_enabled, "
-            " team_channels_enabled, team_category_name, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " team_channels_enabled, team_category_name, "
+            " slash_enabled, app_id, public_key, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "  enabled = excluded.enabled, webhook_url = excluded.webhook_url, "
             "  username = excluded.username, team_emoji = excluded.team_emoji, "
@@ -1886,13 +1914,16 @@ async def admin_discord_update(request: Request):
             "  guild_id = excluded.guild_id, roles_enabled = excluded.roles_enabled, "
             "  team_channels_enabled = excluded.team_channels_enabled, "
             "  team_category_name = excluded.team_category_name, "
+            "  slash_enabled = excluded.slash_enabled, app_id = excluded.app_id, "
+            "  public_key = excluded.public_key, "
             "  updated_at = excluded.updated_at",
             (
                 int(enabled), webhook_url, username, team_emoji,
                 int(announce_month_honors), int(announce_season_close),
                 int(announce_weekly_recap), int(announce_net_wrapup),
                 guild_id, int(roles_enabled),
-                int(team_channels_enabled), team_category_name, now,
+                int(team_channels_enabled), team_category_name,
+                int(slash_enabled), app_id, public_key, now,
             ),
         )
         _log_admin_action(
@@ -1903,7 +1934,8 @@ async def admin_discord_update(request: Request):
                 f"announce_weekly_recap={announce_weekly_recap} "
                 f"announce_net_wrapup={announce_net_wrapup} "
                 f"roles_enabled={roles_enabled} "
-                f"team_channels_enabled={team_channels_enabled}"
+                f"team_channels_enabled={team_channels_enabled} "
+                f"slash_enabled={slash_enabled}"
             ), now=now,
         )
         conn.execute("COMMIT")
@@ -2294,6 +2326,43 @@ async def admin_discord_team_channel_set(request: Request):
         conn.close()
     log.info("admin: discord team-channel set (team=%s channel_id=%s)", team, channel_id)
     return JSONResponse({"team_role": dict(row)})
+
+
+@router.post("/api/admin/discord/slash/register")
+async def admin_discord_slash_register(request: Request):
+    """"Register slash commands" -- app/discord_bot.py's
+    register_commands(), a bulk PUT of app/discord_interactions.py's
+    entire COMMANDS registry to this guild's command list. Admin-
+    triggered only, same as the team-roles ensure button above --
+    slash commands are never registered automatically on startup.
+
+    Refuses with 400 when this isn't fully configured yet (no bot
+    token, no app id, or no guild id) -- same "don't report success for
+    a button that did nothing" precondition check every other Discord
+    admin action in this file already applies.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    result = await discord_bot.register_commands()
+    if not result.get("ok"):
+        return JSONResponse(
+            {"error": result.get("reason") or "slash commands are not fully configured"}, status_code=400,
+        )
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_slash_register",
+            detail=f"commands={result['commands']}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: registered discord slash commands: %s", result["commands"])
+    return JSONResponse(result)
 
 
 @router.post("/api/admin/month/freeze")

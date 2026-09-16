@@ -364,6 +364,7 @@ def load_discord_config(conn) -> dict:
         "       announce_weekly_recap, announce_net_wrapup, "
         "       guild_id, roles_enabled, "
         "       team_channels_enabled, team_category_name, team_category_id, "
+        "       slash_enabled, app_id, public_key, "
         "       updated_at "
         "  FROM discord_config WHERE id = 1"
     ).fetchone()
@@ -391,6 +392,13 @@ def load_discord_config(conn) -> dict:
             "team_channels_enabled": False,
             "team_category_name": "Teams",
             "team_category_id": None,
+            # Slash commands (app/discord_interactions.py) -- same
+            # "not configured yet" fallback as roles_enabled above:
+            # off, app_id/public_key seeded from settings the same way
+            # guild_id is.
+            "slash_enabled": False,
+            "app_id": settings.discord_app_id,
+            "public_key": settings.discord_public_key,
             "updated_at": 0,
         }
     d = dict(row)
@@ -401,6 +409,7 @@ def load_discord_config(conn) -> dict:
     d["announce_net_wrapup"] = bool(d["announce_net_wrapup"])
     d["roles_enabled"] = bool(d["roles_enabled"])
     d["team_channels_enabled"] = bool(d["team_channels_enabled"])
+    d["slash_enabled"] = bool(d["slash_enabled"])
     return d
 
 
@@ -525,7 +534,7 @@ def seed_discord_config_from_env(conn) -> None:
     webhook_url = settings.discord_webhook_announcements
     conn.execute(
         "UPDATE discord_config SET enabled = ?, webhook_url = ?, username = ?, "
-        " team_emoji = ?, guild_id = ?, updated_at = ? WHERE id = 1",
+        " team_emoji = ?, guild_id = ?, app_id = ?, public_key = ?, updated_at = ? WHERE id = 1",
         (
             int(bool(webhook_url)),
             webhook_url,
@@ -538,6 +547,14 @@ def seed_discord_config_from_env(conn) -> None:
             # actually opts in through /api/admin/discord, even on a
             # deployment that already has DISCORD_GUILD_ID set.
             settings.discord_guild_id,
+            # app_id / public_key (app/discord_interactions.py's slash
+            # commands): same one-time seed, same deliberate omission of
+            # `slash_enabled` from this statement -- that stays 0 (its
+            # own column default) until an operator has actually
+            # deployed the endpoint and opted in, even on a deployment
+            # that already has both env vars set.
+            settings.discord_app_id,
+            settings.discord_public_key,
             int(time.time()),
         ),
     )

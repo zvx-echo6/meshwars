@@ -282,7 +282,7 @@ async def _request(
     method: str,
     path: str,
     *,
-    json_body: dict | None = None,
+    json_body: dict | list | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> httpx.Response:
     """One authenticated call to Discord's bot API, returning the raw
@@ -962,6 +962,85 @@ async def ensure_team_channels(*, http_client: httpx.AsyncClient | None = None) 
         "ok": True, "created": created, "recreated": recreated, "reused": reused,
         "adopted": adopted, "unchanged": unchanged, "ambiguous": ambiguous,
     }
+
+
+# ---- slash-command registration (app/discord_interactions.py) -------------
+
+
+async def register_commands(*, http_client: httpx.AsyncClient | None = None) -> dict:
+    """Bulk-overwrite this guild's slash commands with the FULL registry
+    (app/discord_interactions.py's COMMANDS): PUT
+    /applications/{app_id}/guilds/{guild_id}/commands. A guild-scoped
+    bulk overwrite replaces the ENTIRE command set in one call and takes
+    effect immediately (unlike a GLOBAL command registration, which
+    Discord can take up to an hour to propagate) -- a command this app
+    no longer defines disappears from the guild the moment this call
+    returns, and one newly added here appears just as fast, with zero
+    special-casing for either direction.
+
+    Admin-triggered only (POST /api/admin/discord/slash/register) --
+    never run at startup and never on any schedule, unlike
+    ensure_team_roles()/ensure_team_channels() above, which are at least
+    SAFE to re-run unprompted (idempotent adopt-or-create). Registration
+    has no such "nothing changes if nothing changed" property working in
+    an operator's favor here -- it is still safe to call repeatedly (the
+    SAME registry produces the SAME PUT body every time), but there is
+    no reason to run it before an operator has actually finished setting
+    up the interactions endpoint and asked for it.
+
+    Uses the BOT token (settings.discord_bot_token, via this module's
+    own _request()) -- registering commands is a guild-management
+    action taken as the bot user, an entirely different credential from
+    the INTERACTION token app/discord_interactions.py's own deferred
+    follow-ups use to answer one single command invocation (see that
+    module's own _patch_followup() docstring for why those two must
+    never be confused).
+
+    Returns {"ok": True, "commands": [<name>, ...]} (registry order,
+    exactly what was just registered) on success, or {"ok": False,
+    "reason": ...} when this isn't fully configured yet (no bot token,
+    no app_id, or no guild_id -- discord_config.app_id specifically,
+    since the guild the commands register into and the application
+    registering them must both be known) or the PUT itself fails -- same
+    "always answer, never raise" contract every other admin-triggered
+    action in this module already follows.
+
+    Local import of app/discord_interactions.py's COMMANDS: that module
+    imports app/discord_notify.py at module level (build_month_honors_embed,
+    load_discord_config, ...), which THIS module already imports from at
+    its own module level too -- there is no cycle either way, but the
+    import is kept local anyway so a future change to either module's
+    own import graph can never surprise this one's load order, the same
+    caution build_month_honors_embed()'s own local `from . import
+    results` already takes in app/discord_notify.py.
+    """
+    from .discord_interactions import COMMANDS
+
+    conn = connect()
+    try:
+        cfg = load_discord_config(conn)
+    finally:
+        conn.close()
+
+    app_id = cfg.get("app_id")
+    guild_id = cfg.get("guild_id")
+    if not settings.discord_bot_token or not app_id or not guild_id:
+        return {
+            "ok": False,
+            "reason": "slash commands are not fully configured (need a bot token, app id, and guild id)",
+        }
+
+    body = [c.definition() for c in COMMANDS]
+    resp = await _request(
+        "PUT", f"/applications/{app_id}/guilds/{guild_id}/commands",
+        json_body=body, http_client=http_client,
+    )
+    try:
+        _check_ok(resp, "register slash commands")
+    except DiscordAPIError as e:
+        return {"ok": False, "reason": str(e)}
+
+    return {"ok": True, "commands": [c.name for c in COMMANDS]}
 
 
 async def sync_member(

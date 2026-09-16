@@ -1085,3 +1085,117 @@ def test_post_discord_team_channel_requires_role(db_path):
     client = _client_for(account_id)
     resp = client.post("/api/admin/discord/team-channel", json={"team": "RED", "channel_id": None})
     assert resp.status_code == 401
+
+
+# ---- slash commands (app/discord_interactions.py) ------------------------
+
+
+def test_post_discord_saves_slash_fields(db_path):
+    """slash_enabled, app_id, and public_key are neither of them
+    secrets -- see discord_config's own comment in app/db.py -- so they
+    are saved the same plain, always-explicit way as guild_id, with no
+    "omit to keep current" special case."""
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "",
+        "announce_month_honors": True,
+        "slash_enabled": True, "app_id": "123456", "public_key": "deadbeef",
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["slash_enabled"] is True
+    assert resp.json()["config"]["app_id"] == "123456"
+    assert resp.json()["config"]["public_key"] == "deadbeef"
+
+    row = _discord_row(db_path)
+    assert row["slash_enabled"] == 1
+    assert row["app_id"] == "123456"
+    assert row["public_key"] == "deadbeef"
+
+
+def test_get_discord_returns_slash_fields_unscrubbed(db_path):
+    """Unlike webhook_url, neither app_id nor public_key is a secret --
+    GET /api/admin/discord returns both plainly, no hint/set-flag
+    treatment."""
+    account_id = _make_account(db_path)
+    _configure_discord(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE discord_config SET slash_enabled = 1, app_id = 'app-1', public_key = 'pub-1' WHERE id = 1"
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    cfg = resp.json()["config"]
+    assert cfg["slash_enabled"] is True
+    assert cfg["app_id"] == "app-1"
+    assert cfg["public_key"] == "pub-1"
+
+
+def test_get_discord_shows_interactions_endpoint_url(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://meshwars.example")
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    assert resp.json()["interactions_endpoint_url"] == "https://meshwars.example/api/discord/interactions"
+
+
+def test_get_discord_interactions_endpoint_url_blank_when_unconfigured(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    monkeypatch.setattr(settings, "oauth_public_base_url", "")
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200
+    assert resp.json()["interactions_endpoint_url"] == ""
+
+
+def test_post_discord_slash_register_calls_register_commands(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_register(*, http_client=None):
+        return {"ok": True, "commands": ["me", "standings", "honors", "nextnet", "player"]}
+
+    monkeypatch.setattr(admin_ops.discord_bot, "register_commands", fake_register)
+
+    resp = client.post("/api/admin/discord/slash/register", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["commands"] == ["me", "standings", "honors", "nextnet", "player"]
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    action = conn.execute(
+        "SELECT detail FROM admin_action_log WHERE action = 'discord_slash_register'"
+    ).fetchone()
+    conn.close()
+    assert action is not None
+    assert "me" in action["detail"]
+
+
+def test_post_discord_slash_register_400_when_not_configured(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_register(*, http_client=None):
+        return {"ok": False, "reason": "slash commands are not fully configured"}
+
+    monkeypatch.setattr(admin_ops.discord_bot, "register_commands", fake_register)
+
+    resp = client.post("/api/admin/discord/slash/register", json={})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_post_discord_slash_register_requires_role(db_path):
+    _make_account(db_path, role="admin")
+    account_id = _make_account(db_path, role=None, with_totp=False)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/slash/register", json={})
+    assert resp.status_code == 401

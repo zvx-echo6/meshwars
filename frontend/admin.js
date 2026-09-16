@@ -2094,6 +2094,15 @@ function renderDiscordForm(cfg) {
   // admin-editable, see saveDiscord() below.
   document.getElementById('dc-team-channels-enabled').checked = !!cfg.team_channels_enabled;
   document.getElementById('dc-team-category-name').value = cfg.team_category_name || '';
+
+  // Slash commands (app/discord_interactions.py) -- a fourth, separate
+  // Discord integration, saved together with the rest of this same
+  // form. Neither app_id nor public_key is a secret (see
+  // discord_config's own comment in app/db.py), so both come back and
+  // go out as plain values -- no webhook_set-style hint needed.
+  document.getElementById('dc-slash-enabled').checked = !!cfg.slash_enabled;
+  document.getElementById('dc-app-id').value = cfg.app_id || '';
+  document.getElementById('dc-public-key').value = cfg.public_key || '';
 }
 
 // Team roles (app/discord_bot.py) -- discord_team_role rows. role_id
@@ -2298,6 +2307,12 @@ async function loadDiscord() {
     renderDiscordOutbox(d.outbox);
     renderTeamRoles(d.team_roles || []);
     renderReconcileStatus(d.last_reconcile);
+    // Interactions Endpoint URL -- app/admin_ops.py's GET
+    // /api/admin/discord only computes this when OAUTH_PUBLIC_BASE_URL
+    // is configured; blank otherwise, same as every absolute-or-omitted
+    // URL app/discord_notify.py builds.
+    document.getElementById('dc-slash-endpoint-url').textContent =
+      d.interactions_endpoint_url || '(set OAUTH_PUBLIC_BASE_URL first)';
   } catch (e) {
     setStatus('Discord config load failed: ' + e.message, true);
   }
@@ -2319,6 +2334,9 @@ async function saveDiscord(b) {
     guild_id: document.getElementById('dc-guild-id').value.trim(),
     team_channels_enabled: document.getElementById('dc-team-channels-enabled').checked,
     team_category_name: document.getElementById('dc-team-category-name').value.trim(),
+    slash_enabled: document.getElementById('dc-slash-enabled').checked,
+    app_id: document.getElementById('dc-app-id').value.trim(),
+    public_key: document.getElementById('dc-public-key').value.trim(),
   };
   // Blank means keep the existing webhook -- see app/admin_ops.py's
   // admin_discord_update, the same convention the Paint section's own
@@ -2411,6 +2429,24 @@ async function reconcileDiscordRoles(b) {
     const r = await post('/api/admin/discord/roles/reconcile', {});
     out.textContent = 'Checked ' + r.checked + ' player(s), changed ' + r.changed + '.';
     await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+// Slash commands (app/discord_interactions.py) -- bulk-overwrites this
+// guild's command list with app/discord_bot.py's register_commands().
+// Save the Application ID/Public key fields (and turn Enabled on) with
+// the Save button above FIRST -- this button reads whatever was last
+// saved, not the form's current unsaved values.
+async function registerDiscordSlashCommands(b) {
+  const out = document.getElementById('dc-slash-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord/slash/register', {});
+    out.textContent = 'Registered: ' + r.commands.join(', ');
   } catch (e) {
     out.textContent = 'Failed: ' + e.message;
   }
@@ -2638,5 +2674,6 @@ document.getElementById('dc-test').addEventListener('click', function () { sendD
 document.getElementById('dc-channel-add').addEventListener('click', function () { addDiscordChannel(this); });
 document.getElementById('dc-roles-ensure').addEventListener('click', function () { ensureDiscordRoles(this); });
 document.getElementById('dc-roles-reconcile').addEventListener('click', function () { reconcileDiscordRoles(this); });
+document.getElementById('dc-slash-register').addEventListener('click', function () { registerDiscordSlashCommands(this); });
 
 checkAccess();
