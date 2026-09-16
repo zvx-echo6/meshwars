@@ -260,7 +260,7 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     )
     if standings:
         standings_text = "\n".join(
-            f"{s.get('team')}: {s.get('squares', 0)} squares held" for s in standings
+            f"{s.get('team')}: {_fmt_number(s.get('squares', 0))} squares held" for s in standings
         )
     else:
         standings_text = "No standings recorded."
@@ -315,14 +315,20 @@ def build_month_honors_embed(month: str, protocol: str, result: dict) -> dict:
     award_fields = award_fields[:_MAX_EMBED_FIELDS]
 
     base_url = (settings.oauth_public_base_url or "").rstrip("/")
-    results_url = f"{base_url}/results" if base_url else "/results"
 
     embed = {
         "title": f"{proto_label} results: {month}",
         "description": f"Standings:\n{standings_text}",
-        "url": results_url,
         "fields": award_fields,
     }
+    # A Discord embed's "url" must be an ABSOLUTE url -- a relative one
+    # (e.g. "/results") makes Discord reject the ENTIRE message with an
+    # HTTP 400, not just drop the link. So when OAUTH_PUBLIC_BASE_URL
+    # isn't configured, omit the "url" key entirely rather than falling
+    # back to a relative path. This only bites a deployment that has
+    # not set OAUTH_PUBLIC_BASE_URL, which is why it was invisible here.
+    if base_url:
+        embed["url"] = f"{base_url}/results"
     # "username" overrides the webhook's own configured display name --
     # without it, Discord shows whatever the webhook happened to be
     # named when it was created in the channel's Integrations settings

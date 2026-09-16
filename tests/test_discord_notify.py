@@ -268,6 +268,36 @@ def test_build_month_honors_embed_renders_number_with_thousands_separator():
     assert "6005.0" not in text
 
 
+def test_build_month_honors_embed_url_absolute_or_omitted(monkeypatch):
+    """A Discord embed's "url" must be an ABSOLUTE url -- a relative one
+    (the old fallback, "/results") makes Discord reject the WHOLE
+    message with an HTTP 400. When OAUTH_PUBLIC_BASE_URL isn't
+    configured there is no absolute url to give, so the "url" key must
+    be omitted entirely rather than filled with a relative path; when it
+    is configured, the url must be absolute."""
+    monkeypatch.setattr(settings, "oauth_public_base_url", "")
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _sample_result())
+    assert "url" not in embed["embeds"][0]
+
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://mw.test")
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", _sample_result())
+    assert embed["embeds"][0]["url"].startswith("https://")
+
+
+def test_build_month_honors_embed_standings_use_thousands_separator():
+    """The standings line built its number with an f-string directly
+    (f"{squares} squares held"), never routing it through _fmt_number()
+    the way the award fields do -- so one real message printed "6005"
+    in the description right above "6,005" in a field, disagreeing with
+    itself. Standings must use the same formatter."""
+    result = _sample_result()
+    result["standings"] = [{"team": "GREEN", "squares": 6005}]
+    embed = discord_notify.build_month_honors_embed("2026-08", "mc", result)
+    description = embed["embeds"][0]["description"]
+    assert "GREEN: 6,005 squares held" in description
+    assert "GREEN: 6005 squares held" not in description
+
+
 # ---- _post error messages ------------------------------------------------
 
 
