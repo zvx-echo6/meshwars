@@ -642,3 +642,679 @@ def test_register_commands_not_configured_returns_ok_false(db_path):
     result = asyncio.run(discord_bot.register_commands())
     assert result["ok"] is False
     assert "reason" in result
+
+
+def test_registry_contains_the_new_account_commands():
+    for name in ("link", "join", "radios", "setupcheck"):
+        assert name in di._COMMANDS_BY_NAME
+        # No slash-command OPTIONS at all -- every one of these gathers
+        # its input through a modal/component, never a command option
+        # (see /link's own docstring on why an API key is never a
+        # slash-command option).
+        assert di._COMMANDS_BY_NAME[name].options == []
+    assert set(di._COMMANDS_BY_NAME.keys()) == {c.name for c in di.COMMANDS}
+
+
+# ---- 15: /link, /join, /radios, /setupcheck -------------------------------
+#
+# GOOD_KEY/DISABLED_KEY resolve through FakeIngestor, same shape
+# tests/test_account_api.py's own FakeIngestor uses for
+# request.app.state.mc_ingestor.
+
+
+GOOD_KEY = "good-key"
+DISABLED_KEY = "disabled-key"
+KEY_PLAYER_ID = 9001
+
+
+class FakeIngestor:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def authenticate(self, raw_key: str):
+        from app.mc_ingest import AuthResult
+
+        self.calls.append(raw_key)
+        if raw_key == GOOD_KEY:
+            return AuthResult("ok", KEY_PLAYER_ID)
+        if raw_key == DISABLED_KEY:
+            return AuthResult("disabled", KEY_PLAYER_ID)
+        return AuthResult("not_found")
+
+
+def _client_with_ingestor(ingestor) -> TestClient:
+    app = FastAPI()
+    app.include_router(di.router)
+    app.state.mc_ingestor = ingestor
+    return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_account_command_rate_limiters():
+    """di._link_rate_limiter/_join_rate_limiter/_radios_rate_limiter are
+    module-level singletons (see app/auth.py's module docstring on why
+    every _BoundedHits budget in this codebase is built once, at import
+    time) -- cleared between tests the same way
+    tests/test_account_api.py's own autouse fixture clears
+    _link_key_addr_limiter.
+    """
+    di._link_rate_limiter._hits.clear()
+    di._join_rate_limiter._hits.clear()
+    di._radios_rate_limiter._hits.clear()
+    yield
+
+
+def _component(custom_id: str, *, snowflake: str, values: list[str] | None = None) -> dict:
+    data: dict = {"custom_id": custom_id, "component_type": 3 if values is not None else 2}
+    if values is not None:
+        data["values"] = values
+    return {
+        "type": 3, "id": "i1", "application_id": "app-1000", "token": "itok-1",
+        "data": data, "member": {"user": {"id": snowflake}},
+    }
+
+
+def _modal_submit(custom_id: str, fields: dict[str, str], *, snowflake: str) -> dict:
+    components = [
+        {"type": 1, "components": [{"type": 4, "custom_id": k, "value": v}]}
+        for k, v in fields.items()
+    ]
+    return {
+        "type": 5, "id": "i1", "application_id": "app-1000", "token": "itok-1",
+        "data": {"custom_id": custom_id, "components": components},
+        "member": {"user": {"id": snowflake}},
+    }
+
+
+def _make_player(db_path, player_id: int, name: str, team: str = "RED", *, key: str | None = None) -> None:
+    conn = sqlite3.connect(db_path)
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO player(player_id, display_name, team, created_at) VALUES (?, ?, ?, ?)",
+        (player_id, name, team, now),
+    )
+    if key is not None:
+        from app.mc_ingest import hash_secret
+
+        conn.execute(
+            "INSERT INTO api_key(key_hash, player_id, issued_at) VALUES (?, ?, ?)",
+            (hash_secret(key), player_id, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _make_account_with_discord_identity(db_path, snowflake: str, *, disabled: bool = False) -> int:
+    conn = sqlite3.connect(db_path)
+    now = int(time.time())
+    disabled_at = now if disabled else None
+    account_id = conn.execute(
+        "INSERT INTO account(created_at, disabled_at) VALUES (?, ?)", (now, disabled_at)
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO account_identity(provider, subject, account_id, linked_at) "
+        "VALUES ('discord', ?, ?, ?)",
+        (snowflake, account_id, now),
+    )
+    conn.commit()
+    conn.close()
+    return account_id
+
+
+# ---- /link ------------------------------------------------------------
+
+
+def test_link_opens_modal_never_a_slash_option(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    client = _client()
+
+    resp = _post_interaction(client, priv, _command("link"))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["type"] == di._RESPONSE_MODAL
+    assert body["data"]["custom_id"] == "link:modal"
+    field = body["data"]["components"][0]["components"][0]
+    assert field["custom_id"] == "api_key"
+    assert field["type"] == di._COMPONENT_TEXT_INPUT
+
+
+def test_link_modal_submit_new_snowflake_creates_account_and_links(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "KeyHolder", "GREEN")
+
+    synced = []
+
+    async def fake_sync(conn, player_id):
+        synced.append(player_id)
+
+    monkeypatch.setattr(di.discord_bot, "sync_member_safe", fake_sync)
+
+    ingestor = FakeIngestor()
+    client = _client_with_ingestor(ingestor)
+
+    resp = _post_interaction(
+        client, priv, _modal_submit("link:modal", {"api_key": GOOD_KEY}, snowflake="42424242"),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["type"] == 4
+    assert body["data"]["flags"] == di._FLAG_EPHEMERAL
+    assert body["data"]["allowed_mentions"] == {"parse": []}
+    content = body["data"]["content"]
+    assert "KeyHolder" in content and "GREEN" in content
+    assert GOOD_KEY not in content
+
+    conn = sqlite3.connect(db_path)
+    identity = conn.execute(
+        "SELECT account_id FROM account_identity WHERE provider = 'discord' AND subject = ?",
+        ("42424242",),
+    ).fetchone()
+    assert identity is not None
+    account_id = identity[0]
+    player_row = conn.execute(
+        "SELECT account_id FROM player WHERE player_id = ?", (KEY_PLAYER_ID,)
+    ).fetchone()
+    assert player_row[0] == account_id
+    # Two account_link_event rows exist for a brand-new snowflake --
+    # 'identity_linked' from _create_account_with_identity() and
+    # 'player_linked' from _claim_player() -- assert on the latter.
+    event = conn.execute(
+        "SELECT actor, detail FROM account_link_event"
+        " WHERE account_id = ? AND kind = 'player_linked'", (account_id,)
+    ).fetchone()
+    assert event is not None
+    assert event[0] == "user"
+    assert "Discord" in event[1]
+    conn.close()
+
+    assert synced == [KEY_PLAYER_ID]
+
+
+def test_link_modal_submit_existing_account_links_player(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Existing", "BLUE")
+    account_id = _make_account_with_discord_identity(db_path, "55555555")
+
+    monkeypatch.setattr(di.discord_bot, "sync_member_safe", lambda conn, player_id: _noop())
+
+    ingestor = FakeIngestor()
+    client = _client_with_ingestor(ingestor)
+
+    resp = _post_interaction(
+        client, priv, _modal_submit("link:modal", {"api_key": GOOD_KEY}, snowflake="55555555"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert "Existing" in resp.json()["data"]["content"]
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT account_id FROM player WHERE player_id = ?", (KEY_PLAYER_ID,)).fetchone()
+    conn.close()
+    assert row[0] == account_id
+
+
+async def _noop():
+    return None
+
+
+def test_link_modal_submit_bad_key_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    ingestor = FakeIngestor()
+    client = _client_with_ingestor(ingestor)
+
+    resp = _post_interaction(
+        client, priv, _modal_submit("link:modal", {"api_key": "nonsense"}, snowflake="1"),
+    )
+    body = resp.json()
+    assert body["data"]["flags"] == di._FLAG_EPHEMERAL
+    assert "not valid" in body["data"]["content"]
+
+    conn = sqlite3.connect(db_path)
+    n = conn.execute("SELECT COUNT(*) FROM account_identity").fetchone()[0]
+    conn.close()
+    assert n == 0
+
+
+def test_link_modal_submit_disabled_player_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    ingestor = FakeIngestor()
+    client = _client_with_ingestor(ingestor)
+
+    resp = _post_interaction(
+        client, priv, _modal_submit("link:modal", {"api_key": DISABLED_KEY}, snowflake="1"),
+    )
+    body = resp.json()
+    assert "disabled" in body["data"]["content"]
+
+
+def test_link_modal_submit_account_already_has_player_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "KeyHolder", "GREEN")
+    _make_player(db_path, KEY_PLAYER_ID + 1, "AlreadyMine", "RED")
+    account_id = _make_account_with_discord_identity(db_path, "77777777")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE player SET account_id = ? WHERE player_id = ?", (account_id, KEY_PLAYER_ID + 1)
+    )
+    conn.commit()
+    conn.close()
+
+    ingestor = FakeIngestor()
+    client = _client_with_ingestor(ingestor)
+    resp = _post_interaction(
+        client, priv, _modal_submit("link:modal", {"api_key": GOOD_KEY}, snowflake="77777777"),
+    )
+    body = resp.json()
+    assert "already has a linked player" in body["data"]["content"]
+
+
+def test_link_modal_submit_player_claimed_by_different_account_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "KeyHolder", "GREEN")
+    other_account_id = _make_account_with_discord_identity(db_path, "88888888")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE player SET account_id = ? WHERE player_id = ?", (other_account_id, KEY_PLAYER_ID)
+    )
+    conn.commit()
+    conn.close()
+
+    ingestor = FakeIngestor()
+    client = _client_with_ingestor(ingestor)
+    resp = _post_interaction(
+        client, priv, _modal_submit("link:modal", {"api_key": GOOD_KEY}, snowflake="99999999"),
+    )
+    body = resp.json()
+    assert "already linked to a different account" in body["data"]["content"]
+
+
+def test_link_modal_submit_rate_limited_per_snowflake(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    monkeypatch.setattr(settings, "account_link_key_rate_limit_attempts", 1)
+    ingestor = FakeIngestor()
+    client = _client_with_ingestor(ingestor)
+
+    _post_interaction(client, priv, _modal_submit("link:modal", {"api_key": "x"}, snowflake="1"))
+    resp = _post_interaction(client, priv, _modal_submit("link:modal", {"api_key": "x"}, snowflake="1"))
+    assert "Too many attempts" in resp.json()["data"]["content"]
+
+
+def test_disabled_account_refused_on_every_new_command(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_account_with_discord_identity(db_path, "13131313", disabled=True)
+    client = _client_with_ingestor(FakeIngestor())
+
+    for payload in (
+        _command("link"),
+        _command("join"),
+        _command("radios"),
+        _command("setupcheck"),
+    ):
+        payload["member"] = {"user": {"id": "13131313"}}
+        resp = _post_interaction(client, priv, payload)
+        assert "disabled" in resp.json()["data"]["content"], payload["data"]["name"]
+
+
+# ---- /join --------------------------------------------------------------
+
+
+def test_join_meshcore_never_mints_or_shows_a_key(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    monkeypatch.setattr(settings, "oauth_public_base_url", "https://meshwars.example")
+    monkeypatch.setattr(di.discord_bot, "sync_member_safe", lambda conn, player_id: _noop())
+    client = _client_with_ingestor(FakeIngestor())
+
+    resp = _post_interaction(
+        client, priv,
+        _modal_submit(
+            "join:modal",
+            {"display_name": "NewMcPlayer", "team": "RED", "protocol": "mc"},
+            snowflake="21212121",
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    content = resp.json()["data"]["content"]
+    assert "https://meshwars.example/join" in content
+    assert "only issued through the website" in content
+    # No key-shaped string anywhere in the reply.
+    assert "key\":" not in content
+
+    conn = sqlite3.connect(db_path)
+    player_id = conn.execute(
+        "SELECT player_id FROM player WHERE display_name = 'NewMcPlayer'"
+    ).fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM api_key WHERE player_id = ?", (player_id,)).fetchone()[0]
+    conn.close()
+    assert n == 0
+
+
+def test_join_meshtastic_never_mints_a_key(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    monkeypatch.setattr(settings, "join_meshtastic_enabled", True)
+    monkeypatch.setattr(di.discord_bot, "sync_member_safe", lambda conn, player_id: _noop())
+    client = _client_with_ingestor(FakeIngestor())
+
+    resp = _post_interaction(
+        client, priv,
+        _modal_submit(
+            "join:modal",
+            {"display_name": "NewMtPlayer", "team": "BLUE", "protocol": "mt"},
+            snowflake="23232323",
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    content = resp.json()["data"]["content"]
+    assert "NewMtPlayer" in content and "BLUE" in content
+    assert "/radios" in content
+
+    conn = sqlite3.connect(db_path)
+    player_id = conn.execute(
+        "SELECT player_id FROM player WHERE display_name = 'NewMtPlayer'"
+    ).fetchone()[0]
+    n = conn.execute("SELECT COUNT(*) FROM api_key WHERE player_id = ?", (player_id,)).fetchone()[0]
+    account_row = conn.execute(
+        "SELECT account_id FROM player WHERE player_id = ?", (player_id,)
+    ).fetchone()
+    identity = conn.execute(
+        "SELECT account_id FROM account_identity WHERE provider = 'discord' AND subject = '23232323'"
+    ).fetchone()
+    conn.close()
+    assert n == 0
+    assert account_row[0] == identity[0]
+
+
+def test_join_invalid_team_lists_valid_choices(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    client = _client_with_ingestor(FakeIngestor())
+
+    resp = _post_interaction(
+        client, priv,
+        _modal_submit(
+            "join:modal",
+            {"display_name": "Someone", "team": "NOTATEAM", "protocol": "mc"},
+            snowflake="31313131",
+        ),
+    )
+    body = resp.json()["data"]
+    assert body["flags"] == di._FLAG_EPHEMERAL
+    for team in settings.teams_list:
+        assert team in body["content"]
+
+
+def test_join_existing_player_is_refused_and_points_to_me(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "AlreadyIn", "RED")
+    account_id = _make_account_with_discord_identity(db_path, "41414141")
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE player SET account_id = ? WHERE player_id = ?", (account_id, KEY_PLAYER_ID))
+    conn.commit()
+    conn.close()
+
+    client = _client_with_ingestor(FakeIngestor())
+    resp = _post_interaction(client, priv, _command("join", token="jt"))
+    payload = _command("join")
+    payload["member"] = {"user": {"id": "41414141"}}
+    resp = _post_interaction(client, priv, payload)
+    body = resp.json()["data"]
+    assert "/me" in body["content"]
+
+
+def test_join_rate_limited_per_snowflake(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    monkeypatch.setattr(settings, "join_rate_limit_attempts", 1)
+    client = _client_with_ingestor(FakeIngestor())
+
+    fields = {"display_name": "A", "team": "RED", "protocol": "mc"}
+    _post_interaction(client, priv, _modal_submit("join:modal", fields, snowflake="1"))
+    resp = _post_interaction(
+        client, priv,
+        _modal_submit("join:modal", {"display_name": "B", "team": "RED", "protocol": "mc"}, snowflake="1"),
+    )
+    assert "Too many attempts" in resp.json()["data"]["content"]
+
+
+# ---- /radios --------------------------------------------------------------
+
+
+def _link_player_to_snowflake(db_path, player_id: int, snowflake: str) -> int:
+    account_id = _make_account_with_discord_identity(db_path, snowflake)
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE player SET account_id = ? WHERE player_id = ?", (account_id, player_id))
+    conn.commit()
+    conn.close()
+    return account_id
+
+
+def test_radios_list_shows_add_button_and_remove_select(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Radioed", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "51515151")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) VALUES ('mc', 'aabbccdd', ?, ?)",
+        (KEY_PLAYER_ID, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    client = _client_with_ingestor(FakeIngestor())
+    payload = _command("radios")
+    payload["member"] = {"user": {"id": "51515151"}}
+    resp = _post_interaction(client, priv, payload)
+    body = resp.json()["data"]
+    assert body["flags"] == di._FLAG_EPHEMERAL
+    assert "aabbccdd" in body["content"]
+    components = body["components"]
+    add_button = components[0]["components"][0]
+    assert add_button["custom_id"] == "radios:add_open"
+    select = components[1]["components"][0]
+    assert select["custom_id"] == "radios:remove_select"
+    assert select["options"][0]["value"] == "mc:aabbccdd"
+
+
+def test_radios_add_via_modal_normalizes_node_ref(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Radioed", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "61616161")
+    client = _client_with_ingestor(FakeIngestor())
+
+    resp = _post_interaction(
+        client, priv,
+        _modal_submit(
+            "radios:add_submit", {"protocol": "mt", "node_ref": "!AABBCCDD"}, snowflake="61616161",
+        ),
+    )
+    assert resp.status_code == 200, resp.text
+    assert "Added" in resp.json()["data"]["content"]
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT node_ref FROM player_node WHERE player_id = ? AND protocol = 'mt'", (KEY_PLAYER_ID,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == "aabbccdd"
+
+
+def test_radios_remove_requires_confirm(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Radioed", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "71717171")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) VALUES ('mc', 'aabbccdd', ?, ?)",
+        (KEY_PLAYER_ID, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_with_ingestor(FakeIngestor())
+
+    select_resp = _post_interaction(
+        client, priv, _component("radios:remove_select", snowflake="71717171", values=["mc:aabbccdd"]),
+    )
+    assert select_resp.status_code == 200, select_resp.text
+    select_body = select_resp.json()
+    assert select_body["type"] == di._RESPONSE_UPDATE_MESSAGE
+    buttons = select_body["data"]["components"][0]["components"]
+    confirm_id = next(b["custom_id"] for b in buttons if b["label"] == "Remove")
+
+    # Still there until confirmed.
+    conn = sqlite3.connect(db_path)
+    still_there = conn.execute(
+        "SELECT 1 FROM player_node WHERE protocol='mc' AND node_ref='aabbccdd'"
+    ).fetchone()
+    conn.close()
+    assert still_there is not None
+
+    confirm_resp = _post_interaction(
+        client, priv, _component(confirm_id, snowflake="71717171"),
+    )
+    assert confirm_resp.json()["type"] == di._RESPONSE_UPDATE_MESSAGE
+    assert "Removed" in confirm_resp.json()["data"]["content"]
+
+    conn = sqlite3.connect(db_path)
+    gone = conn.execute(
+        "SELECT 1 FROM player_node WHERE protocol='mc' AND node_ref='aabbccdd'"
+    ).fetchone()
+    conn.close()
+    assert gone is None
+
+
+def test_radios_component_from_different_user_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Owner", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "81818181")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) VALUES ('mc', 'aabbccdd', ?, ?)",
+        (KEY_PLAYER_ID, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_with_ingestor(FakeIngestor())
+
+    # A DIFFERENT snowflake, with no account of its own, clicks the
+    # remove select naming the owner's radio.
+    resp = _post_interaction(
+        client, priv, _component("radios:remove_select", snowflake="99990000", values=["mc:aabbccdd"]),
+    )
+    body = resp.json()["data"]
+    assert "haven't linked" in body["content"] or "isn't yours" in body["content"]
+
+    conn = sqlite3.connect(db_path)
+    still_there = conn.execute(
+        "SELECT 1 FROM player_node WHERE protocol='mc' AND node_ref='aabbccdd'"
+    ).fetchone()
+    conn.close()
+    assert still_there is not None
+
+
+def test_radios_tampered_custom_id_naming_unowned_radio_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Owner", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "82828282")
+    _make_player(db_path, KEY_PLAYER_ID + 1, "Other", "BLUE")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID + 1, "83838383")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) VALUES ('mc', 'deadbeef', ?, ?)",
+        (KEY_PLAYER_ID + 1, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_with_ingestor(FakeIngestor())
+
+    # Caller 82828282 owns nothing named 'deadbeef' -- it belongs to a
+    # different player. A tampered confirm custom_id naming it anyway
+    # must be refused, never deleted.
+    resp = _post_interaction(
+        client, priv, _component("radios:remove_confirm:mc:deadbeef", snowflake="82828282"),
+    )
+    assert "isn't yours" in resp.json()["data"]["content"]
+
+    conn = sqlite3.connect(db_path)
+    still_there = conn.execute(
+        "SELECT 1 FROM player_node WHERE protocol='mc' AND node_ref='deadbeef'"
+    ).fetchone()
+    conn.close()
+    assert still_there is not None
+
+
+# ---- /setupcheck ------------------------------------------------------
+
+
+def test_setupcheck_matches_website_helper_content(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Checker", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "91919191")
+
+    client = _client_with_ingestor(FakeIngestor())
+    payload = _command("setupcheck")
+    payload["member"] = {"user": {"id": "91919191"}}
+    resp = _post_interaction(client, priv, payload)
+    content = resp.json()["data"]["content"]
+
+    from app import account_api as account_api_module
+    from app.db import connect as app_connect
+
+    conn = app_connect()
+    try:
+        expected = account_api_module._checkin_health_for_player(conn, KEY_PLAYER_ID, [])
+    finally:
+        conn.close()
+
+    for protocol, board in expected["boards"].items():
+        assert board["summary"] in content
+
+
+# ---- component/modal responses stay ephemeral and mention-free -----------
+
+
+def test_component_and_modal_responses_stay_ephemeral(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    client = _client_with_ingestor(FakeIngestor())
+
+    # The MODAL-opening response (type 9) has no allowed_mentions/flags
+    # fields at all -- Discord's own Modal object doesn't carry them
+    # (see _modal_response()'s own docstring) -- so only its shape is
+    # checked; every OTHER response here (a type-4 message) carries
+    # both.
+    modal_resp = _post_interaction(client, priv, _command("link"))
+    modal_body = modal_resp.json()
+    assert modal_body["type"] == di._RESPONSE_MODAL
+    assert "allowed_mentions" not in modal_body["data"]
+
+    message_responses = [
+        _post_interaction(
+            client, priv, _modal_submit("link:modal", {"api_key": "bogus"}, snowflake="1"),
+        ),
+        _post_interaction(
+            client, priv,
+            _modal_submit("join:modal", {"display_name": "X", "team": "NOPE", "protocol": "mc"}, snowflake="2"),
+        ),
+    ]
+    for resp in message_responses:
+        body = resp.json()
+        assert body["type"] in (4, 7)
+        data = body["data"]
+        assert data["allowed_mentions"] == {"parse": []}
+        assert data.get("flags") == di._FLAG_EPHEMERAL

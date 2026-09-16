@@ -355,6 +355,37 @@ def _link_identity(
     )
 
 
+def _create_account_with_identity(
+    conn: sqlite3.Connection, *, provider_name: str, identity: ProviderIdentity, now: int,
+    detail_suffix: str = "",
+) -> int:
+    """Create a brand-new account and its first identity -- the exact
+    two-write sequence pending_create() below performs for case 4's
+    "create a new account" choice (an INSERT into `account`, then
+    _link_identity() above for the identity row and its own
+    account_link_event). Extracted so app/discord_interactions.py's
+    /link and /join commands can reuse it: a Discord snowflake with no
+    account_identity row yet is exactly this same "brand new identity,
+    nowhere to link" situation, just reached without ever going through
+    resolve_oauth_callback()'s own case 4/pending-token dance at all --
+    a Discord interaction carries no email to make case 3 ambiguous and
+    no session cookie to make case 2 apply, so the caller already KNOWS
+    this is a new account before it ever calls this function; there is
+    no decision left for resolve_oauth_callback() itself to make.
+
+    Returns the new account_id. Runs inside the caller's own open write
+    transaction (pending_create()'s WriteSession, or
+    discord_interactions.py's own) -- neither begun nor committed here.
+    """
+    cur = conn.execute("INSERT INTO account(created_at, last_login_at) VALUES (?, ?)", (now, now))
+    account_id = cur.lastrowid
+    _link_identity(
+        conn, account_id=account_id, provider_name=provider_name, identity=identity,
+        now=now, detail_suffix=detail_suffix,
+    )
+    return account_id
+
+
 async def _sync_discord_roles_if_player_linked(account_id: int) -> None:
     """Discord role sync (app/discord_bot.py) trigger #2 -- "after a
     Discord identity is linked to an account that already has a
@@ -1589,12 +1620,8 @@ async def pending_create(request: Request) -> JSONResponse:
         if err is not None:
             return err
 
-        cur = conn.execute("INSERT INTO account(created_at, last_login_at) VALUES (?, ?)", (now, now))
-        account_id = cur.lastrowid
-
-        _link_identity(
+        account_id = _create_account_with_identity(
             conn,
-            account_id=account_id,
             provider_name=row["provider"],
             identity=ProviderIdentity(
                 subject=row["subject"], email=row["email"], email_verified=bool(row["email_verified"])

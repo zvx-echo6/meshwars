@@ -71,6 +71,83 @@ against `player` (display_name, team only) and gets every SCORING
 figure (rank, points) from the same team_totals()/team_list()/
 active_season() trio /standings already uses. See _team_standings()
 below.
+
+---- ACCOUNT COMMANDS: /link, /join, /radios, /setupcheck --------------
+
+Everything above (/me, /standings, /honors, /nextnet, /player) is a
+read-only public lookup that never requires a caller to have linked
+anything. The commands below are different in kind: they act on the
+CALLING Discord user's own MeshWars account, using the exact same
+account/player model app/account_api.py, app/oauth_api.py,
+app/join_api.py, and app/nodes_api.py already implement for the
+website. THE PRINCIPLE that governs every one of them:
+
+A Discord user whose snowflake is in account_identity (provider
+='discord') is treated as SIGNED IN to that account -- the same
+authority as clicking "Sign in with Discord" on the site. Because
+OAuth sign-in already bypasses this app's own TOTP (see
+app/totp_api.py's module docstring for exactly why), Discord must
+NEVER be able to change anything that protects the account. The
+following are WEBSITE-ONLY, and will never be added here: setting or
+changing a password, enabling/disabling TOTP, setting or changing the
+account's contact email, adding or removing a sign-in identity
+(including Discord's own), issuing or displaying API keys (the one
+exception -- and it is not an exception to this rule, just its literal
+form -- is the one-time key POST /api/join itself mints on the
+website; a Discord /join never mints or shows one, for either
+protocol, see that command's own docstring below), rotating or
+otherwise ever showing an existing API key, logging out or revoking
+sessions, deleting an account, releasing a player link (operator-only,
+see app/admin_api.py), and every operator/admin action. Every command
+below is read-only or acts ONLY on the caller's own player/radios --
+nothing here ever touches account_password, account_totp,
+account.contact_email, or any admin-gated table.
+
+REUSE: every command below calls the SAME service logic the website's
+own routes call -- app/account_api.py's _claim_player() (POST
+/api/account/link-key's own conflict checks and write),
+app/oauth_api.py's _create_account_with_identity() (the same new-
+account write case 4's "create a new account" choice performs),
+app/join_api.py's _create_player() (POST /api/join's own dup-name/
+node-conflict checks and inserts), and app/nodes_api.py's
+add_node_for_player()/remove_node_for_player() (POST /api/nodes and
+DELETE /api/nodes/{node_ref}'s own logic) -- never a second copy of
+any of that SQL, and never an HTTP call to this app's own routes (see
+each command's own docstring for exactly which shared function it
+calls).
+
+RESOLVING THE CALLER: _resolve_caller() below is the one place that
+turns a Discord snowflake into (account_id, player_id, disabled) --
+every command in this section calls it fresh, on EVERY interaction
+(the initial command invocation AND every later component/modal
+interaction it produces), never trusting a custom_id's own claim about
+who is acting. A caller whose account.disabled_at is set is refused,
+ephemerally, on every one of these commands -- note that
+account.disabled_at is a column the WEBSITE currently never reads at
+all (a known gap; every other disablement in this codebase is on
+`player`, not `account`), and this module deliberately does not
+repeat that gap for its own surface rather than wait for the website
+to close it first.
+
+CUSTOM_ID SCHEME: every button/select/modal this section opens uses a
+custom_id of the form "<namespace>:<action>[:<arg>]" (Discord caps
+this at 100 characters) -- see _custom_id_action() below for how that
+is parsed for dispatch. An arg on a custom_id or a select option's
+`value` is DATA (which radio, which node_ref) describing what was
+clicked, NEVER identity or authority: every handler re-resolves the
+CLICKING user's own snowflake (never anything the custom_id claims
+about who owns what) and re-checks ownership against the database
+before acting, on every single interaction including a confirm click
+that follows an already-verified select -- see each handler's own
+comment for exactly where that re-check happens.
+
+EPHEMERAL, ALWAYS: every response in this section -- the initial
+command's, and every later component/modal response it leads to --
+carries the ephemeral flag and allowed_mentions.parse == [] (see this
+module's own constants above). These commands only ever show a caller
+their OWN radios, keys (never displayed, only ever minted once and
+handed back the moment they're created), or setup diagnosis -- never
+another player's.
 """
 from __future__ import annotations
 
@@ -88,10 +165,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
-from . import discord_notify, mc_api, results
-from .db import connect
+from . import account_api, discord_bot, discord_notify, join_api, mc_api, nodes_api, oauth_api, results
+from .auth import new_rate_limit_bucket
+from .config import settings
+from .db import WriteSession, connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .mc_scoring import team_totals
+from .node_ref import normalize_node_ref
+from .oauth import ProviderIdentity
 
 log = logging.getLogger("discord_interactions")
 
@@ -123,11 +204,25 @@ _HANDLER_BUDGET_SECONDS = 2.0
 # Discord's own documented interaction types this route ever receives.
 _TYPE_PING = 1
 _TYPE_APPLICATION_COMMAND = 2
+_TYPE_MESSAGE_COMPONENT = 3
+_TYPE_MODAL_SUBMIT = 5
 
 # Discord's own documented response types this route ever sends.
 _RESPONSE_PONG = 1
 _RESPONSE_CHANNEL_MESSAGE = 4
 _RESPONSE_DEFERRED_CHANNEL_MESSAGE = 5
+# UPDATE_MESSAGE -- a component click's own reply that replaces the
+# message the component lives on, rather than posting a new one (a
+# select-then-confirm flow's own "here's what you chose" step, e.g.
+# /radios' remove confirmation below).
+_RESPONSE_UPDATE_MESSAGE = 7
+# MODAL -- the only response type that can open a Discord modal. Only
+# ever valid as the FIRST response to an APPLICATION_COMMAND or
+# MESSAGE_COMPONENT interaction (Discord's own documented contract);
+# never valid as a modal's own submit response, or as a deferred
+# follow-up PATCH -- see _modal_response()'s own docstring below for
+# how each command that opens one plans around that.
+_RESPONSE_MODAL = 9
 
 # Discord's own documented message flag for "only the invoking user can
 # see this" -- used by every /me response (always) and by an error reply
@@ -155,6 +250,26 @@ _BOARD_OPTION = {
         {"name": "Meshtastic", "value": "mt"},
     ],
 }
+
+# Discord's own component types (discord.dev's "Component Types") this
+# module ever builds. Named here for the same reason _OPTION_TYPE_STRING
+# is: so the account-command builders below read as what they mean.
+_COMPONENT_ACTION_ROW = 1
+_COMPONENT_BUTTON = 2
+_COMPONENT_STRING_SELECT = 3
+_COMPONENT_TEXT_INPUT = 4
+
+# Discord's own button styles -- Danger (red) for a destructive confirm,
+# Secondary (grey) for its paired cancel, Primary (blurple) for every
+# other button this module opens.
+_BUTTON_STYLE_PRIMARY = 1
+_BUTTON_STYLE_SECONDARY = 2
+_BUTTON_STYLE_DANGER = 4
+
+# Discord's own text input style -- every field this module ever asks
+# for (an API key, a display name, a team, a protocol) fits on one
+# line.
+_TEXT_INPUT_STYLE_SHORT = 1
 
 # Fire-and-forget background tasks (one per deferred command -- see
 # _dispatch() below) are kept here so nothing garbage-collects them
@@ -222,6 +337,149 @@ def _connect_discord_message() -> dict:
 
     base = (settings.oauth_public_base_url or "").rstrip("/")
     return _ephemeral(f"Connect your Discord account at {base}/account to use this command.")
+
+
+# ---- account commands: shared plumbing (/link, /join, /radios, /setupcheck) --
+
+
+def _modal_response(*, custom_id: str, title: str, components: list[dict]) -> dict:
+    """A full MODAL (type 9) response ENVELOPE -- unlike _data()'s bare
+    message-data dict, a Modal object (discord.dev) has no
+    `allowed_mentions`/`flags` fields at all, so this builds the whole
+    {"type": 9, "data": {...}} shape directly rather than going through
+    _response()/_data(). A Command (or component) handler that returns
+    this instead of a plain message-data dict signals _dispatch()/
+    _dispatch_interactive() below to use ITS type verbatim instead of
+    wrapping the result as the default type 4 -- a bare message-data
+    dict never carries a top-level "type" key of its own, so the two
+    are unambiguous. Only ever valid as the FIRST response to a command
+    or component click, never as a modal's own submit response and
+    never as a deferred follow-up PATCH (Discord's own documented
+    contract) -- every handler that can return this (see COMMANDS'
+    own /link and /join entries, and _cmd_radios_add_open below) does
+    only a single indexed SELECT before answering, so this module never
+    actually risks hitting the 2-second budget on one of these and
+    having to defer it into an impossible PATCH.
+    """
+    return {
+        "type": _RESPONSE_MODAL,
+        "data": {"custom_id": custom_id, "title": title, "components": components},
+    }
+
+
+def _text_input_row(custom_id: str, label: str, *, required: bool = True, max_length: int | None = None) -> dict:
+    """One single-field action row for a modal's own `components` list
+    -- Discord nests every input inside its own action row (a modal
+    cannot place two inputs in one row), so every _modal_response()
+    call site below builds its `components` list out of one of these
+    per field rather than repeating this two-level shape by hand.
+    """
+    field: dict = {
+        "type": _COMPONENT_TEXT_INPUT,
+        "custom_id": custom_id,
+        "style": _TEXT_INPUT_STYLE_SHORT,
+        "label": label,
+        "required": required,
+    }
+    if max_length is not None:
+        field["max_length"] = max_length
+    return {"type": _COMPONENT_ACTION_ROW, "components": [field]}
+
+
+def _modal_values(body: dict) -> dict[str, str]:
+    """{custom_id: value} for every text-input field submitted with a
+    MODAL_SUBMIT interaction. Discord nests each field inside its own
+    single-item action row (data.components: [{type: 1, components:
+    [{type: 4, custom_id, value}]}]), never flat -- this flattens it
+    once here instead of every modal handler below re-walking the same
+    two-level structure.
+    """
+    data = body.get("data") or {}
+    out: dict[str, str] = {}
+    for row in data.get("components") or []:
+        for comp in row.get("components") or []:
+            cid = comp.get("custom_id")
+            if cid is not None:
+                out[cid] = comp.get("value") or ""
+    return out
+
+
+def _custom_id_action(custom_id: str) -> str:
+    """The dispatch key for a component/modal custom_id -- this
+    module's own scheme (see this module's docstring's CUSTOM_ID
+    SCHEME section) is "<namespace>:<action>[:<arg>]", and the
+    namespace+action pair (never the arg) is what
+    _COMPONENT_HANDLERS/_MODAL_HANDLERS below are keyed on. Example:
+    "radios:remove_confirm:mc:aabbccdd" -> "radios:remove_confirm";
+    "link:modal" -> "link:modal" (no arg at all).
+    """
+    parts = custom_id.split(":")
+    return ":".join(parts[:2]) if len(parts) >= 2 else custom_id
+
+
+def _disabled_account_message() -> dict:
+    return _ephemeral(
+        "This Discord account is linked to a MeshWars account that has been disabled."
+    )
+
+
+def _unlinked_pointer_message() -> dict:
+    return _ephemeral(
+        "You haven't linked a MeshWars account yet. Use /link if you already have a "
+        "player, or /join to create one."
+    )
+
+
+class Caller(NamedTuple):
+    """What _resolve_caller() below knows about the Discord user making
+    ONE interaction -- see that function's own docstring.
+    """
+    account_id: int
+    player_id: int | None
+    disabled: bool
+
+
+def _snowflake_from_body(body: dict) -> str | None:
+    """The invoking Discord user's own snowflake id, from whichever of
+    the two shapes discord.dev's Interaction Object carries it in --
+    same member.user.id / user.id fallback _cmd_me() above already
+    uses, factored out here since every account command and every
+    component/modal interaction it produces needs this same lookup.
+    """
+    member = body.get("member") or {}
+    user = member.get("user") or body.get("user") or {}
+    snowflake = user.get("id")
+    return str(snowflake) if snowflake else None
+
+
+def _resolve_caller(conn, body: dict) -> Caller | None:
+    """snowflake -> account (or None) -> player (or None) -- the ONE
+    place every account command in this section uses to find out who
+    is asking, called fresh on EVERY interaction (see this module's own
+    docstring on why a later component/modal click never trusts its
+    own custom_id for identity). Returns None only when this Discord
+    snowflake has never linked a MeshWars account at all -- callers
+    that see None point the caller at /link or /join (see
+    _unlinked_pointer_message() above).
+    """
+    snowflake = _snowflake_from_body(body)
+    if snowflake is None:
+        return None
+    row = conn.execute(
+        "SELECT a.account_id AS account_id, a.disabled_at AS disabled_at, "
+        "       p.player_id AS player_id "
+        "  FROM account_identity ai "
+        "  JOIN account a ON a.account_id = ai.account_id "
+        "  LEFT JOIN player p ON p.account_id = a.account_id "
+        " WHERE ai.provider = 'discord' AND ai.subject = ?",
+        (snowflake,),
+    ).fetchone()
+    if row is None:
+        return None
+    return Caller(
+        account_id=row["account_id"], player_id=row["player_id"],
+        disabled=row["disabled_at"] is not None,
+    )
 
 
 # ---- team standings (shared by /standings, /me, /player) ----------------
@@ -539,6 +797,609 @@ def _cmd_player(conn, body: dict) -> dict:
     return _data(embeds=[embed])
 
 
+# ---- account commands: /link, /join, /radios, /setupcheck -----------------
+#
+# See this module's own docstring's ACCOUNT COMMANDS section for the
+# full contract (the signed-in-as-Discord principle, the website-only
+# list, reuse, caller resolution, the custom_id scheme, ephemeral-
+# always). Everything below implements that.
+
+# Per-SNOWFLAKE rate limits -- every request here arrives from
+# Discord's own edge IPs, never the caller's, so an address-keyed
+# limiter (every other rate limit in this codebase) would do nothing.
+# /link mirrors the website's own link-key budget exactly
+# (settings.account_link_key_rate_limit_*) since it is the identical
+# sensitive action (a key-guessing oracle without a limit -- see
+# app/account_api.py's own module comment on _link_key_addr_limiter);
+# /join and radio changes reuse the website's own equally-shaped
+# budgets (settings.join_rate_limit_*, settings.
+# account_rotate_key_rate_limit_*) for the same reason -- neither of
+# those actions needs a tighter or looser cadence than the one already
+# chosen for its website equivalent.
+_link_rate_limiter = new_rate_limit_bucket()
+_join_rate_limiter = new_rate_limit_bucket()
+_radios_rate_limiter = new_rate_limit_bucket()
+
+
+def _cmd_link(conn, body: dict) -> dict:
+    """Opens a MODAL for the caller's API key -- see this module's own
+    docstring for why the key is NEVER accepted as a slash-command
+    option (an option's value sits in Discord's own command-usage
+    history/autocomplete for anyone who can see the interaction; a
+    modal's own submission is not). The only thing checked before
+    opening it is whether the caller's account (if one already exists)
+    is disabled -- everything else (already has a player, key belongs
+    to someone else, unknown key, ...) is exactly what
+    _cmd_link_modal_submit() below already refuses, so re-deriving it
+    here too would just be two places that have to agree instead of
+    one.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _disabled_account_message()
+    return _modal_response(
+        custom_id="link:modal",
+        title="Link your MeshWars key",
+        components=[_text_input_row("api_key", "Your MeshWars API key", max_length=200)],
+    )
+
+
+async def _cmd_link_modal_submit(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """/link's modal submit. Authenticates the pasted key the exact
+    same way POST /api/account/link-key does
+    (request.app.state.mc_ingestor.authenticate() -- threaded through
+    here as `ingestor`, see _dispatch_interactive()'s own docstring for
+    why this handler takes it as a parameter instead of reaching for a
+    Request this interaction never carries), auto-creating an account
+    for a snowflake with none yet via app/oauth_api.py's
+    _create_account_with_identity() (the SAME write case 4's "create a
+    new account" choice performs), then claims the player through
+    app/account_api.py's _claim_player() -- the SAME two conflict
+    checks and write POST /api/account/link-key already performs.
+    Never echoes the raw key back, in this response or in a log line.
+    """
+    snowflake = _snowflake_from_body(body)
+    if snowflake is None:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("Could not identify your Discord account.")
+
+    if _link_rate_limiter.limited(
+        snowflake,
+        limit=settings.account_link_key_rate_limit_attempts,
+        window=settings.account_link_key_rate_limit_window_seconds,
+    ):
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("Too many attempts -- try again in a minute.")
+
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_CHANNEL_MESSAGE, _disabled_account_message()
+
+    raw_key = _modal_values(body).get("api_key", "").strip()
+    if not raw_key:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("An API key is required.")
+
+    if ingestor is None:
+        log.error("discord interactions: /link submit with no mc_ingestor configured")
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("Something went wrong.")
+
+    auth = await ingestor.authenticate(raw_key)
+    if auth.status in ("not_found", "revoked"):
+        # Same generic wording every other key-authenticated route in
+        # this app uses for both statuses -- see app/auth.py's own
+        # comment on why not_found/revoked must stay indistinguishable
+        # from the response alone.
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("That key is not valid.")
+    if auth.status == "disabled":
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("That key's player is disabled.")
+
+    player_id = auth.player_id
+    now = int(time.time())
+
+    async with WriteSession() as wconn:
+        if caller is None:
+            account_id = oauth_api._create_account_with_identity(
+                wconn, provider_name="discord",
+                identity=ProviderIdentity(subject=snowflake, email=None, email_verified=False),
+                now=now, detail_suffix=" (via Discord)",
+            )
+        else:
+            account_id = caller.account_id
+
+        outcome = account_api._claim_player(
+            wconn, account_id=account_id, player_id=player_id, now=now,
+            detail_suffix=" (via Discord)",
+        )
+        if outcome.kind == "conflict":
+            return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(outcome.error["error"])
+
+        player = account_api._player_out(wconn, player_id)
+        contact_email = (
+            account_api._verified_contact_email(wconn, account_id)
+            if outcome.kind == "linked" else None
+        )
+
+    if outcome.kind == "linked":
+        # Same fire-and-forget, never-break-the-response contract every
+        # other call site of these two gives -- see
+        # app/account_api.py's link_key() for the identical pairing.
+        sync_conn = connect()
+        try:
+            await discord_bot.sync_member_safe(sync_conn, player_id)
+        finally:
+            sync_conn.close()
+
+        when = account_api.format_notice_timestamp(now)
+        await account_api._notify_security(
+            account_id, contact_email,
+            subject="A player was claimed on your MeshWars account",
+            heading="A player was claimed",
+            lines=(
+                f"The player {player['display_name']} was claimed on your MeshWars "
+                f"account on {when}.",
+                "If that was you, there is nothing to do.",
+                "If it wasn't, someone else has access. Sign in, rotate your API key, "
+                "and check which sign-in methods are attached to the account.",
+            ),
+        )
+
+    verb = "Linked" if outcome.kind == "linked" else "Already linked"
+    return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(
+        f"{verb} -- you're playing as **{player['display_name']}** on team {player['team']}."
+    )
+
+
+def _cmd_join(conn, body: dict) -> dict:
+    """Opens a MODAL asking for what the website's own signed-in join
+    path (POST /api/join with a session -- app/join_api.py's join())
+    asks for: display name, team, and radio type. This deployment lets
+    a player CHOOSE their own team (settings.teams_list -- the SAME
+    choices join()'s own team validation checks against, via
+    app/join_api.py's _validate_team()), so the modal names those same
+    choices rather than assigning one. No invite code -- a Discord
+    caller is already as authenticated as a signed-in website caller,
+    the same reasoning join()'s own docstring gives for skipping it
+    there.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _disabled_account_message()
+    if caller is not None and caller.player_id is not None:
+        return _ephemeral("You already have a player linked. Use /me to see your profile.")
+    return _modal_response(
+        custom_id="join:modal",
+        title="Join MeshWars",
+        components=[
+            _text_input_row("display_name", "Display name (1-32 characters)", max_length=32),
+            _text_input_row("team", f"Team: {', '.join(settings.teams_list)}", max_length=16),
+            _text_input_row("protocol", "Radio: mc (MeshCore) or mt (Meshtastic)", max_length=2),
+        ],
+    )
+
+
+async def _cmd_join_modal_submit(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """/join's modal submit. Mirrors app/join_api.py's own signed-in
+    join path field for field: _validate_display_name()/_validate_team()
+    are the SAME functions join() itself validates against (never a
+    second copy), and _create_player() is the exact write join()
+    performs (dup-name check, node conflict check, player/key/node
+    inserts, account link) -- see that function's own docstring for
+    exactly what changed to let this call it with mint_key=False.
+
+    NEVER mints or shows an API key, for EITHER protocol -- see this
+    module's own docstring's website-only list ("issuing or displaying
+    API keys"). A MeshCore joiner still needs one to configure
+    MeshMapper; this tells them plainly where to get it (the website's
+    own /join page, the only place a key is ever minted) instead.
+    """
+    snowflake = _snowflake_from_body(body)
+    if snowflake is None:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("Could not identify your Discord account.")
+
+    if _join_rate_limiter.limited(
+        snowflake,
+        limit=settings.join_rate_limit_attempts,
+        window=settings.join_rate_limit_window_seconds,
+    ):
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("Too many attempts -- try again later.")
+
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_CHANNEL_MESSAGE, _disabled_account_message()
+    if caller is not None and caller.player_id is not None:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(
+            "You already have a player linked. Use /me to see your profile."
+        )
+
+    values = _modal_values(body)
+    display_name, err = join_api._validate_display_name(values.get("display_name"))
+    if err:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(err)
+
+    team, err = join_api._validate_team(values.get("team"))
+    if err:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(
+            f"{err} -- choose one of: {', '.join(settings.teams_list)}"
+        )
+
+    protocol = (values.get("protocol") or "").strip().lower()
+    if protocol not in ("mc", "mt"):
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(
+            "Radio must be mc (MeshCore) or mt (Meshtastic)."
+        )
+    if protocol == "mt" and not settings.join_meshtastic_enabled:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("Meshtastic registration is not open yet.")
+
+    now = int(time.time())
+    if caller is None:
+        async with WriteSession() as wconn:
+            account_id = oauth_api._create_account_with_identity(
+                wconn, provider_name="discord",
+                identity=ProviderIdentity(subject=snowflake, email=None, email_verified=False),
+                now=now, detail_suffix=" (via Discord)",
+            )
+    else:
+        account_id = caller.account_id
+
+    # Discord's /join NEVER mints or shows a key -- mint_key=False
+    # unconditionally, for EVERY protocol (unlike join()'s own
+    # skip_key, which only skips for an authenticated Meshtastic join
+    # -- see _create_player()'s own docstring for exactly what this
+    # parameter controls and why Discord always passes False).
+    error, status, player_id, _raw_key = join_api._create_player(
+        display_name=display_name, team=team, protocol=protocol, node_ref=None,
+        account_id=account_id, mint_key=False, now=now,
+    )
+    if error is not None:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(error["error"])
+
+    sync_conn = connect()
+    try:
+        await discord_bot.sync_member_safe(sync_conn, player_id)
+    finally:
+        sync_conn.close()
+
+    base = (settings.oauth_public_base_url or "").rstrip("/")
+    if protocol == "mc":
+        # Website-only: issuing or displaying an API key (see this
+        # module's own docstring). MeshMapper needs one to report a
+        # position at all, so this points plainly at the one place a
+        # key is ever minted -- never a Discord command, because there
+        # isn't one and there will not be one.
+        note = (
+            f" MeshMapper needs an API key to report your position, and keys are only "
+            f"issued through the website -- visit {base}/join to get one."
+        )
+    else:
+        note = " Use /radios to add your Meshtastic node once you have its ID."
+    return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(
+        f"Welcome to MeshWars! You're **{display_name}** on team {team}.{note}"
+    )
+
+
+def _cmd_radios(conn, body: dict) -> dict:
+    """Lists the caller's own radios only (protocol + node_ref -- see
+    this module's own PRIVACY section: these are shown ONLY to the
+    caller they belong to), with an "Add radio" button and, when there
+    is at least one to remove, a "Remove" select menu.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _unlinked_pointer_message()
+
+    radios = nodes_api._radios_out(conn, caller.player_id)
+    if not radios:
+        lines = ["You have no radios registered yet."]
+    else:
+        lines = ["Your radios:"] + [
+            f"- {_BOARD_LABELS.get(r['protocol'], r['protocol'])}: `{r['node_ref']}`"
+            for r in radios
+        ]
+
+    components = [{
+        "type": _COMPONENT_ACTION_ROW,
+        "components": [{
+            "type": _COMPONENT_BUTTON, "style": _BUTTON_STYLE_PRIMARY,
+            "label": "Add radio", "custom_id": "radios:add_open",
+        }],
+    }]
+    if radios:
+        components.append({
+            "type": _COMPONENT_ACTION_ROW,
+            "components": [{
+                "type": _COMPONENT_STRING_SELECT,
+                "custom_id": "radios:remove_select",
+                "placeholder": "Remove a radio...",
+                "options": [
+                    {
+                        "label": f"{_BOARD_LABELS.get(r['protocol'], r['protocol'])} {r['node_ref']}",
+                        "value": f"{r['protocol']}:{r['node_ref']}",
+                    }
+                    for r in radios
+                ],
+            }],
+        })
+
+    data = _ephemeral("\n".join(lines))
+    data["components"] = components
+    return data
+
+
+async def _cmd_radios_add_open(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """The "Add radio" button -- opens a MODAL for protocol + node id.
+    Re-resolves the CLICKING user fresh (see this module's own
+    docstring) even though this button's own custom_id carries no
+    claim about anyone at all -- the eventual add
+    (_cmd_radios_add_submit below) always acts on THIS SAME re-resolved
+    caller, never anything a custom_id could name.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_CHANNEL_MESSAGE, _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _RESPONSE_CHANNEL_MESSAGE, _unlinked_pointer_message()
+    return _RESPONSE_MODAL, {
+        "custom_id": "radios:add_submit",
+        "title": "Add a radio",
+        "components": [
+            _text_input_row("protocol", "Protocol: mc (MeshCore) or mt (Meshtastic)", max_length=2),
+            _text_input_row("node_ref", "Node id (8 hex chars, with or without !)", max_length=16),
+        ],
+    }
+
+
+async def _cmd_radios_add_submit(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """Modal submit for "Add radio" -- calls the exact same logic POST
+    /api/nodes does (app/nodes_api.py's add_node_for_player(), which
+    already includes app/node_ref.py's own normalization and the
+    cross-player conflict check), scoped to the FRESHLY re-resolved
+    caller's own player_id, never anything the modal's custom_id names.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_CHANNEL_MESSAGE, _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _RESPONSE_CHANNEL_MESSAGE, _unlinked_pointer_message()
+
+    snowflake = _snowflake_from_body(body)
+    if snowflake and _radios_rate_limiter.limited(
+        snowflake,
+        limit=settings.account_rotate_key_rate_limit_attempts,
+        window=settings.account_rotate_key_rate_limit_window_seconds,
+    ):
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral("Too many attempts -- try again in a minute.")
+
+    values = _modal_values(body)
+    result, status = nodes_api.add_node_for_player(
+        caller.player_id, values.get("protocol"), values.get("node_ref"), None,
+    )
+    if status >= 400:
+        return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(result["error"])
+
+    verb = "Added" if result.get("added") else "Already registered"
+    return _RESPONSE_CHANNEL_MESSAGE, _ephemeral(f"{verb}. Use /radios to see your full list.")
+
+
+async def _cmd_radios_remove_select(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """The "Remove" select menu's own submit -- the chosen option's
+    VALUE ("<protocol>:<node_ref>") names the radio, never who owns it.
+    Ownership is checked here, fresh, against the CLICKING user's own
+    re-resolved player_id, before ever showing a confirm step -- see
+    this module's own docstring's CUSTOM_ID SCHEME section on why an
+    arg is data, never authority.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_UPDATE_MESSAGE, _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _RESPONSE_UPDATE_MESSAGE, _unlinked_pointer_message()
+
+    data = body.get("data") or {}
+    values = data.get("values") or []
+    chosen = values[0] if values else ""
+    protocol, _, node_ref = chosen.partition(":")
+
+    owned = conn.execute(
+        "SELECT 1 FROM player_node WHERE protocol = ? AND node_ref = ? AND player_id = ?",
+        (protocol, node_ref, caller.player_id),
+    ).fetchone()
+    if owned is None:
+        # Either a tampered value naming a radio this caller never
+        # owned, or one that was removed by something else since the
+        # list was rendered -- both refused the same way, never a
+        # guess at which.
+        return _RESPONSE_UPDATE_MESSAGE, _ephemeral(
+            "That radio isn't yours (or it's already been removed)."
+        )
+
+    label = f"{_BOARD_LABELS.get(protocol, protocol)} `{node_ref}`"
+    reply = _ephemeral(f"Remove {label}?")
+    reply["components"] = [{
+        "type": _COMPONENT_ACTION_ROW,
+        "components": [
+            {
+                "type": _COMPONENT_BUTTON, "style": _BUTTON_STYLE_DANGER,
+                "label": "Remove", "custom_id": f"radios:remove_confirm:{protocol}:{node_ref}",
+            },
+            {
+                "type": _COMPONENT_BUTTON, "style": _BUTTON_STYLE_SECONDARY,
+                "label": "Cancel", "custom_id": "radios:remove_cancel",
+            },
+        ],
+    }]
+    return _RESPONSE_UPDATE_MESSAGE, reply
+
+
+async def _cmd_radios_remove_confirm(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """The confirm button -- re-authorizes ownership AGAIN, fresh,
+    exactly as _cmd_radios_remove_select above already did (see this
+    module's own docstring: every component interaction re-checks,
+    never trusting an earlier step's own verification to still hold).
+    Only THIS button actually removes anything; Cancel
+    (_cmd_radios_remove_cancel below) never touches the database.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_UPDATE_MESSAGE, _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _RESPONSE_UPDATE_MESSAGE, _unlinked_pointer_message()
+
+    snowflake = _snowflake_from_body(body)
+    if snowflake and _radios_rate_limiter.limited(
+        snowflake,
+        limit=settings.account_rotate_key_rate_limit_attempts,
+        window=settings.account_rotate_key_rate_limit_window_seconds,
+    ):
+        return _RESPONSE_UPDATE_MESSAGE, _ephemeral("Too many attempts -- try again in a minute.")
+
+    data = body.get("data") or {}
+    parts = (data.get("custom_id") or "").split(":")
+    protocol = parts[2] if len(parts) > 2 else ""
+    node_ref = parts[3] if len(parts) > 3 else ""
+
+    owned = conn.execute(
+        "SELECT 1 FROM player_node WHERE protocol = ? AND node_ref = ? AND player_id = ?",
+        (protocol, node_ref, caller.player_id),
+    ).fetchone()
+    if owned is None:
+        return _RESPONSE_UPDATE_MESSAGE, _ephemeral(
+            "That radio isn't yours (or it's already been removed)."
+        )
+
+    nodes_api.remove_node_for_player(caller.player_id, protocol, node_ref)
+    return _RESPONSE_UPDATE_MESSAGE, _ephemeral("Removed.")
+
+
+async def _cmd_radios_remove_cancel(conn, body: dict, ingestor) -> tuple[int, dict]:
+    return _RESPONSE_UPDATE_MESSAGE, _ephemeral("Cancelled -- nothing was removed.")
+
+
+def _cmd_setupcheck(conn, body: dict) -> dict:
+    """Read-only: the caller's own setup diagnostics, from the exact
+    same logic GET /api/account/checkin-health uses
+    (app/account_api.py's _checkin_health_for_player()) -- never a
+    second copy of that per-board diagnosis.
+
+    KNOWN LIMITATION: the website route reads the check-in poller's own
+    live directory snapshot (request.app.state.checkin_poller) to
+    classify an uncredited MeshCore contact more precisely (resolving
+    vs. not-in-directory vs. ambiguous -- see
+    _checkin_contacts_status()'s own docstring). A slash-command
+    handler has no Request/app.state to read that from (COMMANDS'
+    handler shape is deliberately just (conn, body) -- see this
+    module's own docstring), so this always passes an empty directory,
+    same as the website route does with nothing cached yet: an honest
+    "not_in_directory" rather than a 500, but never the MORE precise
+    sub-diagnosis a live directory would allow. The credited/
+    not-credited headline itself (mc_checkin_award, the actual thing a
+    player cares about) does NOT depend on the directory at all, so
+    this degrades gracefully rather than incorrectly.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _unlinked_pointer_message()
+
+    result = account_api._checkin_health_for_player(conn, caller.player_id, [])
+    lines = []
+    for protocol in (MC_PROTOCOL, MT_PROTOCOL):
+        board = result["boards"].get(protocol)
+        if board is None:
+            continue
+        lines.append(f"**{_BOARD_LABELS.get(protocol, protocol)}**: {board['summary']}")
+    return _ephemeral("\n\n".join(lines))
+
+
+_COMPONENT_HANDLERS: dict[str, Callable] = {
+    "radios:add_open": _cmd_radios_add_open,
+    "radios:remove_select": _cmd_radios_remove_select,
+    "radios:remove_confirm": _cmd_radios_remove_confirm,
+    "radios:remove_cancel": _cmd_radios_remove_cancel,
+}
+
+_MODAL_HANDLERS: dict[str, Callable] = {
+    "link:modal": _cmd_link_modal_submit,
+    "join:modal": _cmd_join_modal_submit,
+    "radios:add_submit": _cmd_radios_add_submit,
+}
+
+
+async def _run_interactive(handler: Callable, body: dict, ingestor) -> tuple[int, dict]:
+    """Runs one component/modal handler against a fresh connection --
+    unlike _run_command() below (which offloads a SYNC handler to a
+    thread via asyncio.to_thread), every handler reached through this
+    function is itself `async def` and does its own awaiting (Discord
+    role sync, the key ingestor's own authenticate()) -- the same way
+    every OTHER route in this app mixes plain sqlite3 calls directly
+    into an async request handler with no to_thread at all
+    (app/account_api.py, app/join_api.py, ...). These handlers simply
+    follow that same, already-established convention instead of
+    _run_command()'s.
+    """
+    conn = connect()
+    try:
+        return await handler(conn, body, ingestor)
+    finally:
+        conn.close()
+
+
+async def _dispatch_interactive(
+    body: dict, cfg: dict, handler: Callable | None, *,
+    ingestor=None, http_client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Shared budget/defer/exception wrapper for MESSAGE_COMPONENT and
+    MODAL_SUBMIT interactions -- the same 2-second-budget/deferral
+    contract _dispatch() below applies to application commands, adapted
+    for a handler that picks its OWN success response TYPE (7,
+    UPDATE_MESSAGE, for most of this section's component clicks; 4 for
+    a modal's own follow-up message; 9 for a button that itself opens
+    another modal) instead of always answering with type 4.
+
+    Every entry point reached through here is always-ephemeral (this
+    module's own docstring, EPHEMERAL ALWAYS), so a deferred ack always
+    carries the ephemeral flag; it always uses the plain type-5
+    "loading" ack, never Discord's component-only type 6
+    (DEFERRED_UPDATE_MESSAGE, whose later PATCH must edit the ORIGINAL
+    message) -- every handler in this section does no more than a
+    couple of local sqlite3 queries before answering, so this should
+    never actually trip in practice.
+    """
+    if handler is None:
+        return _response(_RESPONSE_CHANNEL_MESSAGE, _ephemeral("Unknown interaction."))
+
+    task = asyncio.create_task(_run_interactive(handler, body, ingestor))
+    try:
+        response_type, data = await asyncio.wait_for(asyncio.shield(task), timeout=_HANDLER_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        async def _finish_and_patch() -> None:
+            try:
+                _rt, result_data = await task
+            except Exception:
+                log.exception("discord interactions: deferred component/modal handler failed")
+                result_data = _ephemeral("Something went wrong.")
+            token = body.get("token") or ""
+            app_id = cfg.get("app_id") or ""
+            if not app_id or not token:
+                log.error("discord interactions: cannot deliver deferred response -- missing app id or token")
+                return
+            await _patch_followup(app_id, token, result_data, http_client=http_client)
+
+        followup = asyncio.create_task(_finish_and_patch())
+        for t in (task, followup):
+            _BACKGROUND_TASKS.add(t)
+            t.add_done_callback(_BACKGROUND_TASKS.discard)
+        return _response(
+            _RESPONSE_DEFERRED_CHANNEL_MESSAGE,
+            {"allowed_mentions": _ALLOWED_MENTIONS, "flags": _FLAG_EPHEMERAL},
+        )
+    except Exception:
+        log.exception("discord interactions: component/modal handler failed")
+        return _response(_RESPONSE_CHANNEL_MESSAGE, _ephemeral("Something went wrong."))
+
+    return _response(response_type, data)
+
+
 # ---- the one registry -----------------------------------------------------
 #
 # Every command's Discord definition AND handler, in one place, so
@@ -614,6 +1475,34 @@ COMMANDS: list[Command] = [
         ],
         handler=_cmd_player,
         always_ephemeral=False,
+    ),
+    Command(
+        name="link",
+        description="Link an existing MeshWars API key to your Discord account",
+        options=[],
+        handler=_cmd_link,
+        always_ephemeral=True,
+    ),
+    Command(
+        name="join",
+        description="Create a new MeshWars player linked to your Discord account",
+        options=[],
+        handler=_cmd_join,
+        always_ephemeral=True,
+    ),
+    Command(
+        name="radios",
+        description="Manage your own MeshWars radios (only you can see this)",
+        options=[],
+        handler=_cmd_radios,
+        always_ephemeral=True,
+    ),
+    Command(
+        name="setupcheck",
+        description="Check why your check-ins may not be counting (only you can see this)",
+        options=[],
+        handler=_cmd_setupcheck,
+        always_ephemeral=True,
     ),
 ]
 
@@ -776,6 +1665,15 @@ async def _dispatch(body: dict, cfg: dict, *, http_client: httpx.AsyncClient | N
         log.exception("discord interactions: handler %r failed", name)
         return _response(_RESPONSE_CHANNEL_MESSAGE, _ephemeral("Something went wrong."))
 
+    if "type" in result:
+        # A handler that answers with its own full response envelope
+        # (a MODAL, type 9 -- see _modal_response()'s own docstring,
+        # used by /link and /join above) rather than a plain
+        # message-data dict -- used verbatim instead of being wrapped
+        # as a type-4 message. A plain _data()/_ephemeral() dict never
+        # carries a top-level "type" key of its own, so this is
+        # unambiguous and every existing command above is unaffected.
+        return result
     return _response(_RESPONSE_CHANNEL_MESSAGE, result)
 
 
@@ -823,4 +1721,22 @@ async def discord_interactions_endpoint(request: Request):
         return JSONResponse({"type": _RESPONSE_PONG})
     if itype == _TYPE_APPLICATION_COMMAND:
         return JSONResponse(await _dispatch(body, cfg))
+    if itype in (_TYPE_MESSAGE_COMPONENT, _TYPE_MODAL_SUBMIT):
+        # Same key-authenticated surface /link's modal submit needs
+        # (app/account_api.py's own POST /api/account/link-key
+        # authenticates a pasted key the identical way) -- threaded
+        # through here, never reached for via a second request this
+        # module would have to make itself. Absent on a deployment that
+        # never wires it up at all (app/main.py's lifespan always
+        # constructs one -- see app/nodes_api.py's own module docstring
+        # -- but a bare test app around just this router, as this
+        # module's own tests build, may not).
+        ingestor = getattr(request.app.state, "mc_ingestor", None)
+        custom_id = ((body.get("data") or {}).get("custom_id")) or ""
+        action = _custom_id_action(custom_id)
+        registry = _COMPONENT_HANDLERS if itype == _TYPE_MESSAGE_COMPONENT else _MODAL_HANDLERS
+        handler = registry.get(action)
+        return JSONResponse(
+            await _dispatch_interactive(body, cfg, handler, ingestor=ingestor)
+        )
     return Response(status_code=400)

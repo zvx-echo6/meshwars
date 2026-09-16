@@ -118,7 +118,7 @@ def _radios_out(conn, player_id: int) -> list[dict]:
     ]
 
 
-def _resolve_public_key(conn, protocol: str, node_ref: str, raw_public_key: object) -> tuple[str | None, JSONResponse | None]:
+def _resolve_public_key(conn, protocol: str, node_ref: str, raw_public_key: object) -> tuple[str | None, tuple[dict, int] | None]:
     """Work out what public_key to store on a new binding.
 
     Supplied explicitly: it must normalize cleanly or this is a 400.
@@ -136,10 +136,7 @@ def _resolve_public_key(conn, protocol: str, node_ref: str, raw_public_key: obje
     if raw_public_key is not None:
         normalized = normalize_public_key(raw_public_key)
         if normalized is None:
-            return None, JSONResponse(
-                {"error": "public_key must be 64 hex characters"},
-                status_code=400,
-            )
+            return None, ({"error": "public_key must be 64 hex characters"}, 400)
         return normalized, None
 
     if protocol != "mt":
@@ -183,36 +180,32 @@ async def list_nodes(request: Request, principal: Principal = Depends(require_pr
     return JSONResponse({"radios": radios}, status_code=200)
 
 
-@router.post("/api/nodes")
-async def add_node(request: Request, principal: Principal = Depends(require_principal)) -> JSONResponse:
-    player_id = principal.player_id
-
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "bad request"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "bad request"}, status_code=400)
-
-    protocol = _parse_protocol(body.get("protocol"))
+def add_node_for_player(
+    player_id: int, raw_protocol: object, raw_node_ref: object, raw_public_key: object,
+) -> tuple[dict, int]:
+    """The core of POST /api/nodes, extracted so
+    app/discord_interactions.py's /radios "Add radio" modal can reuse
+    the exact same validation, public-key resolution, conflict check,
+    and insert -- never a second copy of this SQL. Returns
+    (body, status_code) exactly as the route below now just forwards
+    verbatim.
+    """
+    protocol = _parse_protocol(raw_protocol)
     if not protocol:
-        return JSONResponse(
-            {"error": "protocol must be one of: " + ", ".join(_VALID_PROTOCOLS)},
-            status_code=400,
-        )
+        return {"error": "protocol must be one of: " + ", ".join(_VALID_PROTOCOLS)}, 400
 
-    node_ref = normalize_node_ref(body.get("node_ref"))
+    node_ref = normalize_node_ref(raw_node_ref)
     if node_ref is None:
-        return JSONResponse(
+        return (
             {"error": "node_ref is required and must be 8 hex characters, "
                       "with or without a leading !"},
-            status_code=400,
+            400,
         )
 
     now = int(time.time())
     conn = connect()
     try:
-        public_key, err = _resolve_public_key(conn, protocol, node_ref, body.get("public_key"))
+        public_key, err = _resolve_public_key(conn, protocol, node_ref, raw_public_key)
         if err is not None:
             return err
 
@@ -240,10 +233,9 @@ async def add_node(request: Request, principal: Principal = Depends(require_prin
                 # ROLLBACK doesn't close the connection, so it's still
                 # fine to read from here.
                 radios = _radios_out(conn, player_id)
-                return JSONResponse({"radios": radios, "added": False}, status_code=200)
-            return JSONResponse(
-                {"error": "that node is already registered to another player"},
-                status_code=409,
+                return {"radios": radios, "added": False}, 200
+            return (
+                {"error": "that node is already registered to another player"}, 409,
             )
 
         conn.execute(
@@ -260,21 +252,17 @@ async def add_node(request: Request, principal: Principal = Depends(require_prin
     finally:
         conn.close()
 
-    return JSONResponse({"radios": radios, "added": True}, status_code=201)
+    return {"radios": radios, "added": True}, 201
 
 
-@router.delete("/api/nodes/{node_ref}")
-async def remove_node(
-    node_ref: str, request: Request, principal: Principal = Depends(require_principal)
-) -> JSONResponse:
-    player_id = principal.player_id
-
-    protocol = _parse_protocol(request.query_params.get("protocol"))
+def remove_node_for_player(player_id: int, raw_protocol: object, raw_node_ref: object) -> tuple[dict, int]:
+    """The core of DELETE /api/nodes/{node_ref}, extracted for the same
+    reason as add_node_for_player() above -- app/discord_interactions.py's
+    /radios "Remove" flow reuses this rather than a second copy.
+    """
+    protocol = _parse_protocol(raw_protocol)
     if not protocol:
-        return JSONResponse(
-            {"error": "protocol must be one of: " + ", ".join(_VALID_PROTOCOLS)},
-            status_code=400,
-        )
+        return {"error": "protocol must be one of: " + ", ".join(_VALID_PROTOCOLS)}, 400
 
     # A malformed reference can't possibly be bound to anyone. Rather
     # than give it a distinct response, it takes the exact same path as
@@ -282,7 +270,7 @@ async def remove_node(
     # already rejects it -- fold it to a value that will simply never
     # match instead of branching), so the response shape never varies
     # by input validity, ownership, or existence.
-    normalized = normalize_node_ref(node_ref) or ""
+    normalized = normalize_node_ref(raw_node_ref) or ""
 
     conn = connect()
     try:
@@ -305,4 +293,29 @@ async def remove_node(
     finally:
         conn.close()
 
-    return JSONResponse({"radios": radios}, status_code=200)
+    return {"radios": radios}, 200
+
+
+@router.post("/api/nodes")
+async def add_node(request: Request, principal: Principal = Depends(require_principal)) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    result, status = add_node_for_player(
+        principal.player_id, body.get("protocol"), body.get("node_ref"), body.get("public_key"),
+    )
+    return JSONResponse(result, status_code=status)
+
+
+@router.delete("/api/nodes/{node_ref}")
+async def remove_node(
+    node_ref: str, request: Request, principal: Principal = Depends(require_principal)
+) -> JSONResponse:
+    result, status = remove_node_for_player(
+        principal.player_id, request.query_params.get("protocol"), node_ref,
+    )
+    return JSONResponse(result, status_code=status)
