@@ -584,32 +584,60 @@ def _award_line(a: dict) -> str:
     return f"{who}\n{tail}" if tail else who
 
 
+# A spaced middle dot, written as an escape (not the literal multi-byte
+# character) so this file stays plain ASCII on disk. Owner feedback on
+# a by-team screenshot: team, player, and number ran together with
+# nothing but plain spaces between them, making it hard to tell where
+# the team name ended and a handle like "l3@n" or "KI7NOX" began --
+# "still need a dileniator between the COLOR Player <points>". The
+# "--" separator was removed from this exact line by the immediately
+# preceding change (see _team_award_line()'s history) because it was
+# heavy, repeated 30+ times across a by-team field, and read as noise
+# -- but the line still needs SOME token boundary, and a spaced middle
+# dot gives one at a fraction of the visual weight. Used ONLY by
+# _team_award_line() below -- deliberately NOT applied to the
+# standings lines (build_month_honors_embed()'s standings_text, already
+# just "<dot>TEAM **<number>**", two unambiguous tokens) or the
+# headline honors field values (_award_line()/_value_unit_line(),
+# already split across two separate lines), neither of which has this
+# run-together problem.
+_SEP = " \u00b7 "
+
+
 def _team_award_line(a: dict, emoji: dict[str, str]) -> str:
-    """One compact line inside a grouped per-team field: "TEAM <winner>
-    **<number>**", prefixed with that team's coloured dot (_team_dot())
-    when configured -- no ":" after the team, no separator, and no
-    per-line unit (the owner's "wallish" complaint: the same unit
-    phrase repeated on all 7 lines of a by-team block). The unit is
-    appended ONCE for the whole field instead -- see _join_team_field()
-    below, which this function's caller feeds these lines into.
+    """One compact line inside a grouped per-team field: "TEAM
+    <_SEP> <winner> <_SEP> **<number>**", prefixed with that team's
+    coloured dot (_team_dot()) when configured, and no per-line unit
+    (the owner's "wallish" complaint: the same unit phrase repeated on
+    all 7 lines of a by-team block). The unit is appended ONCE for the
+    whole field instead -- see _join_team_field() below, which this
+    function's caller feeds these lines into. See _SEP's own comment
+    for why a spaced middle dot separates the tokens here rather than
+    the "--" this line used before, or nothing at all.
 
     Most per-team awards (team_attacker, team_defender, ...) are a
     property of the team itself, so `who` (player() or team()) is just
-    the scope team again -- "GREEN GREEN **40**" says GREEN twice for
-    nothing, so the leading "TEAM" stands in for `who` and is dropped
-    in that case. A per-team award that DOES name a player distinct
-    from its scope (a team's own top scorer, say) keeps that player's
-    name after the team instead -- but the dot is always keyed on
-    `scope` (the team the line is grouped under), never the player.
+    the scope team again -- "GREEN . GREEN . **40**" says GREEN twice
+    for nothing, so the leading "TEAM" stands in for `who` and is
+    dropped in that case. A per-team award that DOES name a player
+    distinct from its scope (a team's own top scorer, say) keeps that
+    player's name after the team instead -- but the dot is always keyed
+    on `scope` (the team the line is grouped under), never the player.
+
+    `value` is None only for a shape this module has never actually
+    produced (every real per-team award carries a number), but even
+    then this must never leave a dangling trailing separator -- so the
+    bold-number segment, `_SEP` included, is only appended when there
+    is a value to put after it.
     """
     scope = a.get("scope") or ""
     who = a.get("player") or a.get("team") or "Unknown"
     dot = _team_dot(emoji, scope)
     value = a.get("value")
-    bold = f" **{_fmt_number(value)}**" if value is not None else ""
+    bold = f"{_SEP}**{_fmt_number(value)}**" if value is not None else ""
     if who == scope:
         return f"{dot}{scope}{bold}"
-    return f"{dot}{scope} {who}{bold}"
+    return f"{dot}{scope}{_SEP}{who}{bold}"
 
 
 def _join_team_field(lines: list[str], unit: str | None) -> str:

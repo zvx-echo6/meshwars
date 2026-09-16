@@ -405,12 +405,13 @@ def test_build_month_honors_embed_near_miss_number_not_falsely_deduplicated(conn
 
 def test_build_month_honors_embed_team_award_line_also_deduplicates(conn):
     """A per-team (scoped) award line (_team_award_line()) never prints
-    its detail at all any more -- just "TEAM **<number>**" -- so the
-    old per-line 169/169 stutter this test used to guard against cannot
-    recur structurally. What remains to guard: the award's `detail`
-    still surfaces exactly once, as the field's own trailing italic
-    unit line (_join_team_field()), and the per-team line itself stays
-    just the bold number with no "--" and no restated detail text."""
+    its detail at all any more -- just "TEAM <_SEP> **<number>**" -- so
+    the old per-line 169/169 stutter this test used to guard against
+    cannot recur structurally. What remains to guard: the award's
+    `detail` still surfaces exactly once, as the field's own trailing
+    italic unit line (_join_team_field()), and the per-team line itself
+    stays just the bold number (behind the middle-dot separator) with
+    no "--" and no restated detail text."""
     result = _sample_result()
     result["awards"] = [{
         "award": "quick_fingers", "label": "Quick Fingers", "scope": "TEAM0",
@@ -420,9 +421,59 @@ def test_build_month_honors_embed_team_award_line_also_deduplicates(conn):
     embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
     by_team = next(e for e in embed["embeds"] if e["title"] == "By team")
     value = by_team["fields"][0]["value"]
-    assert value == "TEAM0 **169**\n\n*169 s after the net opened*"
+    assert value == "TEAM0 · **169**\n\n*169 s after the net opened*"
     assert "169 169" not in value
     assert "--" not in value
+
+
+# ---- by-team middle-dot separator (_SEP) ----------------------------------
+
+
+def test_team_award_line_distinct_player_gets_separators(conn):
+    """A by-team award naming a player distinct from its team scope --
+    a real screenshot had team, player, and number running together
+    with only plain spaces, hard to read where a handle like "kraroed"
+    started. _SEP puts a spaced middle dot between every token."""
+    a = {
+        "award": "team_top_scorer", "label": "Top Scorer", "scope": "GREEN",
+        "player_id": 9, "player": "kraroed", "team": "GREEN",
+        "value": 1783.0, "detail": "squares taken",
+    }
+    assert discord_notify._team_award_line(a, {}) == "GREEN · kraroed · **1,783**"
+
+
+def test_team_award_line_team_only_names_team_once(conn):
+    """A team-only award (who == scope, the existing de-duplication
+    case) still gets one separator before the number, with the team
+    named exactly once -- never "GREEN GREEN **1,783**"."""
+    a = _team_award("team_attacker", "Top Attacker", "GREEN", 1783.0)
+    line = discord_notify._team_award_line(a, {})
+    assert line == "GREEN · **1,783**"
+    assert line.count("GREEN") == 1
+
+
+def test_team_award_line_no_value_has_no_dangling_separator(conn):
+    """When `value` is None there is nothing to put after the trailing
+    separator, so none is emitted -- never a dangling "GREEN · "
+    with nothing after it."""
+    a = {
+        "award": "some_award", "label": "Some Award", "scope": "GREEN",
+        "player_id": None, "player": None, "team": "GREEN",
+        "value": None, "detail": None,
+    }
+    line = discord_notify._team_award_line(a, {})
+    assert not line.rstrip().endswith(discord_notify._SEP.strip())
+
+
+def test_standings_line_has_no_middle_dot_separator(conn):
+    """_SEP is used ONLY by _team_award_line() -- standings lines stay
+    "<dot>TEAM **<number>**", already unambiguous with just two tokens,
+    and must never grow the by-team block's separator."""
+    result = _sample_result()
+    result["standings"] = [{"team": "GREEN", "squares": 200}]
+    embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", result)
+    description = embed["embeds"][0]["description"]
+    assert "·" not in description
 
 
 def test_build_month_honors_embed_url_absolute_or_omitted(conn, monkeypatch):
