@@ -191,7 +191,7 @@ async def mc_directory_picker(request: Request) -> JSONResponse:
 
 
 @router.get("/api/checkin/mt/nodes")
-def mt_roster_picker(request: Request) -> JSONResponse:
+async def mt_roster_picker(request: Request) -> JSONResponse:
     """Meshtastic nodes from node_seen, so a player can pick a familiar
     node instead of typing an 8-hex node id by hand. PUBLIC, same
     reasoning and same rate limiting as the MeshCore picker above --
@@ -784,7 +784,7 @@ async def confirm_accept(
 
 
 @router.delete("/api/checkin/confirm")
-def confirm_cancel(
+async def confirm_cancel(
     request: Request, principal: Principal = Depends(require_checkin_principal)
 ) -> JSONResponse:
     """Cancel this player's open confirmation window, if any -- MeshCore

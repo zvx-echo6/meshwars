@@ -330,7 +330,7 @@ def _log_admin_action(
 
 
 @router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
-def admin_page() -> HTMLResponse:
+async def admin_page() -> HTMLResponse:
     conn = connect()
     try:
         enabled = _admin_surface_enabled(conn)

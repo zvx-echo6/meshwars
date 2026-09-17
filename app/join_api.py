@@ -576,7 +576,7 @@ def _switch_used_this_month(conn, player_id: int, start: int, end: int) -> bool:
 
 
 @router.get("/api/team")
-def team_status(
+async def team_status(
     request: Request, principal: Principal = Depends(require_team_principal)
 ) -> JSONResponse:
     """Read-only status for the switch-team UI: the player's current

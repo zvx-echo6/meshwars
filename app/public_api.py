@@ -384,7 +384,7 @@ def _board_summary(conn, protocol: str) -> dict:
 
 
 @router.get("/api/v1")
-def v1_index(request: Request) -> JSONResponse:
+async def v1_index(request: Request) -> JSONResponse:
     """What this API is and what is in it, and the one route that needs
     no key -- so somebody who has just been handed one, or is deciding
     whether to ask for one, can see what they are getting. Rate limited
@@ -423,7 +423,7 @@ def v1_index(request: Request) -> JSONResponse:
 
 
 @router.get("/api/v1/status")
-def v1_status(request: Request) -> JSONResponse:
+async def v1_status(request: Request) -> JSONResponse:
     """Both boards in one call.
 
     Exists because a bot answering "how's it going" should not need four
@@ -446,7 +446,7 @@ def v1_status(request: Request) -> JSONResponse:
 
 
 @router.get("/api/v1/seasons")
-def v1_seasons(request: Request, board: str = "meshcore") -> JSONResponse:
+async def v1_seasons(request: Request, board: str = "meshcore") -> JSONResponse:
     """The running season plus every closed one, newest first, each with
     its final per-team tally."""
     proto, err = _guard(request, board)
@@ -465,7 +465,7 @@ def v1_seasons(request: Request, board: str = "meshcore") -> JSONResponse:
 
 
 @router.get("/api/v1/teams")
-def v1_teams(request: Request, board: str = "meshcore") -> JSONResponse:
+async def v1_teams(request: Request, board: str = "meshcore") -> JSONResponse:
     """Standings for one board: squares held, check-in points, and the
     total that decides the season."""
     proto, err = _guard(request, board)
@@ -580,7 +580,7 @@ def _player_rows(conn, protocol: str, season_id: int, name: str | None = None) -
 
 
 @router.get("/api/v1/players")
-def v1_players(request: Request, board: str = "meshcore") -> JSONResponse:
+async def v1_players(request: Request, board: str = "meshcore") -> JSONResponse:
     """The roster for one board, with each player's figures for the
     running season."""
     proto, err = _guard(request, board)
@@ -601,7 +601,7 @@ def v1_players(request: Request, board: str = "meshcore") -> JSONResponse:
 
 
 @router.get("/api/v1/players/{name}")
-def v1_player(request: Request, name: str, board: str = "meshcore") -> JSONResponse:
+async def v1_player(request: Request, name: str, board: str = "meshcore") -> JSONResponse:
     """One player by display name, case-insensitively. 404 if they are
     not registered on this board."""
     proto, err = _guard(request, board)
@@ -622,7 +622,7 @@ def v1_player(request: Request, name: str, board: str = "meshcore") -> JSONRespo
 
 
 @router.get("/api/v1/top")
-def v1_top(request: Request, board: str = "meshcore",
+async def v1_top(request: Request, board: str = "meshcore",
                  kind: str = Query("captures", pattern="^(captures|checkins)$")) -> JSONResponse:
     """Rankings for the running season. Top 20, the same list the site's
     own Season Rankings shows."""
@@ -634,7 +634,7 @@ def v1_top(request: Request, board: str = "meshcore",
 
 
 @router.get("/api/v1/board")
-def v1_board(request: Request, board: str = "meshcore") -> JSONResponse:
+async def v1_board(request: Request, board: str = "meshcore") -> JSONResponse:
     """Every owned square in the running season, with its bounds.
 
     The heaviest route here by a wide margin -- several thousand squares
@@ -648,7 +648,7 @@ def v1_board(request: Request, board: str = "meshcore") -> JSONResponse:
 
 
 @router.get("/api/v1/cells/{cell_id}")
-def v1_cell(request: Request, cell_id: str, board: str = "meshcore") -> JSONResponse:
+async def v1_cell(request: Request, cell_id: str, board: str = "meshcore") -> JSONResponse:
     """One square: who holds it, every team's score on it, when it last
     changed hands, and the repeaters heard from it.
 
@@ -671,7 +671,7 @@ def v1_cell(request: Request, cell_id: str, board: str = "meshcore") -> JSONResp
 
 
 @router.get("/api/v1/captures")
-def v1_captures(request: Request, board: str = "meshcore",
+async def v1_captures(request: Request, board: str = "meshcore",
                       since: int = 0,
                       limit: int = Query(100, ge=1, le=500)) -> JSONResponse:
     """Captures newest first, optionally only those after `since`.
@@ -725,7 +725,7 @@ def v1_captures(request: Request, board: str = "meshcore",
 
 
 @router.get("/api/v1/results")
-def v1_results(request: Request, board: str = "meshcore",
+async def v1_results(request: Request, board: str = "meshcore",
                      limit: int = Query(12, ge=1, le=60)) -> JSONResponse:
     """Finished months, newest first, with standings and honors, plus
     when the month in progress closes.
@@ -742,7 +742,7 @@ def v1_results(request: Request, board: str = "meshcore",
 
 
 @router.get("/api/v1/net")
-def v1_net(request: Request, board: str = "meshcore") -> JSONResponse:
+async def v1_net(request: Request, board: str = "meshcore") -> JSONResponse:
     """The weekly net: whether it is open, when the next one is, and who
     has checked in to the most recent one."""
     proto, err = _guard(request, board)

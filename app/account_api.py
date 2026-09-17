@@ -595,7 +595,7 @@ def _sessions_out(conn, account_id: int, *, current_token_hash: str) -> list[dic
 # ---- routes ---------------------------------------------------------------
 
 @router.get("/api/account")
-def get_account(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
+async def get_account(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
     """The full account read -- identities, linked player, active
     sessions, and account-security state (has_password, contact_email,
     owes_password, role).
@@ -1928,7 +1928,7 @@ def _no_linked_player_error() -> JSONResponse:
 
 
 @router.get("/api/account/stats")
-def account_stats(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
+async def account_stats(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
     """My current standing, per board.
 
     app/mc_api.py's find_for() already answers "what does this player
@@ -2027,7 +2027,7 @@ def account_stats(session: SessionPrincipal = Depends(require_session)) -> JSONR
 
 
 @router.get("/api/account/honors")
-def account_honors(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
+async def account_honors(session: SessionPrincipal = Depends(require_session)) -> JSONResponse:
     """My past honors: this player's own rows out of month_award
     (app/db.py:954), across every FINISHED month, newest first.
 
@@ -2076,7 +2076,7 @@ def account_honors(session: SessionPrincipal = Depends(require_session)) -> JSON
 
 
 @router.get("/api/account/checkins")
-def account_checkins(
+async def account_checkins(
     session: SessionPrincipal = Depends(require_session),
     limit: int = Query(50, ge=1, le=200),
 ) -> JSONResponse:
@@ -2369,7 +2369,7 @@ def _diagnose_checkin_health(
 
 
 @router.get("/api/account/checkin-health")
-def account_checkin_health(
+async def account_checkin_health(
     request: Request, session: SessionPrincipal = Depends(require_session),
 ) -> JSONResponse:
     """Why my check-ins may not be counting -- per board.

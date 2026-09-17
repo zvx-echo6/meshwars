@@ -29,7 +29,7 @@ router = APIRouter()
 
 
 @router.get("/api/notice")
-def active_notice() -> JSONResponse:
+async def active_notice() -> JSONResponse:
     """The current notice, if the operator has published one.
 
     `{"notice": null}` when there is none (no row yet, or the row's

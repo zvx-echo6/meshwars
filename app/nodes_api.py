@@ -171,7 +171,7 @@ def _parse_protocol(raw: object) -> str:
 # ---- routes ---------------------------------------------------------------
 
 @router.get("/api/nodes")
-def list_nodes(request: Request, principal: Principal = Depends(require_principal)) -> JSONResponse:
+async def list_nodes(request: Request, principal: Principal = Depends(require_principal)) -> JSONResponse:
     player_id = principal.player_id
 
     conn = connect()
@@ -264,7 +264,7 @@ async def add_node(request: Request, principal: Principal = Depends(require_prin
 
 
 @router.delete("/api/nodes/{node_ref}")
-def remove_node(
+async def remove_node(
     node_ref: str, request: Request, principal: Principal = Depends(require_principal)
 ) -> JSONResponse:
     player_id = principal.player_id
