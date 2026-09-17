@@ -1325,6 +1325,47 @@ CREATE TABLE IF NOT EXISTS mt_node_confirmation (
     last_scan_at  INTEGER NOT NULL DEFAULT 0
 );
 
+-- DB-backed fallback for app/checkin.py's CheckinPoller._mc_directory
+-- (2026-09-17, the web/worker role split -- app/config.py's
+-- run_background_tasks, docker-compose.yml's `meshwars`/
+-- `meshwars-worker` services). That in-memory dict is what
+-- directory_snapshot() serves from on its fast path, and it is ONLY
+-- ever populated by _refresh_mc_directory_if_stale, which only runs
+-- inside CheckinPoller.run_forever()'s own loop -- a loop that, after
+-- the split, runs in exactly ONE process (the worker). Several HTTP
+-- routes call directory_snapshot() from a request handler (the node
+-- picker in app/checkin_api.py, app/admin_ops.py, app/account_api.py,
+-- and /claimnode in app/discord_interactions.py) -- on a web-role
+-- process, whose own in-memory dict is permanently empty, that used to
+-- mean an always-empty node picker with real upstream data sitting
+-- one process over and unreachable. This table is how the worker
+-- publishes what it fetched so a web-role process can read it back.
+--
+-- One row per connector_url (mirroring _mc_directory's own shape: one
+-- dict entry per connector, not a single global blob) -- `nodes` is
+-- that connector's directory, JSON-serialized (the same node-dict
+-- shape CoreScopeClient/BeaconClient's fetch_directory() already
+-- returns, unchanged), so directory_snapshot()'s DB fallback needs no
+-- reshaping to match what its in-memory fast path already returns.
+-- fetched_at is WALL-CLOCK (int(time.time())), unlike
+-- CheckinPoller._mc_directory_fetched_at (time.monotonic(), meaningless
+-- outside the process that recorded it) -- a cross-process reader needs
+-- a clock that means the same thing in both processes. See
+-- directory_snapshot()'s own docstring for why a web-role reader never
+-- rejects a row for being stale: an out-of-date picker list beats an
+-- empty one, and the worker's own refresh interval is already what
+-- bounds how stale a row can get.
+--
+-- The worker is the ONLY writer, through the ordinary WriteSession
+-- discipline every other write in this codebase uses -- see
+-- _refresh_mc_directory_if_stale. A web-role process only ever reads
+-- this table, never writes it.
+CREATE TABLE IF NOT EXISTS mc_directory_cache (
+    connector_url TEXT PRIMARY KEY,
+    nodes         TEXT NOT NULL,
+    fetched_at    INTEGER NOT NULL
+);
+
 -- ---------------------------------------------------------------------
 -- Monthly results (app/results.py). A six-month season leaves five
 -- months with nothing to show, so each calendar month closes with its

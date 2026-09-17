@@ -167,6 +167,7 @@ looked would silently starve the second.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import time
@@ -2267,6 +2268,32 @@ class CheckinPoller:
         if nodes:
             self._mc_directory[connector_url] = nodes
             self._mc_directory_fetched_at[connector_url] = now
+            # Publish to mc_directory_cache (app/db.py) so a web-role
+            # process's directory_snapshot() (this process's own
+            # in-memory dict is meaningless to it -- see that table's
+            # own SCHEMA comment) can read this connector's directory
+            # back. Wall-clock (int(time.time())), not the monotonic
+            # `now` above: a reader in a DIFFERENT process needs a
+            # timestamp that means the same thing there, and a
+            # monotonic clock's epoch is only comparable within the
+            # process that read it.
+            try:
+                async with WriteSession() as wconn:
+                    wconn.execute(
+                        "INSERT INTO mc_directory_cache(connector_url, nodes, fetched_at) "
+                        "VALUES (?, ?, ?) "
+                        "ON CONFLICT(connector_url) DO UPDATE SET"
+                        " nodes = excluded.nodes, fetched_at = excluded.fetched_at",
+                        (connector_url, json.dumps(nodes), int(time.time())),
+                    )
+            except Exception:
+                # Best-effort: a failure to publish this row must never
+                # take down the poller loop or discard the in-memory
+                # copy this cycle already produced -- a web-role reader
+                # just keeps serving whatever it already had (or
+                # nothing, on a fresh install with no row yet) until
+                # the NEXT successful cycle here tries again.
+                log.exception("checkin: failed to publish mc directory cache for %s", connector_url)
         elif connector_url not in self._mc_directory:
             # No cache to fall back on yet for THIS connector -- its
             # directory bridge is simply unavailable this cycle. Only
@@ -2283,22 +2310,83 @@ class CheckinPoller:
         """Read-only copy of a cached MeshCore-family directory (a
         CoreScope connector's or a Beacon connector's -- both normalize
         to the same shape, see the client-abstraction header comment
-        above), for app/checkin_api.py's node-picker endpoint. With
-        `connector_url`, just that connector's cache; without one, the
-        union across every connector currently cached -- with today's
-        common case of a single configured connector these are the same
-        list, so this is a pure widening, never a narrowing, of what
-        that endpoint used to return. Reads the SAME cache
-        _refresh_mc_directory_if_stale maintains on its own per-
-        connector interval -- that endpoint is a person clicking around
-        a form, not something to hit any upstream for on every request.
+        above), for app/checkin_api.py's node-picker endpoint (and
+        app/admin_ops.py, app/account_api.py, and /claimnode in
+        app/discord_interactions.py). With `connector_url`, just that
+        connector's cache; without one, the union across every
+        connector currently cached -- with today's common case of a
+        single configured connector these are the same list, so this is
+        a pure widening, never a narrowing, of what that endpoint used
+        to return.
+
+        Fast path: this process's own in-memory `self._mc_directory`,
+        the SAME cache _refresh_mc_directory_if_stale maintains on its
+        own per-connector interval -- that endpoint is a person clicking
+        around a form, not something to hit any upstream for on every
+        request. On a single-process deployment (no web/worker split)
+        or on the worker role itself, this dict always has whatever
+        _poll_mc's own loop last fetched, so this is the only path ever
+        taken and no database is touched here at all.
+
+        DB fallback: mc_directory_cache (app/db.py) -- see that table's
+        own SCHEMA comment for the whole story. Only reached for
+        whichever part of this call the in-memory dict cannot answer:
+        a specific `connector_url` this process has never itself
+        fetched, or (with no connector_url) the union case when this
+        process's in-memory dict is entirely empty. This is what makes
+        the web role (app/config.py's run_background_tasks=False,
+        which never runs _poll_mc at all -- see CheckinPoller.start())
+        serve a real, worker-populated directory instead of
+        permanently nothing.
+
+        No staleness check on the DB fallback: a row is served exactly
+        as the worker last wrote it, however old. See mc_directory_cache's
+        own SCHEMA comment -- deliberate, not an oversight: an
+        out-of-date node picker is still useful; an empty one is not,
+        and the worker's own directory_refresh_seconds interval already
+        bounds how stale a row can realistically get.
+
+        Always returns a COPY, never a reference into a cache a caller
+        could then mutate (in-memory or DB-decoded, same contract
+        either way).
         """
         if connector_url is not None:
-            return list(self._mc_directory.get(connector_url, []))
-        out: list[dict] = []
-        for nodes in self._mc_directory.values():
-            out.extend(nodes)
-        return out
+            cached = self._mc_directory.get(connector_url)
+            if cached is not None:
+                return list(cached)
+            return self._directory_from_db(connector_url)
+        if self._mc_directory:
+            out: list[dict] = []
+            for nodes in self._mc_directory.values():
+                out.extend(nodes)
+            return out
+        return self._directory_from_db(None)
+
+    def _directory_from_db(self, connector_url: str | None) -> list[dict]:
+        """mc_directory_cache read for directory_snapshot()'s DB
+        fallback -- see that method's own docstring for when this is
+        reached, and mc_directory_cache's SCHEMA comment for the table
+        itself. A plain connect()/SELECT, not WriteSession: this only
+        ever reads, on the request path (a node-picker click), so it
+        must stay a single cheap indexed lookup (PRIMARY KEY for one
+        connector_url, a full-table scan of what is realistically a
+        handful of rows -- one per configured connector -- for the
+        union form) rather than anything that waits on a write lock.
+        """
+        conn = connect()
+        try:
+            if connector_url is not None:
+                row = conn.execute(
+                    "SELECT nodes FROM mc_directory_cache WHERE connector_url = ?",
+                    (connector_url,),
+                ).fetchone()
+                return json.loads(row["nodes"]) if row is not None else []
+            out: list[dict] = []
+            for row in conn.execute("SELECT nodes FROM mc_directory_cache"):
+                out.extend(json.loads(row["nodes"]))
+            return out
+        finally:
+            conn.close()
 
     # ---- MeshCore polling ------------------------------------------------
 
