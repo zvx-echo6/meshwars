@@ -134,6 +134,22 @@ class Settings(BaseSettings):
     # a reader nothing and takes viewer load off the box entirely.
     board_cache_seconds: int = 10
 
+    # How long a serialized /api/places (viewport) response is reused
+    # before it is rebuilt (0 disables the cache entirely, same
+    # convention as board_cache_seconds above). See app/places_api.py's
+    # _PLACES_CACHE: the place table itself is static between restarts
+    # (written only by the startup seed loader), so the only thing that
+    # can go stale is claimed_by_team, a live join against
+    # place_activation -- a few seconds of staleness there costs a
+    # viewer nothing.
+    places_cache_seconds: int = 10
+    # Same idea for /api/places/near, which additionally re-ranks every
+    # SQL-prefiltered survivor with a per-row Python haversine call
+    # (app/grid.distance_m) -- the actual CPU hot spot this cache exists
+    # to take off the request path, hence the longer default TTL than
+    # the viewport endpoint above.
+    places_near_cache_seconds: int = 60
+
     mc_queue_max: int = 10000
     mc_max_batch_pings: int = 50
     mc_key_cache_seconds: int = 60

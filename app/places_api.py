@@ -25,16 +25,21 @@ scoring rule these parks use is computed once at seed time
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import sqlite3
+import time
+from collections import OrderedDict
 
-from fastapi import APIRouter, Query
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse, Response
 from shapely import wkt as shapely_wkt
 from shapely.geometry import mapping as shapely_mapping
 
 from . import places_seed
+from .config import settings
 from .db import connect
 from .grid import distance_m
 from .place_rotation import current_week_start, resolve_week
@@ -219,15 +224,98 @@ def _park_boundaries_in_viewport(
     return features
 
 
+# ---- response cache -----------------------------------------------------
+#
+# Modeled on app/mc_api.py's cached_json_response/_BOARD_CACHE -- same
+# shape: cache the SERIALIZED bytes (not the Python object, so N viewers
+# don't each pay their own json.dumps), key the ETag inside the per-entry
+# tuple (so a validator minted against one entry's bytes can never 304 a
+# request against a different entry's), and let ttl = 0 disable the cache
+# and rebuild on every call. Deliberately NOT imported from mc_api and not
+# shared with it -- self-contained here so this module's cache can change
+# without touching that one's, per the task that added this.
+#
+# Unlike _BOARD_CACHE (one entry per fixed route name), this module's keys
+# are coordinate-derived -- see _coord_key below and the key-building lines
+# in places_in_viewport/places_near -- so the key space grows with every
+# distinct viewport/near-point a viewer asks for. Left unbounded, that
+# grows without limit for the life of the process in a 2GiB container.
+# _PLACES_CACHE_MAX bounds it: OrderedDict
+# gives O(1) move-to-end on a hit and pop-oldest on overflow, i.e. a plain
+# LRU, with no extra bookkeeping structure needed.
+_PLACES_CACHE: "OrderedDict[str, tuple[float, bytes, str]]" = OrderedDict()
+_PLACES_CACHE_MAX = 512
+
+
+def _coord_key(value: float) -> str:
+    """Format a lat/lon/bbox coordinate to 3 decimal places for a cache
+    key. Via an f-string, not round() -- round()'s repr isn't guaranteed
+    to collapse two floats that are equal at 3 decimal places to the
+    same string (and, unlike round(), f"{v:.3f}" also can't leave a
+    stray "-0.0" that would otherwise key separately from "0.0" for the
+    same rounded value).
+    """
+    return f"{value:.3f}"
+
+
+def cached_places_response(key: str, ttl: int, build, request: Request | None) -> Response:
+    """Serve `build()`'s result as JSON, reusing the serialized bytes for
+    up to `ttl` seconds under `key`. See the _PLACES_CACHE comment above
+    for the shape this follows and why it's a separate cache from
+    app/mc_api.py's.
+
+    ttl = 0 disables the cache: nothing is read from or written to
+    _PLACES_CACHE, and no Cache-Control header is sent -- but a fresh
+    ETag is still computed and still honours an incoming If-None-Match,
+    since minting a validator costs nothing extra on top of the
+    serialization this route was doing anyway.
+    """
+    now = time.monotonic()
+
+    def answer(body: bytes, etag: str) -> Response:
+        headers = {"ETag": etag}
+        if ttl > 0:
+            headers["Cache-Control"] = f"public, max-age={ttl}"
+        if request is not None and request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content=body, media_type="application/json", headers=headers)
+
+    if ttl > 0:
+        hit = _PLACES_CACHE.get(key)
+        if hit is not None and now - hit[0] < ttl:
+            _PLACES_CACHE.move_to_end(key)
+            return answer(hit[1], hit[2])
+
+    # ensure_ascii=False + allow_nan=False, matching JSONResponse.render
+    # (starlette.responses) byte-for-byte -- both routes returned a
+    # JSONResponse before this cache existed, and place names include
+    # non-ASCII characters since the worldwide expansion (see the
+    # _stable_tiebreak comment above), so ensure_ascii=True here would
+    # silently change the response body's bytes (still the same JSON
+    # value, \uXXXX-escaped instead of literal UTF-8) for exactly the
+    # rows this cache is built to serve fast.
+    body = json.dumps(
+        build(), ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+    if ttl > 0:
+        _PLACES_CACHE[key] = (now, body, etag)
+        _PLACES_CACHE.move_to_end(key)
+        if len(_PLACES_CACHE) > _PLACES_CACHE_MAX:
+            _PLACES_CACHE.popitem(last=False)
+    return answer(body, etag)
+
+
 @router.get("/api/places")
 async def places_in_viewport(
+    request: Request,
     north: float = Query(...),
     south: float = Query(...),
     west: float = Query(...),
     east: float = Query(...),
     zoom: float | None = None,
     board: str = "meshcore",
-) -> JSONResponse:
+) -> Response:
     """Live places inside a map viewport -- always-active plus this
     week's live rotating set, capped at MAX_VIEWPORT_RESULTS and ordered
     by points (highest first, so a capped view drops the least valuable
@@ -246,56 +334,72 @@ async def places_in_viewport(
     (any existing caller) just means no boundaries: `park_boundaries`
     comes back as an empty FeatureCollection, never absent, so a
     frontend can always read it the same way.
+
+    Served through cached_places_response (settings.places_cache_seconds)
+    -- see that function. The cache key rounds north/south/west/east to
+    3 decimal places and buckets zoom to int(zoom) (zoom only ever
+    changes this response by crossing the MIN_BOUNDARY_ZOOM threshold,
+    so two zoom values on the same side of it always build the same
+    body); board is keyed verbatim.
     """
     if south > north or west > east:
         return JSONResponse({"error": "invalid bbox"}, status_code=400)
 
-    week_start = current_week_start()
-    conn = connect()
-    try:
-        resolve_week(conn, week_start)
-        protocol = "mt" if board == "meshtastic" else "mc"
-        rows = conn.execute(
-            "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates, "
-            # Newest claim on this place, on this board. place_activation
-            # is small and indexed by place_id (its UNIQUE), so this is a
-            # cheap correlated lookup rather than a walk of the capture
-            # log. Team is read live off `player`, the same choice every
-            # other team attribution in the game makes.
-            "       (SELECT pl.team FROM place_activation a "
-            "          JOIN player pl ON pl.player_id = a.player_id "
-            "         WHERE a.place_id = p.id AND a.protocol = ? "
-            "         ORDER BY a.awarded_at DESC LIMIT 1) AS claimed_by_team "
-            "  FROM place p "
-            " WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
-            f"  AND {_live_where(week_start)} "
-            f" ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT ?",
-            (protocol, south, north, west, east, week_start, MAX_VIEWPORT_RESULTS),
-        ).fetchall()
-        _log_if_still_loading(len(rows))
-        boundary_features = (
-            _park_boundaries_in_viewport(conn, north, south, west, east)
-            if zoom is not None and zoom >= MIN_BOUNDARY_ZOOM
-            else []
-        )
-    finally:
-        conn.close()
+    def build() -> dict:
+        week_start = current_week_start()
+        conn = connect()
+        try:
+            resolve_week(conn, week_start)
+            protocol = "mt" if board == "meshtastic" else "mc"
+            rows = conn.execute(
+                "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates, "
+                # Newest claim on this place, on this board. place_activation
+                # is small and indexed by place_id (its UNIQUE), so this is a
+                # cheap correlated lookup rather than a walk of the capture
+                # log. Team is read live off `player`, the same choice every
+                # other team attribution in the game makes.
+                "       (SELECT pl.team FROM place_activation a "
+                "          JOIN player pl ON pl.player_id = a.player_id "
+                "         WHERE a.place_id = p.id AND a.protocol = ? "
+                "         ORDER BY a.awarded_at DESC LIMIT 1) AS claimed_by_team "
+                "  FROM place p "
+                " WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
+                f"  AND {_live_where(week_start)} "
+                f" ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT ?",
+                (protocol, south, north, west, east, week_start, MAX_VIEWPORT_RESULTS),
+            ).fetchall()
+            _log_if_still_loading(len(rows))
+            boundary_features = (
+                _park_boundaries_in_viewport(conn, north, south, west, east)
+                if zoom is not None and zoom >= MIN_BOUNDARY_ZOOM
+                else []
+            )
+        finally:
+            conn.close()
 
-    return JSONResponse({
-        "week_start": week_start,
-        "park_boundaries": {"type": "FeatureCollection", "features": boundary_features},
-        "count": len(rows),
-        "truncated": len(rows) >= MAX_VIEWPORT_RESULTS,
-        "places": [_row_to_place(r) for r in rows],
-    })
+        return {
+            "week_start": week_start,
+            "park_boundaries": {"type": "FeatureCollection", "features": boundary_features},
+            "count": len(rows),
+            "truncated": len(rows) >= MAX_VIEWPORT_RESULTS,
+            "places": [_row_to_place(r) for r in rows],
+        }
+
+    zoom_bucket = "none" if zoom is None else str(int(zoom))
+    key = (
+        f"viewport:{board}:{_coord_key(north)}:{_coord_key(south)}:"
+        f"{_coord_key(west)}:{_coord_key(east)}:{zoom_bucket}"
+    )
+    return cached_places_response(key, settings.places_cache_seconds, build, request)
 
 
 @router.get("/api/places/near")
 async def places_near(
+    request: Request,
     lat: float = Query(...),
     lon: float = Query(...),
     limit: int = Query(DEFAULT_NEAR_RESULTS, ge=1, le=MAX_NEAR_RESULTS),
-) -> JSONResponse:
+) -> Response:
     """Live places sorted by distance from (lat, lon), for map2's
     slide-out panel -- see that page's module docstring. Distance is
     computed in Python via app/grid.distance_m, matching how the rest of
@@ -321,81 +425,92 @@ async def places_near(
     final unbounded step keeps the old behaviour as a floor for a viewer
     in genuinely empty country, where scanning everything is both
     correct and the only option.
-    """
-    week_start = current_week_start()
-    conn = connect()
-    try:
-        resolve_week(conn, week_start)
-        rows: list = []
-        ranked: list = []
-        # Degrees of latitude are ~111 km everywhere; longitude shrinks
-        # by cos(lat), so the box is widened in longitude to stay square
-        # on the ground. None = no box, scan everything.
-        #
-        # STOPPING RULE, and it is not "enough rows". A square box of
-        # half-width R only guarantees completeness out to R: a place
-        # just beyond the edge at R can be nearer than one kept from the
-        # corner, which is R*sqrt(2) away. So a ring is only trusted
-        # when the limit-th result is itself within R -- then nothing
-        # outside can beat it, because everything outside is at least R
-        # away. Otherwise widen and try again.
-        for radius_km in (25.0, 100.0, 400.0, 1500.0, None):
-            if radius_km is None:
-                rows = conn.execute(
-                    "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
-                    "  FROM place p "
-                    f" WHERE {_live_where(week_start)}",
-                    (week_start,),
-                ).fetchall()
-                ranked = sorted(
-                    ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
-                     for r in rows),
-                    key=lambda x: x["distance_m"],
-                )[:limit]
-                break
-            dlat = radius_km / 111.0
-            coslat = max(math.cos(math.radians(lat)), 0.01)
-            dlon = radius_km / (111.320 * coslat)
-            rows = conn.execute(
-                "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
-                "  FROM place p "
-                "  WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
-                f"   AND {_live_where(week_start)}",
-                (lat - dlat, lat + dlat, lon - dlon, lon + dlon, week_start),
-            ).fetchall()
-            ranked = sorted(
-                ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
-                 for r in rows),
-                key=lambda x: x["distance_m"],
-            )[:limit]
-            if len(ranked) >= limit and ranked[-1]["distance_m"] <= radius_km * 1000.0:
-                break
-            if not rows:
-                # Nothing at all in this box: a viewer in open ocean or
-                # empty desert. Stepping the remaining rings would scan
-                # progressively larger empty boxes before falling back
-                # anyway, which measured SLOWER than the full scan it
-                # ends at. Go straight there.
-                rows = conn.execute(
-                    "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
-                    "  FROM place p "
-                    f" WHERE {_live_where(week_start)}",
-                    (week_start,),
-                ).fetchall()
-                ranked = sorted(
-                    ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
-                     for r in rows),
-                    key=lambda x: x["distance_m"],
-                )[:limit]
-                break
-        _log_if_still_loading(len(rows))
-    finally:
-        conn.close()
 
-    return JSONResponse({
-        "week_start": week_start,
-        "places": [
-            {**_row_to_place(x["place"]), "distance_m": round(x["distance_m"], 1)}
-            for x in ranked
-        ],
-    })
+    Served through cached_places_response (settings.places_near_cache_
+    seconds) -- see that function. The Python sorted()-over-haversine
+    step above is the actual CPU hot spot the cache exists to take off
+    the request path; the cache key rounds lat/lon to 3 decimal places
+    and keys `limit` verbatim.
+    """
+
+    def build() -> dict:
+        week_start = current_week_start()
+        conn = connect()
+        try:
+            resolve_week(conn, week_start)
+            rows: list = []
+            ranked: list = []
+            # Degrees of latitude are ~111 km everywhere; longitude shrinks
+            # by cos(lat), so the box is widened in longitude to stay square
+            # on the ground. None = no box, scan everything.
+            #
+            # STOPPING RULE, and it is not "enough rows". A square box of
+            # half-width R only guarantees completeness out to R: a place
+            # just beyond the edge at R can be nearer than one kept from the
+            # corner, which is R*sqrt(2) away. So a ring is only trusted
+            # when the limit-th result is itself within R -- then nothing
+            # outside can beat it, because everything outside is at least R
+            # away. Otherwise widen and try again.
+            for radius_km in (25.0, 100.0, 400.0, 1500.0, None):
+                if radius_km is None:
+                    rows = conn.execute(
+                        "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
+                        "  FROM place p "
+                        f" WHERE {_live_where(week_start)}",
+                        (week_start,),
+                    ).fetchall()
+                    ranked = sorted(
+                        ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
+                         for r in rows),
+                        key=lambda x: x["distance_m"],
+                    )[:limit]
+                    break
+                dlat = radius_km / 111.0
+                coslat = max(math.cos(math.radians(lat)), 0.01)
+                dlon = radius_km / (111.320 * coslat)
+                rows = conn.execute(
+                    "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
+                    "  FROM place p "
+                    "  WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
+                    f"   AND {_live_where(week_start)}",
+                    (lat - dlat, lat + dlat, lon - dlon, lon + dlon, week_start),
+                ).fetchall()
+                ranked = sorted(
+                    ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
+                     for r in rows),
+                    key=lambda x: x["distance_m"],
+                )[:limit]
+                if len(ranked) >= limit and ranked[-1]["distance_m"] <= radius_km * 1000.0:
+                    break
+                if not rows:
+                    # Nothing at all in this box: a viewer in open ocean or
+                    # empty desert. Stepping the remaining rings would scan
+                    # progressively larger empty boxes before falling back
+                    # anyway, which measured SLOWER than the full scan it
+                    # ends at. Go straight there.
+                    rows = conn.execute(
+                        "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
+                        "  FROM place p "
+                        f" WHERE {_live_where(week_start)}",
+                        (week_start,),
+                    ).fetchall()
+                    ranked = sorted(
+                        ({"place": r, "distance_m": distance_m(lat, lon, r["lat"], r["lon"])}
+                         for r in rows),
+                        key=lambda x: x["distance_m"],
+                    )[:limit]
+                    break
+            _log_if_still_loading(len(rows))
+        finally:
+            conn.close()
+
+        return {
+            "week_start": week_start,
+            "places": [
+                {**_row_to_place(x["place"]), "distance_m": round(x["distance_m"], 1)}
+                for x in ranked
+            ],
+        }
+
+    key = f"near:{_coord_key(lat)}:{_coord_key(lon)}:{limit}"
+    return cached_places_response(key, settings.places_near_cache_seconds, build, request)
