@@ -1800,10 +1800,16 @@ def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
     # Display word is "new", not "first" -- the owner's own call, purely
     # presentational (see the per-player line below for the fuller note).
     # "claimed" dropped too: it was padding the owner never asked for.
-    lines = [
-        f"**{_fmt_number(n_summits)}** new summit{'' if n_summits == 1 else 's'} "
-        f"and **{_fmt_number(n_parks)}** new park{'' if n_parks == 1 else 's'}"
-    ]
+    # A zero count is left out rather than spelled out: "1 new summit and
+    # 0 new parks" reads as a gap, not a fact. The section itself is
+    # never rendered with both at zero -- no qualifying rows means no
+    # section at all.
+    counts = []
+    if n_summits:
+        counts.append(f"**{_fmt_number(n_summits)}** new summit{'' if n_summits == 1 else 's'}")
+    if n_parks:
+        counts.append(f"**{_fmt_number(n_parks)}** new park{'' if n_parks == 1 else 's'}")
+    lines = [" and ".join(counts)]
 
     # ONE unattributed elevation figure -- deliberately no player name
     # anywhere near it, even though every row it is drawn from has one.

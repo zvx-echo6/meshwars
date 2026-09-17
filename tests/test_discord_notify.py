@@ -1828,7 +1828,9 @@ def test_weekly_exploration_section_header_says_new_not_first(conn):
     embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
     field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Exploration")
     lines = field["value"].splitlines()
-    assert lines[0] == "**1** new summit and **0** new parks"
+    # A zero count is omitted, not spelled out as "and **0** new parks".
+    assert lines[0] == "**1** new summit"
+    assert "**0**" not in field["value"]
     assert "first" not in field["value"].lower()
 
 
