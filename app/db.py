@@ -2347,6 +2347,34 @@ CREATE TABLE IF NOT EXISTS discord_config (
     slash_enabled               INTEGER NOT NULL DEFAULT 0,
     app_id                      TEXT NOT NULL DEFAULT '',
     public_key                  TEXT NOT NULL DEFAULT '',
+    -- The pinned, self-editing leaderboard (app/discord_leaderboard.py) --
+    -- a FIFTH, separate Discord feature layered on top of the webhook
+    -- (posts/edits through it, same as every announce_* kind above) AND
+    -- the bot (pins the message it posts, same DISCORD_BOT_TOKEN role
+    -- sync already authenticates with -- see discord_team_role's own
+    -- comment). Same "must never turn itself on the moment a database
+    -- happens to gain this column" reasoning as roles_enabled/
+    -- slash_enabled above: defaults to 0 (OFF). leaderboard_interval_
+    -- seconds is its OWN gate, separate from
+    -- settings.discord_outbox_poll_interval_seconds -- a leaderboard
+    -- pass reads every board's live standings and three Top Operators
+    -- rankings, real work compared to the outbox's own cheap table scan,
+    -- so it rides run_forever()'s existing loop (same "one background
+    -- loop, its own interval gate" shape maybe_reconcile_roles() already
+    -- uses) rather than running every single 30s cycle. Defaults to 600
+    -- (10 minutes) -- frequent enough that a fresh capture shows up
+    -- promptly, far below Discord's own per-webhook rate limit for a
+    -- single edited message. leaderboard_top_n caps each of the three
+    -- Top Operators lists the leaderboard embeds show (Wardrivers/
+    -- NetOps/Explorer -- see app/discord_leaderboard.py's own module
+    -- docstring), independent of those helpers' own internal top-20 cap
+    -- in app/mc_api.py. Defaults to 5 -- short enough that three lists
+    -- plus a full standings table comfortably fit one message's field
+    -- budget (see app/discord_notify.py's _MAX_EMBED_FIELDS/
+    -- _MAX_TOTAL_EMBED_CHARS, reused as-is by the leaderboard).
+    leaderboard_enabled          INTEGER NOT NULL DEFAULT 0,
+    leaderboard_interval_seconds INTEGER NOT NULL DEFAULT 600,
+    leaderboard_top_n            INTEGER NOT NULL DEFAULT 5,
     updated_at                 INTEGER NOT NULL DEFAULT 0
 );
 
@@ -2423,6 +2451,40 @@ CREATE TABLE IF NOT EXISTS discord_team_role (
     role_id     TEXT NOT NULL,
     channel_id  TEXT,
     updated_at  INTEGER NOT NULL
+);
+
+-- The ONE pinned, self-editing leaderboard message app/discord_leaderboard.py
+-- maintains (`kind` is always "leaderboard" today, but the column is a
+-- free-form key rather than a fixed value so a future second pinned
+-- message -- a per-net board, say -- can share this same table instead
+-- of a near-duplicate one). webhook_id is the webhook's own numeric id,
+-- PARSED from its URL, never the URL or its token itself: the token
+-- already lives in discord_config.webhook_url/discord_channel.webhook_url
+-- (both already SECRETS -- see discord_config's own comment), and this
+-- table exists purely to remember WHICH message to edit next, which
+-- needs no credential at all -- only channel_id/message_id (bot API
+-- targets, both non-secret, same reasoning discord_team_role.channel_id
+-- already gives) and webhook_id (compared against a freshly resolved
+-- webhook's own parsed id on every pass, to detect an operator moving
+-- the leaderboard to a different webhook -- see that module's own
+-- docstring for what happens then). content_hash is the SHA-256 of the
+-- message body MINUS its own "as of" timestamp line (see that module's
+-- own docstring for why the timestamp itself is excluded from the hash
+-- it gates) -- an unchanged hash means "don't PATCH," the whole point of
+-- a pinned message that edits itself instead of spamming a new post
+-- every interval. pinned is a plain 0/1 the bot sets after a successful
+-- pin attempt, never assumed -- a missing bot token or a missing Pin
+-- Messages permission must never fail the whole pass (see that module's
+-- own docstring), it only ever leaves this at 0 so the admin panel can
+-- say "not pinned" honestly.
+CREATE TABLE IF NOT EXISTS discord_pinned_message (
+    kind          TEXT PRIMARY KEY,
+    webhook_id    TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,
+    message_id    TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    updated_at    INTEGER NOT NULL
 );
 """
 
@@ -3030,6 +3092,15 @@ MIGRATIONS = [
     "ALTER TABLE discord_config ADD COLUMN slash_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE discord_config ADD COLUMN app_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE discord_config ADD COLUMN public_key TEXT NOT NULL DEFAULT ''",
+    # leaderboard_enabled / leaderboard_interval_seconds / leaderboard_top_n:
+    # app/discord_leaderboard.py's pinned leaderboard, added after
+    # discord_config already shipped -- same "an ALTER is required here
+    # too" situation as every column above. Same defaults as the CREATE
+    # TABLE above (see that column's own comment): off by default, a
+    # 10-minute pass interval, top 5 per Top Operators list.
+    "ALTER TABLE discord_config ADD COLUMN leaderboard_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE discord_config ADD COLUMN leaderboard_interval_seconds INTEGER NOT NULL DEFAULT 600",
+    "ALTER TABLE discord_config ADD COLUMN leaderboard_top_n INTEGER NOT NULL DEFAULT 5",
 ]
 
 PRAGMAS = [

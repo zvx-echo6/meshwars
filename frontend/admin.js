@@ -2103,6 +2103,36 @@ function renderDiscordForm(cfg) {
   document.getElementById('dc-slash-enabled').checked = !!cfg.slash_enabled;
   document.getElementById('dc-app-id').value = cfg.app_id || '';
   document.getElementById('dc-public-key').value = cfg.public_key || '';
+
+  // Leaderboard (app/discord_leaderboard.py) -- a fifth, separate
+  // feature, saved together with the rest of this same form. Neither
+  // the interval nor top-N is a secret, so both come back and go out as
+  // plain values -- no webhook_set-style hint needed.
+  document.getElementById('dc-leaderboard-enabled').checked = !!cfg.leaderboard_enabled;
+  document.getElementById('dc-leaderboard-interval').value = cfg.leaderboard_interval_seconds || '';
+  document.getElementById('dc-leaderboard-topn').value = cfg.leaderboard_top_n || '';
+}
+
+// Leaderboard status (GET /api/admin/discord's own `leaderboard` block --
+// app/discord_leaderboard.py's leaderboard_admin_status()): whether a
+// message has ever been posted, a jump link, pinned yes/no, and when its
+// content last actually changed -- rendered separately from the plain
+// config fields above since this is READ-ONLY status, not a form field.
+function renderLeaderboardStatus(status) {
+  const jumpEl = document.getElementById('dc-leaderboard-jump');
+  if (status && status.posted && status.jump_url) {
+    jumpEl.replaceChildren(el('a', { href: status.jump_url, target: '_blank', rel: 'noopener', text: status.jump_url }));
+  } else if (status && status.posted) {
+    jumpEl.textContent = 'posted (set a Guild ID above for a jump link)';
+  } else {
+    jumpEl.textContent = 'not posted yet';
+  }
+  document.getElementById('dc-leaderboard-pinned').textContent = status && status.posted
+    ? (status.pinned ? 'yes' : 'no')
+    : '--';
+  document.getElementById('dc-leaderboard-updated').textContent = status && status.updated_at
+    ? fmtTs(status.updated_at)
+    : '--';
 }
 
 // Team roles (app/discord_bot.py) -- discord_team_role rows. role_id
@@ -2307,6 +2337,7 @@ async function loadDiscord() {
     renderDiscordOutbox(d.outbox);
     renderTeamRoles(d.team_roles || []);
     renderReconcileStatus(d.last_reconcile);
+    renderLeaderboardStatus(d.leaderboard);
     // Interactions Endpoint URL -- app/admin_ops.py's GET
     // /api/admin/discord only computes this when OAUTH_PUBLIC_BASE_URL
     // is configured; blank otherwise, same as every absolute-or-omitted
@@ -2337,6 +2368,9 @@ async function saveDiscord(b) {
     slash_enabled: document.getElementById('dc-slash-enabled').checked,
     app_id: document.getElementById('dc-app-id').value.trim(),
     public_key: document.getElementById('dc-public-key').value.trim(),
+    leaderboard_enabled: document.getElementById('dc-leaderboard-enabled').checked,
+    leaderboard_interval_seconds: parseInt(document.getElementById('dc-leaderboard-interval').value, 10) || 600,
+    leaderboard_top_n: parseInt(document.getElementById('dc-leaderboard-topn').value, 10) || 5,
   };
   // Blank means keep the existing webhook -- see app/admin_ops.py's
   // admin_discord_update, the same convention the Paint section's own
@@ -2447,6 +2481,28 @@ async function registerDiscordSlashCommands(b) {
   try {
     const r = await post('/api/admin/discord/slash/register', {});
     out.textContent = 'Registered: ' + r.commands.join(', ');
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+// "Post / repair now" (app/discord_leaderboard.py's run_leaderboard_pass(
+// force=True)) -- runs one pass immediately, ignoring the interval, and
+// always re-asserts the pin even when the content itself didn't change
+// (an operator may have unpinned it by hand). Save the Enabled/Interval/
+// Top N fields above with the Save button FIRST -- this button reads
+// whatever was last saved, not the form's current unsaved values, same
+// caveat registerDiscordSlashCommands() already carries for its own
+// fields.
+async function runDiscordLeaderboard(b) {
+  const out = document.getElementById('dc-leaderboard-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord/leaderboard/run', {});
+    out.textContent = r.ok ? ('Done: ' + r.reason) : ('Not run: ' + r.reason);
+    await loadDiscord();
   } catch (e) {
     out.textContent = 'Failed: ' + e.message;
   }
@@ -2675,5 +2731,6 @@ document.getElementById('dc-channel-add').addEventListener('click', function () 
 document.getElementById('dc-roles-ensure').addEventListener('click', function () { ensureDiscordRoles(this); });
 document.getElementById('dc-roles-reconcile').addEventListener('click', function () { reconcileDiscordRoles(this); });
 document.getElementById('dc-slash-register').addEventListener('click', function () { registerDiscordSlashCommands(this); });
+document.getElementById('dc-leaderboard-run').addEventListener('click', function () { runDiscordLeaderboard(this); });
 
 checkAccess();

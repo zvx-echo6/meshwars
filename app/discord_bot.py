@@ -1043,6 +1043,79 @@ async def register_commands(*, http_client: httpx.AsyncClient | None = None) -> 
     return {"ok": True, "commands": [c.name for c in COMMANDS]}
 
 
+# ---- pin support (app/discord_leaderboard.py) ------------------------------
+
+
+async def pin_message(channel_id: str, message_id: str, *, http_client: httpx.AsyncClient | None = None) -> bool:
+    """Pin `message_id` in `channel_id` with the bot -- True on success,
+    False on ANY failure (no bot token configured, missing "Pin Messages"
+    in this guild, the message/channel is gone, a transport error) --
+    NEVER raises. app/discord_leaderboard.py's own pinned-leaderboard
+    pass calls this after posting or reposting the leaderboard message,
+    and must keep that message ITSELF updating even when pinning fails
+    (see that module's own docstring) -- a pin failure is surfaced to the
+    admin panel as "not pinned," never treated as a reason to fail the
+    whole pass. Deliberately gated on nothing but the bot token itself --
+    not _roles_ready()/_channels_ready() above, which gate the entirely
+    separate role-sync and team-channel FEATURES; pinning a message needs
+    only the bot's own credential and the "Pin Messages" permission this
+    module's own docstring already lists it as holding.
+
+    Tries the CURRENT (v10, 2026) pin route first -- PUT
+    /channels/{channel_id}/messages/pins/{message_id} -- and falls back
+    to the LEGACY route -- PUT /channels/{channel_id}/pins/{message_id} --
+    only when the current route itself answers 404 (a Discord API
+    version that predates the move). Any OTHER status from the current
+    route is this call's own final answer, never silently retried
+    against the legacy path -- a 403 (permission missing) means exactly
+    that on either route, not "try the old one instead."
+    """
+    if not settings.discord_bot_token:
+        return False
+    try:
+        resp = await _request(
+            "PUT", f"/channels/{channel_id}/messages/pins/{message_id}", http_client=http_client
+        )
+        if resp.status_code == 404:
+            resp = await _request(
+                "PUT", f"/channels/{channel_id}/pins/{message_id}", http_client=http_client
+            )
+        return 200 <= resp.status_code < 300
+    except DiscordAPIError:
+        log.exception("discord leaderboard: pin message failed")
+        return False
+
+
+async def unpin_message(channel_id: str, message_id: str, *, http_client: httpx.AsyncClient | None = None) -> None:
+    """Unpin `message_id` in `channel_id` with the bot -- best-effort,
+    never raises. Called only from app/discord_leaderboard.py's own
+    webhook-moved case: an operator repointed discord_config (or a
+    discord_channel row) for kind="leaderboard" at a different webhook,
+    so the OLD pinned message is being replaced. That old message can
+    never be DELETED by this app -- Herald holds no "Manage Messages"
+    grant (see this module's own docstring for the exact permission
+    list), and the old webhook's own bearer token is not something this
+    table ever stored in the first place (see discord_pinned_message's
+    own comment in app/db.py for why only webhook_id, never the URL, is
+    kept) -- so unpinning it with the bot is the only cleanup left
+    available. A 404 on either route (already unpinned, or the message
+    or channel itself is gone) is not a failure worth logging -- there is
+    nothing left to unpin -- so both routes' 404s are silently ignored,
+    same current/legacy fallback shape pin_message() above uses; only an
+    unexpected transport-level failure is logged.
+    """
+    try:
+        resp = await _request(
+            "DELETE", f"/channels/{channel_id}/messages/pins/{message_id}", http_client=http_client
+        )
+        if resp.status_code == 404:
+            await _request(
+                "DELETE", f"/channels/{channel_id}/pins/{message_id}", http_client=http_client
+            )
+    except DiscordAPIError:
+        log.exception("discord leaderboard: unpin old message failed")
+
+
 async def sync_member(
     conn, player_id: int, *, http_client: httpx.AsyncClient | None = None
 ) -> dict:

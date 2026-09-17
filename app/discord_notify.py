@@ -331,10 +331,12 @@ def load_discord_config(conn) -> dict:
     -- enabled, webhook_url, username, team_emoji, announce_month_honors,
     announce_season_close, announce_weekly_recap, announce_net_wrapup,
     guild_id, roles_enabled, team_channels_enabled, team_category_name,
-    team_category_id, updated_at. Read on every enqueue() call, every drain cycle
+    team_category_id, leaderboard_enabled, leaderboard_interval_seconds,
+    leaderboard_top_n, updated_at. Read on every enqueue() call, every drain cycle
     (_drain_once()), by build_month_honors_embed()/
     build_season_close_embed()/build_weekly_recap_embed()/
-    build_net_wrapup_embed(), and by every admin route that needs the
+    build_net_wrapup_embed(), by app/discord_leaderboard.py's own
+    leaderboard pass, and by every admin route that needs the
     current values (app/admin_ops.py) -- never cached anywhere in the
     process. Exactly the pattern app/freqmapper_ingest.py's
     load_freqmapper_config() uses for freqmapper_config, for the same
@@ -372,6 +374,7 @@ def load_discord_config(conn) -> dict:
         "       guild_id, roles_enabled, "
         "       team_channels_enabled, team_category_name, team_category_id, "
         "       slash_enabled, app_id, public_key, "
+        "       leaderboard_enabled, leaderboard_interval_seconds, leaderboard_top_n, "
         "       updated_at "
         "  FROM discord_config WHERE id = 1"
     ).fetchone()
@@ -406,6 +409,16 @@ def load_discord_config(conn) -> dict:
             "slash_enabled": False,
             "app_id": settings.discord_app_id,
             "public_key": settings.discord_public_key,
+            # Pinned leaderboard (app/discord_leaderboard.py) -- same
+            # "not configured yet" fallback as roles_enabled/slash_enabled
+            # above: off, with the same interval/top-n the CREATE TABLE
+            # itself defaults to, so a missing row degrades to exactly
+            # the schema's own defaults rather than inventing a different
+            # answer (this function's own docstring already states that
+            # rule for every other fallback field here).
+            "leaderboard_enabled": False,
+            "leaderboard_interval_seconds": 600,
+            "leaderboard_top_n": 5,
             "updated_at": 0,
         }
     d = dict(row)
@@ -417,6 +430,7 @@ def load_discord_config(conn) -> dict:
     d["roles_enabled"] = bool(d["roles_enabled"])
     d["team_channels_enabled"] = bool(d["team_channels_enabled"])
     d["slash_enabled"] = bool(d["slash_enabled"])
+    d["leaderboard_enabled"] = bool(d["leaderboard_enabled"])
     return d
 
 
@@ -2348,14 +2362,25 @@ async def run_forever() -> None:
     build_month_honors_embed()'s own local `from . import results`
     already gives.
 
+    Also calls app/discord_leaderboard.py's maybe_run_leaderboard() once
+    per cycle -- a FOURTH feature (the pinned, self-editing leaderboard)
+    on this same loop, same "one background loop, its own interval gate"
+    shape as maybe_reconcile_roles() above; that module's own interval
+    gate (discord_config.leaderboard_interval_seconds, 10 minutes by
+    default) is what actually limits how often it does real work.
+    Imported locally for the same circular-import reason maybe_reconcile_
+    roles() above is: app/discord_leaderboard.py imports FROM this
+    module (load_discord_config, resolve_discord_webhook, rendering
+    helpers).
+
     Never raises out of the loop -- same fire-and-forget contract
     app/account_api.py's _notify_security() applies to a single mail
     send, extended here to a whole poll cycle: a bug handling one
-    cycle's rows (or one cycle's due-check, or one cycle's role
-    reconcile) must never crash the process or stop later cycles (and
-    later months' announcements) from ever running again. Each of the
-    three is wrapped separately so one's failure never skips the other
-    two in the same cycle.
+    cycle's rows (or one cycle's due-check, one cycle's role reconcile,
+    or one cycle's leaderboard pass) must never crash the process or
+    stop later cycles (and later months' announcements) from ever
+    running again. Each is wrapped separately so one's failure never
+    skips the others in the same cycle.
     """
     log.info("discord outbox loop starting (announcements gated by discord_config)")
     while True:
@@ -2378,4 +2403,11 @@ async def run_forever() -> None:
             raise
         except Exception:
             log.exception("discord roles: reconcile cycle failed")
+        try:
+            from . import discord_leaderboard
+            await discord_leaderboard.maybe_run_leaderboard()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("discord leaderboard: pass cycle failed")
         await asyncio.sleep(max(settings.discord_outbox_poll_interval_seconds, 1))

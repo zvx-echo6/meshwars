@@ -37,7 +37,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import discord_bot, discord_notify, mc_api, results
+from . import discord_bot, discord_leaderboard, discord_notify, mc_api, results
 from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
     checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
@@ -1655,7 +1655,7 @@ async def admin_notice_save(request: Request):
 
 
 # ---- Discord announcements (app/db.py's discord_config/discord_outbox,
-# app/discord_notify.py) ---------------------------------------------------
+# app/discord_notify.py, app/discord_bot.py, app/discord_leaderboard.py) --
 
 
 def _scrub_discord_secrets(cfg: dict) -> dict:
@@ -1734,7 +1734,12 @@ async def admin_discord(request: Request):
     reasoning as guild_id. `last_reconcile` is app/discord_bot.py's
     get_last_reconcile() -- the most recent reconcile pass, manual or
     scheduled, process-local (see that function's own docstring for why
-    it doesn't survive a restart).
+    it doesn't survive a restart). `leaderboard` is
+    app/discord_leaderboard.py's leaderboard_admin_status() -- whether
+    the pinned leaderboard message has ever been posted, a jump link,
+    pinned yes/no, and when its content last changed; the three plain
+    leaderboard_* config fields themselves already come through
+    unscrubbed in `config` above, same as guild_id.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -1760,6 +1765,7 @@ async def admin_discord(request: Request):
         team_roles = conn.execute(
             "SELECT team, role_id, channel_id, updated_at FROM discord_team_role ORDER BY team"
         ).fetchall()
+        leaderboard_status = discord_leaderboard.leaderboard_admin_status(conn, cfg)
     finally:
         conn.close()
     config_out = _scrub_discord_secrets(cfg)
@@ -1770,6 +1776,14 @@ async def admin_discord(request: Request):
         "channels": [_scrub_discord_channel(c) for _, c in sorted(channels.items())],
         "team_roles": [dict(r) for r in team_roles],
         "last_reconcile": discord_bot.get_last_reconcile(),
+        # The pinned leaderboard (app/discord_leaderboard.py) -- whether
+        # a message has ever been posted, a jump link, pinned yes/no, and
+        # when its content last actually changed. `config` above already
+        # carries leaderboard_enabled/leaderboard_interval_seconds/
+        # leaderboard_top_n straight through from load_discord_config()
+        # (none of the three is a secret), so this block is only the
+        # separate discord_pinned_message state, not a duplicate of those.
+        "leaderboard": leaderboard_status,
         "outbox": {
             "pending": pending,
             "posted": posted,
@@ -1852,6 +1866,16 @@ async def admin_discord_update(request: Request):
     comment in app/db.py), so there is no "omit to keep current" case
     for either. Registering the commands themselves is a SEPARATE step
     (POST /api/admin/discord/slash/register), not done here.
+
+    leaderboard_enabled, leaderboard_interval_seconds, and
+    leaderboard_top_n (app/discord_leaderboard.py's pinned leaderboard --
+    a FIFTH, separate feature) are saved the same plain, always-explicit
+    way as roles_enabled/guild_id above -- neither is a secret, so there
+    is no "omit to keep current" case for any of them. The interval and
+    top-N are clamped to a floor (30 seconds, 1 player) here rather than
+    trusting the admin form's own client-side `min` attribute. Running a
+    pass immediately is a SEPARATE step (POST
+    /api/admin/discord/leaderboard/run), not done here.
     """
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
@@ -1882,6 +1906,26 @@ async def admin_discord_update(request: Request):
     slash_enabled = bool(body.get("slash_enabled"))
     app_id = (body.get("app_id") or "").strip()
     public_key = (body.get("public_key") or "").strip()
+    # Leaderboard (app/discord_leaderboard.py) -- a fifth, separate
+    # feature, saved the same plain, always-explicit way as roles_enabled/
+    # guild_id above: neither the interval nor top-N is a secret, so
+    # there is no "omit to keep current" case for either. Both are
+    # clamped to a sane floor here (never 0 or negative) rather than
+    # trusting the admin form's own client-side `min` attribute, which a
+    # direct API call could simply not send.
+    leaderboard_enabled = bool(body.get("leaderboard_enabled"))
+    try:
+        # Deliberately `body.get(key, default)`, not `body.get(key) or
+        # default` -- the latter would treat an explicit 0 the same as
+        # "not given at all" and silently reset it to the default
+        # instead of clamping it to the floor below, which is what an
+        # operator who actually typed 0 should see happen.
+        leaderboard_interval_seconds = max(int(body.get("leaderboard_interval_seconds", 600)), 30)
+        leaderboard_top_n = max(int(body.get("leaderboard_top_n", 5)), 1)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"error": "leaderboard_interval_seconds and leaderboard_top_n must be integers"}, status_code=400
+        )
 
     now = int(time.time())
     conn = connect()
@@ -1902,8 +1946,9 @@ async def admin_discord_update(request: Request):
             " announce_month_honors, announce_season_close, announce_weekly_recap, "
             " announce_net_wrapup, guild_id, roles_enabled, "
             " team_channels_enabled, team_category_name, "
-            " slash_enabled, app_id, public_key, updated_at) "
-            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " slash_enabled, app_id, public_key, "
+            " leaderboard_enabled, leaderboard_interval_seconds, leaderboard_top_n, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "  enabled = excluded.enabled, webhook_url = excluded.webhook_url, "
             "  username = excluded.username, team_emoji = excluded.team_emoji, "
@@ -1916,6 +1961,9 @@ async def admin_discord_update(request: Request):
             "  team_category_name = excluded.team_category_name, "
             "  slash_enabled = excluded.slash_enabled, app_id = excluded.app_id, "
             "  public_key = excluded.public_key, "
+            "  leaderboard_enabled = excluded.leaderboard_enabled, "
+            "  leaderboard_interval_seconds = excluded.leaderboard_interval_seconds, "
+            "  leaderboard_top_n = excluded.leaderboard_top_n, "
             "  updated_at = excluded.updated_at",
             (
                 int(enabled), webhook_url, username, team_emoji,
@@ -1923,7 +1971,8 @@ async def admin_discord_update(request: Request):
                 int(announce_weekly_recap), int(announce_net_wrapup),
                 guild_id, int(roles_enabled),
                 int(team_channels_enabled), team_category_name,
-                int(slash_enabled), app_id, public_key, now,
+                int(slash_enabled), app_id, public_key,
+                int(leaderboard_enabled), leaderboard_interval_seconds, leaderboard_top_n, now,
             ),
         )
         _log_admin_action(
@@ -1935,7 +1984,10 @@ async def admin_discord_update(request: Request):
                 f"announce_net_wrapup={announce_net_wrapup} "
                 f"roles_enabled={roles_enabled} "
                 f"team_channels_enabled={team_channels_enabled} "
-                f"slash_enabled={slash_enabled}"
+                f"slash_enabled={slash_enabled} "
+                f"leaderboard_enabled={leaderboard_enabled} "
+                f"leaderboard_interval_seconds={leaderboard_interval_seconds} "
+                f"leaderboard_top_n={leaderboard_top_n}"
             ), now=now,
         )
         conn.execute("COMMIT")
@@ -2362,6 +2414,44 @@ async def admin_discord_slash_register(request: Request):
     finally:
         conn.close()
     log.info("admin: registered discord slash commands: %s", result["commands"])
+    return JSONResponse(result)
+
+
+@router.post("/api/admin/discord/leaderboard/run")
+async def admin_discord_leaderboard_run(request: Request):
+    """"Post / repair now" -- app/discord_leaderboard.py's
+    run_leaderboard_pass(force=True): runs one leaderboard pass
+    immediately, bypassing maybe_run_leaderboard()'s own interval gate
+    (the periodic one run_forever() calls on its own schedule), and
+    always re-asserts the pin even when the content itself hasn't
+    changed since the last pass -- an operator may have unpinned the
+    message by hand, and this button is the explicit way to fix that
+    without waiting for the standings to actually move.
+
+    Never refuses with 400 the way POST /api/admin/discord/slash/register
+    does for its own precondition -- "leaderboard disabled" or "no
+    webhook routed" are ordinary, expected outcomes of clicking this
+    before turning the feature on at all, not malformed input, so they
+    come back as an ordinary {"ok": false, "reason": ...} for the admin
+    panel to show inline rather than an error banner.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    result = await discord_leaderboard.run_leaderboard_pass(force=True)
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_leaderboard_run",
+            detail=f"ok={result.get('ok')} reason={result.get('reason')}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: ran discord leaderboard pass (ok=%s reason=%s)", result.get("ok"), result.get("reason"))
     return JSONResponse(result)
 
 

@@ -476,7 +476,7 @@
           <p class="adm-hint">Send a specific announcement kind to its own Discord channel instead of the default one above. A kind with no route here uses the default webhook; a route left "Off" is never announced at all -- it does NOT fall back to the default.</p>
           <div id="dc-channels"></div>
           <div class="adm-form">
-            <input type="text" id="dc-channel-new-kind" autocomplete="off" placeholder="kind, e.g. month_honors" />
+            <input type="text" id="dc-channel-new-kind" autocomplete="off" placeholder="kind, e.g. month_honors, leaderboard" />
             <button type="button" id="dc-channel-add" class="adm-btn adm-btn-quiet">Add route</button>
           </div>
           <div id="dc-channel-result" class="adm-result"></div>
@@ -533,6 +533,27 @@
           </div>
           <div id="dc-slash-result" class="adm-result"></div>
           <p class="adm-hint">Interactions Endpoint URL (paste into the developer portal): <span id="dc-slash-endpoint-url" class="adm-mono"></span></p>
+
+          <h3 class="adm-h3">Leaderboard</h3>
+          <details class="adm-about">
+            <summary>About the leaderboard</summary>
+            <p class="adm-hint">A FIFTH, separate feature: one pinned message per deployment, posted once through the webhook routed for kind "leaderboard" above (or the default webhook, same fallback as every other kind) and then edited in place -- never reposted -- whenever the standings actually change. Pinning uses Herald (the same bot as team roles above); a missing bot token or "Pin Messages" permission still lets the message keep updating, it just won't be pinned. Shows, per board with an active season: team standings, then the top players from the site's own Wardrivers/NetOps/Explorer rankings.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-leaderboard-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-field-label">Interval (seconds)<input type="number" id="dc-leaderboard-interval" autocomplete="off" min="30" placeholder="600" /></label>
+            <label class="adm-field-label">Top N per list<input type="number" id="dc-leaderboard-topn" autocomplete="off" min="1" placeholder="5" /></label>
+          </div>
+          <p class="adm-hint">Saved together with the Save button above -- part of the same form as everything else on this page.</p>
+          <div class="adm-form">
+            <button type="button" id="dc-leaderboard-run" class="adm-btn adm-btn-quiet">Post / repair now</button>
+          </div>
+          <div id="dc-leaderboard-result" class="adm-result"></div>
+          <p class="adm-hint">
+            Message: <span id="dc-leaderboard-jump" class="adm-mono">not posted yet</span>
+            &middot; Pinned: <span id="dc-leaderboard-pinned"></span>
+            &middot; Last changed: <span id="dc-leaderboard-updated"></span>
+          </p>
         </section>
 
         <section class="adm-section" data-section="keys" hidden>
@@ -554,7 +575,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260916-9"></script>
+  <script src="/static/admin.js?v=20260917-1"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

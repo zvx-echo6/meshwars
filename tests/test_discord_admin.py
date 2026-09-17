@@ -1199,3 +1199,146 @@ def test_post_discord_slash_register_requires_role(db_path):
     client = _client_for(account_id)
     resp = client.post("/api/admin/discord/slash/register", json={})
     assert resp.status_code == 401
+
+
+# ---- Leaderboard (app/discord_leaderboard.py) ----------------------------
+#
+# Same shape every other Discord admin surface in this file already
+# uses: GET /api/admin/discord returns the three plain, non-secret
+# leaderboard_* config fields straight through (no scrubbing needed,
+# same reasoning as guild_id) plus a separate `leaderboard` status
+# block from app/discord_leaderboard.py's own leaderboard_admin_status();
+# POST /api/admin/discord saves the three fields the same always-
+# explicit way roles_enabled/guild_id are saved; POST
+# /api/admin/discord/leaderboard/run is tested with
+# run_leaderboard_pass() itself stubbed out (fake_run below) -- the real
+# pass's own HTTP behavior is covered end to end in
+# tests/test_discord_leaderboard.py, this file only needs to prove the
+# route calls it with force=True and logs the action.
+
+
+def test_get_discord_reports_leaderboard_defaults_and_not_posted(db_path):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["config"]["leaderboard_enabled"] is False
+    assert body["config"]["leaderboard_interval_seconds"] == 600
+    assert body["config"]["leaderboard_top_n"] == 5
+    assert body["leaderboard"] == {
+        "posted": False, "jump_url": "", "pinned": False, "updated_at": 0,
+    }
+
+
+def test_get_discord_reports_leaderboard_status_when_posted(db_path):
+    account_id = _make_account(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE discord_config SET guild_id = '555' WHERE id = 1")
+    conn.execute(
+        "INSERT INTO discord_pinned_message"
+        "  (kind, webhook_id, channel_id, message_id, content_hash, pinned, updated_at) "
+        "VALUES ('leaderboard', '1', '2', '3', 'deadbeef', 1, ?)", (NOW,),
+    )
+    conn.commit()
+    conn.close()
+    client = _client_for(account_id)
+
+    resp = client.get("/api/admin/discord")
+    assert resp.status_code == 200, resp.text
+    lb = resp.json()["leaderboard"]
+    assert lb["posted"] is True
+    assert lb["jump_url"] == "https://discord.com/channels/555/2/3"
+    assert lb["pinned"] is True
+    assert lb["updated_at"] == NOW
+
+
+def test_post_discord_saves_leaderboard_fields(db_path):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "", "announce_month_honors": True,
+        "leaderboard_enabled": True,
+        "leaderboard_interval_seconds": 120,
+        "leaderboard_top_n": 3,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["leaderboard_enabled"] is True
+    assert resp.json()["config"]["leaderboard_interval_seconds"] == 120
+    assert resp.json()["config"]["leaderboard_top_n"] == 3
+    row = _discord_row(db_path)
+    assert bool(row["leaderboard_enabled"]) is True
+    assert row["leaderboard_interval_seconds"] == 120
+    assert row["leaderboard_top_n"] == 3
+
+
+def test_post_discord_leaderboard_fields_are_clamped_to_a_floor(db_path):
+    """0 or negative values must never reach the database -- see
+    admin_discord_update()'s own docstring on why these are clamped
+    server-side rather than trusted from the form's client-side `min`."""
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    resp = client.post("/api/admin/discord", json={
+        "enabled": True, "username": "", "team_emoji": "", "announce_month_honors": True,
+        "leaderboard_enabled": True,
+        "leaderboard_interval_seconds": 0,
+        "leaderboard_top_n": 0,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["leaderboard_interval_seconds"] == 30
+    assert resp.json()["config"]["leaderboard_top_n"] == 1
+
+
+def test_post_discord_leaderboard_run_calls_pass_with_force_true(db_path, monkeypatch):
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    calls = []
+
+    async def fake_run(*, force=False, http_client=None):
+        calls.append(force)
+        return {"ok": True, "reason": "posted", "pinned": True}
+
+    monkeypatch.setattr(admin_ops.discord_leaderboard, "run_leaderboard_pass", fake_run)
+
+    resp = client.post("/api/admin/discord/leaderboard/run", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": True, "reason": "posted", "pinned": True}
+    assert calls == [True]
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    action = conn.execute(
+        "SELECT detail FROM admin_action_log WHERE action = 'discord_leaderboard_run'"
+    ).fetchone()
+    conn.close()
+    assert action is not None
+    assert "ok=True" in action["detail"]
+
+
+def test_post_discord_leaderboard_run_returns_ok_false_without_erroring(db_path, monkeypatch):
+    """Leaderboard disabled, or no webhook routed, is an ordinary
+    outcome of clicking this before the feature is turned on -- never a
+    400, see admin_discord_leaderboard_run()'s own docstring."""
+    account_id = _make_account(db_path)
+    client = _client_for(account_id)
+
+    async def fake_run(*, force=False, http_client=None):
+        return {"ok": False, "reason": "leaderboard disabled"}
+
+    monkeypatch.setattr(admin_ops.discord_leaderboard, "run_leaderboard_pass", fake_run)
+
+    resp = client.post("/api/admin/discord/leaderboard/run", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ok": False, "reason": "leaderboard disabled"}
+
+
+def test_post_discord_leaderboard_run_requires_role(db_path):
+    _make_account(db_path, role="admin")
+    account_id = _make_account(db_path, role=None, with_totp=False)
+    client = _client_for(account_id)
+    resp = client.post("/api/admin/discord/leaderboard/run", json={})
+    assert resp.status_code == 401
