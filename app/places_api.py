@@ -307,7 +307,7 @@ def cached_places_response(key: str, ttl: int, build, request: Request | None) -
 
 
 @router.get("/api/places")
-async def places_in_viewport(
+def places_in_viewport(
     request: Request,
     north: float = Query(...),
     south: float = Query(...),
@@ -394,7 +394,7 @@ async def places_in_viewport(
 
 
 @router.get("/api/places/near")
-async def places_near(
+def places_near(
     request: Request,
     lat: float = Query(...),
     lon: float = Query(...),

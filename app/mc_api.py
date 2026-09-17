@@ -562,7 +562,7 @@ def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
 
 
 @router.get("/api/mc/board")
-async def mc_board(request: Request) -> Response:
+def mc_board(request: Request) -> Response:
     """Every owned cell in the active MeshCore season. See board_for().
 
     The heaviest route on the site by an order of magnitude, and the one
@@ -761,7 +761,7 @@ def chunks_for(protocol: str, k: int, ids: list[tuple[int, int]]) -> dict:
 
 
 @router.get("/api/mc/chunks")
-async def mc_chunks(z: float = 12.0, ids: str = "") -> Response:
+def mc_chunks(z: float = 12.0, ids: str = "") -> Response:
     """Owned cells in the requested lattice chunks, aggregated for zoom `z`.
 
     Additive and unused by the map so far: the board still loads through
@@ -791,14 +791,14 @@ async def mc_chunks(z: float = 12.0, ids: str = "") -> Response:
 
 
 @router.get("/api/mc/scores")
-async def mc_scores() -> dict:
+def mc_scores() -> dict:
     """Active season id/window plus every team's current tile count for
     MeshCore. See scores_for()."""
     return scores_for(MC_PROTOCOL)
 
 
 @router.get("/api/mc/players")
-async def mc_players() -> list[dict]:
+def mc_players() -> list[dict]:
     """display_name + team for every non-disabled player.
 
     Deliberately excludes player_id, key hashes, or anything else --
@@ -868,14 +868,14 @@ def history_for(protocol: str) -> list[dict]:
 
 
 @router.get("/api/mc/history")
-async def mc_history() -> list[dict]:
+def mc_history() -> list[dict]:
     """Closed MeshCore seasons, newest first, each with its final
     per-team tile tally. See history_for()."""
     return history_for(MC_PROTOCOL)
 
 
 @router.get("/api/mc/season")
-async def mc_season_info() -> dict:
+def mc_season_info() -> dict:
     """Active/closed season status plus the winner banner for the
     MeshCore board -- the namespaced counterpart to app/api.py's
     /season (which serves the same shape for Meshtastic, protocol='mt').
@@ -1037,7 +1037,7 @@ def find_for(protocol: str, name: str) -> dict | None:
 
 
 @router.get("/api/mc/find")
-async def mc_find(
+def mc_find(
     request: Request, name: str, session: SessionPrincipal = Depends(require_session)
 ):
     """Case-insensitive exact match on a player's display name, scoped
@@ -1103,7 +1103,7 @@ def top_for(protocol: str) -> list[dict]:
 
 
 @router.get("/api/mc/top")
-async def mc_top() -> list[dict]:
+def mc_top() -> list[dict]:
     """Players ranked by capture-event count in the active MeshCore
     season. See top_for(). Request path, request shape, and response
     shape are unchanged by the addition of top_for()'s `protocol`
@@ -1191,7 +1191,7 @@ def results_for(protocol: str, limit: int = 12) -> dict:
 
 
 @router.get("/api/mc/results")
-async def mc_results() -> dict:
+def mc_results() -> dict:
     """Monthly results for the MeshCore board. See results_for()."""
     return results_for(MC_PROTOCOL)
 
@@ -1213,7 +1213,7 @@ def award_geometry_for(protocol: str, month: str, award: str) -> dict | None:
 
 
 @router.get("/api/mc/results/{month}/{award}/geo")
-async def mc_award_geometry(month: str, award: str) -> JSONResponse:
+def mc_award_geometry(month: str, award: str) -> JSONResponse:
     """Where a MeshCore honor was earned, as GeoJSON, for the map to
     draw. 404 rather than an empty collection when there is nothing to
     show, so the map can tell "no such thing" from "an empty road"."""
@@ -1224,7 +1224,7 @@ async def mc_award_geometry(month: str, award: str) -> JSONResponse:
 
 
 @router.get("/api/mc/top-checkins")
-async def mc_top_checkins() -> list[dict]:
+def mc_top_checkins() -> list[dict]:
     """Players ranked by check-in points in the active MeshCore season.
     See top_checkin_for(). New route -- every existing /api/mc/* route's
     request path, request shape, and response shape is unchanged by
@@ -1287,7 +1287,7 @@ def top_explorer_for(protocol: str) -> list[dict]:
 
 
 @router.get("/api/mc/top-explorer")
-async def mc_top_explorer() -> list[dict]:
+def mc_top_explorer() -> list[dict]:
     """Players ranked by Explorer Score in the active MeshCore season.
     See top_explorer_for(). New route -- every existing /api/mc/* route's
     request path, request shape, and response shape is unchanged by
@@ -1583,7 +1583,7 @@ def _redact_cell_detail(detail: dict, *, authenticated: bool) -> dict:
 
 
 @router.get("/api/mc/cell/{cell_id}")
-async def mc_cell(cell_id: str, session: SessionPrincipal | None = Depends(optional_session)):
+def mc_cell(cell_id: str, session: SessionPrincipal | None = Depends(optional_session)):
     """Detail for one cell on the active MeshCore board. See
     cell_detail_for().
 
@@ -1662,7 +1662,7 @@ def _counters_out_mt(row) -> dict:
 
 
 @router.post("/api/mc/status")
-async def mc_status(
+def mc_status(
     request: Request, principal: Principal = Depends(require_status_principal)
 ) -> JSONResponse:
     """Lets a player check whether their wardriving app is actually

@@ -88,7 +88,7 @@ def _truncate(ts: int) -> int:
 
 
 @router.get("/config")
-async def config() -> dict:
+def config() -> dict:
     now_ts = int(time.time())
     conn = connect()
     try:
@@ -350,7 +350,7 @@ def _build_get_nodes(*, include_attribution: bool) -> dict:
 
 
 @router.get("/get-nodes")
-async def get_nodes(session: SessionPrincipal | None = Depends(optional_session)) -> Response:
+def get_nodes(session: SessionPrincipal | None = Depends(optional_session)) -> Response:
     """The map's main data route. See _build_get_nodes() above.
 
     Cached separately per auth state (`mt_board_public` vs.
@@ -374,14 +374,14 @@ async def get_nodes(session: SessionPrincipal | None = Depends(optional_session)
 # results PAGE. A data route and a page cannot share it, and the page is
 # the one a person types.
 @router.get("/api/results")
-async def mt_results() -> dict:
+def mt_results() -> dict:
     """Monthly results for the Meshtastic board. See
     mc_api.results_for()."""
     return mc_api.results_for(MT_PROTOCOL)
 
 
 @router.get("/api/results/{month}/{award}/geo")
-async def mt_award_geometry(month: str, award: str) -> JSONResponse:
+def mt_award_geometry(month: str, award: str) -> JSONResponse:
     """Where a Meshtastic honor was earned, as GeoJSON. Meshtastic
     counterpart of mc_api's route; see mc_api.award_geometry_for()."""
     geo = mc_api.award_geometry_for(MT_PROTOCOL, month, award)
@@ -410,7 +410,7 @@ async def live_tracks_stream(request: Request):
 
 
 @router.get("/scores")
-async def scores() -> dict:
+def scores() -> dict:
     """Seven-team tile counts for the active Meshtastic season. See
     app/mc_api.py's scores_for(), which this calls directly with
     protocol='mt' rather than duplicating its query logic -- this is the
@@ -420,7 +420,7 @@ async def scores() -> dict:
 
 
 @router.get("/history")
-async def history() -> dict:
+def history() -> dict:
     """Closed Meshtastic seasons under the new player model, newest
     first, each with its final per-team tile tally. See app/mc_api.py's
     history_for().
@@ -434,7 +434,7 @@ async def history() -> dict:
 
 
 @router.get("/season")
-async def season_info() -> dict:
+def season_info() -> dict:
     """Season status plus the winner banner for the Meshtastic board.
     The counterpart of app/mc_api.py's /api/mc/season -- both call the
     same winner_banner_for(), so the `winner_banner` shape is identical
@@ -462,7 +462,7 @@ async def season_info() -> dict:
 
 
 @router.get("/teams")
-async def teams_list() -> dict:
+def teams_list() -> dict:
     """Full roster of registered Meshtastic players, grouped by team.
 
     Unlike the retired snake-draft `team_assignment` table (reassigned
@@ -498,7 +498,7 @@ async def teams_list() -> dict:
 
 
 @router.get("/team/{node_ref}")
-async def team_lookup(
+def team_lookup(
     node_ref: str, session: SessionPrincipal = Depends(require_session)
 ) -> dict:
     """Look up a single Meshtastic radio's registered player and team.
@@ -584,7 +584,7 @@ _find_addr_rate_limiter = new_rate_limit_bucket()
 
 
 @router.get("/find")
-async def find_player(
+def find_player(
     request: Request, name: str, session: SessionPrincipal = Depends(require_session)
 ):
     """Case-insensitive exact match on a player's display name, scoped
@@ -612,7 +612,7 @@ async def find_player(
 
 
 @router.get("/top")
-async def top_players() -> list[dict]:
+def top_players() -> list[dict]:
     """Players ranked by capture-event count in the active Meshtastic
     season -- the Meshtastic counterpart of /api/mc/top. See
     app/mc_api.py's top_for(); response shape is identical to
@@ -622,7 +622,7 @@ async def top_players() -> list[dict]:
 
 
 @router.get("/top-checkins")
-async def top_checkin_players() -> list[dict]:
+def top_checkin_players() -> list[dict]:
     """Players ranked by check-in points in the active Meshtastic
     season -- the Meshtastic counterpart of /api/mc/top-checkins. See
     app/mc_api.py's top_checkin_for(); response shape is identical to
@@ -632,7 +632,7 @@ async def top_checkin_players() -> list[dict]:
 
 
 @router.get("/top-explorer")
-async def top_explorer_players() -> list[dict]:
+def top_explorer_players() -> list[dict]:
     """Players ranked by Explorer Score in the active Meshtastic
     season -- the Meshtastic counterpart of /api/mc/top-explorer. See
     app/mc_api.py's top_explorer_for(); response shape is identical to
@@ -642,7 +642,7 @@ async def top_explorer_players() -> list[dict]:
 
 
 @router.get("/cell/{cell_id}")
-async def cell_detail(
+def cell_detail(
     cell_id: str, session: SessionPrincipal | None = Depends(optional_session)
 ):
     """Rich popup data for a single grid cell -- the cell-keyed
@@ -874,7 +874,7 @@ async def _stream_tile_range(path: Path, start: int, end: int):
             yield chunk
 
 
-async def tile_file(filename: str, request: Request) -> Response:
+def tile_file(filename: str, request: Request) -> Response:
     """Serve one PMTiles archive from settings.tiles_dir with real
     byte-range support -- see the module comment above this section for
     why this exists instead of Starlette's StaticFiles.
@@ -1083,7 +1083,7 @@ def mount(app: FastAPI) -> None:
         # frontend/index.html + mc.js -- see map2.html/map2.js for what
         # that port did and did not carry forward.
         @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-        async def index(request: Request):
+        def index(request: Request):
             return _templated_html_page(request, frontend_dir / "map2.html", "map page not bundled")
 
         # The original Leaflet map, kept reachable for side-by-side
@@ -1091,11 +1091,11 @@ def mount(app: FastAPI) -> None:
         # in its own <head> (frontend/index.html) so it never competes
         # with / for the site's own search identity.
         @app.get("/map-legacy", response_class=HTMLResponse, include_in_schema=False)
-        async def map_legacy_page(request: Request):
+        def map_legacy_page(request: Request):
             return _templated_html_page(request, frontend_dir / "index.html", "legacy map page not bundled")
 
         @app.get("/join", response_class=HTMLResponse, include_in_schema=False)
-        async def join_page(request: Request):
+        def join_page(request: Request):
             return _templated_html_page(request, frontend_dir / "join.html", "join page not bundled")
 
         # The account layer's own page (app/account_api.py) -- which
@@ -1107,7 +1107,7 @@ def mount(app: FastAPI) -> None:
         # signed-in vs. signed-out, and frontend/account.js renders
         # either state from that response.
         @app.get("/account", response_class=HTMLResponse, include_in_schema=False)
-        async def account_page(request: Request):
+        def account_page(request: Request):
             return _templated_html_page(request, frontend_dir / "account.html", "account page not bundled")
 
         # The case-4 sign-in decision screen (frontend/link.js) -- reached
@@ -1115,7 +1115,7 @@ def mount(app: FastAPI) -> None:
         # provider identity has never been seen before. Not in the nav;
         # a person only ever arrives here via that redirect.
         @app.get("/link", response_class=HTMLResponse, include_in_schema=False)
-        async def link_page(request: Request):
+        def link_page(request: Request):
             return _templated_html_page(request, frontend_dir / "link.html", "link page not bundled")
 
         # The confirmation screen GET /auth/contact-email/verify
@@ -1125,7 +1125,7 @@ def mount(app: FastAPI) -> None:
         # frontend/verify-email.js. Not in the nav; reached only by that
         # redirect, same as /link above.
         @app.get("/account/verify-email", response_class=HTMLResponse, include_in_schema=False)
-        async def verify_email_page(request: Request):
+        def verify_email_page(request: Request):
             return _templated_html_page(request, frontend_dir / "verify-email.html", "verify-email page not bundled")
 
         # Where a real browser lands to type in a second factor after a
@@ -1137,19 +1137,19 @@ def mount(app: FastAPI) -> None:
         # "small standalone screen, only ever arrived at by redirect"
         # shape as /link and /account/verify-email just above.
         @app.get("/verify-totp", response_class=HTMLResponse, include_in_schema=False)
-        async def verify_totp_page(request: Request):
+        def verify_totp_page(request: Request):
             return _templated_html_page(request, frontend_dir / "verify-totp.html", "verify-totp page not bundled")
 
         @app.get("/about", response_class=HTMLResponse, include_in_schema=False)
-        async def about_page(request: Request):
+        def about_page(request: Request):
             return _templated_html_page(request, frontend_dir / "about.html", "about page not bundled")
 
         @app.get("/results", response_class=HTMLResponse, include_in_schema=False)
-        async def results_page(request: Request):
+        def results_page(request: Request):
             return _templated_html_page(request, frontend_dir / "results.html", "results page not bundled")
 
         @app.get("/rules", response_class=HTMLResponse, include_in_schema=False)
-        async def rules_page(request: Request):
+        def rules_page(request: Request):
             return _templated_html_page(request, frontend_dir / "rules.html", "rules page not bundled")
 
         # Player-facing how-to reference: setup, account management,
@@ -1160,14 +1160,14 @@ def mount(app: FastAPI) -> None:
         # the pitch, docs = the how-to). Admin/operator procedures are
         # not documented here; they stay in the repo's own docs/ tree.
         @app.get("/docs", response_class=HTMLResponse, include_in_schema=False)
-        async def docs_page(request: Request):
+        def docs_page(request: Request):
             return _templated_html_page(request, frontend_dir / "docs.html", "docs page not bundled")
 
         # Not in the top nav (no sign-off for a new nav entry) -- linked
         # instead from the site footer. Same top-level-page pattern as
         # every other route in this block.
         @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
-        async def privacy_page(request: Request):
+        def privacy_page(request: Request):
             return _templated_html_page(request, frontend_dir / "privacy.html", "privacy page not bundled")
 
         # Alias for / (frontend/map2.html, same handler target as index()
@@ -1175,14 +1175,14 @@ def mount(app: FastAPI) -> None:
         # open or bookmarked from before the MapLibre map became the
         # front page.
         @app.get("/map2", response_class=HTMLResponse, include_in_schema=False)
-        async def map2_page(request: Request):
+        def map2_page(request: Request):
             return _templated_html_page(request, frontend_dir / "map2.html", "map2 page not bundled")
 
         # Not in the nav bar on purpose -- this is a reference for the
         # handful of people building against the API, linked from the
         # foot of /about rather than offered to every visitor.
         @app.get("/api", response_class=HTMLResponse, include_in_schema=False)
-        async def api_docs_page(request: Request):
+        def api_docs_page(request: Request):
             return _templated_html_page(request, frontend_dir / "api.html", "api docs not bundled")
 
         # robots.txt / sitemap.xml: plain static files, same explicit
@@ -1193,9 +1193,9 @@ def mount(app: FastAPI) -> None:
         # _html_page no-cache/ETag handling. Neither needs _inject_head
         # -- there's no settings-driven content in either one.
         @app.get("/robots.txt", include_in_schema=False)
-        async def robots_txt(request: Request):
+        def robots_txt(request: Request):
             return _html_page(request, frontend_dir / "robots.txt", "robots.txt not bundled")
 
         @app.get("/sitemap.xml", include_in_schema=False)
-        async def sitemap_xml(request: Request):
+        def sitemap_xml(request: Request):
             return _html_page(request, frontend_dir / "sitemap.xml", "sitemap.xml not bundled")

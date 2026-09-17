@@ -6,7 +6,6 @@ drawn earlier in the week, then deactivated by a later seed reload).
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 
@@ -89,9 +88,7 @@ def test_inactive_place_excluded_from_viewport(conn, monkeypatch):
     _place(conn, 1, "summit", 43.0, -116.0, points=100, rotates=0, active=1)
     _place(conn, 2, "summit", 43.01, -116.01, points=100, rotates=0, active=0)
 
-    result = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
+    result = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
     ids = {p["id"] for p in json.loads(result.body)["places"]}
     assert ids == {1}
 
@@ -108,9 +105,7 @@ def test_inactive_place_excluded_even_with_a_stale_place_week_row(conn, monkeypa
     conn.execute("INSERT INTO place_week(week_start, place_id) VALUES (?, ?)", (WEEK, 1))
     conn.execute("INSERT INTO place_week(week_start, place_id) VALUES (?, ?)", (WEEK, 2))
 
-    result = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
+    result = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
     ids = {p["id"] for p in json.loads(result.body)["places"]}
     assert ids == {2}
 
@@ -121,7 +116,7 @@ def test_inactive_place_excluded_from_near_panel(conn, monkeypatch):
     _place(conn, 1, "landmark", 43.0, -116.0, points=5, rotates=0, active=1)
     _place(conn, 2, "landmark", 43.001, -116.001, points=5, rotates=0, active=0)
 
-    result = asyncio.run(places_near(request=_request(), lat=43.0, lon=-116.0, limit=20))
+    result = places_near(request=_request(), lat=43.0, lon=-116.0, limit=20)
     ids = {p["id"] for p in json.loads(result.body)["places"]}
     assert ids == {1}
 
@@ -152,9 +147,7 @@ def test_capped_viewport_thins_evenly_not_by_insertion_order(conn, monkeypatch):
     for i in range(101, 201):
         _place(conn, i, "summit", 43.0, -116.0, points=100)
 
-    result = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
+    result = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
     data = json.loads(result.body)
     ids = [p["id"] for p in data["places"]]
 
@@ -183,12 +176,8 @@ def test_capped_viewport_is_deterministic_across_repeated_calls(conn, monkeypatc
     for i in range(1, 201):
         _place(conn, i, "summit", 43.0, -116.0, points=100)
 
-    result_a = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
-    result_b = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
+    result_a = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
+    result_b = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
 
     ids_a = [p["id"] for p in json.loads(result_a.body)["places"]]
     ids_b = [p["id"] for p in json.loads(result_b.body)["places"]]
@@ -276,12 +265,8 @@ def test_repeated_viewport_request_within_ttl_uses_cache_not_db(conn, monkeypatc
     calls = _counting_connect(monkeypatch, conn)
     _place(conn, 1, "summit", 43.0, -116.0, points=100)
 
-    result_a = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
-    result_b = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
+    result_a = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
+    result_b = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
 
     assert calls["n"] == 1
     assert result_a.body == result_b.body
@@ -296,8 +281,8 @@ def test_near_requests_within_rounding_threshold_share_one_query(conn, monkeypat
     calls = _counting_connect(monkeypatch, conn)
     _place(conn, 1, "summit", 43.0, -116.0, points=100)
 
-    asyncio.run(places_near(request=_request(), lat=43.00001, lon=-116.00001, limit=20))
-    asyncio.run(places_near(request=_request(), lat=43.00004, lon=-116.00004, limit=20))
+    places_near(request=_request(), lat=43.00001, lon=-116.00001, limit=20)
+    places_near(request=_request(), lat=43.00004, lon=-116.00004, limit=20)
 
     assert calls["n"] == 1
 
@@ -311,8 +296,8 @@ def test_near_requests_above_rounding_threshold_produce_two_queries(conn, monkey
     calls = _counting_connect(monkeypatch, conn)
     _place(conn, 1, "summit", 43.0, -116.0, points=100)
 
-    asyncio.run(places_near(request=_request(), lat=43.000, lon=-116.000, limit=20))
-    asyncio.run(places_near(request=_request(), lat=43.010, lon=-116.010, limit=20))
+    places_near(request=_request(), lat=43.000, lon=-116.000, limit=20)
+    places_near(request=_request(), lat=43.010, lon=-116.010, limit=20)
 
     assert calls["n"] == 2
 
@@ -325,17 +310,13 @@ def test_if_none_match_returns_304(conn, monkeypatch):
     monkeypatch.setattr(places_api_module, "connect", lambda: conn)
     _place(conn, 1, "summit", 43.0, -116.0, points=100)
 
-    result = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
+    result = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
     etag = result.headers["etag"]
     assert etag
 
-    result2 = asyncio.run(
-        places_in_viewport(
-            request=_request(if_none_match=etag),
-            north=44.0, south=42.0, west=-117.0, east=-115.0,
-        )
+    result2 = places_in_viewport(
+        request=_request(if_none_match=etag),
+        north=44.0, south=42.0, west=-117.0, east=-115.0,
     )
     assert result2.status_code == 304
     assert result2.headers["etag"] == etag
@@ -350,12 +331,8 @@ def test_zero_ttl_disables_places_cache(conn, monkeypatch):
     monkeypatch.setattr(places_api_module.settings, "places_cache_seconds", 0)
     _place(conn, 1, "summit", 43.0, -116.0, points=100)
 
-    result_a = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
-    result_b = asyncio.run(
-        places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
-    )
+    result_a = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
+    result_b = places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0)
 
     assert calls["n"] == 2
     assert "cache-control" not in result_a.headers
@@ -373,6 +350,6 @@ def test_places_cache_eviction_bounded_at_max(conn, monkeypatch):
 
     over_cap = places_api_module._PLACES_CACHE_MAX + 50
     for i in range(over_cap):
-        asyncio.run(places_near(request=_request(), lat=i * 0.01, lon=-116.0, limit=1))
+        places_near(request=_request(), lat=i * 0.01, lon=-116.0, limit=1)
 
     assert len(places_api_module._PLACES_CACHE) == places_api_module._PLACES_CACHE_MAX

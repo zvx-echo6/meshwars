@@ -8,7 +8,6 @@ app/admin_api.py's token guard.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 
@@ -59,7 +58,7 @@ class _NonClosingConn:
 
 def test_no_notice_ever_saved_returns_none(conn, monkeypatch):
     monkeypatch.setattr(notice_api_module, "connect", lambda: conn)
-    result = asyncio.run(active_notice())
+    result = active_notice()
     assert json.loads(result.body) == {"notice": None}
 
 
@@ -67,7 +66,7 @@ def test_inactive_notice_returns_none(conn, monkeypatch):
     monkeypatch.setattr(notice_api_module, "connect", lambda: conn)
     _save(conn, "2026-08-25", "Scoring changed", "Read the rules page.", active=False)
 
-    result = asyncio.run(active_notice())
+    result = active_notice()
     assert json.loads(result.body) == {"notice": None}
 
 
@@ -76,7 +75,7 @@ def test_active_notice_returns_version_title_body(conn, monkeypatch):
     _save(conn, "2026-08-25", "Scoring changed",
           "Points now come from effort, not category.\nSee the rules page.", active=True)
 
-    result = asyncio.run(active_notice())
+    result = active_notice()
     data = json.loads(result.body)
     assert data == {
         "notice": {
@@ -104,7 +103,7 @@ def test_saving_again_overwrites_rather_than_accumulating(conn, monkeypatch):
     rows = conn.execute("SELECT * FROM notice").fetchall()
     assert len(rows) == 1
 
-    result = asyncio.run(active_notice())
+    result = active_notice()
     data = json.loads(result.body)
     assert data["notice"]["version_key"] == "2026-08-26"
     assert data["notice"]["title"] == "Scoring changed, take two"
@@ -119,10 +118,10 @@ def test_retiring_keeps_the_row_but_stops_serving_it(conn, monkeypatch):
     monkeypatch.setattr(notice_api_module, "connect", lambda: _NonClosingConn(conn))
 
     _save(conn, "2026-08-25", "Scoring changed", "Read the rules page.", active=True)
-    assert json.loads(asyncio.run(active_notice()).body)["notice"] is not None
+    assert json.loads(active_notice().body)["notice"] is not None
 
     _save(conn, "2026-08-25", "Scoring changed", "Read the rules page.", active=False)
-    assert json.loads(asyncio.run(active_notice()).body) == {"notice": None}
+    assert json.loads(active_notice().body) == {"notice": None}
 
     row = conn.execute("SELECT title, body FROM notice WHERE id = 1").fetchone()
     assert row["title"] == "Scoring changed"
