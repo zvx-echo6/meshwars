@@ -81,6 +81,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from . import discord_bot
 from .account_api import (
     _ACCOUNT_SCOPED_TABLES,
     _PLAYER_SCOPED_TABLES,
@@ -2653,6 +2654,16 @@ async def admin_set_team(request: Request):
         raise
     finally:
         conn.close()
+
+    # Discord role sync (app/discord_bot.py) -- fire-and-forget, after
+    # the commit above, never allowed to break, delay, or roll back an
+    # operator's team change. See app/join_api.py's switch_team() for
+    # the identical call on the player's own self-service path.
+    sync_conn = connect()
+    try:
+        await discord_bot.sync_member_safe(sync_conn, player_id)
+    finally:
+        sync_conn.close()
 
     log.info("admin: set player %d team to %s", player_id, team)
     return JSONResponse({"player_id": player_id, "team": team, "changed": True}, status_code=200)

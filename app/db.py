@@ -2151,6 +2151,342 @@ CREATE TABLE IF NOT EXISTS site_referrer_daily (
     views           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, referrer)
 );
+
+-- ---------------------------------------------------------------------
+-- Discord outbound announcements (app/discord_notify.py): end-of-month
+-- honors posted to a Discord webhook, through a durable outbox rather
+-- than a direct HTTP call at freeze time. Two things a direct call
+-- cannot give that this table exists for:
+--
+-- 1. EXACTLY ONCE, across restarts. `kind` names what is being
+--    announced ("month_honors" today, room for more later) and `key` is
+--    that announcement's own natural key ("2026-08:mc" -- month and
+--    protocol) -- the UNIQUE index on (kind, key) is what makes
+--    enqueue()'s INSERT OR IGNORE a no-op on a duplicate rather than a
+--    second post. Without it, a process restarting mid-drain, or the
+--    admin re-freeze route (app/admin_ops.py's POST
+--    /api/admin/month/freeze) calling app/results.py's freeze_month()
+--    again for a month already announced, would repost the same honors
+--    to the Discord channel every time.
+--
+-- 2. ENQUEUED INSIDE THE FREEZE TRANSACTION, not after it commits.
+--    app/results.py's freeze_month() calls discord_notify.enqueue()
+--    with the SAME `conn` it just wrote month_result/month_standing/
+--    month_award through, before that transaction's caller commits
+--    (app/db.py's WriteSession, or the admin route's own BEGIN
+--    IMMEDIATE/COMMIT) -- so a freeze that raises and rolls back takes
+--    this row with it. A month that never actually froze can never be
+--    announced; there is no window where the outbox has a row for a
+--    result the database does not.
+--
+-- posted_at IS NULL means pending -- picked up by run_forever()'s poll
+-- loop, which does the actual HTTP POST OUTSIDE any WriteSession (a
+-- webhook call is not database work and must never hold the single
+-- global write lock while it waits on the network) and only takes the
+-- lock afterward, briefly, to record the outcome. attempts/last_error
+-- let a permanently-failing row (a revoked webhook, a deleted channel)
+-- stop retrying forever rather than spinning every poll interval --
+-- see settings.discord_outbox_max_attempts and
+-- discord_outbox_max_age_hours in app/config.py for the two independent
+-- reasons a pending row is skipped rather than posted.
+CREATE TABLE IF NOT EXISTS discord_outbox (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    posted_at   INTEGER,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discord_outbox_key ON discord_outbox(kind, key);
+
+-- Singleton, same upsert-by-fixed-id shape as `checkin_config` and
+-- `freqmapper_config` above -- read FRESH by app/discord_notify.py's
+-- load_discord_config() every time it is needed (enqueue(), the drain
+-- loop, build_month_honors_embed()), never cached in the process, so an
+-- admin edit through app/admin_ops.py's /api/admin/discord takes effect
+-- on the very next freeze or drain cycle, no restart. Before this table
+-- existed, every one of these five values lived only in settings.py
+-- (DISCORD_WEBHOOK_ANNOUNCEMENTS, DISCORD_WEBHOOK_USERNAME,
+-- DISCORD_TEAM_EMOJI) and changing any of them meant editing .env and
+-- redeploying -- the owner's "build everything editable, no black
+-- boxes" rule this table exists to satisfy.
+-- seed_discord_config_from_env (app/discord_notify.py, called from
+-- init_db() below) bootstraps webhook_url/username/team_emoji from
+-- those same settings.py values the first time this row is ever
+-- touched, the exact same guarded-by-updated_at pattern
+-- app/checkin.py's seed_nets_from_env and
+-- app/freqmapper_ingest.py's seed_freqmapper_config_from_env already
+-- use for their own singletons, so deploying this table changes NO
+-- behavior for a deployment that already had a webhook configured via
+-- .env: `enabled` is seeded to 1 whenever that seed finds a non-empty
+-- webhook (settings.py itself never had a separate enabled/disabled
+-- toggle -- "a webhook is configured" WAS the on/off switch, so the
+-- seed reconstructs the same on/off state as a real column instead of
+-- silently defaulting to off underneath an already-live deployment).
+-- webhook_url is a SECRET (see freqmapper_config's own comment on
+-- api_key for the general rule this follows -- a Discord webhook URL
+-- carries its own bearer auth token in the path): never returned by any
+-- route, only a webhook_set boolean plus a last-4-characters hint
+-- (app/admin_ops.py's _scrub_discord_secrets). An ABSENT or blank
+-- webhook_url in a POST /api/admin/discord body leaves the stored value
+-- UNCHANGED rather than wiping it -- the exact same api_key-vs-
+-- clear_api_key contract app/admin_ops.py's POST /api/admin/paint
+-- already applies to freqmapper_config.api_key (see that route's own
+-- docstring); clear_webhook is the explicit way to actually blank it.
+-- announce_month_honors is a SEPARATE toggle from `enabled`, checked
+-- only for the automatic end-of-month announcement
+-- (app/discord_notify.py's enqueue(), kind="month_honors"): an operator
+-- can leave the webhook enabled -- so a manual test announcement
+-- (kind="test", from POST /api/admin/discord/test) still goes out --
+-- while turning off the automatic monthly post on its own. Defaults to
+-- 1 (on): this reproduces exactly the always-on behavior every
+-- deployment already had before this toggle existed, the same
+-- "deploying this changes nothing" contract every other seeded default
+-- in this table follows.
+CREATE TABLE IF NOT EXISTS discord_config (
+    id                         INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled                    INTEGER NOT NULL DEFAULT 0,
+    webhook_url                TEXT NOT NULL DEFAULT '',
+    username                   TEXT NOT NULL DEFAULT '',
+    team_emoji                 TEXT NOT NULL DEFAULT '',
+    announce_month_honors      INTEGER NOT NULL DEFAULT 1,
+    -- Per-kind gate for season closes (app/mc_scoring.py's
+    -- maybe_roll_season()) -- same "separate from `enabled`, on by
+    -- default" shape announce_month_honors already established: an
+    -- operator who never visits /api/admin/discord to turn a new kind
+    -- off keeps getting it, and either can be switched off without
+    -- touching the webhook or any other kind. See MIGRATIONS below --
+    -- discord_config already existed in every deployment before this
+    -- column did, so an ALTER is also required there, not just here.
+    announce_season_close      INTEGER NOT NULL DEFAULT 1,
+    -- SUPERSEDED 2026-09-16 by announce_weekly_recap below: this used to
+    -- gate a per-activation "notable place activation" announcement
+    -- (app/place_scoring.py's credit_places(), app/discord_notify.py's
+    -- since-removed build_place_activation_embed()/
+    -- place_activation_notability()), retired for being too frequent
+    -- (~373/month) and for announcing a player's location within minutes
+    -- of them reaching it -- see credit_places()'s own comment on the
+    -- removal. Column LEFT IN PLACE, per this codebase's "never drop a
+    -- column" rule (place_activation.points_reason's own comment states
+    -- the same rule for a different table) -- but nothing reads it any
+    -- more; app/discord_notify.py's load_discord_config() no longer even
+    -- selects it, and no admin route accepts or returns it.
+    announce_place_activation  INTEGER NOT NULL DEFAULT 1,
+    -- The Sunday weekly recap (app/discord_notify.py's
+    -- weekly_recap_provider(), a TIME_DRIVEN_PROVIDERS entry) that
+    -- replaced announce_place_activation's old per-event announcement
+    -- above -- same independent, on-by-default, separate-from-`enabled`
+    -- shape as every other per-kind gate in this table.
+    announce_weekly_recap      INTEGER NOT NULL DEFAULT 1,
+    -- Per-net wrap-up (app/discord_notify.py's net_wrapup_provider(), a
+    -- TIME_DRIVEN_PROVIDERS entry, kind="net_wrapup:<checkin_net.id>") --
+    -- same independent, on-by-default, separate-from-`enabled` shape as
+    -- every other per-kind gate in this table. ONE toggle gates every
+    -- net's wrap-up; an operator who wants only SOME nets to post routes
+    -- the rest to a disabled discord_channel row instead (see that
+    -- table's own comment) rather than this column growing a per-net
+    -- flag of its own.
+    announce_net_wrapup        INTEGER NOT NULL DEFAULT 1,
+    -- Discord ROLE sync (app/discord_bot.py), an entirely separate
+    -- feature from every announce_* toggle above (those gate what the
+    -- WEBHOOK posts; this gates what the BOT does to guild members'
+    -- roles). guild_id is non-secret and seeded from DISCORD_GUILD_ID
+    -- the same one-time way webhook_url/username/team_emoji already
+    -- are (seed_discord_config_from_env(), app/discord_notify.py).
+    -- roles_enabled defaults to 0 (OFF), unlike every announce_*
+    -- column's opt-out default -- see the MIGRATIONS entry for this
+    -- same pair of columns for why.
+    guild_id                   TEXT NOT NULL DEFAULT '',
+    roles_enabled              INTEGER NOT NULL DEFAULT 0,
+    -- Private per-team text channels (app/discord_bot.py's
+    -- ensure_team_channels()), layered on TOP of role sync above --
+    -- pointless without a team role to gate a channel's overwrites on,
+    -- so this is gated by roles_enabled/guild_id/the bot token as well
+    -- as its own toggle (see that function's own docstring). Same
+    -- "defaults to 0 (OFF), needs an operator to actually run the
+    -- ensure step" reasoning roles_enabled's own comment above gives --
+    -- a database gaining this column must never start creating Discord
+    -- channels on its own.
+    team_channels_enabled      INTEGER NOT NULL DEFAULT 0,
+    -- The category (Discord's own "channel type 4," a folder of
+    -- channels) ensure_team_channels() creates/finds team channels
+    -- under. Non-secret, admin-editable, plain text -- same shape as
+    -- guild_id above. Defaults to 'Teams' so a deployment that turns
+    -- team_channels_enabled on without first visiting
+    -- /api/admin/discord to rename it still gets a sensible category.
+    team_category_name         TEXT NOT NULL DEFAULT 'Teams',
+    -- The category's discovered Discord id, remembered the exact same
+    -- "found or created once, reused forever after" way
+    -- discord_team_role.role_id already is for a team role -- see that
+    -- table's own comment. Nullable: NULL until ensure_team_channels()
+    -- has actually run once. Not admin-editable directly (an operator
+    -- edits team_category_name instead; this column is this app's own
+    -- bookkeeping, repaired automatically if the category is ever
+    -- renamed or deleted by hand).
+    team_category_id           TEXT,
+    -- Discord slash commands (app/discord_interactions.py), HTTP
+    -- Interactions -- a FOURTH, separate Discord integration from the
+    -- three above (this table's own webhook/role/channel fields):
+    -- Discord POSTs each command straight to POST
+    -- /api/discord/interactions and this app answers in the HTTP
+    -- response, no gateway connection. Defaults to 0 (OFF), same
+    -- "must never turn itself on the moment a database happens to gain
+    -- this column" reasoning roles_enabled's own comment above gives --
+    -- an operator must deploy the endpoint AND enable it here BEFORE
+    -- pasting the interactions URL into Discord's developer portal,
+    -- since Discord verifies that URL immediately and refuses to save
+    -- it otherwise (see app/discord_interactions.py's own module
+    -- docstring). app_id and public_key are both non-secret (shown in
+    -- Discord's own developer portal to anyone who can see the
+    -- application) and seeded from DISCORD_APP_ID/DISCORD_PUBLIC_KEY
+    -- the same one-time way guild_id seeds from DISCORD_GUILD_ID. The
+    -- bot token used to REGISTER commands (app/discord_bot.py's
+    -- register_commands()) is discord_bot_token, environment-only,
+    -- same as every other use of it in this table -- never stored here.
+    slash_enabled               INTEGER NOT NULL DEFAULT 0,
+    app_id                      TEXT NOT NULL DEFAULT '',
+    public_key                  TEXT NOT NULL DEFAULT '',
+    -- The pinned, self-editing leaderboard (app/discord_leaderboard.py) --
+    -- a FIFTH, separate Discord feature layered on top of the webhook
+    -- (posts/edits through it, same as every announce_* kind above) AND
+    -- the bot (pins the message it posts, same DISCORD_BOT_TOKEN role
+    -- sync already authenticates with -- see discord_team_role's own
+    -- comment). Same "must never turn itself on the moment a database
+    -- happens to gain this column" reasoning as roles_enabled/
+    -- slash_enabled above: defaults to 0 (OFF). leaderboard_interval_
+    -- seconds is its OWN gate, separate from
+    -- settings.discord_outbox_poll_interval_seconds -- a leaderboard
+    -- pass reads every board's live standings and three Top Operators
+    -- rankings, real work compared to the outbox's own cheap table scan,
+    -- so it rides run_forever()'s existing loop (same "one background
+    -- loop, its own interval gate" shape maybe_reconcile_roles() already
+    -- uses) rather than running every single 30s cycle. Defaults to 600
+    -- (10 minutes) -- frequent enough that a fresh capture shows up
+    -- promptly, far below Discord's own per-webhook rate limit for a
+    -- single edited message. leaderboard_top_n caps each of the three
+    -- Top Operators lists the leaderboard embeds show (Wardrivers/
+    -- NetOps/Explorer -- see app/discord_leaderboard.py's own module
+    -- docstring), independent of those helpers' own internal top-20 cap
+    -- in app/mc_api.py. Defaults to 5 -- short enough that three lists
+    -- plus a full standings table comfortably fit one message's field
+    -- budget (see app/discord_notify.py's _MAX_EMBED_FIELDS/
+    -- _MAX_TOTAL_EMBED_CHARS, reused as-is by the leaderboard).
+    leaderboard_enabled          INTEGER NOT NULL DEFAULT 0,
+    leaderboard_interval_seconds INTEGER NOT NULL DEFAULT 600,
+    leaderboard_top_n            INTEGER NOT NULL DEFAULT 5,
+    updated_at                 INTEGER NOT NULL DEFAULT 0
+);
+
+-- Per-kind Discord channel routing, on top of discord_config's own
+-- single default webhook above. `kind` matches discord_outbox.kind (a
+-- plain announcement kind like "month_honors", or a colon-scoped one
+-- like a future "net_wrapup:12" -- see app/discord_notify.py's
+-- _channel_kind_candidates() for how a scoped kind resolves against
+-- both a per-instance row and the generic one before falling back
+-- here). No row for a kind at all is the common case and means "use
+-- discord_config.webhook_url", exactly the one-channel behavior every
+-- deployment already has -- this table only needs a row once an
+-- operator actually wants a kind to go somewhere else.
+--
+-- `enabled` is NOT "fall back to the default when off". It means "do
+-- not announce this kind at all" -- a deliberate, explicit distinction
+-- from a MISSING row (which does fall back): an operator flipping a
+-- kind off is choosing silence for that kind, and silently posting it
+-- to the main channel anyway would be exactly the wrong behavior at
+-- exactly the moment they asked for the opposite. See
+-- app/discord_notify.py's resolve_discord_webhook() for the one place
+-- that implements this rule.
+--
+-- webhook_url is a SECRET, same treatment as discord_config.webhook_url
+-- above (never returned by any route, only a webhook_set boolean plus a
+-- last-4 hint -- app/admin_ops.py's _scrub_discord_secrets). An ABSENT
+-- or blank webhook_url in a POST /api/admin/discord/channel body leaves
+-- a row's stored value UNCHANGED, same clear_webhook-to-actually-blank-it
+-- contract discord_config's own POST route already uses.
+--
+-- Resolved FRESH at POST time, in the drain loop, never at enqueue
+-- time, and NEVER stored on the discord_outbox row itself -- see
+-- app/discord_notify.py's _drain_once() for the reasoning: a pending
+-- row must follow an operator's later channel move, not the channel
+-- that happened to be configured the moment it was queued.
+CREATE TABLE IF NOT EXISTS discord_channel (
+    kind        TEXT PRIMARY KEY,
+    webhook_url TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  INTEGER NOT NULL DEFAULT 0
+);
+
+-- Discord ROLE sync (app/discord_bot.py -- "Herald," a separate Discord
+-- integration from the webhook announcements above: this one
+-- authenticates as a bot, via DISCORD_BOT_TOKEN, and never posts a
+-- message at all). One row per MeshWars team, remembering the Discord
+-- role id app/discord_bot.py's ensure_team_roles() created (or
+-- adopted, if a same-named role already existed) for that team, so a
+-- role is discovered ONCE and reused forever after rather than
+-- ensure_team_roles() searching the guild's role list by name on every
+-- call, and so app/discord_bot.py's sync_member() knows which of a
+-- member's current roles are "team roles" at all (any id in this
+-- table) versus some other role this bot must never touch (moderator,
+-- booster, anything else the guild has). `team` matches the keys of
+-- app/discord_notify.py's own _TEAM_COLORS palette (RED, GREEN, ...)
+-- -- reused verbatim rather than a second copy, so the two can never
+-- name a different set of teams. discord_config.guild_id/roles_enabled
+-- (below) are the other two pieces of this feature's config; both live
+-- there rather than a third table, following that singleton's own
+-- existing "one config row per Discord feature" shape.
+--
+-- channel_id (nullable): the private team-channel app/discord_bot.py's
+-- ensure_team_channels() created (or adopted) for this team, once an
+-- operator has also turned on discord_config.team_channels_enabled --
+-- the SAME row that already remembers a team's role id remembers its
+-- channel id too, rather than a second table, since both are
+-- discovered/repaired by the same "find by id, else by name, else
+-- create" pass and always travel together. NULL until
+-- ensure_team_channels() has actually run for this team (a fresh
+-- install, or one that has only ever used role sync, never touches
+-- this column).
+CREATE TABLE IF NOT EXISTS discord_team_role (
+    team        TEXT PRIMARY KEY,
+    role_id     TEXT NOT NULL,
+    channel_id  TEXT,
+    updated_at  INTEGER NOT NULL
+);
+
+-- The ONE pinned, self-editing leaderboard message app/discord_leaderboard.py
+-- maintains (`kind` is always "leaderboard" today, but the column is a
+-- free-form key rather than a fixed value so a future second pinned
+-- message -- a per-net board, say -- can share this same table instead
+-- of a near-duplicate one). webhook_id is the webhook's own numeric id,
+-- PARSED from its URL, never the URL or its token itself: the token
+-- already lives in discord_config.webhook_url/discord_channel.webhook_url
+-- (both already SECRETS -- see discord_config's own comment), and this
+-- table exists purely to remember WHICH message to edit next, which
+-- needs no credential at all -- only channel_id/message_id (bot API
+-- targets, both non-secret, same reasoning discord_team_role.channel_id
+-- already gives) and webhook_id (compared against a freshly resolved
+-- webhook's own parsed id on every pass, to detect an operator moving
+-- the leaderboard to a different webhook -- see that module's own
+-- docstring for what happens then). content_hash is the SHA-256 of the
+-- message body MINUS its own "as of" timestamp line (see that module's
+-- own docstring for why the timestamp itself is excluded from the hash
+-- it gates) -- an unchanged hash means "don't PATCH," the whole point of
+-- a pinned message that edits itself instead of spamming a new post
+-- every interval. pinned is a plain 0/1 the bot sets after a successful
+-- pin attempt, never assumed -- a missing bot token or a missing Pin
+-- Messages permission must never fail the whole pass (see that module's
+-- own docstring), it only ever leaves this at 0 so the admin panel can
+-- say "not pinned" honestly.
+CREATE TABLE IF NOT EXISTS discord_pinned_message (
+    kind          TEXT PRIMARY KEY,
+    webhook_id    TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,
+    message_id    TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    updated_at    INTEGER NOT NULL
+);
 """
 
 
@@ -2672,6 +3008,100 @@ MIGRATIONS = [
     # historical rows are ever NULL going forward.
     "ALTER TABLE mc_checkin_award ADD COLUMN net_id INTEGER",
     "CREATE INDEX IF NOT EXISTS idx_mc_checkin_award_net ON mc_checkin_award(net_id, player_id, net_date)",
+    # Seed the discord_config singleton with the defaults every fresh
+    # column above already carries, so the row exists unconditionally
+    # from the first boot after this migration runs -- same reasoning as
+    # checkin_config's and freqmapper_config's own "INSERT OR
+    # IGNORE...VALUES (1)" migrations above: app/discord_notify.py's
+    # load_discord_config() and app/admin_ops.py's discord routes both
+    # assume it is always there. INSERT OR IGNORE:
+    # seed_discord_config_from_env() (called from init_db() below) is
+    # what actually populates webhook_url/username/team_emoji from
+    # settings.py on a truly fresh install; this migration only has to
+    # guarantee the row EXISTS, not what it holds.
+    "INSERT OR IGNORE INTO discord_config(id) VALUES (1)",
+    # announce_season_close / announce_place_activation added after
+    # discord_config already shipped and was live in every deployment
+    # (unlike announce_month_honors, which landed in the same CREATE
+    # TABLE as the rest of this table's columns and so never needed a
+    # migration of its own) -- same situation as place.rotates/active
+    # above, an ALTER is required here too. Default to 1 (on), matching
+    # announce_month_honors's own default: an operator who never visits
+    # /api/admin/discord to turn one of these off keeps getting both new
+    # kinds announced, the same "opt-out, not opt-in" behavior every
+    # existing announcement kind already has.
+    "ALTER TABLE discord_config ADD COLUMN announce_season_close INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE discord_config ADD COLUMN announce_place_activation INTEGER NOT NULL DEFAULT 1",
+    # announce_weekly_recap: same "added after discord_config already
+    # shipped, so an ALTER is required" situation as the two columns just
+    # above -- see this column's own comment on the CREATE TABLE above
+    # for what it replaced (announce_place_activation's old per-event
+    # announcement) and why. Default 1 (on), same "opt-out, not opt-in"
+    # reasoning as every other announcement kind.
+    "ALTER TABLE discord_config ADD COLUMN announce_weekly_recap INTEGER NOT NULL DEFAULT 1",
+    # announce_net_wrapup: same "added after discord_config already
+    # shipped, so an ALTER is required" situation as the three columns
+    # above -- see this column's own comment on the CREATE TABLE above.
+    # Default 1 (on), same "opt-out, not opt-in" reasoning as every other
+    # announcement kind.
+    "ALTER TABLE discord_config ADD COLUMN announce_net_wrapup INTEGER NOT NULL DEFAULT 1",
+    # guild_id / roles_enabled: app/discord_bot.py's Discord ROLE sync
+    # feature, added after discord_config already shipped -- same
+    # "an ALTER is required here too" situation as every column above.
+    # guild_id is non-secret (a Discord guild id is just a number
+    # visible to anyone in the server, same as a channel id) and is
+    # seeded from DISCORD_GUILD_ID the same one-time,
+    # guarded-by-updated_at way webhook_url/username/team_emoji already
+    # are (see app/discord_notify.py's seed_discord_config_from_env()).
+    # roles_enabled defaults to 0 (OFF) -- deliberately NOT the
+    # "opt-out, not opt-in" default every announce_* column above uses:
+    # this feature needs a bot token AND a guild id AND an operator to
+    # have actually run "Create / repair team roles" before it can do
+    # anything sensible, so it must never turn itself on the moment a
+    # database happens to gain this column.
+    "ALTER TABLE discord_config ADD COLUMN guild_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE discord_config ADD COLUMN roles_enabled INTEGER NOT NULL DEFAULT 0",
+    # team_channels_enabled / team_category_name / team_category_id:
+    # app/discord_bot.py's private-team-channels feature, added after
+    # discord_config already shipped -- same "an ALTER is required here
+    # too" situation as every column above. team_channels_enabled
+    # defaults to 0 (OFF), same "must never turn itself on the moment a
+    # database happens to gain this column" reasoning as roles_enabled's
+    # own migration entry above. team_category_name defaults to the same
+    # 'Teams' the CREATE TABLE default above uses. team_category_id is
+    # nullable -- see discord_config's own comment on the CREATE TABLE
+    # above for why (this app's own discovered-id bookkeeping, not an
+    # operator-set value).
+    "ALTER TABLE discord_config ADD COLUMN team_channels_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE discord_config ADD COLUMN team_category_name TEXT NOT NULL DEFAULT 'Teams'",
+    "ALTER TABLE discord_config ADD COLUMN team_category_id TEXT",
+    # discord_team_role.channel_id: the matching per-team migration for
+    # the column discord_team_role's own CREATE TABLE comment above
+    # describes -- nullable, same reasoning.
+    "ALTER TABLE discord_team_role ADD COLUMN channel_id TEXT",
+    # slash_enabled / app_id / public_key: app/discord_interactions.py's
+    # HTTP-Interactions slash commands, added after discord_config
+    # already shipped -- same "an ALTER is required here too" situation
+    # as every column above. slash_enabled defaults to 0 (OFF), same
+    # "must never turn itself on the moment a database happens to gain
+    # this column" reasoning as roles_enabled's own migration entry
+    # above -- see that column's own CREATE TABLE comment for why this
+    # one especially must stay an explicit opt-in (Discord verifies the
+    # endpoint URL the moment it is pasted into the developer portal).
+    # app_id/public_key are non-secret and nullable-as-empty-string,
+    # same shape as guild_id.
+    "ALTER TABLE discord_config ADD COLUMN slash_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE discord_config ADD COLUMN app_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE discord_config ADD COLUMN public_key TEXT NOT NULL DEFAULT ''",
+    # leaderboard_enabled / leaderboard_interval_seconds / leaderboard_top_n:
+    # app/discord_leaderboard.py's pinned leaderboard, added after
+    # discord_config already shipped -- same "an ALTER is required here
+    # too" situation as every column above. Same defaults as the CREATE
+    # TABLE above (see that column's own comment): off by default, a
+    # 10-minute pass interval, top 5 per Top Operators list.
+    "ALTER TABLE discord_config ADD COLUMN leaderboard_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE discord_config ADD COLUMN leaderboard_interval_seconds INTEGER NOT NULL DEFAULT 600",
+    "ALTER TABLE discord_config ADD COLUMN leaderboard_top_n INTEGER NOT NULL DEFAULT 5",
 ]
 
 PRAGMAS = [
@@ -3254,6 +3684,21 @@ def init_db() -> None:
             seed_freqmapper_config_from_env(conn)
         except Exception:
             log.exception("freqmapper: seed_freqmapper_config_from_env failed -- config may be unseeded")
+
+        # Discord announcements (app/discord_notify.py): the same
+        # one-time bootstrap shape as seed_freqmapper_config_from_env
+        # just above, migrating settings.py's discord_webhook_*/
+        # discord_team_emoji values onto the discord_config singleton so
+        # an operator can edit them through app/admin_ops.py's
+        # /api/admin/discord without a restart or an env-var edit. Local
+        # import, same circular-import reason as freqmapper_ingest.py's
+        # own import just above (discord_notify.py imports WriteSession
+        # from this module).
+        try:
+            from .discord_notify import seed_discord_config_from_env
+            seed_discord_config_from_env(conn)
+        except Exception:
+            log.exception("discord: seed_discord_config_from_env failed -- config may be unseeded")
     finally:
         conn.close()
 

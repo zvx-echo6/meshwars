@@ -247,7 +247,7 @@ def _windowed_captures(conn: sqlite3.Connection, protocol: str, start: int, end:
     return out
 
 
-def _ownership_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> list[sqlite3.Row]:
+def ownership_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> list[sqlite3.Row]:
     """Who owns every square at `at_ts`: one row per cell, carrying the
     owning team and the player whose paint put it there.
 
@@ -257,10 +257,19 @@ def _ownership_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> list[s
     Scoped to the season active at that instant, because a season
     boundary clears the board and counting across one is meaningless.
 
-    Three things read this: the standings (grouped by team -- the same
+    Named WITHOUT a leading underscore (unlike most of this module's
+    other helpers) because app/discord_notify.py's weekly recap
+    (_weekly_placement_section()) now calls this cross-module, at the
+    window's two endpoints, to answer "how did each team's standing
+    move this week" without writing a second standings query -- see
+    that function's own docstring. Every in-module caller below is
+    unaffected by the rename.
+
+    Four things read this: the standings (grouped by team -- the same
     figure the scoreboard shows), Empire Builder (grouped by player, so
-    the per-player numbers add up to the team's own), and Longest Road
-    (the cell ids themselves).
+    the per-player numbers add up to the team's own), Longest Road (the
+    cell ids themselves), and the weekly recap's own placement-changes
+    section, cross-module, as above.
     """
     season = conn.execute(
         "SELECT id FROM mc_season "
@@ -502,7 +511,7 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
     # is what the preview on a preview host shows.
     # end is the first instant of the NEXT month, so the close is end-1.
     at = min(end - 1, now if now is not None else int(time.time()))
-    ownership = _ownership_at(conn, protocol, at)
+    ownership = ownership_at(conn, protocol, at)
     held: dict[str, int] = {}
     held_by_player: dict[int, int] = {}
     cells_by_team: dict[str, set[tuple[int, int]]] = {}
@@ -743,7 +752,32 @@ def compute_month(conn: sqlite3.Connection, protocol: str, month: str,
 
 
 def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) -> None:
-    """Write a finished month's result. Caller holds the write lock."""
+    """Write a finished month's result. Caller holds the write lock.
+
+    Also called directly by the admin re-freeze route
+    (app/admin_ops.py's POST /api/admin/month/freeze), to recompute a
+    month whose history was wrong or that closed while the service was
+    down -- not just from the ordinary catch-up path below
+    (maybe_roll_months()). Confirmed: that route holds no other write
+    path to month_result/month_standing/month_award, so every write
+    this function makes -- announcement included -- goes through here
+    every time, whether this is the month's first freeze or its tenth.
+
+    The Discord announcement enqueued below rides on that same fact.
+    discord_notify.enqueue()'s INSERT OR IGNORE is keyed on
+    (kind="month_honors", key=f"{month}:{protocol}") -- a re-freeze of
+    an already-announced month enqueues the identical key and is
+    silently dropped, so the admin re-freeze route can correct a
+    month's history as many times as it needs to without ever
+    reposting the same honors to Discord.
+    """
+    # Local import: app/discord_notify.py imports THIS module at module
+    # level (for AWARD_LABELS, in build_month_honors_embed) -- importing
+    # it back here at module level would be a circular import. Deferred
+    # to inside this function instead, which costs nothing: freeze_month
+    # runs at most a handful of times a month.
+    from . import discord_notify
+
     result = compute_month(conn, protocol, month, now)
     conn.execute("INSERT OR REPLACE INTO month_result(month, protocol, closed_at) VALUES (?, ?, ?)",
                  (month, protocol, now))
@@ -763,6 +797,19 @@ def freeze_month(conn: sqlite3.Connection, protocol: str, month: str, now: int) 
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (month, protocol, a["award"], a["scope"], a["player_id"], a["team"], a["value"], a["detail"]),
         )
+
+    # Enqueued on THIS SAME conn, inside the caller's still-open
+    # transaction -- see app/db.py's discord_outbox comment and
+    # app/discord_notify.py's enqueue() docstring: a freeze that raises
+    # after this point rolls back the whole transaction, this row
+    # included, so a month that never actually froze can never be
+    # announced.
+    discord_notify.enqueue(
+        conn, kind="month_honors", key=f"{month}:{protocol}",
+        payload=discord_notify.build_month_honors_embed(conn, month, protocol, result),
+        now=now,
+    )
+
     log.info("results: froze %s for %s (%d awards)", month, protocol, len(result["awards"]))
 
 
@@ -936,7 +983,7 @@ def _point_feature(lat: float, lon: float, props: dict) -> dict:
 def _road_geometry(conn, protocol, at, team):
     """The winning team's longest chain, as the squares along it."""
     by_team: dict[str, set[tuple[int, int]]] = {}
-    for row in _ownership_at(conn, protocol, at):
+    for row in ownership_at(conn, protocol, at):
         xy = _cell_xy(row["cell_id"])
         if xy is not None:
             by_team.setdefault(row["team"], set()).add(xy)

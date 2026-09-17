@@ -54,6 +54,7 @@ from .client_ip import get_client_ip
 from .clientlog_api import router as clientlog_router
 from .config import settings
 from .db import connect
+from .discord_interactions import router as discord_interactions_router
 from .join_api import router as join_router
 from .mc_api import router as mc_router
 from .mc_ingest import hash_secret, log_raw_batch
@@ -1051,6 +1052,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(places_router)
     app.include_router(notice_router)
     app.include_router(clientlog_router)
+    app.include_router(discord_interactions_router)
 
     # Static frontend
     frontend_dir = Path(__file__).resolve().parent.parent / "frontend"

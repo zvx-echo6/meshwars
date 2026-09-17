@@ -37,7 +37,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import mc_api, results
+from . import discord_bot, discord_leaderboard, discord_notify, mc_api, results
 from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
     checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
@@ -1652,6 +1652,807 @@ async def admin_notice_save(request: Request):
         "active": active,
         "updated_at": now,
     })
+
+
+# ---- Discord announcements (app/db.py's discord_config/discord_outbox,
+# app/discord_notify.py, app/discord_bot.py, app/discord_leaderboard.py) --
+
+
+def _scrub_discord_secrets(cfg: dict) -> dict:
+    """Never let discord_config.webhook_url leave this process in a
+    JSON response -- same rule, same shape as _scrub_freqmapper_secrets
+    above for freqmapper_config.api_key. Replaced with a webhook_set
+    boolean plus a last-4-characters hint (enough for an operator to
+    recognize "yes, that's the one I pasted in" without ever showing
+    the credential itself); every other field passes through unchanged.
+    """
+    out = dict(cfg)
+    url = out.pop("webhook_url", "") or ""
+    out["webhook_set"] = bool(url)
+    out["webhook_hint"] = url[-4:] if url else ""
+    return out
+
+
+def _scrub_discord_channel(row: dict) -> dict:
+    """Same never-return-the-real-URL rule as _scrub_discord_secrets()
+    above, applied to one discord_channel row: kind, enabled,
+    webhook_set, webhook_hint (last 4 characters), updated_at. Used by
+    GET /api/admin/discord for every row in the routing table -- a
+    per-kind webhook is exactly as much a bearer credential as
+    discord_config's own default one (see app/discord_notify.py's module
+    docstring), so it gets the identical treatment, never the real
+    value, no matter which table it lives in.
+    """
+    url = row.get("webhook_url") or ""
+    return {
+        "kind": row["kind"],
+        "enabled": bool(row["enabled"]),
+        "webhook_set": bool(url),
+        "webhook_hint": url[-4:] if url else "",
+        "updated_at": row.get("updated_at", 0),
+    }
+
+
+@router.get("/api/admin/discord")
+async def admin_discord(request: Request):
+    """Current Discord announcement config (secret scrubbed) plus
+    outbox health, for the admin panel's Discord section. config comes
+    from load_discord_config (app/discord_notify.py) -- the same
+    fresh-every-read singleton enqueue()/the drain loop/
+    build_month_honors_embed() all read, never settings.py, so what
+    this route returns is exactly what the next freeze or drain cycle
+    will act on. `failed` is a SUBSET of `pending` (attempts > 0 AND
+    posted_at IS NULL) -- a row that has failed at least once but has
+    not yet hit discord_outbox_max_attempts is both pending (still
+    eligible to be retried) and failed (the last attempt did not
+    succeed); this is not a disjoint three-way split. `recent` is the
+    most recent 10 outbox rows regardless of status, newest first --
+    last_error is safe to show here, it is Discord's own response text
+    describing what was wrong with the payload this app sent, never a
+    credential (see app/discord_notify.py's module docstring).
+
+    `channels` is every discord_channel row (app/discord_notify.py's
+    load_discord_channels()), each scrubbed by _scrub_discord_channel()
+    above -- same never-return-the-real-webhook rule as `config` itself,
+    sorted by kind so the admin table renders in a stable order across
+    reloads rather than shuffling with SQLite's own unspecified row
+    order.
+
+    `config.bot_token_set` is app/discord_bot.py's role-sync bot token
+    (settings.discord_bot_token) -- NEVER the token itself, only whether
+    one is configured, same never-return-the-real-secret rule as every
+    webhook field on this same response, except this one lives in the
+    environment, not discord_config, so it isn't already covered by
+    _scrub_discord_secrets(). `team_roles` is every discord_team_role
+    row (team, role_id, channel_id, updated_at) -- neither a role id nor
+    a channel id is a credential (visible to anyone in the server who
+    can see that role/channel at all), so both are returned as-is;
+    channel_id is NULL/None until ensure_team_channels() has actually
+    run for that team. `config` also carries team_channels_enabled/
+    team_category_name/team_category_id straight through from
+    load_discord_config() -- none of the three is a secret either, same
+    reasoning as guild_id. `last_reconcile` is app/discord_bot.py's
+    get_last_reconcile() -- the most recent reconcile pass, manual or
+    scheduled, process-local (see that function's own docstring for why
+    it doesn't survive a restart). `leaderboard` is
+    app/discord_leaderboard.py's leaderboard_admin_status() -- whether
+    the pinned leaderboard message has ever been posted, a jump link,
+    pinned yes/no, and when its content last changed; the three plain
+    leaderboard_* config fields themselves already come through
+    unscrubbed in `config` above, same as guild_id.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    conn = connect()
+    try:
+        cfg = discord_notify.load_discord_config(conn)
+        channels = discord_notify.load_discord_channels(conn)
+        pending = conn.execute(
+            "SELECT count(*) FROM discord_outbox WHERE posted_at IS NULL"
+        ).fetchone()[0]
+        posted = conn.execute(
+            "SELECT count(*) FROM discord_outbox WHERE posted_at IS NOT NULL"
+        ).fetchone()[0]
+        failed = conn.execute(
+            "SELECT count(*) FROM discord_outbox WHERE attempts > 0 AND posted_at IS NULL"
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, kind, key, posted_at, attempts, last_error FROM discord_outbox "
+            " ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        team_roles = conn.execute(
+            "SELECT team, role_id, channel_id, updated_at FROM discord_team_role ORDER BY team"
+        ).fetchall()
+        leaderboard_status = discord_leaderboard.leaderboard_admin_status(conn, cfg)
+    finally:
+        conn.close()
+    config_out = _scrub_discord_secrets(cfg)
+    config_out["bot_token_set"] = bool(settings.discord_bot_token)
+    base_url = (settings.oauth_public_base_url or "").rstrip("/")
+    return JSONResponse({
+        "config": config_out,
+        "channels": [_scrub_discord_channel(c) for _, c in sorted(channels.items())],
+        "team_roles": [dict(r) for r in team_roles],
+        "last_reconcile": discord_bot.get_last_reconcile(),
+        # The pinned leaderboard (app/discord_leaderboard.py) -- whether
+        # a message has ever been posted, a jump link, pinned yes/no, and
+        # when its content last actually changed. `config` above already
+        # carries leaderboard_enabled/leaderboard_interval_seconds/
+        # leaderboard_top_n straight through from load_discord_config()
+        # (none of the three is a secret), so this block is only the
+        # separate discord_pinned_message state, not a duplicate of those.
+        "leaderboard": leaderboard_status,
+        "outbox": {
+            "pending": pending,
+            "posted": posted,
+            "failed": failed,
+            "recent": [dict(r) for r in rows],
+        },
+        # The URL an operator pastes into Discord's developer portal
+        # (Interactions Endpoint URL) for app/discord_interactions.py's
+        # slash commands -- neither app_id nor public_key is a secret
+        # (both already pass through config_out above unscrubbed), so
+        # the only thing worth computing here is the absolute URL
+        # itself, same absolute-or-omitted rule as every embed `url`
+        # app/discord_notify.py builds (a relative path is meaningless
+        # to paste into a form outside this app). Empty when
+        # OAUTH_PUBLIC_BASE_URL isn't configured -- there is no URL to
+        # show yet in that case.
+        "interactions_endpoint_url": f"{base_url}/api/discord/interactions" if base_url else "",
+    })
+
+
+@router.post("/api/admin/discord")
+async def admin_discord_update(request: Request):
+    """Update the Discord announcement config singleton. Takes effect
+    on the very next freeze/roll/weekly-recap due-check
+    (build_month_honors_embed()/build_season_close_embed()/
+    build_weekly_recap_embed(), all via enqueue()) or drain cycle -- all
+    read discord_config fresh every
+    time (load_discord_config), never settings.py.
+
+    announce_month_honors, announce_season_close, announce_weekly_recap,
+    and announce_net_wrapup are four INDEPENDENT per-kind gates, same
+    plain bool(body.get(...)) shape as `enabled` itself -- unlike
+    webhook_url below, there is no "omit to keep the current value"
+    special case for any of them, so the admin form always submits all
+    four explicitly. (announce_place_activation is no longer one of
+    them: the per-event place announcement it gated was retired
+    2026-09-16 in favour of announce_weekly_recap's Sunday recap -- see
+    that column's own comment in app/db.py. The column itself still
+    exists, per this codebase's "never drop a column" rule, but this
+    route no longer reads, writes, or returns it.)
+
+    webhook_url is a SECRET (see discord_config's own comment in
+    app/db.py): an ABSENT or empty-string webhook_url in the body
+    leaves the stored value UNCHANGED, not cleared -- GET
+    /api/admin/discord never returns the real value, so a form that
+    always echoes '' into this field would otherwise silently wipe the
+    webhook on every unrelated edit. Same exact contract POST
+    /api/admin/paint already applies to freqmapper_config.api_key (see
+    that route's own docstring); clear_webhook is the explicit way to
+    actually blank this one out.
+
+    roles_enabled and guild_id (app/discord_bot.py's role sync -- an
+    entirely separate feature from every announce_* field above) are
+    saved the same plain way as `enabled` and `username`: no "omit to
+    keep current" special case, since neither is a secret (a guild id
+    is visible to anyone in the server, same as a channel id -- see
+    app/config.py's discord_guild_id comment). Whether the BOT TOKEN
+    itself is set is never accepted or returned here at all -- that is
+    settings.discord_bot_token, environment-only, exactly like
+    account_totp_encryption_key (see GET /api/admin/discord's own
+    `bot_token_set` field for the one thing this app ever reveals about
+    it).
+
+    team_channels_enabled and team_category_name (app/discord_bot.py's
+    private team channels, layered on top of role sync -- see that
+    module's ensure_team_channels()) are saved the same plain,
+    always-explicit way as roles_enabled/guild_id above -- neither is a
+    secret, a blank team_category_name is accepted as-is (
+    ensure_team_channels() itself falls back to "Teams" when this is
+    blank), and there is no "omit to keep current" case for either.
+    team_category_id is NEVER accepted here -- it is this app's own
+    discovered/created id, written only by ensure_team_channels() itself
+    (see that column's own comment in app/db.py); an admin form has no
+    business setting it directly.
+
+    slash_enabled, app_id, and public_key (app/discord_interactions.py's
+    slash commands -- a FOURTH, separate Discord integration) are saved
+    the same plain, always-explicit way as roles_enabled/guild_id above:
+    neither app_id nor public_key is a secret (see discord_config's own
+    comment in app/db.py), so there is no "omit to keep current" case
+    for either. Registering the commands themselves is a SEPARATE step
+    (POST /api/admin/discord/slash/register), not done here.
+
+    leaderboard_enabled, leaderboard_interval_seconds, and
+    leaderboard_top_n (app/discord_leaderboard.py's pinned leaderboard --
+    a FIFTH, separate feature) are saved the same plain, always-explicit
+    way as roles_enabled/guild_id above -- neither is a secret, so there
+    is no "omit to keep current" case for any of them. The interval and
+    top-N are clamped to a floor (30 seconds, 1 player) here rather than
+    trusting the admin form's own client-side `min` attribute. Running a
+    pass immediately is a SEPARATE step (POST
+    /api/admin/discord/leaderboard/run), not done here.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    enabled = bool(body.get("enabled"))
+    username = (body.get("username") or "").strip()
+    team_emoji = (body.get("team_emoji") or "").strip()
+    announce_month_honors = bool(body.get("announce_month_honors"))
+    announce_season_close = bool(body.get("announce_season_close"))
+    announce_weekly_recap = bool(body.get("announce_weekly_recap"))
+    announce_net_wrapup = bool(body.get("announce_net_wrapup"))
+    roles_enabled = bool(body.get("roles_enabled"))
+    guild_id = (body.get("guild_id") or "").strip()
+    team_channels_enabled = bool(body.get("team_channels_enabled"))
+    team_category_name = (body.get("team_category_name") or "").strip()
+    # Slash commands (app/discord_interactions.py) -- neither app_id nor
+    # public_key is a secret (see discord_config's own comment in
+    # app/db.py), so both are saved the same plain, always-explicit way
+    # as guild_id above: no "omit to keep current" special case.
+    slash_enabled = bool(body.get("slash_enabled"))
+    app_id = (body.get("app_id") or "").strip()
+    public_key = (body.get("public_key") or "").strip()
+    # Leaderboard (app/discord_leaderboard.py) -- a fifth, separate
+    # feature, saved the same plain, always-explicit way as roles_enabled/
+    # guild_id above: neither the interval nor top-N is a secret, so
+    # there is no "omit to keep current" case for either. Both are
+    # clamped to a sane floor here (never 0 or negative) rather than
+    # trusting the admin form's own client-side `min` attribute, which a
+    # direct API call could simply not send.
+    leaderboard_enabled = bool(body.get("leaderboard_enabled"))
+    try:
+        # Deliberately `body.get(key, default)`, not `body.get(key) or
+        # default` -- the latter would treat an explicit 0 the same as
+        # "not given at all" and silently reset it to the default
+        # instead of clamping it to the floor below, which is what an
+        # operator who actually typed 0 should see happen.
+        leaderboard_interval_seconds = max(int(body.get("leaderboard_interval_seconds", 600)), 30)
+        leaderboard_top_n = max(int(body.get("leaderboard_top_n", 5)), 1)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            {"error": "leaderboard_interval_seconds and leaderboard_top_n must be integers"}, status_code=400
+        )
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        current = conn.execute(
+            "SELECT webhook_url FROM discord_config WHERE id = 1"
+        ).fetchone()
+        current_webhook = current["webhook_url"] if current else ""
+        if body.get("clear_webhook") is True:
+            webhook_url = ""
+        else:
+            submitted = body.get("webhook_url")
+            webhook_url = submitted if isinstance(submitted, str) and submitted else current_webhook
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO discord_config(id, enabled, webhook_url, username, team_emoji, "
+            " announce_month_honors, announce_season_close, announce_weekly_recap, "
+            " announce_net_wrapup, guild_id, roles_enabled, "
+            " team_channels_enabled, team_category_name, "
+            " slash_enabled, app_id, public_key, "
+            " leaderboard_enabled, leaderboard_interval_seconds, leaderboard_top_n, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  enabled = excluded.enabled, webhook_url = excluded.webhook_url, "
+            "  username = excluded.username, team_emoji = excluded.team_emoji, "
+            "  announce_month_honors = excluded.announce_month_honors, "
+            "  announce_season_close = excluded.announce_season_close, "
+            "  announce_weekly_recap = excluded.announce_weekly_recap, "
+            "  announce_net_wrapup = excluded.announce_net_wrapup, "
+            "  guild_id = excluded.guild_id, roles_enabled = excluded.roles_enabled, "
+            "  team_channels_enabled = excluded.team_channels_enabled, "
+            "  team_category_name = excluded.team_category_name, "
+            "  slash_enabled = excluded.slash_enabled, app_id = excluded.app_id, "
+            "  public_key = excluded.public_key, "
+            "  leaderboard_enabled = excluded.leaderboard_enabled, "
+            "  leaderboard_interval_seconds = excluded.leaderboard_interval_seconds, "
+            "  leaderboard_top_n = excluded.leaderboard_top_n, "
+            "  updated_at = excluded.updated_at",
+            (
+                int(enabled), webhook_url, username, team_emoji,
+                int(announce_month_honors), int(announce_season_close),
+                int(announce_weekly_recap), int(announce_net_wrapup),
+                guild_id, int(roles_enabled),
+                int(team_channels_enabled), team_category_name,
+                int(slash_enabled), app_id, public_key,
+                int(leaderboard_enabled), leaderboard_interval_seconds, leaderboard_top_n, now,
+            ),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_config_save",
+            detail=(
+                f"enabled={enabled} announce_month_honors={announce_month_honors} "
+                f"announce_season_close={announce_season_close} "
+                f"announce_weekly_recap={announce_weekly_recap} "
+                f"announce_net_wrapup={announce_net_wrapup} "
+                f"roles_enabled={roles_enabled} "
+                f"team_channels_enabled={team_channels_enabled} "
+                f"slash_enabled={slash_enabled} "
+                f"leaderboard_enabled={leaderboard_enabled} "
+                f"leaderboard_interval_seconds={leaderboard_interval_seconds} "
+                f"leaderboard_top_n={leaderboard_top_n}"
+            ), now=now,
+        )
+        conn.execute("COMMIT")
+        cfg = discord_notify.load_discord_config(conn)
+    finally:
+        conn.close()
+    log.info("admin: discord config updated (enabled=%s roles_enabled=%s)", enabled, roles_enabled)
+    config_out = _scrub_discord_secrets(cfg)
+    config_out["bot_token_set"] = bool(settings.discord_bot_token)
+    return JSONResponse({"config": config_out})
+
+
+@router.post("/api/admin/discord/channel")
+async def admin_discord_channel_upsert(request: Request):
+    """Upsert one discord_channel routing row: kind, webhook_url,
+    enabled. `kind` names a discord_outbox kind (or a generic prefix of
+    a colon-scoped one -- see app/discord_notify.py's
+    _channel_kind_candidates()) and must be a non-empty string; there is
+    no fixed list of legal kinds here, since a kind can be a future
+    per-instance one this route has no way to enumerate in advance.
+
+    webhook_url follows the EXACT same secret contract as POST
+    /api/admin/discord's own webhook_url field (see that route's own
+    docstring): an ABSENT or empty-string webhook_url in the body leaves
+    a row's already-stored value UNCHANGED rather than wiping it -- GET
+    /api/admin/discord never returns a real per-kind webhook either, so
+    a form re-submitting a blank field on every unrelated edit (e.g.
+    toggling `enabled` alone) must never silently clear it.
+    clear_webhook is the explicit way to actually blank a row's webhook.
+    A brand-new row (no prior stored value) with no webhook_url given
+    and no clear_webhook is created with an empty webhook_url -- nothing
+    to "keep" yet, so this is the only case where the result reads as
+    "on with a blank webhook", which resolve_discord_webhook() already
+    treats as not actually configured and falls back to the default
+    (see that function's own docstring).
+
+    enabled defaults to True for a brand-new row (an operator adding a
+    route is choosing to route it, not to silence the kind -- silencing
+    is exactly what setting enabled=False is for, spelled out
+    explicitly) and otherwise takes the body's own value.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    kind = (body.get("kind") or "").strip()
+    if not kind:
+        return JSONResponse({"error": "kind is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        current = conn.execute(
+            "SELECT webhook_url, enabled FROM discord_channel WHERE kind = ?", (kind,)
+        ).fetchone()
+        current_webhook = current["webhook_url"] if current else ""
+        if body.get("clear_webhook") is True:
+            webhook_url = ""
+        else:
+            submitted = body.get("webhook_url")
+            webhook_url = submitted if isinstance(submitted, str) and submitted else current_webhook
+
+        if "enabled" in body:
+            enabled = bool(body.get("enabled"))
+        else:
+            enabled = bool(current["enabled"]) if current else True
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO discord_channel(kind, webhook_url, enabled, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(kind) DO UPDATE SET "
+            "  webhook_url = excluded.webhook_url, enabled = excluded.enabled, "
+            "  updated_at = excluded.updated_at",
+            (kind, webhook_url, int(enabled), now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_channel_save",
+            detail=f"kind={kind} enabled={enabled}", now=now,
+        )
+        conn.execute("COMMIT")
+        channels = discord_notify.load_discord_channels(conn)
+    finally:
+        conn.close()
+    log.info("admin: discord channel route saved (kind=%s enabled=%s)", kind, enabled)
+    return JSONResponse({"channel": _scrub_discord_channel(channels[kind])})
+
+
+@router.post("/api/admin/discord/test")
+async def admin_discord_test(request: Request):
+    """Enqueue a small test announcement (kind="test") so an operator
+    can confirm the webhook actually works without waiting for a real
+    month to freeze. key is the current unix timestamp in NANOSECONDS
+    (time.time_ns(), not int(time.time())) -- always unique, so it can
+    never collide with a real kind="month_honors" key (a different
+    `kind` entirely) and, just as importantly, never collides with
+    ITSELF: two clicks landing in the same wall-clock second would
+    otherwise share one second-resolution key and the second click
+    would be silently dropped by discord_outbox's own UNIQUE(kind, key)
+    exactly-once index instead of enqueuing a second row. Returns
+    immediately; the existing drain loop (app/discord_notify.py's
+    run_forever()) posts it on its own schedule, same as any other
+    queued announcement.
+
+    Refuses with 400 when announcements are not actually enabled
+    (discord_notify.announcements_enabled() false) -- enqueue() itself
+    would silently no-op in that case, and a "test" button that reports
+    success while queuing nothing would be a lying success flag: it
+    would tell an operator the webhook works when nothing was ever
+    queued to prove it.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    now = int(time.time())
+    conn = connect()
+    try:
+        cfg = discord_notify.load_discord_config(conn)
+        if not discord_notify.announcements_enabled(cfg):
+            return JSONResponse(
+                {"error": "Discord announcements are not enabled, or no webhook is configured"},
+                status_code=400,
+            )
+        key = str(time.time_ns())
+        payload = {
+            "username": cfg["username"] or "MeshWars",
+            "embeds": [{
+                "title": "MeshWars test announcement",
+                "description": "If you can see this in Discord, the webhook is working.",
+            }],
+        }
+        conn.execute("BEGIN IMMEDIATE")
+        discord_notify.enqueue(conn, kind="test", key=key, payload=payload, now=now)
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_test_announcement",
+            detail=f"key={key}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: enqueued discord test announcement (key=%s)", key)
+    return JSONResponse({"enqueued": True, "key": key})
+
+
+@router.post("/api/admin/discord/outbox/retry")
+async def admin_discord_outbox_retry(request: Request):
+    """Reset one failed discord_outbox row for retry: attempts back to
+    0 and last_error cleared, so the next drain cycle
+    (app/discord_notify.py's _drain_once()) picks it up again exactly
+    as if it had never failed. Does not touch kind/key/payload/
+    created_at -- created_at is left alone deliberately, so
+    discord_outbox_max_age_hours still ages out a row that has been
+    sitting broken for a very long time even after a manual retry
+    resets its attempt count.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    row_id = body.get("id")
+    if not isinstance(row_id, int) or isinstance(row_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE discord_outbox SET attempts = 0, last_error = NULL WHERE id = ?", (row_id,)
+        )
+        if cur.rowcount == 0:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "not found"}, status_code=404)
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_outbox_retry",
+            detail=f"id={row_id}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: reset discord outbox row %d for retry", row_id)
+    return JSONResponse({"retried": True, "id": row_id})
+
+
+@router.post("/api/admin/discord/roles/ensure")
+async def admin_discord_roles_ensure(request: Request):
+    """"Create / repair team roles and channels" -- app/discord_bot.py's
+    ensure_team_roles(), which makes sure every MeshWars team has
+    exactly one Discord role (creating one, or adopting an existing
+    same-named role, or recreating one deleted by hand) and records its
+    id in discord_team_role, followed -- only when that succeeds -- by
+    ensure_team_channels(), which does the same "find, adopt, or create,
+    and repair the permissions every run" for each team's private
+    channel (see that function's own docstring). Channels are gated on
+    roles succeeding first: a channel's own permission overwrite names a
+    team's role id, so running it against a guild where roles just
+    failed would have nothing to gate on.
+
+    Refuses with 400 when role sync itself isn't actually configured
+    (roles_enabled off, or no bot token, or no guild id) -- same "don't
+    report success for a button that did nothing" reasoning POST
+    /api/admin/discord/test already applies to its own precondition
+    check. ensure_team_channels() is NOT held to that same all-or-
+    nothing rule: when team channels aren't enabled (or channel creation
+    itself fails partway through, e.g. a missing permission), its own
+    {"ok": False, "reason": ...} is still returned to the caller under
+    `channels` rather than turning the whole request into a 400 -- the
+    role work above already genuinely succeeded and must be reported as
+    such.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    result = await discord_bot.ensure_team_roles()
+    if not result.get("ok"):
+        return JSONResponse(
+            {"error": result.get("reason") or "role sync is not enabled or not fully configured"},
+            status_code=400,
+        )
+    channels_result = await discord_bot.ensure_team_channels()
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_roles_ensure",
+            detail=(
+                f"created={result['created']} recreated={result['recreated']} "
+                f"reused={result['reused']} channels={channels_result}"
+            ), now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: ensured discord team roles (created=%s recreated=%s reused=%s) channels=%s",
+              result["created"], result["recreated"], result["reused"], channels_result)
+    return JSONResponse({**result, "channels": channels_result})
+
+
+@router.post("/api/admin/discord/roles/reconcile")
+async def admin_discord_roles_reconcile(request: Request):
+    """"Reconcile all now" -- runs app/discord_bot.py's reconcile_all()
+    immediately, bypassing maybe_reconcile_roles()'s own 15-minute
+    interval gate (an operator clicking this button means now, not
+    "whenever the background loop next gets to it") but still updating
+    that same gate, so the background loop's own next tick correctly
+    waits out a fresh interval from this manual run rather than firing
+    again moments later. Refuses with 400 on the same "not actually
+    configured" precondition as the ensure-roles route above.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    result = await discord_bot.reconcile_all()
+    if not result.get("ok"):
+        return JSONResponse(
+            {"error": result.get("reason") or "role sync is not enabled or not fully configured"},
+            status_code=400,
+        )
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_roles_reconcile",
+            detail=f"checked={result['checked']} changed={result['changed']}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: discord roles reconcile (checked=%d changed=%d)",
+              result["checked"], result["changed"])
+    return JSONResponse(result)
+
+
+@router.post("/api/admin/discord/team-channel")
+async def admin_discord_team_channel_set(request: Request):
+    """Hand-pick one team's Discord channel -- the admin's own way out
+    of app/discord_bot.py's ensure_team_channels() `ambiguous` bucket:
+    when more than one channel in the configured category normalizes
+    (see that module's _normalize_channel_name()) to the same team name
+    -- e.g. an owner's server has both `red-old` and `red🟥` -- that
+    function refuses to guess, touches neither channel, and reports the
+    team here instead. This route is the deliberate, one-time human
+    judgment call that unblocks it.
+
+    `channel_id` (a Discord snowflake string) is validated against a
+    FRESH GET of the live guild's own channel list (the same call
+    ensure_team_channels() itself makes) -- it must both exist and be a
+    text channel (type 0, discord_bot._CHANNEL_TYPE_TEXT); a category, a
+    voice channel, or an id that doesn't exist at all is rejected with a
+    clear message rather than silently stored as a value the next ensure
+    run could never actually use. `channel_id: null` clears the mapping
+    instead -- no live check needed, since clearing can never be wrong --
+    letting an operator undo a bad pick or fall back to ensure's own
+    adopt-or-create logic on the next run.
+
+    Requires team channels to actually be configured (same
+    discord_bot._channels_ready() precondition ensure_team_channels()
+    itself is gated on -- roles_enabled, a bot token, a guild id, AND
+    team_channels_enabled) before attempting the live lookup: there is no
+    guild to check a channel id against otherwise. Clearing a mapping
+    (channel_id: null) is exempt from this check -- forgetting a stored
+    id is always safe, configured or not.
+
+    Writes straight into discord_team_role.channel_id -- the exact same
+    column _upsert_team_channel() (app/discord_bot.py) writes -- so nothing
+    about the next ensure_team_channels() run needs to know whether a
+    given team's channel id came from that function's own adoption logic
+    or from an admin's deliberate pick here; a still-valid stored id is
+    step one of that function's own adoption order either way (see that
+    function's own docstring), and role_id is left completely untouched.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    team = (body.get("team") or "").strip()
+    if team not in discord_bot._TEAM_COLORS:
+        return JSONResponse({"error": "unknown team"}, status_code=400)
+    if "channel_id" not in body:
+        return JSONResponse({"error": "channel_id is required (or null to clear)"}, status_code=400)
+    channel_id = body.get("channel_id")
+    if channel_id is not None:
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            return JSONResponse({"error": "channel_id must be a string, or null to clear"}, status_code=400)
+        channel_id = channel_id.strip()
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        if channel_id is not None:
+            cfg = discord_notify.load_discord_config(conn)
+            if not discord_bot._channels_ready(cfg):
+                return JSONResponse(
+                    {"error": "team channels are not enabled or not fully configured"}, status_code=400,
+                )
+            guild_id = cfg["guild_id"]
+            try:
+                channels = await discord_bot._list_guild_channels(guild_id)
+            except discord_bot.DiscordAPIError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            match = next((c for c in channels if c.get("id") == channel_id), None)
+            if match is None:
+                return JSONResponse({"error": "no channel with that id in this guild"}, status_code=400)
+            if match.get("type") != discord_bot._CHANNEL_TYPE_TEXT:
+                return JSONResponse({"error": "that channel is not a text channel"}, status_code=400)
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO discord_team_role(team, role_id, channel_id, updated_at) VALUES (?, '', ?, ?) "
+            "ON CONFLICT(team) DO UPDATE SET channel_id = excluded.channel_id, updated_at = excluded.updated_at",
+            (team, channel_id, now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_team_channel_set",
+            detail=f"team={team} channel_id={channel_id}", now=now,
+        )
+        conn.execute("COMMIT")
+        row = conn.execute(
+            "SELECT team, role_id, channel_id, updated_at FROM discord_team_role WHERE team = ?", (team,)
+        ).fetchone()
+    finally:
+        conn.close()
+    log.info("admin: discord team-channel set (team=%s channel_id=%s)", team, channel_id)
+    return JSONResponse({"team_role": dict(row)})
+
+
+@router.post("/api/admin/discord/slash/register")
+async def admin_discord_slash_register(request: Request):
+    """"Register slash commands" -- app/discord_bot.py's
+    register_commands(), a bulk PUT of app/discord_interactions.py's
+    entire COMMANDS registry to this guild's command list. Admin-
+    triggered only, same as the team-roles ensure button above --
+    slash commands are never registered automatically on startup.
+
+    Refuses with 400 when this isn't fully configured yet (no bot
+    token, no app id, or no guild id) -- same "don't report success for
+    a button that did nothing" precondition check every other Discord
+    admin action in this file already applies.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    result = await discord_bot.register_commands()
+    if not result.get("ok"):
+        return JSONResponse(
+            {"error": result.get("reason") or "slash commands are not fully configured"}, status_code=400,
+        )
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_slash_register",
+            detail=f"commands={result['commands']}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: registered discord slash commands: %s", result["commands"])
+    return JSONResponse(result)
+
+
+@router.post("/api/admin/discord/leaderboard/run")
+async def admin_discord_leaderboard_run(request: Request):
+    """"Post / repair now" -- app/discord_leaderboard.py's
+    run_leaderboard_pass(force=True): runs one leaderboard pass
+    immediately, bypassing maybe_run_leaderboard()'s own interval gate
+    (the periodic one run_forever() calls on its own schedule), and
+    always re-asserts the pin even when the content itself hasn't
+    changed since the last pass -- an operator may have unpinned the
+    message by hand, and this button is the explicit way to fix that
+    without waiting for the standings to actually move.
+
+    Never refuses with 400 the way POST /api/admin/discord/slash/register
+    does for its own precondition -- "leaderboard disabled" or "no
+    webhook routed" are ordinary, expected outcomes of clicking this
+    before turning the feature on at all, not malformed input, so they
+    come back as an ordinary {"ok": false, "reason": ...} for the admin
+    panel to show inline rather than an error banner.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    result = await discord_leaderboard.run_leaderboard_pass(force=True)
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="discord_leaderboard_run",
+            detail=f"ok={result.get('ok')} reason={result.get('reason')}", now=now,
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: ran discord leaderboard pass (ok=%s reason=%s)", result.get("ok"), result.get("reason"))
+    return JSONResponse(result)
 
 
 @router.post("/api/admin/month/freeze")

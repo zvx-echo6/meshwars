@@ -26,7 +26,7 @@
        admin.css (admin.css's own layout now shifts down by nav.css's
        --mw-nav-h). -->
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260913-1" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260916-1" />
 </head>
 <body>
 
@@ -129,6 +129,7 @@
           <button type="button" class="adm-nav-item" data-section="months">Months</button>
           <button type="button" class="adm-nav-item" data-section="places">Places</button>
           <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
+          <button type="button" class="adm-nav-item" data-section="discord">Discord</button>
           <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
         </nav>
 
@@ -440,6 +441,121 @@
           <div id="nt-result" class="adm-result"></div>
         </section>
 
+        <section class="adm-section" data-section="discord" hidden>
+          <h2 class="adm-h2">Discord</h2>
+          <details class="adm-about">
+            <summary>About Discord announcements</summary>
+            <p class="adm-hint">Posts end-of-month honors, season closes, a Sunday weekly recap, a wrap-up the day after each net -- and, on request, a one-off test message -- to a Discord channel via a webhook. The webhook URL is a secret and is never shown here once saved; leave it blank when saving other fields to keep the one already configured. Each "Announce ..." toggle below gates only its own kind -- it can be turned off while leaving the webhook enabled, so the test button and every other kind still work.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-check-label"><input type="checkbox" id="dc-month-honors" class="adm-check" /> Announce month honors</label>
+            <label class="adm-check-label"><input type="checkbox" id="dc-season-close" class="adm-check" /> Announce season close</label>
+            <label class="adm-check-label"><input type="checkbox" id="dc-weekly-recap" class="adm-check" /> Announce weekly recap</label>
+            <label class="adm-check-label"><input type="checkbox" id="dc-net-wrapup" class="adm-check" /> Announce net wrap-ups</label>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label adm-field-label-wide">Webhook URL
+              <input type="password" id="dc-webhook-url" autocomplete="off" placeholder="leave blank to keep current" />
+            </label>
+            <label class="adm-check-label"><input type="checkbox" id="dc-clear-webhook" class="adm-check" /> Clear</label>
+            <span class="adm-hint" id="dc-webhook-hint"></span>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Username<input type="text" id="dc-username" autocomplete="off" placeholder="MeshWars" /></label>
+            <label class="adm-field-label adm-field-label-wide">Team emoji<input type="text" id="dc-team-emoji" autocomplete="off" placeholder="RED=<:mw_red:123456789>,GREEN=<:mw_green:987654321>" /></label>
+          </div>
+          <p class="adm-hint">Team emoji: comma-separated TEAM=token entries, one per team, using exactly the token Discord itself echoes back for a custom emoji (e.g. &lt;:mw_red:123456789&gt;). A team left out of this list renders with no dot, exactly as if none were configured.</p>
+          <div class="adm-form">
+            <button type="button" id="dc-save" class="adm-btn">Save</button>
+            <button type="button" id="dc-test" class="adm-btn adm-btn-quiet">Send test announcement</button>
+          </div>
+          <div id="dc-result" class="adm-result"></div>
+
+          <h3 class="adm-h3">Channel routing</h3>
+          <p class="adm-hint">Send a specific announcement kind to its own Discord channel instead of the default one above. A kind with no route here uses the default webhook; a route left "Off" is never announced at all -- it does NOT fall back to the default.</p>
+          <div id="dc-channels"></div>
+          <div class="adm-form">
+            <input type="text" id="dc-channel-new-kind" autocomplete="off" placeholder="kind, e.g. month_honors, leaderboard" />
+            <button type="button" id="dc-channel-add" class="adm-btn adm-btn-quiet">Add route</button>
+          </div>
+          <div id="dc-channel-result" class="adm-result"></div>
+
+          <h3 class="adm-h3">Outbox health</h3>
+          <div id="dc-outbox-summary"></div>
+          <div id="dc-outbox"></div>
+
+          <h3 class="adm-h3">Team roles</h3>
+          <details class="adm-about">
+            <summary>About team roles</summary>
+            <p class="adm-hint">A separate feature from the announcements above: "Herald," a Discord bot, gives a player's linked Discord account the role for their MeshWars team (and no other team's role) once they're both linked and a member of the server. The bot token is a secret, set only via the DISCORD_BOT_TOKEN environment variable -- never entered here.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-roles-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-field-label adm-field-label-wide">Guild (server) ID<input type="text" id="dc-guild-id" autocomplete="off" placeholder="right-click the server icon in Discord -> Copy Server ID" /></label>
+            <span class="adm-hint" id="dc-bot-token-hint"></span>
+          </div>
+          <p class="adm-hint">Enabled/Guild ID are saved together with the Save button above -- they're part of the same form.</p>
+
+          <h3 class="adm-h3">Team channels</h3>
+          <details class="adm-about">
+            <summary>About team channels</summary>
+            <p class="adm-hint">A private text channel per team, inside one shared category, visible only to players holding that team's role (and Herald itself). Layered on top of team roles above -- needs roles enabled, a bot token, and a guild ID before it can do anything.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-team-channels-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-field-label adm-field-label-wide">Category name<input type="text" id="dc-team-category-name" autocomplete="off" placeholder="Teams" /></label>
+          </div>
+          <p class="adm-hint">Saved together with the Save button above -- part of the same form as everything else on this page.</p>
+
+          <div class="adm-form">
+            <button type="button" id="dc-roles-ensure" class="adm-btn">Create / repair team roles and channels</button>
+            <button type="button" id="dc-roles-reconcile" class="adm-btn adm-btn-quiet">Reconcile all now</button>
+          </div>
+          <div id="dc-roles-result" class="adm-result"></div>
+          <div id="dc-roles-ambiguous"></div>
+          <div id="dc-roles-reconcile-status" class="adm-hint"></div>
+          <div id="dc-team-roles"></div>
+
+          <h3 class="adm-h3">Slash commands</h3>
+          <details class="adm-about">
+            <summary>About slash commands</summary>
+            <p class="adm-hint">A FOURTH, separate Discord integration: /me, /standings, /honors, /nextnet, and /player, answered by an HTTPS endpoint (no bot gateway connection). Neither the application id nor the public key below is a secret -- both are shown on the application's own General Information page in Discord's developer portal. Deploy this endpoint and turn Enabled on here BEFORE pasting the URL below into the developer portal's Interactions Endpoint URL field -- Discord verifies it immediately and refuses to save it otherwise.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-slash-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-field-label adm-field-label-wide">Application ID<input type="text" id="dc-app-id" autocomplete="off" placeholder="from the developer portal's General Information page" /></label>
+            <label class="adm-field-label adm-field-label-wide">Public key<input type="text" id="dc-public-key" autocomplete="off" placeholder="from the same page" /></label>
+          </div>
+          <p class="adm-hint">Saved together with the Save button above -- part of the same form as everything else on this page.</p>
+          <div class="adm-form">
+            <button type="button" id="dc-slash-register" class="adm-btn">Register slash commands</button>
+          </div>
+          <div id="dc-slash-result" class="adm-result"></div>
+          <p class="adm-hint">Interactions Endpoint URL (paste into the developer portal): <span id="dc-slash-endpoint-url" class="adm-mono"></span></p>
+
+          <h3 class="adm-h3">Leaderboard</h3>
+          <details class="adm-about">
+            <summary>About the leaderboard</summary>
+            <p class="adm-hint">A FIFTH, separate feature: one pinned message per deployment, posted once through the webhook routed for kind "leaderboard" above (or the default webhook, same fallback as every other kind) and then edited in place -- never reposted -- whenever the standings actually change. Pinning uses Herald (the same bot as team roles above); a missing bot token or "Pin Messages" permission still lets the message keep updating, it just won't be pinned. Shows, per board with an active season: team standings, then the top players from the site's own Wardrivers/NetOps/Explorer rankings.</p>
+          </details>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="dc-leaderboard-enabled" class="adm-check" /> Enabled</label>
+            <label class="adm-field-label">Interval (seconds)<input type="number" id="dc-leaderboard-interval" autocomplete="off" min="30" placeholder="600" /></label>
+            <label class="adm-field-label">Top N per list<input type="number" id="dc-leaderboard-topn" autocomplete="off" min="1" placeholder="5" /></label>
+          </div>
+          <p class="adm-hint">Saved together with the Save button above -- part of the same form as everything else on this page.</p>
+          <div class="adm-form">
+            <button type="button" id="dc-leaderboard-run" class="adm-btn adm-btn-quiet">Post / repair now</button>
+          </div>
+          <div id="dc-leaderboard-result" class="adm-result"></div>
+          <p class="adm-hint">
+            Message: <span id="dc-leaderboard-jump" class="adm-mono">not posted yet</span>
+            &middot; Pinned: <span id="dc-leaderboard-pinned"></span>
+            &middot; Last changed: <span id="dc-leaderboard-updated"></span>
+          </p>
+        </section>
+
         <section class="adm-section" data-section="keys" hidden>
           <h2 class="adm-h2">API keys</h2>
           <details class="adm-about">
@@ -459,7 +575,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260913-1"></script>
+  <script src="/static/admin.js?v=20260917-1"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

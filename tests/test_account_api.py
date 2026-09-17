@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import app.db as db
+from app import account_api as account_api_module
 from app.account_api import router as account_router
 from app.auth import http_exception_as_error_body
 from app.db import MIGRATIONS, SCHEMA
@@ -339,6 +340,39 @@ def test_link_key_success(client, db_path):
     conn.close()
     assert row[0] == account_id
     assert event == ("player_linked", "user")
+
+
+def test_link_key_succeeds_even_when_discord_role_sync_fails(client, db_path, monkeypatch):
+    """Discord role sync (app/discord_bot.py's sync_member_safe(), fired
+    after this route's own commit -- see link_key()'s own comment) must
+    never break, delay, or roll back a successful player claim. Forces
+    the underlying sync_member() to raise and proves the response and
+    the actual link are both unaffected.
+    """
+    _login(client, db_path)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("simulated discord outage")
+
+    monkeypatch.setattr(account_api_module.discord_bot, "sync_member", boom)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player(player_id, display_name, team, created_at) VALUES (?, ?, ?, ?)",
+        (KEY_PLAYER_ID, "KeyHolder", "GREEN", int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.post("/api/account/link-key", json={"api_key": GOOD_KEY})
+
+    assert resp.status_code == 200
+    assert resp.json()["player"]["player_id"] == KEY_PLAYER_ID
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT account_id FROM player WHERE player_id = ?", (KEY_PLAYER_ID,)).fetchone()
+    conn.close()
+    assert row[0] is not None  # the link itself still went through
 
 
 def test_link_key_relinking_the_same_already_linked_player_is_a_success_noop(client, db_path):

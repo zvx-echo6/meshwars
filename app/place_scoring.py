@@ -35,10 +35,14 @@ Rules encoded here, from docs/features/places.md:
     baked into place.points): anything inside a Census place's own
     radius is 5, and outside it a landmark is 10, a park is 25, and a
     summit scales linearly 50->100 from 6,000ft to 9,000ft of
-    elevation. Nothing here branches on ref_type or points_reason --
-    place.points is read as an opaque number, exactly as it was under
-    the old flat model, which is why the rescore needed no change in
-    this module.
+    elevation. Nothing in the CREDITING path (credit_places() below)
+    branches on ref_type or points_reason -- place.points is read as an
+    opaque number, exactly as it was under the old flat model, which is
+    why the rescore needed no change there. (qualifying_place_firsts()
+    much further below is the one exception: a separate, read-only
+    REPORTING helper for the weekly Discord recap, not part of crediting
+    at all, that does branch on ref_type and points_reason -- see its
+    own module-level comment for why.)
   - NON-STACKING: at most ONE place credits per cell. A cell routinely
     maps to more than one place -- a landmark standing inside a big
     park is the ordinary case -- and only the HIGHEST-VALUE eligible
@@ -301,6 +305,21 @@ def credit_places(
         (place_id, player_id, week_start, awarded, ts, protocol),
     )
     credited = [(place_id, awarded)]
+
+    # A per-activation Discord announcement used to be enqueued right
+    # here (build_place_activation_embed()/place_activation_notability(),
+    # app/discord_notify.py) -- removed 2026-09-16: at ~373 activations a
+    # month it was too frequent to be worth reading, and posting each one
+    # in near-real-time announced a player's location within minutes of
+    # them reaching it, which is exactly the pairing app/public_api.py's
+    # privacy rule ("identity can be public, location can be public, the
+    # link between them requires a session") exists to keep off of an
+    # unauthenticated surface. Notable activations are now folded,
+    # anonymised to a per-player COUNT with no place name attached, into
+    # the Sunday "weekly recap" (this module's own qualifying_place_
+    # firsts() below, read by app/discord_notify.py's time-driven
+    # weekly_recap_provider(), a TIME_DRIVEN_PROVIDERS entry) instead of
+    # announced one at a time.
     if awarded < points:
         log.info(
             "place_scoring: player %d credited %s at cell %s (week %s) "
@@ -314,3 +333,139 @@ def credit_places(
             player_id, credited, cell_id, week_start,
         )
     return credited
+
+
+# ---------------------------------------------------------------------
+# Weekly exploration reel (app/discord_notify.py's Sunday weekly_recap
+# provider) -- reads place_activation for the "notable firsts" the old
+# per-event announcement used to post one at a time (see credit_places()'s
+# own comment on why that was removed).
+#
+# *** HARD PRIVACY WARNING ***
+# Every row this returns carries a player's display name AND team
+# alongside a SPECIFIC place's own name/ref_type/elevation_ft. That
+# pairing is exactly what app/public_api.py's module docstring (line 38)
+# forbids on any unauthenticated surface: "identity can be public,
+# location can be public, the link between them requires a session" --
+# the rule commit 007db35 ("stop the public API linking a person to a
+# place") hardened across the rest of the site. Discord has NO session
+# concept at all, so a caller building an announcement from these rows
+# MUST NOT ever render a player name and a place name on the same line,
+# or anywhere in the same message where a reader could connect the two.
+# The only sanctioned rendering (app/discord_notify.py's weekly_recap
+# provider) reduces this to an aggregate COUNT of firsts per player and
+# one unattributed elevation figure -- never a place name next to a
+# person. Do not add a second caller of this function that renders a
+# place name and a player name together, on Discord or anywhere else
+# unauthenticated, without checking with Matt first (the same standing
+# instruction app/public_api.py's own docstring already carries for its
+# two grandfathered person-to-place routes).
+#
+# QUALIFYING RULE: which place_activation rows count as a "notable
+# first" at all. Matched on place.points_reason's PREFIX, never on
+# place.points itself -- points are a rating the seed-build script can
+# retune at any time (score_points() in scripts/build_places_seed.py),
+# but points_reason states the FACT being selected on (in a Census
+# place's radius, or not), which does not change if the number attached
+# to it does. Live values, for reference (2026-09):
+#   landmark  in_city / remote                   -> never qualifies
+#   park      in_city, in_city_by_area   5 pts   -> city parks, excluded
+#   park      remote, remote_by_area    25 pts   -> qualifies
+#   summit    remote_scaled          50-100 pts  -> qualifies
+# i.e. a summit always qualifies (every summit on file is scored
+# 'remote_scaled' -- see place.points_reason's own CREATE TABLE comment,
+# no summit has ever been scored 'in_city'), a park qualifies unless its
+# points_reason begins with 'in_city', and a landmark never qualifies at
+# all, regardless of points_reason. Measured against production data
+# (2026-09): 483 total place_activation rows, of which 275 were
+# in-city parks and 107 were landmarks -- excluded by this rule -- leaving
+# 82 qualifying firsts (76 parks, 6 summits) for the month, about 2 a
+# day. That volume is exactly why these are collected into one weekly
+# reel instead of announced as they happen (see credit_places()'s own
+# comment on the per-event announcement this replaced).
+#
+# "FIRST" IS SEASON-WIDE, NOT WINDOW-WIDE: a place_activation row only
+# counts here if it is that (place, player)'s EARLIEST activation
+# anywhere in the whole season, not merely the earliest inside
+# [start_ts, end_ts) -- so a player who first activated a summit three
+# weeks ago and returns to it this week must NOT reappear in this week's
+# reel. The reporting window only decides which week's message reports a
+# first that already happened; it never redefines what "first" means.
+def qualifying_place_firsts(conn: sqlite3.Connection, *, protocol: str, season_id: int,
+                             start_ts: int, end_ts: int) -> list[dict]:
+    """Qualifying first-time place activations whose activation falls in
+    [start_ts, end_ts) -- see this section's own module-level comment
+    above for the qualifying rule, the season-wide "first" semantics, and
+    the HARD PRIVACY WARNING on what these rows may never be rendered
+    into. Read-only: enqueues nothing, writes nothing, calls
+    discord_notify for nothing -- a pure query a caller (currently only
+    discord_notify.py's weekly_recap_provider()) turns into an
+    announcement itself.
+
+    `protocol` scopes both which board's activations are read
+    (place_activation.protocol, same 'mc'/'mt' split every other place
+    honour already filters on -- see this module's own docstring) and
+    which board's "earlier activation" rows count against the
+    season-wide first-ever check: a first on one board does not consume
+    a player's first on the other, mirroring how a place credit itself
+    is scoped (place_activation.protocol's own CREATE TABLE comment).
+
+    `season_id` names an mc_season row (already resolved by the caller --
+    place_activation has no season_id column of its own to join on, see
+    app/mc_scoring.py's team_place_points() for the same situation and
+    the same fix: scope by TIME against mc_season.started_at/ends_at
+    instead). A season_id that does not belong to `protocol`, or does
+    not exist at all, yields an empty list rather than raising -- a
+    caller passing a stale or mismatched id should see "nothing to
+    report," not a crash in a background poll loop.
+
+    Each returned dict carries place_id, player_id, awarded_at, points,
+    place_name, ref_type, elevation_ft, player_name, team -- read the
+    HARD PRIVACY WARNING above before doing anything with place_name and
+    player_name together.
+    """
+    season = conn.execute(
+        "SELECT started_at, ends_at FROM mc_season WHERE id = ? AND protocol = ?",
+        (season_id, protocol),
+    ).fetchone()
+    if season is None:
+        return []
+    season_start, season_end = season["started_at"], season["ends_at"]
+
+    rows = conn.execute(
+        "SELECT pa.place_id, pa.player_id, pa.awarded_at, pa.points, "
+        "       p.name AS place_name, p.ref_type, p.elevation_ft, "
+        "       pl.display_name AS player_name, pl.team AS team "
+        "  FROM place_activation pa "
+        "  JOIN place p ON p.id = pa.place_id "
+        "  JOIN player pl ON pl.player_id = pa.player_id "
+        " WHERE pa.protocol = ? "
+        "   AND pa.awarded_at >= ? AND pa.awarded_at < ? "
+        "   AND ("
+        "        p.ref_type = 'summit' "
+        "        OR (p.ref_type = 'park' AND "
+        "            (p.points_reason IS NULL OR p.points_reason NOT LIKE 'in_city%'))"
+        "   )"
+        # Season-wide "first" check: exclude this row if this exact
+        # (place, player) already has an EARLIER activation anywhere in
+        # the same season (not just inside this window) -- see this
+        # section's own module-level comment for why the window must
+        # never redefine "first". Bounded to the season's own
+        # [started_at, ends_at) so an activation from a PRIOR season at
+        # the same place never falsely suppresses a genuine first in
+        # this one (place_id/player pairs are not reset between
+        # seasons -- place.id is permanent, see that table's own
+        # comment).
+        "   AND NOT EXISTS ("
+        "        SELECT 1 FROM place_activation earlier "
+        "         WHERE earlier.place_id = pa.place_id "
+        "           AND earlier.player_id = pa.player_id "
+        "           AND earlier.protocol = pa.protocol "
+        "           AND earlier.awarded_at < pa.awarded_at "
+        "           AND earlier.awarded_at >= ? "
+        "           AND earlier.awarded_at < ?"
+        "   )"
+        " ORDER BY pa.awarded_at",
+        (protocol, start_ts, end_ts, season_start, season_end),
+    ).fetchall()
+    return [dict(r) for r in rows]

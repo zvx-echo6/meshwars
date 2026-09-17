@@ -1081,6 +1081,157 @@ class Settings(BaseSettings):
     account_totp_verify_challenge_rate_limit_attempts: int = 8
     account_totp_verify_challenge_rate_limit_window_seconds: int = 300
 
+    # ---- Discord announcements (app/discord_notify.py) --------------------
+    # Outbound end-of-month honors, posted to a Discord channel through a
+    # webhook -- see app/db.py's discord_outbox table comment for the
+    # durable-outbox design this backs. NOT the OAuth_DISCORD_CLIENT_ID/
+    # SECRET pair above (app/oauth.py) -- those authenticate a PLAYER
+    # signing in with their own Discord account; this authenticates the
+    # APP posting to one specific channel, an entirely separate Discord
+    # feature with its own credential.
+    #
+    # Empty means off, same "empty means off, never open" contract every
+    # other optional credential in this file uses (join_invite_code,
+    # smtp_host, ...). This value, and discord_webhook_username/
+    # discord_team_emoji below, are the SEED only -- app/db.py's
+    # discord_config table is the actual source of truth from the first
+    # boot onward (app/discord_notify.py's seed_discord_config_from_env(),
+    # called once from init_db()); an operator edits the live values
+    # through app/admin_ops.py's /api/admin/discord, not by changing
+    # these env vars and redeploying. A Discord webhook URL is itself a
+    # bearer credential (anyone who has it can post to the channel as
+    # this app, no further auth), so it is never logged and never
+    # returned from any route, same as freqmapper_api_key/admin_token
+    # above.
+    discord_webhook_announcements: str = ""
+
+    # The Discord display name a post appears under -- Discord otherwise
+    # falls back to whatever name the webhook happened to be created
+    # with in the channel's Integrations settings (Discord's own
+    # placeholder default, "Captain Hook", if nobody bothered to rename
+    # it), which has nothing to do with what app actually posted.
+    # discord_notify.build_month_honors_embed() puts this in the webhook
+    # body's own "username" field so a post always identifies itself as
+    # MeshWars regardless of how the webhook itself is named -- not a
+    # secret, and not empty-means-off like every other setting in this
+    # section: an empty override here falls back to "MeshWars" (see that
+    # function's own comment), never to omitting the field and letting
+    # Discord's placeholder show through.
+    discord_webhook_username: str = "MeshWars"
+
+    # How often run_forever()'s outbox drain loop wakes up -- same
+    # "cheap enough to run often" cadence checkin_poll_interval_seconds
+    # and freqmapper_poll_interval_seconds already use for their own
+    # background loops. A month closes at most a handful of times a
+    # year, so this only ever has real work on rare cycles; a short
+    # interval costs nothing and keeps the lag between "month froze" and
+    # "channel sees it" small.
+    discord_outbox_poll_interval_seconds: int = 30
+
+    # A pending row older than this is skipped, never posted -- the same
+    # "a long outage must never dump stale news" reasoning
+    # checkin_net_start_date and freqmapper_paint_from apply to their own
+    # backlogs, applied here to a queue instead of a feed. Without this,
+    # a webhook broken for a week (a deleted channel, a revoked URL
+    # nobody noticed) would, the moment it is fixed, immediately post
+    # every honor that piled up in the meantime, days late and out of
+    # context.
+    discord_outbox_max_age_hours: int = 72
+
+    # A row that has failed this many times stops being retried --
+    # attempts/last_error are recorded on the row itself (see
+    # discord_outbox's own comment in app/db.py) so an operator can see
+    # why, but the loop itself must eventually give up on a
+    # permanently-broken webhook rather than retrying it forever, once
+    # every poll interval, for the life of the deployment.
+    discord_outbox_max_attempts: int = 10
+
+    # Per-team coloured-dot custom emoji for Discord announcements
+    # (app/discord_notify.py) -- see the owner feedback that led here in
+    # that module's own comment: the embed `color` bar alone read as
+    # "still no color", and Discord's built-in ANSI code-block palette
+    # was rejected outright (yellow reads brown, orange reads brown too,
+    # pink and purple look too similar). A custom Discord emoji is the
+    # only remaining way to put an actual team colour next to a team's
+    # name in Discord's own rendering.
+    #
+    # Deliberately NOT hardcoded: a custom emoji's ID is specific to the
+    # ONE Discord server it was uploaded to. This repository is public
+    # and AGPL (see meshwars-agpl-relicense) -- baking in this
+    # deployment's own emoji IDs would post literal, broken text like
+    # "<:mw_green:1234567890>" in every OTHER operator's channel, who
+    # has no such emoji and never will unless they upload their own.
+    #
+    # Format: comma-separated TEAM=token pairs, where the token is
+    # EXACTLY what Discord itself produces for a custom emoji -- get one
+    # by typing "\:mw_green:" (with the leading backslash) in any
+    # channel on the server that owns the emoji and sending it; Discord
+    # echoes back the raw <:name:id> (or <a:name:id> if animated) form,
+    # which is what belongs here. Example:
+    # DISCORD_TEAM_EMOJI=RED=<:mw_red:111>,GREEN=<:mw_green:222>
+    #
+    # Empty means off, same "empty means off, never open" contract every
+    # other optional setting in this section uses: a team missing from
+    # this map (or the whole setting left unset) renders exactly as it
+    # did before this feature existed -- no dot, no leading space, no
+    # stray placeholder text. See discord_notify._parse_team_emoji().
+    discord_team_emoji: str = ""
+
+    # ---- Discord role sync (app/discord_bot.py) ----------------------------
+    # A THIRD, entirely separate Discord integration on top of the two
+    # above -- OAUTH_DISCORD_CLIENT_ID/SECRET (a player signing in with
+    # their own Discord account) and discord_webhook_announcements (this
+    # app posting to one channel via a webhook). This one authenticates
+    # as an actual bot user in the guild ("Herald"), via a bot token, so
+    # it can read guild members and manage roles.
+    #
+    # SECRET, environment only, exactly like account_totp_encryption_key
+    # above: never stored in discord_config or any other table, never
+    # returned by any route, never logged. A stolen database file alone
+    # must never be enough to act as this bot in the guild. Get one from
+    # discord.com/developers/applications -> your application -> Bot ->
+    # Reset Token; the bot must already be added to the guild with
+    # (at minimum) the Manage Roles permission, and its own role must sit
+    # ABOVE every team role in the guild's role list, or its Manage Roles
+    # permission cannot actually assign or remove them (Discord's own
+    # role-hierarchy rule, not something this app can work around).
+    #
+    # Empty means role sync can never run: app/discord_bot.py's
+    # _roles_ready() requires this AND discord_config.roles_enabled=1 AND
+    # a configured guild_id, all three, before making a single API call.
+    discord_bot_token: str = ""
+
+    # The Discord guild (server) id role sync operates in -- one guild
+    # per deployment, same as this app's Discord OAuth login (there is
+    # no per-team or per-net guild). Non-secret (a guild id is visible to
+    # anyone in the server, the same as a channel id) -- this is the SEED
+    # only, written once into discord_config.guild_id by
+    # seed_discord_config_from_env() the same guarded-by-updated_at way
+    # discord_webhook_announcements seeds discord_config.webhook_url; an
+    # operator edits the live value through app/admin_ops.py's
+    # /api/admin/discord afterward, not by changing this env var and
+    # redeploying.
+    discord_guild_id: str = ""
+
+    # ---- Discord slash commands (app/discord_interactions.py) --------------
+    # A FOURTH, separate Discord integration: HTTP Interactions, not a
+    # gateway connection -- Discord POSTs each /command invocation
+    # straight to POST /api/discord/interactions and this app answers in
+    # the HTTP response itself. Neither value below is a secret (both
+    # are shown in Discord's own developer portal, under the
+    # application's General Information page, to anyone who can already
+    # see the application there) -- these are the SEED only, written
+    # once into discord_config.app_id/public_key by
+    # seed_discord_config_from_env() the same guarded-by-updated_at way
+    # discord_guild_id seeds discord_config.guild_id; an operator edits
+    # the live values afterward through /api/admin/discord. Registering
+    # the commands themselves (app/discord_bot.py's register_commands())
+    # uses discord_bot_token above, not a new credential -- this pair
+    # only identifies the application and verifies its request
+    # signatures, it never authenticates an outbound call.
+    discord_app_id: str = ""
+    discord_public_key: str = ""
+
     @property
     def teams_list(self) -> list[str]:
         return [t.strip().upper() for t in self.teams.split(",") if t.strip()]

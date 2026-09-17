@@ -2049,6 +2049,466 @@ async function saveNotice(b, overrideActive) {
   b.disabled = false;
 }
 
+// ---- discord announcements ----------------------------------------------
+//
+// Same "whole singleton, one POST" shape savePaint()/saveNotice() above
+// already use for their own DB-backed config. The webhook URL never
+// comes back from GET /api/admin/discord (app/admin_ops.py's
+// _scrub_discord_secrets) -- only webhook_set/webhook_hint, the same
+// has_api_key-shaped hint the Paint section's API key field already
+// uses -- so the input is always rendered blank and a blank submit
+// leaves the stored value alone (clear_webhook is the explicit way to
+// actually blank it).
+
+function renderDiscordForm(cfg) {
+  document.getElementById('dc-enabled').checked = !!cfg.enabled;
+  document.getElementById('dc-month-honors').checked = !!cfg.announce_month_honors;
+  document.getElementById('dc-season-close').checked = !!cfg.announce_season_close;
+  document.getElementById('dc-weekly-recap').checked = !!cfg.announce_weekly_recap;
+  document.getElementById('dc-net-wrapup').checked = !!cfg.announce_net_wrapup;
+  document.getElementById('dc-webhook-url').value = '';
+  document.getElementById('dc-clear-webhook').checked = false;
+  document.getElementById('dc-webhook-hint').textContent = cfg.webhook_set
+    ? ('currently set, ending in ' + cfg.webhook_hint)
+    : 'not set';
+  document.getElementById('dc-username').value = cfg.username || '';
+  document.getElementById('dc-team-emoji').value = cfg.team_emoji || '';
+
+  // Team roles (app/discord_bot.py) -- an entirely separate feature
+  // from every field above, but roles_enabled/guild_id are plain,
+  // non-secret columns saved together with the rest of this same form
+  // (see saveDiscord() below). bot_token_set never carries the token
+  // itself -- only whether DISCORD_BOT_TOKEN is configured at all, the
+  // same has_api_key-shaped hint every other secret field on this page
+  // already uses.
+  document.getElementById('dc-roles-enabled').checked = !!cfg.roles_enabled;
+  document.getElementById('dc-guild-id').value = cfg.guild_id || '';
+  document.getElementById('dc-bot-token-hint').textContent = cfg.bot_token_set
+    ? 'Bot token: configured'
+    : 'Bot token: not set (DISCORD_BOT_TOKEN environment variable)';
+
+  // Team channels (app/discord_bot.py's ensure_team_channels()) -- a
+  // second feature layered on the roles above, saved together with the
+  // rest of this same form. team_category_id (this app's own
+  // discovered/created id) is never shown or edited here -- it's not
+  // admin-editable, see saveDiscord() below.
+  document.getElementById('dc-team-channels-enabled').checked = !!cfg.team_channels_enabled;
+  document.getElementById('dc-team-category-name').value = cfg.team_category_name || '';
+
+  // Slash commands (app/discord_interactions.py) -- a fourth, separate
+  // Discord integration, saved together with the rest of this same
+  // form. Neither app_id nor public_key is a secret (see
+  // discord_config's own comment in app/db.py), so both come back and
+  // go out as plain values -- no webhook_set-style hint needed.
+  document.getElementById('dc-slash-enabled').checked = !!cfg.slash_enabled;
+  document.getElementById('dc-app-id').value = cfg.app_id || '';
+  document.getElementById('dc-public-key').value = cfg.public_key || '';
+
+  // Leaderboard (app/discord_leaderboard.py) -- a fifth, separate
+  // feature, saved together with the rest of this same form. Neither
+  // the interval nor top-N is a secret, so both come back and go out as
+  // plain values -- no webhook_set-style hint needed.
+  document.getElementById('dc-leaderboard-enabled').checked = !!cfg.leaderboard_enabled;
+  document.getElementById('dc-leaderboard-interval').value = cfg.leaderboard_interval_seconds || '';
+  document.getElementById('dc-leaderboard-topn').value = cfg.leaderboard_top_n || '';
+}
+
+// Leaderboard status (GET /api/admin/discord's own `leaderboard` block --
+// app/discord_leaderboard.py's leaderboard_admin_status()): whether a
+// message has ever been posted, a jump link, pinned yes/no, and when its
+// content last actually changed -- rendered separately from the plain
+// config fields above since this is READ-ONLY status, not a form field.
+function renderLeaderboardStatus(status) {
+  const jumpEl = document.getElementById('dc-leaderboard-jump');
+  if (status && status.posted && status.jump_url) {
+    jumpEl.replaceChildren(el('a', { href: status.jump_url, target: '_blank', rel: 'noopener', text: status.jump_url }));
+  } else if (status && status.posted) {
+    jumpEl.textContent = 'posted (set a Guild ID above for a jump link)';
+  } else {
+    jumpEl.textContent = 'not posted yet';
+  }
+  document.getElementById('dc-leaderboard-pinned').textContent = status && status.posted
+    ? (status.pinned ? 'yes' : 'no')
+    : '--';
+  document.getElementById('dc-leaderboard-updated').textContent = status && status.updated_at
+    ? fmtTs(status.updated_at)
+    : '--';
+}
+
+// Team roles (app/discord_bot.py) -- discord_team_role rows. role_id
+// stays informational (repaired only by the buttons below); channel_id
+// is now editable per row, POSTing to /api/admin/discord/team-channel --
+// this is the operator's own way to resolve one of
+// ensure_team_channels()'s `ambiguous` entries (see
+// renderAmbiguousChannels() below) by hand-picking the right channel id,
+// or to clear a bad pick back to empty (which lets the next "Create /
+// repair" run adopt or create one on its own again).
+function renderTeamRoles(teamRoles) {
+  const host = document.getElementById('dc-team-roles');
+  host.replaceChildren();
+  if (!teamRoles.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No team roles discovered yet -- use "Create / repair team roles and channels" below.' }));
+    return;
+  }
+  teamRoles.forEach((r) => {
+    const row = el('div', { className: 'adm-row' });
+    const info = el('div', { className: 'adm-row-info' });
+    info.appendChild(el('strong', { className: 'adm-mono', text: r.team }));
+    info.appendChild(el('span', { className: 'adm-mono', text: r.role_id }));
+    row.appendChild(info);
+
+    const form = el('div', { className: 'adm-row-actions' });
+    const channelInput = el('input', { type: 'text', placeholder: 'channel id (blank = none)' });
+    channelInput.className = 'adm-mono';
+    channelInput.autocomplete = 'off';
+    channelInput.value = r.channel_id || '';
+    form.appendChild(channelInput);
+    const rowOut = el('span', { className: 'adm-hint' });
+    form.appendChild(btn('Save', 'adm-btn-quiet', async (b) => {
+      b.disabled = true;
+      rowOut.textContent = '';
+      try {
+        const value = channelInput.value.trim();
+        await post('/api/admin/discord/team-channel', { team: r.team, channel_id: value ? value : null });
+        await loadDiscord();
+      } catch (e) {
+        rowOut.textContent = 'Failed: ' + e.message;
+      }
+      b.disabled = false;
+    }));
+    form.appendChild(rowOut);
+    row.appendChild(form);
+
+    host.appendChild(row);
+  });
+}
+
+// ensure_team_channels()'s `ambiguous` bucket (app/discord_bot.py): a
+// team where more than one channel in the configured category
+// normalizes to its name -- that function refuses to guess, so this
+// just lists the candidate (real, un-normalized) channel names and
+// points at the per-row channel id field above, the only way to
+// actually resolve one. Rendered fresh after every "Create / repair"
+// click (see ensureDiscordRoles() below) -- purely informational,
+// cleared to empty (nothing shown) once ensure reports no ambiguous
+// teams at all, rather than left showing a stale prior result.
+function renderAmbiguousChannels(ambiguous) {
+  const host = document.getElementById('dc-roles-ambiguous');
+  host.replaceChildren();
+  if (!ambiguous || !ambiguous.length) return;
+  host.appendChild(el('p', { className: 'adm-hint adm-status-bad', text: 'Could not tell which channel is which for these teams -- pick one by hand in the channel id field above, then Save:' }));
+  ambiguous.forEach((a) => {
+    host.appendChild(el('p', { className: 'adm-hint', text: a.team + ': ' + a.candidates.join(', ') }));
+  });
+}
+
+function renderReconcileStatus(lastReconcile) {
+  const out = document.getElementById('dc-roles-reconcile-status');
+  if (!lastReconcile || !lastReconcile.at) {
+    out.textContent = 'No reconcile has run yet.';
+    return;
+  }
+  out.textContent = 'Last reconcile: ' + fmtTs(lastReconcile.at)
+    + ' -- checked ' + lastReconcile.checked + ', changed ' + lastReconcile.changed + '.';
+}
+
+function renderDiscordOutbox(outbox) {
+  const summary = document.getElementById('dc-outbox-summary');
+  summary.replaceChildren();
+  const p = el('p', { className: 'adm-net-health' + (outbox.failed > 0 ? ' adm-status-bad' : '') });
+  p.appendChild(el('span', {
+    text: outbox.pending + ' pending, ' + outbox.posted + ' posted, ' + outbox.failed + ' failed',
+  }));
+  summary.appendChild(p);
+
+  const host = document.getElementById('dc-outbox');
+  host.replaceChildren();
+  if (!outbox.recent.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No announcements queued yet.' }));
+    return;
+  }
+  outbox.recent.forEach((row) => {
+    const rowEl = el('div', { className: 'adm-row' });
+    const info = el('div', { className: 'adm-row-info' });
+    info.appendChild(el('span', { className: 'adm-mono', text: row.kind + ':' + row.key }));
+    info.appendChild(el('span', {
+      text: row.posted_at ? ('posted ' + fmtTs(row.posted_at))
+        : (row.attempts + (row.attempts === 1 ? ' attempt' : ' attempts')),
+    }));
+    if (row.last_error) {
+      info.appendChild(el('span', { text: row.last_error }));
+    }
+    rowEl.appendChild(info);
+    if (!row.posted_at && row.attempts > 0) {
+      rowEl.appendChild(btn('Retry', 'adm-btn-quiet', (b) => retryDiscordOutboxRow(b, row.id)));
+    }
+    host.appendChild(rowEl);
+  });
+}
+
+// Per-kind channel routing (app/db.py's discord_channel,
+// app/admin_ops.py's POST /api/admin/discord/channel) -- same
+// never-show-the-real-webhook rule as the default webhook field above:
+// GET /api/admin/discord's `channels` never carries a real URL, only
+// webhook_set/webhook_hint, so each row's webhook input always renders
+// blank and a blank Save leaves that row's stored value alone (its own
+// "Clear" checkbox is the explicit way to blank it).
+function renderDiscordChannels(channels) {
+  const host = document.getElementById('dc-channels');
+  host.replaceChildren();
+  if (!channels.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No per-kind routes configured -- every kind uses the default webhook above.' }));
+    return;
+  }
+  channels.forEach((c) => {
+    const row = el('div', { className: 'adm-row' });
+
+    const info = el('div', { className: 'adm-row-info' });
+    info.appendChild(el('strong', { className: 'adm-mono', text: c.kind }));
+    info.appendChild(el('span', {
+      text: c.webhook_set ? ('webhook set, ending in ' + c.webhook_hint) : 'webhook not set',
+    }));
+    row.appendChild(info);
+
+    const form = el('div', { className: 'adm-row-actions' });
+    const enabledLabel = el('label', { className: 'adm-check-label' });
+    const enabledBox = el('input', { type: 'checkbox' });
+    enabledBox.className = 'adm-check';
+    enabledBox.checked = !!c.enabled;
+    enabledLabel.appendChild(enabledBox);
+    enabledLabel.appendChild(document.createTextNode(' On'));
+    form.appendChild(enabledLabel);
+
+    const webhookInput = el('input', { type: 'password', placeholder: 'leave blank to keep current' });
+    webhookInput.autocomplete = 'off';
+    form.appendChild(webhookInput);
+
+    const clearLabel = el('label', { className: 'adm-check-label' });
+    const clearBox = el('input', { type: 'checkbox' });
+    clearBox.className = 'adm-check';
+    clearLabel.appendChild(clearBox);
+    clearLabel.appendChild(document.createTextNode(' Clear'));
+    form.appendChild(clearLabel);
+
+    form.appendChild(btn('Save', 'adm-btn-quiet', async (b) => {
+      b.disabled = true;
+      try {
+        const payload = { kind: c.kind, enabled: enabledBox.checked };
+        if (clearBox.checked) {
+          payload.clear_webhook = true;
+        } else if (webhookInput.value) {
+          payload.webhook_url = webhookInput.value;
+        }
+        await post('/api/admin/discord/channel', payload);
+        await loadDiscord();
+      } catch (e) {
+        setStatus('Channel route save failed: ' + e.message, true);
+      }
+      b.disabled = false;
+    }));
+    row.appendChild(form);
+
+    host.appendChild(row);
+  });
+}
+
+async function addDiscordChannel(b) {
+  const input = document.getElementById('dc-channel-new-kind');
+  const out = document.getElementById('dc-channel-result');
+  out.replaceChildren();
+  const kind = input.value.trim();
+  if (!kind) { out.textContent = 'Give it a kind first.'; return; }
+  b.disabled = true;
+  try {
+    await post('/api/admin/discord/channel', { kind: kind, enabled: true });
+    input.value = '';
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function loadDiscord() {
+  try {
+    const d = await api('/api/admin/discord');
+    renderDiscordForm(d.config);
+    renderDiscordChannels(d.channels || []);
+    renderDiscordOutbox(d.outbox);
+    renderTeamRoles(d.team_roles || []);
+    renderReconcileStatus(d.last_reconcile);
+    renderLeaderboardStatus(d.leaderboard);
+    // Interactions Endpoint URL -- app/admin_ops.py's GET
+    // /api/admin/discord only computes this when OAUTH_PUBLIC_BASE_URL
+    // is configured; blank otherwise, same as every absolute-or-omitted
+    // URL app/discord_notify.py builds.
+    document.getElementById('dc-slash-endpoint-url').textContent =
+      d.interactions_endpoint_url || '(set OAUTH_PUBLIC_BASE_URL first)';
+  } catch (e) {
+    setStatus('Discord config load failed: ' + e.message, true);
+  }
+}
+
+async function saveDiscord(b) {
+  const out = document.getElementById('dc-result');
+  out.replaceChildren();
+
+  const payload = {
+    enabled: document.getElementById('dc-enabled').checked,
+    announce_month_honors: document.getElementById('dc-month-honors').checked,
+    announce_season_close: document.getElementById('dc-season-close').checked,
+    announce_weekly_recap: document.getElementById('dc-weekly-recap').checked,
+    announce_net_wrapup: document.getElementById('dc-net-wrapup').checked,
+    username: document.getElementById('dc-username').value.trim(),
+    team_emoji: document.getElementById('dc-team-emoji').value.trim(),
+    roles_enabled: document.getElementById('dc-roles-enabled').checked,
+    guild_id: document.getElementById('dc-guild-id').value.trim(),
+    team_channels_enabled: document.getElementById('dc-team-channels-enabled').checked,
+    team_category_name: document.getElementById('dc-team-category-name').value.trim(),
+    slash_enabled: document.getElementById('dc-slash-enabled').checked,
+    app_id: document.getElementById('dc-app-id').value.trim(),
+    public_key: document.getElementById('dc-public-key').value.trim(),
+    leaderboard_enabled: document.getElementById('dc-leaderboard-enabled').checked,
+    leaderboard_interval_seconds: parseInt(document.getElementById('dc-leaderboard-interval').value, 10) || 600,
+    leaderboard_top_n: parseInt(document.getElementById('dc-leaderboard-topn').value, 10) || 5,
+  };
+  // Blank means keep the existing webhook -- see app/admin_ops.py's
+  // admin_discord_update, the same convention the Paint section's own
+  // api_key field already uses. clear_webhook is the explicit way to
+  // actually blank it.
+  if (document.getElementById('dc-clear-webhook').checked) {
+    payload.clear_webhook = true;
+  } else {
+    const webhookUrl = document.getElementById('dc-webhook-url').value;
+    if (webhookUrl) payload.webhook_url = webhookUrl;
+  }
+
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord', payload);
+    renderDiscordForm(r.config);
+    out.textContent = 'Saved.';
+    setStatus('Discord config saved', false);
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function sendDiscordTest(b) {
+  const out = document.getElementById('dc-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    await post('/api/admin/discord/test', {});
+    out.textContent = 'Test announcement queued -- check the channel shortly.';
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function retryDiscordOutboxRow(b, id) {
+  b.disabled = true;
+  try {
+    await post('/api/admin/discord/outbox/retry', { id: id });
+    await loadDiscord();
+  } catch (e) {
+    setStatus('Retry failed: ' + e.message, true);
+  }
+  b.disabled = false;
+}
+
+async function ensureDiscordRoles(b) {
+  const out = document.getElementById('dc-roles-result');
+  out.replaceChildren();
+  document.getElementById('dc-roles-ambiguous').replaceChildren();
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord/roles/ensure', {});
+    let text = 'Roles -- created: ' + (r.created.join(', ') || 'none')
+      + '. Recreated: ' + (r.recreated.join(', ') || 'none')
+      + '. Reused: ' + (r.reused.join(', ') || 'none') + '.';
+    // Channels (app/discord_bot.py's ensure_team_channels(), run right
+    // after roles above): {"ok": false} here just means the feature
+    // isn't turned on, or a Discord permission was missing -- not a
+    // failure of the roles step above, which already succeeded by the
+    // time this ran, so it renders as its own line rather than an error.
+    const c = r.channels;
+    if (c && c.ok) {
+      text += ' Channels -- created: ' + (c.created.join(', ') || 'none')
+        + '. Recreated: ' + (c.recreated.join(', ') || 'none')
+        + '. Adopted: ' + (c.adopted.join(', ') || 'none') + '.';
+      // "ambiguous" gets its own block below rather than folded into
+      // this one-line summary -- each entry carries candidate channel
+      // names an operator needs to actually read, not just a team list.
+      renderAmbiguousChannels(c.ambiguous);
+    } else if (c) {
+      text += ' Channels: ' + (c.reason || 'not configured.');
+    }
+    out.textContent = text;
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function reconcileDiscordRoles(b) {
+  const out = document.getElementById('dc-roles-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord/roles/reconcile', {});
+    out.textContent = 'Checked ' + r.checked + ' player(s), changed ' + r.changed + '.';
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+// Slash commands (app/discord_interactions.py) -- bulk-overwrites this
+// guild's command list with app/discord_bot.py's register_commands().
+// Save the Application ID/Public key fields (and turn Enabled on) with
+// the Save button above FIRST -- this button reads whatever was last
+// saved, not the form's current unsaved values.
+async function registerDiscordSlashCommands(b) {
+  const out = document.getElementById('dc-slash-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord/slash/register', {});
+    out.textContent = 'Registered: ' + r.commands.join(', ');
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+// "Post / repair now" (app/discord_leaderboard.py's run_leaderboard_pass(
+// force=True)) -- runs one pass immediately, ignoring the interval, and
+// always re-asserts the pin even when the content itself didn't change
+// (an operator may have unpinned it by hand). Save the Enabled/Interval/
+// Top N fields above with the Save button FIRST -- this button reads
+// whatever was last saved, not the form's current unsaved values, same
+// caveat registerDiscordSlashCommands() already carries for its own
+// fields.
+async function runDiscordLeaderboard(b) {
+  const out = document.getElementById('dc-leaderboard-result');
+  out.replaceChildren();
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/discord/leaderboard/run', {});
+    out.textContent = r.ok ? ('Done: ' + r.reason) : ('Not run: ' + r.reason);
+    await loadDiscord();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 // ---- read-API keys ----------------------------------------------------
 
 async function loadApiClients() {
@@ -2141,7 +2601,7 @@ function badge(id, value, bad) {
 async function refreshAll() {
   const loads = [
     loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
-    loadTraffic(), loadCheckinAwards(),
+    loadDiscord(), loadTraffic(), loadCheckinAwards(),
   ];
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
@@ -2265,5 +2725,12 @@ document.getElementById('nt-save').addEventListener('click', function () { saveN
 // first retyping title/body/version just to satisfy the required-field
 // check saveNotice() otherwise runs.
 document.getElementById('nt-clear').addEventListener('click', function () { saveNotice(this, false); });
+document.getElementById('dc-save').addEventListener('click', function () { saveDiscord(this); });
+document.getElementById('dc-test').addEventListener('click', function () { sendDiscordTest(this); });
+document.getElementById('dc-channel-add').addEventListener('click', function () { addDiscordChannel(this); });
+document.getElementById('dc-roles-ensure').addEventListener('click', function () { ensureDiscordRoles(this); });
+document.getElementById('dc-roles-reconcile').addEventListener('click', function () { reconcileDiscordRoles(this); });
+document.getElementById('dc-slash-register').addEventListener('click', function () { registerDiscordSlashCommands(this); });
+document.getElementById('dc-leaderboard-run').addEventListener('click', function () { runDiscordLeaderboard(this); });
 
 checkAccess();

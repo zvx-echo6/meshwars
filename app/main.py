@@ -15,8 +15,10 @@ from .auth import http_exception_as_error_body
 from .checkin import CheckinPoller
 from .config import settings
 from .db import connect, init_db
+from . import discord_interactions, discord_notify
 from .freqmapper_ingest import FreqMapperIngestor, load_freqmapper_config
 from .ingest import Ingestor
+from .log_redact import DiscordWebhookRedactionFilter
 from .mc_ingest import McIngestor
 from .meshview_client import MeshviewClient
 from .mqtt_subscriber import MqttSubscriber
@@ -26,6 +28,13 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# httpx logs every request it makes at INFO, including the full URL --
+# and a Discord webhook/interaction-followup URL carries its own bearer
+# token in the path (app/discord_notify.py, app/discord_interactions.py).
+# Redact that token in place rather than silencing or lowering the
+# level on the httpx logger: its other lines are operationally useful.
+# See app/log_redact.py's own module docstring.
+logging.getLogger("httpx").addFilter(DiscordWebhookRedactionFilter())
 log = logging.getLogger("main")
 
 
@@ -104,6 +113,20 @@ async def lifespan(app: FastAPI):
     mqtt_subscriber = MqttSubscriber()
     await mqtt_subscriber.start()
 
+    # Discord outbox drain loop (app/discord_notify.py): posts
+    # end-of-month honors app/results.py's freeze_month() already queued
+    # to discord_outbox. Started UNCONDITIONALLY, same reasoning as
+    # freqmapper_ingestor and checkin_poller above: announcements_enabled()
+    # is a runtime setting (DISCORD_WEBHOOK_ANNOUNCEMENTS), and the loop
+    # has to keep running to notice an operator configuring one later. A
+    # fresh install with no webhook set still starts this task; it simply
+    # does nothing each cycle until one is set. A bare function, not a
+    # class instance like the other background workers here -- it holds
+    # no persistent connection or client to gracefully release, so there
+    # is no discord_notify.stop() to call at shutdown, only the task
+    # cancellation every other task here already gets.
+    discord_task = asyncio.create_task(discord_notify.run_forever(), name="discord-outbox")
+
     app.state.client = client
     app.state.ingestor = ingestor
     app.state.ingest_task = task
@@ -112,6 +135,7 @@ async def lifespan(app: FastAPI):
     app.state.mqtt_subscriber = mqtt_subscriber
     app.state.freqmapper_ingestor = freqmapper_ingestor
     app.state.freqmapper_task = freqmapper_task
+    app.state.discord_task = discord_task
 
     try:
         yield
@@ -129,6 +153,16 @@ async def lifespan(app: FastAPI):
             await freqmapper_task
         except (asyncio.CancelledError, Exception):
             pass
+        discord_task.cancel()
+        try:
+            await discord_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        # /claimnode's own background watchers (app/discord_interactions.py)
+        # -- each one otherwise keeps polling and PATCHing a Discord
+        # message for up to five minutes after whatever started it;
+        # never leave one running past this process's own life.
+        await discord_interactions.cancel_all_claimnode_watches()
         if settings.mc_ingest_enabled:
             await mc_ingestor.stop()
         await checkin_poller.stop()

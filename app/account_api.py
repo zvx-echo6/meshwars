@@ -82,11 +82,12 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import mc_api, results
+from . import discord_bot, mc_api, results
 from .auth import new_rate_limit_bucket
 from .client_ip import get_client_ip
 from .config import settings
@@ -665,6 +666,77 @@ async def get_account(session: SessionPrincipal = Depends(require_session)) -> J
     )
 
 
+class _ClaimOutcome(NamedTuple):
+    """Result of _claim_player() below -- see its own docstring."""
+    kind: str  # "linked" | "already_linked" | "conflict"
+    error: dict | None
+    status_code: int
+
+
+def _claim_player(
+    conn, *, account_id: int, player_id: int, now: int, detail_suffix: str = "",
+) -> _ClaimOutcome:
+    """The two conflict checks and the write link_key() below performs,
+    once an API key has already been authenticated to `player_id` --
+    extracted so app/discord_interactions.py's /link command can reuse
+    the exact same "one account, one player" enforcement (both
+    directions) rather than a second copy. Callers run this inside
+    their OWN already-open write transaction (link_key()'s WriteSession,
+    or discord_interactions.py's own) -- this function neither begins
+    nor commits one itself.
+
+    Returns a _ClaimOutcome:
+      - "conflict": `error`/`status_code` are what the caller should
+        respond with; nothing was written.
+      - "already_linked": this key's player is already linked to THIS
+        account -- the desired end state already holds (a retried
+        request, a second click, the same key submitted twice). Not a
+        conflict, no write, no second account_link_event -- see
+        link_key()'s own docstring for why.
+      - "linked": the write happened -- player.account_id was just set
+        and an account_link_event row was just inserted. The caller is
+        responsible for everything link_key() does AFTER its own
+        WriteSession closes (reading the player back, Discord role
+        sync, the security notice) -- this function only ever touches
+        `player` and `account_link_event`.
+
+    `detail_suffix` is appended to the account_link_event `detail`
+    text -- link_key() itself leaves it blank; discord_interactions.py
+    passes " (via Discord)" so the audit trail can tell the two paths
+    apart without a second `kind` value.
+    """
+    existing = conn.execute(
+        "SELECT player_id FROM player WHERE account_id = ?", (account_id,)
+    ).fetchone()
+    if existing is not None:
+        if existing["player_id"] == player_id:
+            return _ClaimOutcome("already_linked", None, 200)
+        return _ClaimOutcome(
+            "conflict", {"error": "this account already has a linked player"}, 409
+        )
+
+    owner = conn.execute(
+        "SELECT account_id FROM player WHERE player_id = ?", (player_id,)
+    ).fetchone()
+    if owner is not None and owner["account_id"] is not None:
+        return _ClaimOutcome(
+            "conflict",
+            {"error": "that key's player is already linked to a different account"},
+            409,
+        )
+
+    conn.execute(
+        "UPDATE player SET account_id = ? WHERE player_id = ?",
+        (account_id, player_id),
+    )
+    conn.execute(
+        "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
+        "VALUES (?, 'player_linked', ?, 'user', ?)",
+        (account_id, f"player_id={player_id}{detail_suffix}", now),
+    )
+    return _ClaimOutcome("linked", None, 200)
+
+
 @router.post("/api/account/link-key")
 async def link_key(
     request: Request, session: SessionPrincipal = Depends(require_session)
@@ -738,40 +810,18 @@ async def link_key(
     # statements that ran before a conflict is detected are the two
     # read-only SELECTs below.
     async with WriteSession() as conn:
-        existing = conn.execute(
-            "SELECT player_id FROM player WHERE account_id = ?", (session.account_id,)
-        ).fetchone()
-        if existing is not None:
-            if existing["player_id"] == player_id:
-                # This key's player is already linked to THIS account --
-                # the desired end state already holds (most likely a
-                # retried request: see this route's own docstring). Not
-                # a conflict, no write, no second account_link_event --
-                # just report the same success a fresh link would have.
-                player = _player_out(conn, player_id)
-                return JSONResponse({"player": player}, status_code=200)
-            return JSONResponse(
-                {"error": "this account already has a linked player"}, status_code=409
-            )
+        outcome = _claim_player(conn, account_id=session.account_id, player_id=player_id, now=now)
+        if outcome.kind == "already_linked":
+            # This key's player is already linked to THIS account -- the
+            # desired end state already holds (most likely a retried
+            # request: see this route's own docstring). Not a conflict,
+            # no write, no second account_link_event -- just report the
+            # same success a fresh link would have.
+            player = _player_out(conn, player_id)
+            return JSONResponse({"player": player}, status_code=200)
+        if outcome.kind == "conflict":
+            return JSONResponse(outcome.error, status_code=outcome.status_code)
 
-        owner = conn.execute(
-            "SELECT account_id FROM player WHERE player_id = ?", (player_id,)
-        ).fetchone()
-        if owner is not None and owner["account_id"] is not None:
-            return JSONResponse(
-                {"error": "that key's player is already linked to a different account"},
-                status_code=409,
-            )
-
-        conn.execute(
-            "UPDATE player SET account_id = ? WHERE player_id = ?",
-            (session.account_id, player_id),
-        )
-        conn.execute(
-            "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
-            "VALUES (?, 'player_linked', ?, 'user', ?)",
-            (session.account_id, f"player_id={player_id}", now),
-        )
         contact_email = _verified_contact_email(conn, session.account_id)
 
     conn = connect()
@@ -779,6 +829,18 @@ async def link_key(
         player = _player_out(conn, player_id)
     finally:
         conn.close()
+
+    # Discord role sync (app/discord_bot.py) -- fire-and-forget, same
+    # never-break-delay-or-roll-back contract as _notify_security()
+    # just below. This is the "player linked to an account" trigger
+    # (app/discord_bot.py module docstring's WHAT THIS DOES section);
+    # a no-op if this account has no linked Discord identity or role
+    # sync isn't configured at all.
+    sync_conn = connect()
+    try:
+        await discord_bot.sync_member_safe(sync_conn, player_id)
+    finally:
+        sync_conn.close()
 
     # Security notice (Stage 2, event 6) -- see _notify_security()'s own
     # docstring for why a send failure here can never surface to this
@@ -2438,46 +2500,58 @@ async def account_checkin_health(
 
     conn = connect()
     try:
-        # Imported here, not at module level -- same "don't pay for
-        # app.checkin's heavy chain unless this endpoint is actually
-        # hit" reasoning as this module's other local .checkin imports
-        # (e.g. checkin_streak above). Aliased to match this file's
-        # existing call-site name; it's the same protocol-general
-        # schedule walk that used to be duplicated here as a private
-        # copy -- see most_recent_net_date()'s own docstring.
-        from .checkin import most_recent_net_date as _most_recent_net_date
-
-        boards: dict[str, dict] = {}
-        for protocol in (MC_PROTOCOL, MT_PROTOCOL):
-            contacts = _checkin_contacts_status(conn, session.player_id, directory, protocol)
-            most_recent_net_date = _most_recent_net_date(conn, protocol)
-            credited_points = None
-            if most_recent_net_date is not None:
-                row = conn.execute(
-                    "SELECT points FROM mc_checkin_award "
-                    " WHERE player_id = ? AND protocol = ? AND net_date = ?",
-                    (session.player_id, protocol, most_recent_net_date),
-                ).fetchone()
-                credited_points = row["points"] if row is not None else None
-
-            state, summary = _diagnose_checkin_health(
-                protocol, contacts, most_recent_net_date, credited_points,
-            )
-            boards[protocol] = {
-                "resolved": state == "credited",
-                "state": state,
-                "summary": summary,
-                "most_recent_net_date": most_recent_net_date,
-                "contacts": contacts,
-            }
+        result = _checkin_health_for_player(conn, session.player_id, directory)
     finally:
         conn.close()
+
+    return JSONResponse(result, status_code=200)
+
+
+def _checkin_health_for_player(conn, player_id: int, directory: list[dict]) -> dict:
+    """The body of GET /api/account/checkin-health, extracted so
+    app/discord_interactions.py's /setupcheck command can show a
+    Discord caller the exact same diagnosis this route computes for the
+    website's own panel -- read-only, never a second copy of the
+    per-board headline logic. See that route's own docstring just above
+    for the full contract (what `directory` is, why both boards always
+    appear, what `resolved` means); this is exactly its own former
+    request-handling body, unchanged, just no longer tied to a session
+    or a JSONResponse.
+    """
+    # Imported here, not at module level -- same "don't pay for
+    # app.checkin's heavy chain unless this endpoint is actually
+    # hit" reasoning as this module's other local .checkin imports
+    # (e.g. checkin_streak above). Aliased to match this file's
+    # existing call-site name; it's the same protocol-general
+    # schedule walk that used to be duplicated here as a private
+    # copy -- see most_recent_net_date()'s own docstring.
+    from .checkin import most_recent_net_date as _most_recent_net_date
+
+    boards: dict[str, dict] = {}
+    for protocol in (MC_PROTOCOL, MT_PROTOCOL):
+        contacts = _checkin_contacts_status(conn, player_id, directory, protocol)
+        most_recent_net_date = _most_recent_net_date(conn, protocol)
+        credited_points = None
+        if most_recent_net_date is not None:
+            row = conn.execute(
+                "SELECT points FROM mc_checkin_award "
+                " WHERE player_id = ? AND protocol = ? AND net_date = ?",
+                (player_id, protocol, most_recent_net_date),
+            ).fetchone()
+            credited_points = row["points"] if row is not None else None
+
+        state, summary = _diagnose_checkin_health(
+            protocol, contacts, most_recent_net_date, credited_points,
+        )
+        boards[protocol] = {
+            "resolved": state == "credited",
+            "state": state,
+            "summary": summary,
+            "most_recent_net_date": most_recent_net_date,
+            "contacts": contacts,
+        }
 
     overall_resolved = all(
         b["state"] in ("credited", "nothing_bound") for b in boards.values()
     )
-
-    return JSONResponse(
-        {"resolved": overall_resolved, "boards": boards},
-        status_code=200,
-    )
+    return {"resolved": overall_resolved, "boards": boards}

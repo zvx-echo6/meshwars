@@ -54,6 +54,7 @@ import unicodedata
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from . import discord_bot
 from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
 from .client_ip import get_client_ip
 from .config import settings
@@ -303,6 +304,62 @@ async def join(
                 )
 
     now = int(time.time())
+    account_id = session.account_id if session is not None else None
+    # See _create_player() below's own docstring for exactly what
+    # mint_key controls -- unchanged from before this was extracted:
+    # every combination mints a key except a signed-in Meshtastic join.
+    skip_key = session is not None and protocol == "mt"
+    error, status, player_id, raw_key = _create_player(
+        display_name=display_name, team=team, protocol=protocol, node_ref=node_ref,
+        account_id=account_id, mint_key=not skip_key, now=now,
+    )
+    if error is not None:
+        return JSONResponse(error, status_code=status)
+
+    # 8. Plaintext key shown once, plus the config link for MeshCore --
+    # or, for the one skipped case above, no key field at all (see
+    # _registration_response()).
+    return JSONResponse(
+        _registration_response(display_name, team, protocol, raw_key),
+        status_code=200,
+    )
+
+
+def _create_player(
+    *, display_name: str, team: str, protocol: str, node_ref: str | None,
+    account_id: int | None, mint_key: bool, now: int,
+) -> tuple[dict | None, int, int | None, str | None]:
+    """The write transaction join() above runs, extracted so
+    app/discord_interactions.py's /join command can reuse the EXACT
+    same dup-name check, node-conflict check, player/key/node inserts,
+    and account-link write -- never a second copy of this SQL. Returns
+    (error_body, status_code, player_id, raw_key): on any conflict,
+    error_body/status_code are what the caller should respond with and
+    player_id/raw_key are both None; on success error_body is None,
+    status_code is 200, and player_id/raw_key describe what was
+    created (raw_key is None whenever mint_key is False, or -- unlike
+    a direct call -- there is nothing else that makes it None: unlike
+    join()'s own inline skip_key computation, THIS function does
+    exactly what mint_key says and nothing more).
+
+    mint_key is the only thing a caller here decides for itself.
+    join() above computes it the same way it always did (False only
+    for a signed-in Meshtastic join -- see its own long-standing
+    comment, preserved at the call site above for why). Discord's
+    /join command (app/discord_interactions.py) always passes False,
+    for EVERY protocol -- issuing or displaying an API key is
+    website-only, never something a Discord command may do (see that
+    module's own docstring) -- which is exactly why this function
+    takes the decision as a plain parameter instead of re-deriving
+    join()'s own session/protocol-shaped rule internally.
+
+    account_id, when given, links the new player to that account in
+    the SAME transaction it is created in -- the exact write a
+    signed-in website join already performs, and now also what
+    Discord's /join uses for the account it just resolved (or created)
+    for the calling snowflake, without ever going through session
+    cookies at all.
+    """
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -313,25 +370,26 @@ async def join(
         ).fetchone()
         if dup:
             conn.execute("ROLLBACK")
-            return JSONResponse({"error": "that name is taken"}, status_code=409)
+            return {"error": "that name is taken"}, 409, None, None
 
         # Re-check "does this account already have a linked player"
         # under the write lock BEGIN IMMEDIATE above just acquired --
-        # step 0's check ran before this transaction opened, so a
-        # second /api/join call on the same session racing in between
-        # could otherwise still slip a second player onto one account.
-        # Same conflict, same message, same reasoning as
-        # app/account_api.py's link_key() re-checking its own
-        # "already linked" condition inside its WriteSession.
-        if session is not None:
+        # an earlier check (join()'s own step 0, or
+        # app/discord_interactions.py's own pre-modal check) ran before
+        # this transaction opened, so a second join call on the same
+        # account racing in between could otherwise still slip a
+        # second player onto one account. Same conflict, same message,
+        # same reasoning as app/account_api.py's link_key() re-checking
+        # its own "already linked" condition inside its WriteSession.
+        if account_id is not None:
             already = conn.execute(
                 "SELECT player_id FROM player WHERE account_id = ?",
-                (session.account_id,),
+                (account_id,),
             ).fetchone()
             if already:
                 conn.execute("ROLLBACK")
-                return JSONResponse(
-                    {"error": "this account already has a linked player"}, status_code=409
+                return (
+                    {"error": "this account already has a linked player"}, 409, None, None,
                 )
 
         if node_ref is not None:
@@ -341,17 +399,16 @@ async def join(
             ).fetchone()
             if bound:
                 conn.execute("ROLLBACK")
-                return JSONResponse(
-                    {"error": "that node is already registered to another player"},
-                    status_code=409,
+                return (
+                    {"error": "that node is already registered to another player"}, 409, None, None,
                 )
 
-        # 7. Create the player, and the key -- except in exactly one
-        # case: a signed-in caller joining as Meshtastic. Every other
-        # combination keeps minting one:
+        # 7. Create the player, and the key -- except when the caller
+        # says not to (mint_key=False). Every other combination keeps
+        # minting one:
         #
         # - Anonymous + mt: this player is NOT linked to any account
-        #   (session is None, so the account_id UPDATE below never
+        #   (account_id is None, so the account_id UPDATE below never
         #   runs). POST /api/account/link-key is the ONLY way this
         #   player can ever be claimed into an account later, and it
         #   authenticates by this exact key. Skip minting here and an
@@ -359,27 +416,28 @@ async def join(
         #   never simplify this to "skip the key for all mt joins".
         # - Anonymous + mc / authenticated + mc: unchanged -- MeshMapper
         #   needs the key to configure its upstream connection
-        #   regardless of how the player got here.
-        # - Authenticated + mt: the only case skipped. The player is
-        #   already linked to the account in this same transaction
-        #   below, so there is nothing left for a key to claim, and no
-        #   Meshtastic ingest path (freqmapper_ingest.py's api_key
-        #   references are FreqMapper's own upstream credential, not a
-        #   player key; coverage and net check-ins match by node ID)
-        #   ever consumes a player key for this protocol. Minting one
-        #   anyway is what made the account page's Security panel show
-        #   "rotate" copy -- warning about breaking MeshMapper -- to a
-        #   player who has never touched MeshMapper and has no key in
-        #   use to break.
+        #   regardless of how the player got here (except Discord's
+        #   /join, which always passes mint_key=False -- see this
+        #   function's own docstring).
+        # - Authenticated + mt: the only case join() itself skips. The
+        #   player is already linked to the account in this same
+        #   transaction below, so there is nothing left for a key to
+        #   claim, and no Meshtastic ingest path (freqmapper_ingest.py's
+        #   api_key references are FreqMapper's own upstream credential,
+        #   not a player key; coverage and net check-ins match by node
+        #   ID) ever consumes a player key for this protocol. Minting
+        #   one anyway is what made the account page's Security panel
+        #   show "rotate" copy -- warning about breaking MeshMapper --
+        #   to a player who has never touched MeshMapper and has no key
+        #   in use to break.
         cur = conn.execute(
             "INSERT INTO player(display_name, team, created_at) VALUES (?, ?, ?)",
             (display_name, team, now),
         )
         player_id = cur.lastrowid
 
-        skip_key = session is not None and protocol == "mt"
         raw_key = None
-        if not skip_key:
+        if mint_key:
             raw_key = secrets.token_urlsafe(32)
             conn.execute(
                 "INSERT INTO api_key(key_hash, player_id, issued_at) VALUES (?, ?, ?)",
@@ -393,25 +451,26 @@ async def join(
                 (node_ref, player_id, now),
             )
 
-        # A session-based join links the new player to the calling
-        # account in the SAME transaction that created it -- so a
-        # signed-in caller who just joined never has to turn around and
-        # paste their own brand-new key into POST /api/account/link-key
-        # to claim what they just made. Same write, same event kind
-        # ('player_linked'), and the same reasoning app/account_api.py's
-        # link_key() already documents for its own UPDATE -- this is
-        # just that same link happening automatically, at creation time,
-        # for the one case (no prior player at all) link-key's own
-        # conflict check above already proved is clear.
-        if session is not None:
+        # An account-linked join links the new player to that account
+        # in the SAME transaction that created it -- so a signed-in
+        # website join never has to turn around and paste their own
+        # brand-new key into POST /api/account/link-key to claim what
+        # they just made, and Discord's /join never has to either. Same
+        # write, same event kind ('player_linked'), and the same
+        # reasoning app/account_api.py's link_key() already documents
+        # for its own UPDATE -- this is just that same link happening
+        # automatically, at creation time, for the one case (no prior
+        # player at all) the conflict check above already proved is
+        # clear.
+        if account_id is not None:
             conn.execute(
                 "UPDATE player SET account_id = ? WHERE player_id = ?",
-                (session.account_id, player_id),
+                (account_id, player_id),
             )
             conn.execute(
                 "INSERT INTO account_link_event(account_id, kind, detail, actor, created_at) "
                 "VALUES (?, 'player_linked', ?, 'user', ?)",
-                (session.account_id, f"player_id={player_id}", now),
+                (account_id, f"player_id={player_id}", now),
             )
 
         conn.execute("COMMIT")
@@ -421,13 +480,7 @@ async def join(
     finally:
         conn.close()
 
-    # 8. Plaintext key shown once, plus the config link for MeshCore --
-    # or, for the one skipped case above, no key field at all (see
-    # _registration_response()).
-    return JSONResponse(
-        _registration_response(display_name, team, protocol, raw_key),
-        status_code=200,
-    )
+    return None, 200, player_id, raw_key
 
 
 @router.post("/api/join/redeem")
@@ -676,6 +729,19 @@ async def switch_team(
         raise
     finally:
         conn.close()
+
+    # Discord role sync (app/discord_bot.py) -- fire-and-forget, run
+    # AFTER the transaction above has already committed (this function
+    # never uses WriteSession, but the same "HTTP work happens outside
+    # any write transaction" rule applies), never allowed to break,
+    # delay, or roll back a team switch that already succeeded. A
+    # no-op when the player has no linked Discord identity or role sync
+    # isn't configured at all -- see sync_member_safe()'s own docstring.
+    sync_conn = connect()
+    try:
+        await discord_bot.sync_member_safe(sync_conn, player_id)
+    finally:
+        sync_conn.close()
 
     return JSONResponse(
         {"team": team, "next_switch_at": end},

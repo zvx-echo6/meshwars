@@ -110,6 +110,63 @@ services:
       # (default) or "freqmapper". Exactly one paints at a time -- see
       # this setting's own comment in app/config.py.
       MT_PAINT_SOURCE: "${MT_PAINT_SOURCE:-meshview}"
+      # Discord announcements (app/discord_notify.py): end-of-month
+      # honors posted to a Discord channel webhook. NOT the same as
+      # OAUTH_DISCORD_CLIENT_ID/SECRET above (a player sign-in provider)
+      # -- this is a separate credential for a separate feature. Empty
+      # means off, never open, same contract as every other optional
+      # credential in this file. Compose does not pass .env through
+      # wholesale, so this line is what actually gets the value from
+      # .env into the container -- see .env.example for how to create
+      # the webhook. Never set a real value in this file; it is a public
+      # repository.
+      DISCORD_WEBHOOK_ANNOUNCEMENTS: "${DISCORD_WEBHOOK_ANNOUNCEMENTS:-}"
+      # Display name a Discord announcement posts under -- overrides
+      # whatever name the webhook itself was created with in Discord.
+      # Not a secret. Falls back to "MeshWars" if left blank (see that
+      # setting's own comment in app/config.py).
+      DISCORD_WEBHOOK_USERNAME: "${DISCORD_WEBHOOK_USERNAME:-}"
+      # Per-team coloured-dot custom emoji for an announcement -- empty
+      # means no dots, rendered exactly as before this setting existed.
+      # See .env.example for how an operator gets these tokens from
+      # their own Discord server. Compose does not pass .env through
+      # wholesale, so -- same trap as DISCORD_WEBHOOK_ANNOUNCEMENTS above
+      # -- a missing line here means the value sits correctly in .env
+      # and silently never reaches the app.
+      DISCORD_TEAM_EMOJI: "${DISCORD_TEAM_EMOJI:-}"
+      # Discord ROLE sync (app/discord_bot.py) -- a THIRD, separate
+      # Discord integration: a real bot user ("Herald") in the guild,
+      # authenticated by this token, that assigns/removes team roles on
+      # guild members. NOT a webhook URL and NOT the OAUTH_DISCORD_*
+      # sign-in credential above. A SECRET, same "empty means off,
+      # never logged, never returned by any route" treatment as
+      # ACCOUNT_TOTP_ENCRYPTION_KEY -- see .env.example for where to get
+      # one. THE KNOWN TRAP: compose does not pass .env through
+      # wholesale, so a missing line here means a real token sitting in
+      # .env silently never reaches the container and role sync just
+      # never does anything, with no error anywhere obvious. Never set a
+      # real value in this file; it is a public repository.
+      DISCORD_BOT_TOKEN: "${DISCORD_BOT_TOKEN:-}"
+      # The Discord guild (server) id role sync operates in. Not a
+      # secret (visible to anyone in the server), but still needs this
+      # forwarding line for the same reason DISCORD_TEAM_EMOJI does --
+      # this is only the one-time SEED for discord_config.guild_id (see
+      # that setting's own comment in app/config.py); an operator edits
+      # the live value afterward through /api/admin/discord.
+      DISCORD_GUILD_ID: "${DISCORD_GUILD_ID:-}"
+      # Slash commands (app/discord_interactions.py) -- a FOURTH,
+      # separate Discord integration: an HTTPS endpoint Discord POSTs
+      # each /command invocation to directly, no bot gateway connection.
+      # Neither value is a secret (both are shown on the application's
+      # own General Information page in Discord's developer portal) --
+      # this is only the one-time SEED for discord_config.app_id/
+      # public_key; an operator edits the live values afterward through
+      # /api/admin/discord. Same forwarding-line trap as every other
+      # Discord setting above: compose does not pass .env through
+      # wholesale, so a missing line here means a value sitting in .env
+      # silently never reaches the container.
+      DISCORD_APP_ID: "${DISCORD_APP_ID:-}"
+      DISCORD_PUBLIC_KEY: "${DISCORD_PUBLIC_KEY:-}"
     volumes:
       # The game database, in a directory beside this compose file. A
       # plain directory rather than a named volume so the operator can

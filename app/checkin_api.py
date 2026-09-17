@@ -362,37 +362,11 @@ def _clear_confirm_windows(conn, player_id: int) -> None:
 async def confirm_start(
     request: Request, principal: Principal = Depends(require_checkin_principal)
 ) -> JSONResponse:
-    """Open (or replace) this player's confirmation window.
-
-    `protocol` in the body selects which radio type: "mc" (the
-    default, so the original MeshCore-only frontend keeps working
-    unchanged against this same endpoint) requires `name`, the display
-    name the player's radio currently shows on the mesh; "mt" takes no
-    `name` at all and instead generates a fresh, unique broadcast code
-    for the player to send. Whichever protocol is NOT selected has its
-    OWN window cleared here too (_clear_confirm_windows) -- a player
-    has at most one open confirmation window, ever, regardless of
-    protocol; starting one kind always retires the other kind's, the
-    same way starting a fresh MeshCore window already retired any
-    previous MeshCore one.
-
-    MeshCore path: takes the baseline snapshot -- an on-demand,
-    uncached scan of every configured MeshCore-family connector
-    (app/checkin.py's confirm_scan_all_connectors; see that function
-    and app/db.py's mc_node_confirmation comment for why this can
-    never be CheckinPoller's cached directory) -- RIGHT NOW, before
-    responding, so the window's five minutes start counting from a
-    snapshot the player has not yet had a chance to act on.
-
-    Meshtastic path: no baseline needed at all -- see app/checkin.py's
-    Meshtastic node-confirmation section header for why a freshly
-    generated, unique code is its own proof with nothing to compare it
-    against.
-
-    Set, not add, on whichever table gets the new row: PRIMARY KEY
-    (player_id) means opening a second window on the SAME protocol (a
-    retry, a different node, a typo fixed) silently replaces whatever
-    window of that protocol was already open, exactly as before.
+    """HTTP surface for start_confirmation() below -- parses the request
+    body and forwards whatever it returns verbatim. See that function's
+    own docstring for the actual logic (extracted so
+    app/discord_interactions.py's /claimnode command can open the exact
+    same window this route does, never a second copy of it).
     """
     player_id = principal.player_id
 
@@ -406,16 +380,61 @@ async def confirm_start(
     protocol = body.get("protocol")
     if protocol is None:
         protocol = "mc"  # default -- see docstring: keeps the pre-existing MeshCore-only callers unchanged
+
+    result, status = await start_confirmation(player_id, protocol, body.get("name"))
+    return JSONResponse(result, status_code=status)
+
+
+async def start_confirmation(player_id: int, protocol: str, name: str | None) -> tuple[dict, int]:
+    """Open (or replace) this player's confirmation window -- the core
+    of POST /api/checkin/confirm/start above, extracted so
+    app/discord_interactions.py's /claimnode command can call this
+    directly (a plain function call, never this app's own HTTP route
+    over HTTP) rather than duplicate the baseline scan / code issuance
+    / insert a second time. Returns (body, status_code), exactly as the
+    route above now just forwards verbatim.
+
+    `protocol` must be "mc" or "mt" -- validated HERE, once, so a
+    malformed value from either caller is refused identically (today
+    only the website route can actually pass one through unvalidated;
+    /claimnode's own `board` option is a fixed Discord choice list that
+    can never arrive here as anything else). "mc" requires `name`, the
+    display name the player's radio currently shows on the mesh; "mt"
+    takes no `name` at all and instead generates a fresh, unique
+    broadcast code for the player to send. Whichever protocol is NOT
+    selected has its OWN window cleared here too
+    (_clear_confirm_windows) -- a player has at most one open
+    confirmation window, ever, regardless of protocol; starting one
+    kind always retires the other kind's, the same way starting a
+    fresh MeshCore window already retired any previous MeshCore one.
+
+    MeshCore path: takes the baseline snapshot -- an on-demand,
+    uncached scan of every configured MeshCore-family connector
+    (app/checkin.py's confirm_scan_all_connectors; see that function
+    and app/db.py's mc_node_confirmation comment for why this can
+    never be CheckinPoller's cached directory) -- RIGHT NOW, before
+    returning, so the window's five minutes start counting from a
+    snapshot the player has not yet had a chance to act on.
+
+    Meshtastic path: no baseline needed at all -- see app/checkin.py's
+    Meshtastic node-confirmation section header for why a freshly
+    generated, unique code is its own proof with nothing to compare it
+    against.
+
+    Set, not add, on whichever table gets the new row: PRIMARY KEY
+    (player_id) means opening a second window on the SAME protocol (a
+    retry, a different node, a typo fixed) silently replaces whatever
+    window of that protocol was already open, exactly as before.
+    """
     if protocol not in ("mc", "mt"):
-        return JSONResponse({"error": "protocol must be 'mc' or 'mt'"}, status_code=400)
+        return {"error": "protocol must be 'mc' or 'mt'"}, 400
 
     now = int(time.time())
     expires_at = now + _CONFIRM_WINDOW_SECONDS
 
     if protocol == "mc":
-        name = body.get("name")
         if normalize_sender_name(name) is None:
-            return JSONResponse({"error": "name is required"}, status_code=400)
+            return {"error": "name is required"}, 400
 
         conn = connect()
         try:
@@ -428,9 +447,9 @@ async def confirm_start(
             conn.execute("BEGIN IMMEDIATE")
             try:
                 # Clears BOTH tables, not just this one -- see
-                # _clear_confirm_windows and this route's own docstring
-                # for why starting one protocol's window always retires
-                # the other's.
+                # _clear_confirm_windows and this function's own
+                # docstring for why starting one protocol's window
+                # always retires the other's.
                 _clear_confirm_windows(conn, player_id)
                 conn.execute(
                     "INSERT INTO mc_node_confirmation"
@@ -447,9 +466,9 @@ async def confirm_start(
 
         _scan_cache.pop(player_id, None)  # stale from any previous window -- see _scan_cache's own comment
 
-        return JSONResponse(
+        return (
             {"expires_at": expires_at, "window_seconds": _CONFIRM_WINDOW_SECONDS, "baseline_count": len(baseline)},
-            status_code=200,
+            200,
         )
 
     # protocol == "mt"
@@ -479,31 +498,40 @@ async def confirm_start(
 
     _scan_cache.pop(player_id, None)
 
-    return JSONResponse(
-        {"protocol": "mt", "code": code, "expires_at": expires_at, "window_seconds": _CONFIRM_WINDOW_SECONDS},
-        status_code=200,
-    )
+    return {"protocol": "mt", "code": code, "expires_at": expires_at, "window_seconds": _CONFIRM_WINDOW_SECONDS}, 200
 
 
 @router.get("/api/checkin/confirm/status")
 async def confirm_status(
     request: Request, principal: Principal = Depends(require_checkin_principal)
 ) -> JSONResponse:
+    """HTTP surface for confirmation_status() below -- see that
+    function's own docstring for the actual logic (extracted for the
+    same reuse reason as start_confirmation() above).
+    """
+    return JSONResponse(await confirmation_status(principal.player_id), status_code=200)
+
+
+async def confirmation_status(player_id: int) -> dict:
     """Poll this player's open confirmation window -- MeshCore for a
-    fresh advert, Meshtastic for a message carrying the issued code.
-    Checks mc_node_confirmation first, then mt_node_confirmation, and
-    the response always names which one it found via `protocol` -- see
-    this section's header comment for why there can never be a row in
-    both at once, so this is never actually ambiguous, just two tables
-    to look in.
+    fresh advert, Meshtastic for a message carrying the issued code --
+    the core of GET /api/checkin/confirm/status above, extracted so
+    app/discord_interactions.py's /claimnode command can poll the exact
+    same way that route does, from its own background watcher task,
+    never a second copy of it. Checks mc_node_confirmation first, then
+    mt_node_confirmation, and the response always names which one it
+    found via `protocol` -- see this section's header comment for why
+    there can never be a row in both at once, so this is never actually
+    ambiguous, just two tables to look in.
 
     Re-scans on every call the caller isn't throttled on (see
     _scan_cache's own comment for why a THROTTLED call is answered from
     the previous scan instead of skipped outright -- a player mid-
     window still gets an answer every poll, just not always a freshly
-    fetched one) -- a browser polling this every couple of seconds for
-    up to five minutes must never turn into a request storm against
-    every configured connector, MeshCore or Meshtastic alike.
+    fetched one) -- a browser (or /claimnode's own watcher) polling
+    this every couple of seconds for up to five minutes must never turn
+    into a request storm against every configured connector, MeshCore
+    or Meshtastic alike.
 
     An open `mt` window's response includes `code`, the same issued
     code confirm_start returned -- the player is about to broadcast it
@@ -512,13 +540,12 @@ async def confirm_status(
     the code (and the countdown, and polling) instead of forcing a
     cancel-and-restart. An `mc` window's response never carries a
     `code` key at all -- there is no code on that protocol, only a
-    typed_name, which this route already doesn't echo back either.
+    typed_name, which this function already doesn't echo back either.
     Strictly scoped to the caller's OWN window either way, same as
-    every other field here -- this route reads mc_node_confirmation/
+    every other field here -- this reads mc_node_confirmation/
     mt_node_confirmation by this player's own player_id, never anyone
     else's.
     """
-    player_id = principal.player_id
     now = int(time.time())
 
     conn = connect()
@@ -533,7 +560,7 @@ async def confirm_status(
             if now >= mc_row["expires_at"]:
                 conn.execute("DELETE FROM mc_node_confirmation WHERE player_id = ?", (player_id,))
                 _scan_cache.pop(player_id, None)
-                return JSONResponse({"state": "none"}, status_code=200)
+                return {"state": "none"}
 
             typed_name = mc_row["typed_name"]
             expires_at = mc_row["expires_at"]
@@ -571,15 +598,12 @@ async def confirm_status(
                 }
                 for c in candidates
             ]
-            return JSONResponse(
-                {
-                    "protocol": "mc",
-                    "state": "found" if out_candidates else "waiting",
-                    "expires_at": expires_at,
-                    "candidates": out_candidates,
-                },
-                status_code=200,
-            )
+            return {
+                "protocol": "mc",
+                "state": "found" if out_candidates else "waiting",
+                "expires_at": expires_at,
+                "candidates": out_candidates,
+            }
 
         mt_row = conn.execute(
             "SELECT code, expires_at, last_scan_at FROM mt_node_confirmation WHERE player_id = ?",
@@ -587,12 +611,12 @@ async def confirm_status(
         ).fetchone()
 
         if mt_row is None:
-            return JSONResponse({"state": "none"}, status_code=200)
+            return {"state": "none"}
 
         if now >= mt_row["expires_at"]:
             conn.execute("DELETE FROM mt_node_confirmation WHERE player_id = ?", (player_id,))
             _scan_cache.pop(player_id, None)
-            return JSONResponse({"state": "none"}, status_code=200)
+            return {"state": "none"}
 
         code = mt_row["code"]
         expires_at = mt_row["expires_at"]
@@ -627,55 +651,23 @@ async def confirm_status(
     finally:
         conn.close()
 
-    return JSONResponse(
-        {
-            "protocol": "mt",
-            "state": "found" if out_candidates else "waiting",
-            "expires_at": expires_at,
-            "code": code,
-            "candidates": out_candidates,
-        },
-        status_code=200,
-    )
+    return {
+        "protocol": "mt",
+        "state": "found" if out_candidates else "waiting",
+        "expires_at": expires_at,
+        "code": code,
+        "candidates": out_candidates,
+    }
 
 
 @router.post("/api/checkin/confirm/accept")
 async def confirm_accept(
     request: Request, principal: Principal = Depends(require_checkin_principal)
 ) -> JSONResponse:
-    """Bind the radio identified in the body to the caller, IF a live
-    re-scan still finds it among the current window's candidates.
-
-    Which protocol is open -- and therefore which body field is read,
-    and which upstream re-scan runs -- is read off the database
-    (mc_node_confirmation checked first, then mt_node_confirmation),
-    never off a client-supplied `protocol`: see this section's header
-    comment for why a player can never have both open at once, so
-    there is nothing for a client-supplied value to disambiguate that
-    the database doesn't already answer on its own. MeshCore: body
-    carries `public_key` (64 hex), unchanged from before this feature
-    existed. Meshtastic: body carries `node_ref` (bare or
-    "!"-prefixed 8-hex, normalize_node_ref accepts either) -- the same
-    identifier GET .../status already reports on each mt candidate, so
-    a client never has to convert between shapes to go from status to
-    accept.
-
-    Never trusts the client's word that a node was offered by GET
-    .../status -- an accept request is re-verified against a fresh scan
-    here (confirm_scan_all_connectors, under this player's own
-    typed_name and baseline, for mc; mt_confirm_scan_all_connectors,
-    under this player's own code, for mt) the same way GET .../status
-    computes candidates itself. Once verified, the bind honours the
-    SAME first-claim-wins conflict check POST /api/nodes uses
-    (app/nodes_api.py): a node already claimed by someone else refuses
-    with 409 and binds nothing; already bound to the CALLER is treated
-    as success, not an error (a retried request, a second click); a
-    fresh bind consumes the window (both tables cleared, same as
-    confirm_start opening a new one) so it can't be replayed against a
-    second node.
+    """HTTP surface for accept_confirmation() below -- see that
+    function's own docstring for the actual logic (extracted for the
+    same reuse reason as start_confirmation() above).
     """
-    player_id = principal.player_id
-
     try:
         body = await request.json()
     except Exception:
@@ -683,6 +675,48 @@ async def confirm_accept(
     if not isinstance(body, dict):
         return JSONResponse({"error": "bad request"}, status_code=400)
 
+    result, status = await accept_confirmation(principal.player_id, body)
+    return JSONResponse(result, status_code=status)
+
+
+async def accept_confirmation(player_id: int, body: dict) -> tuple[dict, int]:
+    """Bind the radio identified in `body` to `player_id`, IF a live
+    re-scan still finds it among the current window's candidates -- the
+    core of POST /api/checkin/confirm/accept above, extracted so
+    app/discord_interactions.py's /claimnode command (its select/
+    confirm click handlers) can bind through this exact same logic,
+    never a second copy of it or an HTTP call to this app's own route.
+    Returns (body, status_code), exactly as the route above now just
+    forwards verbatim.
+
+    Which protocol is open -- and therefore which body field is read,
+    and which upstream re-scan runs -- is read off the database
+    (mc_node_confirmation checked first, then mt_node_confirmation),
+    never off a client-supplied `protocol`: see this section's header
+    comment for why a player can never have both open at once, so
+    there is nothing for a client-supplied value to disambiguate that
+    the database doesn't already answer on its own. MeshCore: `body`
+    carries `public_key` (64 hex), unchanged from before this feature
+    existed. Meshtastic: `body` carries `node_ref` (bare or
+    "!"-prefixed 8-hex, normalize_node_ref accepts either) -- the same
+    identifier GET .../status already reports on each mt candidate, so
+    a caller never has to convert between shapes to go from status to
+    accept.
+
+    Never trusts the caller's word that a node was offered by GET
+    .../status (or /claimnode's own watcher) -- an accept is
+    re-verified against a fresh scan here (confirm_scan_all_connectors,
+    under this player's own typed_name and baseline, for mc;
+    mt_confirm_scan_all_connectors, under this player's own code, for
+    mt) the same way GET .../status computes candidates itself. Once
+    verified, the bind honours the SAME first-claim-wins conflict check
+    POST /api/nodes uses (app/nodes_api.py): a node already claimed by
+    someone else refuses with 409 and binds nothing; already bound to
+    the CALLER is treated as success, not an error (a retried request,
+    a second click); a fresh bind consumes the window (both tables
+    cleared, same as confirm_start opening a new one) so it can't be
+    replayed against a second node.
+    """
     conn = connect()
     try:
         now = int(time.time())
@@ -703,26 +737,20 @@ async def confirm_accept(
             if window_row is not None:
                 _clear_confirm_windows(conn, player_id)
                 _scan_cache.pop(player_id, None)
-            return JSONResponse(
-                {"error": "no open confirmation window -- start one first"}, status_code=409
-            )
+            return {"error": "no open confirmation window -- start one first"}, 409
 
         if mc_row is not None:
             protocol = "mc"
             public_key = normalize_public_key(body.get("public_key"))
             if public_key is None:
-                return JSONResponse(
-                    {"error": "public_key is required and must be 64 hex characters"}, status_code=400
-                )
+                return {"error": "public_key is required and must be 64 hex characters"}, 400
 
             raw = await confirm_scan_all_connectors(conn, mc_row["typed_name"])
             baseline = json.loads(mc_row["baseline"])
             candidates = _fresh_candidates(raw, baseline)
 
             if not any(c["public_key"] == public_key for c in candidates):
-                return JSONResponse(
-                    {"error": "that key is not a current confirmation candidate"}, status_code=400
-                )
+                return {"error": "that key is not a current confirmation candidate"}, 400
 
             node_ref = public_key[:8]
             bind_public_key = public_key
@@ -730,15 +758,11 @@ async def confirm_accept(
             protocol = "mt"
             node_ref = normalize_node_ref(body.get("node_ref"))
             if node_ref is None:
-                return JSONResponse(
-                    {"error": "node_ref is required and must be 8 hex characters"}, status_code=400
-                )
+                return {"error": "node_ref is required and must be 8 hex characters"}, 400
 
             candidates = await mt_confirm_scan_all_connectors(conn, mt_row["code"])
             if not any(c["node_ref"] == node_ref for c in candidates):
-                return JSONResponse(
-                    {"error": "that node is not a current confirmation candidate"}, status_code=400
-                )
+                return {"error": "that node is not a current confirmation candidate"}, 400
 
             bind_public_key = None  # Meshtastic node confirmation proves a node id, never a key
 
@@ -756,10 +780,7 @@ async def confirm_accept(
             ).fetchone()
             if existing is not None and existing["player_id"] != player_id:
                 conn.execute("ROLLBACK")
-                return JSONResponse(
-                    {"error": "that node is already registered to another player"},
-                    status_code=409,
-                )
+                return {"error": "that node is already registered to another player"}, 409
             if existing is None:
                 conn.execute(
                     "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
@@ -780,23 +801,30 @@ async def confirm_accept(
         conn.close()
 
     _scan_cache.pop(player_id, None)
-    return JSONResponse({"node_ref": node_ref}, status_code=200)
+    return {"node_ref": node_ref}, 200
 
 
 @router.delete("/api/checkin/confirm")
 async def confirm_cancel(
     request: Request, principal: Principal = Depends(require_checkin_principal)
 ) -> JSONResponse:
+    """HTTP surface for cancel_confirmation() below."""
+    return JSONResponse(cancel_confirmation(principal.player_id), status_code=200)
+
+
+def cancel_confirmation(player_id: int) -> dict:
     """Cancel this player's open confirmation window, if any -- MeshCore
     or Meshtastic, whichever is open (see this section's header
     comment for why a player only ever has one). Always-succeeds:
-    calling this with no window open is not an error, just a no-op.
+    calling this with no window open is not an error, just a no-op --
+    the core of DELETE /api/checkin/confirm above, extracted so
+    app/discord_interactions.py's /claimnode Cancel button can call
+    this directly, never a second copy of it.
     """
-    player_id = principal.player_id
     conn = connect()
     try:
         _clear_confirm_windows(conn, player_id)
     finally:
         conn.close()
     _scan_cache.pop(player_id, None)
-    return JSONResponse({"state": "none"}, status_code=200)
+    return {"state": "none"}
