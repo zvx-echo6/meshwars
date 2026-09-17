@@ -14,7 +14,7 @@ from .auth import http_exception_as_error_body
 from .checkin import CheckinPoller
 from .config import settings
 from .db import connect, init_db
-from . import discord_notify
+from . import discord_interactions, discord_notify
 from .freqmapper_ingest import FreqMapperIngestor, load_freqmapper_config
 from .ingest import Ingestor
 from .log_redact import DiscordWebhookRedactionFilter
@@ -157,6 +157,11 @@ async def lifespan(app: FastAPI):
             await discord_task
         except (asyncio.CancelledError, Exception):
             pass
+        # /claimnode's own background watchers (app/discord_interactions.py)
+        # -- each one otherwise keeps polling and PATCHing a Discord
+        # message for up to five minutes after whatever started it;
+        # never leave one running past this process's own life.
+        await discord_interactions.cancel_all_claimnode_watches()
         if settings.mc_ingest_enabled:
             await mc_ingestor.stop()
         await checkin_poller.stop()

@@ -1285,6 +1285,91 @@ def test_setupcheck_matches_website_helper_content(db_path):
         assert board["summary"] in content
 
 
+class _FakePoller:
+    """Stands in for app.checkin.CheckinPoller on app.state.checkin_poller
+    -- only directory_snapshot() is ever called by _cmd_setupcheck.
+    """
+
+    def __init__(self, directory: list[dict]) -> None:
+        self._directory = directory
+
+    def directory_snapshot(self, connector_url: str | None = None) -> list[dict]:
+        return list(self._directory)
+
+
+def test_setupcheck_matches_website_route_for_ambiguous_resolving_case(db_path):
+    """The bug this test guards: /setupcheck used to always pass an
+    EMPTY directory (di._cmd_setupcheck's own former KNOWN LIMITATION),
+    so a resolving-but-uncredited MeshCore contact always read as
+    "not_in_directory" here even when the website's own
+    /api/account/checkin-health -- given the SAME live directory via
+    request.app.state.checkin_poller -- would have said
+    "resolving_uncredited". With ctx.app_state wired through, both must
+    now agree, for this genuinely ambiguous/resolving case and not just
+    the empty-directory one the baseline test above already covers.
+    """
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Resolver", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "77779999")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) VALUES ('mc', 'aabbccdd', ?, ?)",
+        (KEY_PLAYER_ID, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    directory = [
+        {"name": "Resolver Radio", "public_key": "aabbccdd" + "11" * 28, "role": "companion", "last_seen": None},
+    ]
+
+    app = FastAPI()
+    app.include_router(di.router)
+    app.state.mc_ingestor = FakeIngestor()
+    app.state.checkin_poller = _FakePoller(directory)
+    client = TestClient(app)
+
+    payload = _command("setupcheck")
+    payload["member"] = {"user": {"id": "77779999"}}
+    resp = _post_interaction(client, priv, payload)
+    assert resp.status_code == 200, resp.text
+    content = resp.json()["data"]["content"]
+
+    from app import account_api as account_api_module
+    from app.db import connect as app_connect
+
+    conn = app_connect()
+    try:
+        expected = account_api_module._checkin_health_for_player(conn, KEY_PLAYER_ID, directory)
+    finally:
+        conn.close()
+
+    # Prove this is genuinely the ambiguous/resolving case the empty-
+    # directory baseline test can never exercise, not a duplicate of it.
+    assert expected["boards"]["mc"]["state"] == "resolving_uncredited"
+    for protocol, board in expected["boards"].items():
+        assert board["summary"] in content
+
+
+def test_setupcheck_with_no_poller_on_app_state_falls_back_to_empty_directory(db_path):
+    """A bare app.state (no checkin_poller attribute at all -- the shape
+    this file's own _client()/_client_with_ingestor() build) must
+    degrade the same way the website route does with nothing cached
+    yet, never raise.
+    """
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Nobody", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "77778888")
+    client = _client_with_ingestor(FakeIngestor())
+
+    payload = _command("setupcheck")
+    payload["member"] = {"user": {"id": "77778888"}}
+    resp = _post_interaction(client, priv, payload)
+    assert resp.status_code == 200, resp.text
+
+
 # ---- component/modal responses stay ephemeral and mention-free -----------
 
 
@@ -1318,3 +1403,493 @@ def test_component_and_modal_responses_stay_ephemeral(db_path):
         data = body["data"]
         assert data["allowed_mentions"] == {"parse": []}
         assert data.get("flags") == di._FLAG_EPHEMERAL
+
+
+# ---- /claimnode -------------------------------------------------------
+#
+# Board picked via a required Discord choice option, so every test below
+# uses an options list rather than a bare command name -- see
+# _claimnode_command() below.
+
+
+def _claimnode_command(board: str, name: str | None = None, *, token: str = "itok-1") -> dict:
+    options = [{"name": "board", "value": board}]
+    if name is not None:
+        options.append({"name": "name", "value": name})
+    return _command("claimnode", options, token=token)
+
+
+class _FakeTask:
+    """A plain double for asyncio.Task, so tests can put one directly
+    into di._CLAIMNODE_TASKS and assert on whether it was cancelled,
+    without needing a real event loop task alive across a TestClient
+    request boundary (see this section's own header comment on why the
+    watcher-lifecycle tests below instead call di._dispatch() directly
+    under asyncio.run()).
+    """
+
+    def __init__(self) -> None:
+        self.cancelled_flag = False
+
+    def done(self) -> bool:
+        return self.cancelled_flag
+
+    def cancel(self) -> None:
+        self.cancelled_flag = True
+
+
+@pytest.fixture(autouse=True)
+def _reset_claimnode_state():
+    """di._claimnode_rate_limiter and di._CLAIMNODE_TASKS are module-level
+    singletons, same reasoning as _reset_account_command_rate_limiters
+    above -- cleared before AND after every test in this section so one
+    test's leftover watcher (real or fake) can never leak into the next.
+    """
+    di._claimnode_rate_limiter._hits.clear()
+    di._CLAIMNODE_TASKS.clear()
+    yield
+    for task in list(di._CLAIMNODE_TASKS.values()):
+        try:
+            if not task.done():
+                task.cancel()
+        except Exception:
+            pass
+    di._CLAIMNODE_TASKS.clear()
+
+
+def test_claimnode_registered_with_required_board_and_optional_name():
+    assert "claimnode" in di._COMMANDS_BY_NAME
+    opts = {o["name"]: o for o in di._COMMANDS_BY_NAME["claimnode"].options}
+    assert opts["board"]["required"] is True
+    assert opts["name"]["required"] is False
+    assert {c["value"] for c in opts["board"]["choices"]} == {"mc", "mt"}
+
+
+def test_claimnode_meshcore_without_name_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "61000001")
+    client = _client_with_ingestor(FakeIngestor())
+
+    payload = _claimnode_command("mc")
+    payload["member"] = {"user": {"id": "61000001"}}
+    resp = _post_interaction(client, priv, payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+    assert body["flags"] == di._FLAG_EPHEMERAL
+    assert "needs a" in body["content"]
+    assert di._CLAIMNODE_TASKS == {}
+
+
+def test_claimnode_meshtastic_with_name_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "61000002")
+    client = _client_with_ingestor(FakeIngestor())
+
+    payload = _claimnode_command("mt", "Should not be given")
+    payload["member"] = {"user": {"id": "61000002"}}
+    resp = _post_interaction(client, priv, payload)
+    assert "doesn't take a" in resp.json()["data"]["content"]
+
+
+def test_claimnode_meshcore_with_name_starts_and_returns_cancel_button(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "61000003")
+    client = _client_with_ingestor(FakeIngestor())
+
+    payload = _claimnode_command("mc", "My Radio", token="ctok-1")
+    payload["member"] = {"user": {"id": "61000003"}}
+    payload["application_id"] = "app-claim-1"
+    resp = _post_interaction(client, priv, payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+    assert body["flags"] == di._FLAG_EPHEMERAL
+    assert body["allowed_mentions"] == {"parse": []}
+    assert "Trigger an advert" in body["content"]
+    assert "<t:" in body["content"] and ":R>" in body["content"]
+    buttons = body["components"][0]["components"]
+    assert buttons[0]["label"] == "Cancel"
+    assert buttons[0]["custom_id"] == f"claimnode:cancel:{KEY_PLAYER_ID}"
+
+
+def test_claimnode_meshtastic_start_returns_code(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "61000004")
+    client = _client_with_ingestor(FakeIngestor())
+
+    payload = _claimnode_command("mt", token="ctok-2")
+    payload["member"] = {"user": {"id": "61000004"}}
+    payload["application_id"] = "app-claim-2"
+    resp = _post_interaction(client, priv, payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+    assert "mw-" in body["content"]
+    assert "<t:" in body["content"] and ":R>" in body["content"]
+
+
+def test_claimnode_unlinked_and_disabled_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_account_with_discord_identity(db_path, "61000006", disabled=True)
+    client = _client_with_ingestor(FakeIngestor())
+
+    unlinked_payload = _claimnode_command("mt")
+    unlinked_payload["member"] = {"user": {"id": "61000005"}}
+    resp = _post_interaction(client, priv, unlinked_payload)
+    assert "haven't linked" in resp.json()["data"]["content"]
+
+    disabled_payload = _claimnode_command("mt")
+    disabled_payload["member"] = {"user": {"id": "61000006"}}
+    resp2 = _post_interaction(client, priv, disabled_payload)
+    assert "disabled" in resp2.json()["data"]["content"]
+
+
+def test_claimnode_responses_are_ephemeral_and_mention_free(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "61000007")
+    client = _client_with_ingestor(FakeIngestor())
+
+    payload = _claimnode_command("mc")  # missing name -> refusal path
+    payload["member"] = {"user": {"id": "61000007"}}
+    resp = _post_interaction(client, priv, payload)
+    data = resp.json()["data"]
+    assert data["flags"] == di._FLAG_EPHEMERAL
+    assert data["allowed_mentions"] == {"parse": []}
+
+    resp2 = _post_interaction(
+        client, priv, _component(f"claimnode:cancel:{KEY_PLAYER_ID}", snowflake="99999999"),
+    )
+    data2 = resp2.json()["data"]
+    assert data2["flags"] == di._FLAG_EPHEMERAL
+    assert data2["allowed_mentions"] == {"parse": []}
+
+
+# ---- /claimnode candidate rendering ----------------------------------
+
+
+def test_claimnode_candidates_render_select_for_mc_and_button_for_mt():
+    mc_data = di._claimnode_candidates_message("mc", 42, [
+        {
+            "public_key": "a1" * 32, "node_ref": "a1a1a1a1", "name": "Radio One",
+            "role": "companion", "last_heard": 1, "already_claimed": False, "already_yours": False,
+        },
+    ])
+    select = mc_data["components"][0]["components"][0]
+    assert select["type"] == di._COMPONENT_STRING_SELECT
+    assert select["custom_id"] == "claimnode:select:42"
+    assert select["options"][0]["value"] == "a1" * 32
+
+    mt_data = di._claimnode_candidates_message("mt", 42, [
+        {
+            "node_ref": "aabbccdd", "node_id": 123, "name": "Node1",
+            "last_heard": 1, "already_claimed": False, "already_yours": False,
+        },
+    ])
+    button = mt_data["components"][0]["components"][0]
+    assert button["type"] == di._COMPONENT_BUTTON
+    assert button["custom_id"] == "claimnode:confirm:42:aabbccdd"
+
+
+# ---- /claimnode accept -- select/confirm call the SAME shared logic --
+
+
+def test_claimnode_select_calls_shared_accept_and_reports_success(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "62000001")
+    client = _client_with_ingestor(FakeIngestor())
+
+    calls = {}
+
+    async def fake_accept(player_id, body):
+        calls["player_id"] = player_id
+        calls["body"] = body
+        return {"node_ref": "aabbccdd"}, 200
+
+    monkeypatch.setattr(di.checkin_api, "accept_confirmation", fake_accept)
+
+    resp = _post_interaction(
+        client, priv,
+        _component(f"claimnode:select:{KEY_PLAYER_ID}", snowflake="62000001", values=["a1" * 32]),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["type"] == di._RESPONSE_UPDATE_MESSAGE
+    assert "aabbccdd" in body["data"]["content"]
+    assert calls == {"player_id": KEY_PLAYER_ID, "body": {"public_key": "a1" * 32}}
+
+
+def test_claimnode_confirm_button_calls_shared_accept_and_reports_success(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "62000002")
+    client = _client_with_ingestor(FakeIngestor())
+
+    calls = {}
+
+    async def fake_accept(player_id, body):
+        calls["player_id"] = player_id
+        calls["body"] = body
+        return {"node_ref": "aabbccdd"}, 200
+
+    monkeypatch.setattr(di.checkin_api, "accept_confirmation", fake_accept)
+
+    resp = _post_interaction(
+        client, priv,
+        _component(f"claimnode:confirm:{KEY_PLAYER_ID}:aabbccdd", snowflake="62000002"),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["type"] == di._RESPONSE_UPDATE_MESSAGE
+    assert "aabbccdd" in body["data"]["content"]
+    assert calls == {"player_id": KEY_PLAYER_ID, "body": {"node_ref": "aabbccdd"}}
+
+
+def test_claimnode_accept_failure_from_shared_logic_is_surfaced(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "62000003")
+    client = _client_with_ingestor(FakeIngestor())
+
+    async def fake_accept(player_id, body):
+        return {"error": "that node is already registered to another player"}, 409
+
+    monkeypatch.setattr(di.checkin_api, "accept_confirmation", fake_accept)
+
+    resp = _post_interaction(
+        client, priv,
+        _component(f"claimnode:select:{KEY_PLAYER_ID}", snowflake="62000003", values=["a1" * 32]),
+    )
+    assert "already registered to another player" in resp.json()["data"]["content"]
+
+
+# ---- /claimnode component re-authorisation -----------------------------
+
+
+def test_claimnode_component_from_different_user_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Owner", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "63000001")
+    client = _client_with_ingestor(FakeIngestor())
+
+    # A stranger with no account of their own clicks a select naming
+    # the owner's own pending confirmation.
+    resp = _post_interaction(
+        client, priv,
+        _component(f"claimnode:select:{KEY_PLAYER_ID}", snowflake="99990001", values=["a1" * 32]),
+    )
+    assert "haven't linked" in resp.json()["data"]["content"]
+
+
+def test_claimnode_tampered_custom_id_naming_someone_elses_confirmation_is_refused(db_path):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Owner", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "63000002")
+    _make_player(db_path, KEY_PLAYER_ID + 1, "Attacker", "BLUE")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID + 1, "63000003")
+    client = _client_with_ingestor(FakeIngestor())
+
+    # The attacker IS linked -- just to a DIFFERENT player -- and clicks
+    # a select whose custom_id claims the OWNER's player_id.
+    resp = _post_interaction(
+        client, priv,
+        _component(f"claimnode:select:{KEY_PLAYER_ID}", snowflake="63000003", values=["a1" * 32]),
+    )
+    assert "isn't yours" in resp.json()["data"]["content"]
+
+
+# ---- /claimnode cancel --------------------------------------------------
+
+
+def test_claimnode_cancel_calls_shared_cancel_and_stops_watch(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "64000001")
+    client = _client_with_ingestor(FakeIngestor())
+
+    calls = []
+    monkeypatch.setattr(
+        di.checkin_api, "cancel_confirmation",
+        lambda pid: (calls.append(pid), {"state": "none"})[1],
+    )
+    fake_task = _FakeTask()
+    di._CLAIMNODE_TASKS[KEY_PLAYER_ID] = fake_task
+
+    resp = _post_interaction(
+        client, priv, _component(f"claimnode:cancel:{KEY_PLAYER_ID}", snowflake="64000001"),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["type"] == di._RESPONSE_UPDATE_MESSAGE
+    assert body["data"]["content"] == "Cancelled."
+    assert calls == [KEY_PLAYER_ID]
+    assert fake_task.cancelled_flag is True
+
+
+def test_claimnode_second_concurrent_claim_cancels_and_restarts(db_path):
+    """Mirrors the website's own behaviour: POST /api/checkin/confirm/
+    start silently REPLACES whatever window a player already had open
+    (app/checkin_api.py's start_confirmation() docstring), rather than
+    refusing a second start outright. /claimnode's own second call does
+    the same -- cancels this player's still-running watcher and starts
+    a fresh one -- instead of pointing at the existing claim.
+    """
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "64000002")
+    client = _client_with_ingestor(FakeIngestor())
+
+    fake_task = _FakeTask()
+    di._CLAIMNODE_TASKS[KEY_PLAYER_ID] = fake_task
+
+    payload = _claimnode_command("mt")
+    payload["member"] = {"user": {"id": "64000002"}}
+    payload["application_id"] = "app-claim-3"
+    resp = _post_interaction(client, priv, payload)
+    assert resp.status_code == 200, resp.text
+
+    assert fake_task.cancelled_flag is True
+    assert di._CLAIMNODE_TASKS.get(KEY_PLAYER_ID) is not fake_task
+
+
+# ---- /claimnode background watcher (real asyncio.Task, direct dispatch) --
+#
+# Same reasoning test_slow_handler_defers_and_delivers_via_interaction_
+# token above already gives for calling di._dispatch() directly rather
+# than going through TestClient: a watcher that outlives its own
+# request/response cycle needs the SAME event loop kept alive past that
+# cycle (asyncio.run(run()) below, awaiting a short sleep after
+# _dispatch() returns) -- TestClient's own portal offers no such seam.
+
+
+def test_claimnode_watcher_edits_via_interaction_token_never_bot_token(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "65000001")
+    monkeypatch.setattr(settings, "discord_bot_token", "super-secret-bot-token")
+    monkeypatch.setattr(di, "_CLAIMNODE_POLL_SECONDS", 0.02)
+
+    far_future = int(time.time()) + 300
+    poll_count = {"n": 0}
+
+    async def fake_status(player_id):
+        poll_count["n"] += 1
+        if poll_count["n"] < 2:
+            return {"protocol": "mc", "state": "waiting", "expires_at": far_future, "candidates": []}
+        return {
+            "protocol": "mc", "state": "found", "expires_at": far_future,
+            "candidates": [{
+                "public_key": "a1" * 32, "node_ref": "a1a1a1a1", "name": "My Radio",
+                "role": "companion", "last_heard": int(time.time()),
+                "already_claimed": False, "already_yours": False,
+            }],
+        }
+
+    monkeypatch.setattr(di.checkin_api, "confirmation_status", fake_status)
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append({
+            "method": request.method, "url": str(request.url),
+            "headers": dict(request.headers), "body": json.loads(request.content),
+        })
+        return httpx.Response(200, json={"ok": True})
+
+    body = {
+        "type": 2, "application_id": "app-claim-watch", "token": "claim-token-watch",
+        "member": {"user": {"id": "65000001"}},
+        "data": {"name": "claimnode", "options": [
+            {"name": "board", "value": "mc"}, {"name": "name", "value": "My Radio"},
+        ]},
+    }
+    cfg = {"app_id": "app-claim-watch"}
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_client:
+            result = await di._dispatch(body, cfg, http_client=mock_client)
+            assert result["type"] == 4
+            await asyncio.sleep(0.3)
+            return result
+
+    asyncio.run(run())
+
+    assert poll_count["n"] >= 2
+    assert len(captured) == 1  # only the transition to "found" edits the message, not every poll
+    edit = captured[0]
+    assert edit["method"] == "PATCH"
+    assert edit["url"] == "https://discord.com/api/v10/webhooks/app-claim-watch/claim-token-watch/messages/@original"
+    auth = edit["headers"].get("authorization", "")
+    assert "super-secret-bot-token" not in auth
+    assert "bot" not in auth.lower()
+    select = edit["body"]["components"][0]["components"][0]
+    assert select["type"] == di._COMPONENT_STRING_SELECT
+    assert select["custom_id"] == f"claimnode:select:{KEY_PLAYER_ID}"
+
+
+def test_claimnode_expiry_updates_message_and_task_is_gone(db_path, monkeypatch):
+    priv, pub_hex = _keypair()
+    _enable_slash(db_path, public_key_hex=pub_hex)
+    _make_player(db_path, KEY_PLAYER_ID, "Claimer", "RED")
+    _link_player_to_snowflake(db_path, KEY_PLAYER_ID, "65000002")
+    monkeypatch.setattr(settings, "discord_bot_token", "super-secret-bot-token")
+    monkeypatch.setattr(di, "_CLAIMNODE_POLL_SECONDS", 0.02)
+
+    async def fake_start(player_id, protocol, name):
+        # Already expired (or expiring within this instant) -- the
+        # watcher's very first loop check must notice and stop without
+        # ever needing to poll confirmation_status at all.
+        return {"protocol": "mt", "code": "mw-testcode", "expires_at": int(time.time()), "window_seconds": 300}, 200
+
+    monkeypatch.setattr(di.checkin_api, "start_confirmation", fake_start)
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append({
+            "method": request.method, "url": str(request.url),
+            "headers": dict(request.headers), "body": json.loads(request.content),
+        })
+        return httpx.Response(200, json={"ok": True})
+
+    body = {
+        "type": 2, "application_id": "app-claim-expire", "token": "claim-token-expire",
+        "member": {"user": {"id": "65000002"}},
+        "data": {"name": "claimnode", "options": [{"name": "board", "value": "mt"}]},
+    }
+    cfg = {"app_id": "app-claim-expire"}
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_client:
+            result = await di._dispatch(body, cfg, http_client=mock_client)
+            assert result["type"] == 4
+            await asyncio.sleep(0.3)
+            return result
+
+    asyncio.run(run())
+
+    assert len(captured) == 1
+    assert captured[0]["method"] == "PATCH"
+    assert "closed without hearing" in captured[0]["body"]["content"]
+    auth = captured[0]["headers"].get("authorization", "")
+    assert "super-secret-bot-token" not in auth
+    assert "bot" not in auth.lower()
+    # The watcher's own done-callback removed it once it finished.
+    assert KEY_PLAYER_ID not in di._CLAIMNODE_TASKS

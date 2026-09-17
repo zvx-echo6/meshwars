@@ -165,7 +165,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
-from . import account_api, discord_bot, discord_notify, join_api, mc_api, nodes_api, oauth_api, results
+from . import account_api, checkin_api, discord_bot, discord_notify, join_api, mc_api, nodes_api, oauth_api, results
 from .auth import new_rate_limit_bucket
 from .config import settings
 from .db import WriteSession, connect
@@ -249,6 +249,30 @@ _BOARD_OPTION = {
         {"name": "MeshCore", "value": "mc"},
         {"name": "Meshtastic", "value": "mt"},
     ],
+}
+
+# /claimnode's own board option -- REQUIRED, unlike _BOARD_OPTION above:
+# every other board-scoped command has a sensible default (MeshCore) to
+# fall back to for a read-only lookup, but opening a confirmation window
+# is a write with real consequences (see _cmd_claimnode's own docstring
+# on cancel-and-restart), so a caller must say which radio type they
+# mean rather than have one silently assumed.
+_CLAIMNODE_BOARD_OPTION = {
+    "type": _OPTION_TYPE_STRING,
+    "name": "board",
+    "description": "Which board -- MeshCore or Meshtastic",
+    "required": True,
+    "choices": [
+        {"name": "MeshCore", "value": "mc"},
+        {"name": "Meshtastic", "value": "mt"},
+    ],
+}
+
+_CLAIMNODE_NAME_OPTION = {
+    "type": _OPTION_TYPE_STRING,
+    "name": "name",
+    "description": "MeshCore only -- the name your radio currently shows on the mesh",
+    "required": False,
 }
 
 # Discord's own component types (discord.dev's "Component Types") this
@@ -819,6 +843,13 @@ def _cmd_player(conn, body: dict) -> dict:
 _link_rate_limiter = new_rate_limit_bucket()
 _join_rate_limiter = new_rate_limit_bucket()
 _radios_rate_limiter = new_rate_limit_bucket()
+# /claimnode's own budget -- no website equivalent shaped quite like it
+# (POST /api/checkin/confirm/start is key/session-authenticated, not
+# snowflake-rate-limited at all), so this reuses
+# settings.account_rotate_key_rate_limit_* -- the same "occasional,
+# sensitive write action" cadence /radios' own add/submit already
+# borrows for the identical reason.
+_claimnode_rate_limiter = new_rate_limit_bucket()
 
 
 def _cmd_link(conn, body: dict) -> dict:
@@ -1274,26 +1305,29 @@ async def _cmd_radios_remove_cancel(conn, body: dict, ingestor) -> tuple[int, di
     return _RESPONSE_UPDATE_MESSAGE, _ephemeral("Cancelled -- nothing was removed.")
 
 
-def _cmd_setupcheck(conn, body: dict) -> dict:
+def _cmd_setupcheck(conn, body: dict, ctx: CommandContext) -> dict:
     """Read-only: the caller's own setup diagnostics, from the exact
     same logic GET /api/account/checkin-health uses
     (app/account_api.py's _checkin_health_for_player()) -- never a
     second copy of that per-board diagnosis.
 
-    KNOWN LIMITATION: the website route reads the check-in poller's own
-    live directory snapshot (request.app.state.checkin_poller) to
-    classify an uncredited MeshCore contact more precisely (resolving
-    vs. not-in-directory vs. ambiguous -- see
-    _checkin_contacts_status()'s own docstring). A slash-command
-    handler has no Request/app.state to read that from (COMMANDS'
-    handler shape is deliberately just (conn, body) -- see this
-    module's own docstring), so this always passes an empty directory,
-    same as the website route does with nothing cached yet: an honest
-    "not_in_directory" rather than a 500, but never the MORE precise
-    sub-diagnosis a live directory would allow. The credited/
+    Reads the check-in poller's own live directory snapshot off
+    `ctx.app_state.checkin_poller` (see CommandContext's own docstring
+    -- this is why this command declares needs_context=True), the
+    SAME source and the SAME
+    request.app.state.checkin_poller.directory_snapshot() call the
+    website route makes, so this classifies an uncredited MeshCore
+    contact exactly as precisely (resolving vs. not-in-directory vs.
+    ambiguous -- see _checkin_contacts_status()'s own docstring) as
+    that route does, rather than the empty directory a handler with no
+    app.state at all would be stuck with. With nothing cached yet (no
+    poller running, or ctx.app_state itself None -- e.g. a bare test
+    app around just this router with no lifespan), this degrades to an
+    empty directory, same as the website route does in that case: an
+    honest "not_in_directory" rather than a 500. The credited/
     not-credited headline itself (mc_checkin_award, the actual thing a
     player cares about) does NOT depend on the directory at all, so
-    this degrades gracefully rather than incorrectly.
+    this degrades gracefully rather than incorrectly either way.
     """
     caller = _resolve_caller(conn, body)
     if caller is not None and caller.disabled:
@@ -1301,7 +1335,11 @@ def _cmd_setupcheck(conn, body: dict) -> dict:
     if caller is None or caller.player_id is None:
         return _unlinked_pointer_message()
 
-    result = account_api._checkin_health_for_player(conn, caller.player_id, [])
+    app_state = ctx.app_state if ctx is not None else None
+    poller = getattr(app_state, "checkin_poller", None) if app_state is not None else None
+    directory = poller.directory_snapshot() if poller is not None else []
+
+    result = account_api._checkin_health_for_player(conn, caller.player_id, directory)
     lines = []
     for protocol in (MC_PROTOCOL, MT_PROTOCOL):
         board = result["boards"].get(protocol)
@@ -1311,11 +1349,471 @@ def _cmd_setupcheck(conn, body: dict) -> dict:
     return _ephemeral("\n\n".join(lines))
 
 
+# ---- /claimnode ---------------------------------------------------------
+#
+# Proves a specific radio is the caller's own and binds it, entirely
+# through the SAME confirm logic GET/POST /api/checkin/confirm/* use
+# (app/checkin_api.py's start_confirmation()/confirmation_status()/
+# accept_confirmation()/cancel_confirmation(), each extracted from its
+# own route for exactly this reuse -- see that module's own docstrings)
+# -- never a second copy of the baseline scan, code issuance, or bind,
+# and never an HTTP call to this app's own routes (see this module's
+# own docstring's REUSE note).
+#
+# Unlike every command above, this one outlives its own interaction
+# response: opening a window is answered immediately (or deferred, the
+# same _HANDLER_BUDGET_SECONDS contract as any other command), but
+# WATCHING for a candidate to appear runs in a background asyncio.Task
+# (_claimnode_watch below) for up to the window's own five minutes,
+# editing the ORIGINAL ephemeral message via PATCH
+# .../webhooks/{app_id}/{token}/messages/@original -- this
+# interaction's OWN token (embedded in the URL, reusing
+# _patch_followup() verbatim), never app/discord_bot.py's bot token,
+# for the exact same reason _patch_followup()'s own docstring already
+# gives. Discord interaction tokens last 15 minutes, comfortably
+# outliving the 5-minute window this ever needs to edit within.
+#
+# ONE ACTIVE CLAIM PER ACCOUNT, same as the website: _CLAIMNODE_TASKS
+# below tracks at most one watcher per player_id, exactly mirroring
+# start_confirmation()'s own "at most one open window per player,
+# regardless of protocol" invariant (app/checkin_api.py: PRIMARY KEY
+# (player_id) on both confirmation tables). A second /claimnode
+# cancels this player's own still-running watcher and starts fresh --
+# CANCEL-AND-RESTART, the same silent replacement
+# start_confirmation()'s own docstring already documents ("opens (or
+# REPLACES)") at the database layer -- rather than refusing outright;
+# see _cmd_claimnode's own docstring for why that's the one this
+# mirrors.
+#
+# PRIVACY: every message this section ever sends is ephemeral (see this
+# module's own EPHEMERAL ALWAYS section) and shows candidates only for
+# the name/code THIS caller supplied -- never another player's, and
+# never a location: confirm_scan_all_connectors'/
+# mt_confirm_scan_all_connectors' own output carries no lat/lon at all,
+# so there is nothing here that could leak one even by accident.
+
+# Matches frontend/account.js's own CHECKIN_CONFIRM_POLL_MS -- a poll
+# cadence already proven safe against app/checkin_api.py's own 8-second
+# upstream-scan throttle (_CONFIRM_SCAN_THROTTLE_SECONDS): every poll
+# either lands inside the throttle (answered from the last scan, no new
+# upstream request) or just outside it, never both stacking into a
+# request storm.
+_CLAIMNODE_POLL_SECONDS = 5.0
+
+# player_id -> this player's own currently-running watcher task, if
+# any -- at most one per player (see this section's own header comment
+# above). Populated by _cmd_claimnode, read/cancelled by
+# _cancel_claimnode_watch (a fresh /claimnode, an accept, an explicit
+# Cancel click) and by cancel_all_claimnode_watches (app shutdown, see
+# app/main.py's own lifespan). A task removes ITSELF once it finishes
+# on its own (expiry, an unhandled exception) via the done-callback
+# _register_claimnode_task attaches -- guarded by an identity check
+# (`is t`) so a task that finishes just AFTER cancel-and-restart already
+# overwrote this player's entry with a fresh task can never pop that
+# fresh one out from under it.
+_CLAIMNODE_TASKS: dict[int, asyncio.Task] = {}
+
+
+def _register_claimnode_task(player_id: int, task: asyncio.Task) -> None:
+    _CLAIMNODE_TASKS[player_id] = task
+
+    def _cleanup(t: asyncio.Task, pid: int = player_id) -> None:
+        if _CLAIMNODE_TASKS.get(pid) is t:
+            _CLAIMNODE_TASKS.pop(pid, None)
+
+    task.add_done_callback(_cleanup)
+
+
+def _cancel_claimnode_watch(player_id: int) -> None:
+    """Cancel this player's own /claimnode background watcher, if one is
+    running -- safe to call with none running. Does not pop the dict
+    entry itself: the cancelled task's own done-callback
+    (_register_claimnode_task's `_cleanup`) does that, guarded by the
+    identity check that keeps a cancel-and-restart race from evicting a
+    freshly-registered replacement (see _CLAIMNODE_TASKS' own comment).
+    """
+    task = _CLAIMNODE_TASKS.get(player_id)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+async def cancel_all_claimnode_watches() -> None:
+    """Cancel every in-flight /claimnode watcher -- called from
+    app/main.py's own lifespan shutdown so a watcher never keeps
+    running (and never keeps trying to PATCH a Discord message) past
+    this process's own life. Safe to call with none running.
+    """
+    tasks = [t for t in _CLAIMNODE_TASKS.values() if not t.done()]
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _claimnode_instructions_text(protocol: str, start_result: dict, expires_at: int) -> str:
+    """The initial /claimnode reply text -- the SAME instructions
+    frontend/account.js's own renderCheckinConfirmWaiting gives a
+    website caller proving the same two protocols, plus when the watch
+    expires as a Discord relative timestamp (<t:UNIX:R> -- Discord
+    itself renders this in the reader's own local time zone, same as
+    /nextnet's own timestamps above).
+    """
+    when = f"<t:{expires_at}:R>"
+    if protocol == MT_PROTOCOL:
+        code = start_result["code"]
+        return (
+            f"Send this exact code on any channel of your mesh now -- it can be "
+            f"part of a longer sentence: `{code}`\n"
+            f"Watching until {when}."
+        )
+    return (
+        "Trigger an advert on that radio now -- most MeshCore devices send one "
+        "from a long-press of the side button, or a \"Send Advert\" / "
+        "\"Flood Advert\" menu item.\n"
+        f"Watching until {when}."
+    )
+
+
+def _claimnode_expired_message() -> dict:
+    return _ephemeral(
+        "That confirmation window closed without hearing your radio. Try /claimnode again."
+    )
+
+
+def _claimnode_candidate_key(protocol: str, candidate: dict) -> str:
+    """The identifier that tells two candidates apart, and lets
+    _claimnode_watch below tell "the same candidate set as last poll"
+    apart from "something changed" without re-sending an identical
+    message every poll (see this command's own docstring: "update the
+    message when candidates appear," not on every throttled repeat).
+    """
+    return candidate["public_key"] if protocol == MC_PROTOCOL else candidate["node_ref"]
+
+
+def _claimnode_candidates_message(protocol: str, player_id: int, candidates: list[dict]) -> dict:
+    """The "pick your radio" message once at least one live candidate
+    has been heard. `candidates` is already filtered to drop anything
+    already_claimed by SOMEONE ELSE (accepting one would just come back
+    409) -- see _claimnode_watch below, the only caller.
+
+    MeshCore: a string select listing each node (name plus a short key
+    prefix, so two identically-named nodes stay distinguishable) --
+    custom_id names the PENDING CONFIRMATION (this player_id), never
+    trusted for identity on its own (see _cmd_claimnode_select below,
+    which re-resolves the clicking user fresh); each option's `value`
+    names the CANDIDATE (its public key) -- data, not authority, same
+    as every other select in this module (see this module's own
+    CUSTOM_ID SCHEME section).
+
+    Meshtastic: one Confirm button per candidate node (normally just
+    one -- the radio that actually sent the code) -- its own custom_id
+    names BOTH the pending confirmation and the candidate node_ref,
+    since a button (unlike a select) carries no separate `value` field
+    of its own.
+    """
+    if protocol == MC_PROTOCOL:
+        options = []
+        for c in candidates[:25]:  # Discord's own cap on a select's option list
+            key = c["public_key"]
+            short_key = f"{key[:8]}…{key[-4:]}"
+            options.append({"label": f"{c['name']} ({short_key})"[:100], "value": key})
+        data = _ephemeral("We heard the following nodes advertising under that name. Pick yours:")
+        data["components"] = [{
+            "type": _COMPONENT_ACTION_ROW,
+            "components": [{
+                "type": _COMPONENT_STRING_SELECT,
+                "custom_id": f"claimnode:select:{player_id}",
+                "placeholder": "Which node is yours?",
+                "options": options,
+            }],
+        }]
+        return data
+
+    data = _ephemeral("We heard that code from the following node. Confirm it's yours:")
+    data["components"] = [
+        {
+            "type": _COMPONENT_ACTION_ROW,
+            "components": [{
+                "type": _COMPONENT_BUTTON, "style": _BUTTON_STYLE_PRIMARY,
+                "label": f"Confirm {c.get('name') or c['node_ref']}"[:80],
+                "custom_id": f"claimnode:confirm:{player_id}:{c['node_ref']}",
+            }],
+        }
+        for c in candidates[:5]  # Discord's own cap: 5 action rows per message
+    ]
+    return data
+
+
+async def _claimnode_watch(
+    player_id: int, protocol: str, app_id: str, token: str, expires_at: int,
+    *, http_client: httpx.AsyncClient | None = None,
+) -> None:
+    """Background watcher for one /claimnode confirmation window --
+    polls the SAME status logic GET /api/checkin/confirm/status uses
+    (app/checkin_api.py's confirmation_status()) every
+    _CLAIMNODE_POLL_SECONDS, never longer than `expires_at` (the
+    window's own five minutes), editing the original message only when
+    the live candidate set actually CHANGES (_claimnode_candidate_key
+    above) -- never on every poll, so a player watching the message
+    doesn't see it flicker on an unchanged "still waiting."
+
+    Ends one of three ways: candidates appear (message updated to the
+    picker, this task's job is done -- the eventual select/button click
+    is handled by _cmd_claimnode_select/_cmd_claimnode_confirm below,
+    a SEPARATE interaction, and cancels this same task on success, see
+    _cancel_claimnode_watch); the window closes with nothing heard
+    (message updated to say so); or this task is cancelled from
+    outside (a fresh /claimnode, an accept, an explicit Cancel click,
+    or app shutdown -- cancel_all_claimnode_watches) -- in which case
+    it exits without touching the message at all, since whichever
+    caller cancelled it is the one responsible for the message's next
+    state.
+
+    An unhandled exception is logged and ends the watch with a short
+    failure message, exactly like any other handler in this module
+    never lets a stack trace reach Discord.
+    """
+    try:
+        last_keys: frozenset[str] = frozenset()
+        while True:
+            now = int(time.time())
+            remaining = expires_at - now
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(_CLAIMNODE_POLL_SECONDS, remaining))
+
+            status = await checkin_api.confirmation_status(player_id)
+            if status.get("state") == "none":
+                # Closed some other way that isn't this task's own
+                # cancellation (which would have stopped this loop
+                # already) -- the only way left is a natural expiry
+                # confirmation_status() itself just noticed and cleared.
+                break
+
+            live = [c for c in (status.get("candidates") or []) if not c.get("already_claimed")]
+            keys = frozenset(_claimnode_candidate_key(protocol, c) for c in live)
+            if keys and keys != last_keys:
+                last_keys = keys
+                data = _claimnode_candidates_message(protocol, player_id, live)
+                await _patch_followup(app_id, token, data, http_client=http_client)
+
+        if not last_keys:
+            await _patch_followup(app_id, token, _claimnode_expired_message(), http_client=http_client)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("discord interactions: /claimnode watcher failed for player %d", player_id)
+        try:
+            await _patch_followup(
+                app_id, token,
+                _ephemeral("Something went wrong watching for your radio. Try /claimnode again."),
+                http_client=http_client,
+            )
+        except Exception:
+            log.exception("discord interactions: /claimnode failure PATCH also failed")
+
+
+async def _cmd_claimnode(conn, body: dict, ctx: CommandContext) -> dict:
+    """/claimnode board:<MeshCore|Meshtastic> [name:<string>] -- proves a
+    specific radio is the caller's own and binds it, entirely ephemeral
+    (COMMANDS' own always_ephemeral=True for this command). Opens a
+    confirmation window exactly as POST /api/checkin/confirm/start does
+    (app/checkin_api.py's start_confirmation(), reused verbatim), then
+    hands off to a background asyncio.Task (_claimnode_watch above)
+    that watches for a candidate for up to the window's own five
+    minutes, editing THIS interaction's own original message. Never
+    calls this app's own HTTP routes over HTTP -- every call here is a
+    plain Python function call into app/checkin_api.py.
+
+    Caller must already be linked (_resolve_caller, the same fresh,
+    never-trust-a-custom_id resolution every command in this section
+    uses) -- unlinked points at /link or /join, same as every other
+    account command; a disabled account is refused the same way too.
+
+    `name` is required when `board` is MeshCore, and refused otherwise
+    -- this is checked HERE (Discord's own option system has no
+    "required if" between two options), before start_confirmation() is
+    ever called, so a caller gets a plain, specific reason rather than
+    that function's own generic "name is required" (worded for the
+    website's JSON body, not a slash-command option).
+
+    ONE ACTIVE CLAIM PER ACCOUNT, same as the website: see this
+    section's own header comment for why a second /claimnode
+    CANCELS-AND-RESTARTS rather than refusing -- start_confirmation()
+    itself already silently replaces whatever window this player had
+    open (any protocol), so this command's own watcher has to follow
+    suit rather than leave two of them racing to edit the same old
+    message.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _unlinked_pointer_message()
+
+    snowflake = _snowflake_from_body(body)
+    if snowflake and _claimnode_rate_limiter.limited(
+        snowflake,
+        limit=settings.account_rotate_key_rate_limit_attempts,
+        window=settings.account_rotate_key_rate_limit_window_seconds,
+    ):
+        return _ephemeral("Too many attempts -- try again in a minute.")
+
+    opts = _options_map(body)
+    protocol = _BOARD_CHOICES.get(opts.get("board"))
+    if protocol is None:
+        return _ephemeral("Choose a board -- MeshCore or Meshtastic.")
+
+    name = (opts.get("name") or "").strip() or None
+    if protocol == MC_PROTOCOL and not name:
+        return _ephemeral(
+            "MeshCore needs a `name` -- the name your radio currently shows on the mesh."
+        )
+    if protocol == MT_PROTOCOL and name:
+        return _ephemeral("Meshtastic doesn't take a `name` -- leave it out and run /claimnode again.")
+
+    result, status = await checkin_api.start_confirmation(caller.player_id, protocol, name)
+    if status >= 400:
+        return _ephemeral(result.get("error", "Something went wrong."))
+
+    # Cancel-and-restart -- see this function's own docstring.
+    _cancel_claimnode_watch(caller.player_id)
+
+    cfg = ctx.cfg if ctx is not None else None
+    app_id = (cfg or {}).get("app_id") or ""
+    token = body.get("token") or ""
+    expires_at = result["expires_at"]
+    if app_id and token:
+        task = asyncio.create_task(
+            _claimnode_watch(
+                caller.player_id, protocol, app_id, token, expires_at,
+                http_client=ctx.http_client if ctx is not None else None,
+            )
+        )
+        _register_claimnode_task(caller.player_id, task)
+    else:
+        log.error("discord interactions: /claimnode with no app id or token -- cannot watch")
+
+    data = _ephemeral(_claimnode_instructions_text(protocol, result, expires_at))
+    data["components"] = [{
+        "type": _COMPONENT_ACTION_ROW,
+        "components": [{
+            "type": _COMPONENT_BUTTON, "style": _BUTTON_STYLE_SECONDARY,
+            "label": "Cancel", "custom_id": f"claimnode:cancel:{caller.player_id}",
+        }],
+    }]
+    return data
+
+
+def _claimnode_owner_from_custom_id(custom_id: str) -> int | None:
+    """The player_id a claimnode custom_id names -- DATA, never
+    authority (see this module's own CUSTOM_ID SCHEME section): every
+    handler below re-resolves the CLICKING user fresh and compares
+    against this, never trusting the custom_id's own claim about whose
+    confirmation it is.
+    """
+    parts = custom_id.split(":")
+    if len(parts) < 3:
+        return None
+    try:
+        return int(parts[2])
+    except ValueError:
+        return None
+
+
+async def _cmd_claimnode_select(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """The MeshCore candidate select's own submit -- re-authorises the
+    CLICKING user fresh, checks it against the custom_id's claimed
+    player_id (never trusted on its own), then accepts through the SAME
+    logic POST /api/checkin/confirm/accept uses
+    (app/checkin_api.py's accept_confirmation(), which itself
+    re-verifies the chosen key against a fresh scan -- see that
+    function's own docstring).
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_UPDATE_MESSAGE, _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _RESPONSE_UPDATE_MESSAGE, _unlinked_pointer_message()
+
+    data = body.get("data") or {}
+    owner = _claimnode_owner_from_custom_id(data.get("custom_id") or "")
+    if owner != caller.player_id:
+        return _RESPONSE_UPDATE_MESSAGE, _ephemeral("That confirmation isn't yours.")
+
+    values = data.get("values") or []
+    public_key = values[0] if values else ""
+
+    result, status = await checkin_api.accept_confirmation(caller.player_id, {"public_key": public_key})
+    _cancel_claimnode_watch(caller.player_id)
+    if status >= 400:
+        return _RESPONSE_UPDATE_MESSAGE, _ephemeral(result.get("error", "Something went wrong."))
+    return _RESPONSE_UPDATE_MESSAGE, _ephemeral(
+        f"Bound to `{result['node_ref']}`. Check-ins from that node now count toward you."
+    )
+
+
+async def _cmd_claimnode_confirm(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """Meshtastic's own Confirm button -- same re-authorisation and
+    shared accept_confirmation() call as _cmd_claimnode_select above,
+    keyed on the node_ref the custom_id names (data, re-verified by
+    accept_confirmation() itself against a fresh scan, never trusted on
+    its own).
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_UPDATE_MESSAGE, _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _RESPONSE_UPDATE_MESSAGE, _unlinked_pointer_message()
+
+    data = body.get("data") or {}
+    custom_id = data.get("custom_id") or ""
+    owner = _claimnode_owner_from_custom_id(custom_id)
+    if owner != caller.player_id:
+        return _RESPONSE_UPDATE_MESSAGE, _ephemeral("That confirmation isn't yours.")
+
+    parts = custom_id.split(":")
+    node_ref = parts[3] if len(parts) > 3 else ""
+
+    result, status = await checkin_api.accept_confirmation(caller.player_id, {"node_ref": node_ref})
+    _cancel_claimnode_watch(caller.player_id)
+    if status >= 400:
+        return _RESPONSE_UPDATE_MESSAGE, _ephemeral(result.get("error", "Something went wrong."))
+    return _RESPONSE_UPDATE_MESSAGE, _ephemeral(
+        f"Bound to `{result['node_ref']}`. Check-ins from that node now count toward you."
+    )
+
+
+async def _cmd_claimnode_cancel(conn, body: dict, ingestor) -> tuple[int, dict]:
+    """Cancel button -- same logic DELETE /api/checkin/confirm uses
+    (app/checkin_api.py's cancel_confirmation()), and stops this
+    player's own background watcher (_cancel_claimnode_watch) so it
+    never fires a stale edit after the player has already backed out.
+    """
+    caller = _resolve_caller(conn, body)
+    if caller is not None and caller.disabled:
+        return _RESPONSE_UPDATE_MESSAGE, _disabled_account_message()
+    if caller is None or caller.player_id is None:
+        return _RESPONSE_UPDATE_MESSAGE, _unlinked_pointer_message()
+
+    data = body.get("data") or {}
+    owner = _claimnode_owner_from_custom_id(data.get("custom_id") or "")
+    if owner != caller.player_id:
+        return _RESPONSE_UPDATE_MESSAGE, _ephemeral("That confirmation isn't yours.")
+
+    checkin_api.cancel_confirmation(caller.player_id)
+    _cancel_claimnode_watch(caller.player_id)
+    return _RESPONSE_UPDATE_MESSAGE, _ephemeral("Cancelled.")
+
+
 _COMPONENT_HANDLERS: dict[str, Callable] = {
     "radios:add_open": _cmd_radios_add_open,
     "radios:remove_select": _cmd_radios_remove_select,
     "radios:remove_confirm": _cmd_radios_remove_confirm,
     "radios:remove_cancel": _cmd_radios_remove_cancel,
+    "claimnode:select": _cmd_claimnode_select,
+    "claimnode:confirm": _cmd_claimnode_confirm,
+    "claimnode:cancel": _cmd_claimnode_cancel,
 }
 
 _MODAL_HANDLERS: dict[str, Callable] = {
@@ -1409,18 +1907,58 @@ async def _dispatch_interactive(
 # never disagree about what commands this bot has.
 
 
+class CommandContext(NamedTuple):
+    """What a command handler gets beyond (conn, body) when its own
+    Command entry sets needs_context=True -- app_state (this process's
+    live app.state, the same object every OTHER route in this app
+    already reads via request.app.state, e.g. app/account_api.py's own
+    request.app.state.checkin_poller) and http_client (the same
+    injectable httpx.AsyncClient seam _patch_followup()/_dispatch()
+    already thread through for tests). A command handler's own shape is
+    deliberately just (conn, body) -- see this module's own docstring
+    -- since a slash-command interaction carries no Request at all;
+    this is the narrow, explicit substitute a handler declares it
+    needs, rather than an open door to a Request this interaction was
+    never given one of. Most commands need neither field at all --
+    today only /setupcheck (app_state, for the live check-in directory)
+    and /claimnode (both, to spawn its background watcher and edit the
+    original message via the interaction token) do.
+    """
+    app_state: object | None
+    http_client: httpx.AsyncClient | None
+    # discord_config, the same dict _dispatch() itself already has on
+    # hand (loaded once, up front, by the route -- see
+    # discord_interactions_endpoint()) -- /claimnode's own watcher reads
+    # cfg["app_id"] off this rather than the interaction body's own
+    # `application_id` field, the same source _finish_deferred() above
+    # already uses for its own follow-up PATCH, so app_id never has two
+    # different sources of truth within this module.
+    cfg: dict | None
+
+
 class Command(NamedTuple):
     name: str
     description: str
     options: list[dict]
-    handler: Callable[[object, dict], dict]
+    handler: Callable
     always_ephemeral: bool
+    # See CommandContext's own docstring. Defaulted so every existing
+    # (conn, body) -> dict handler above is unaffected.
+    needs_context: bool = False
+    # True for a handler that is itself `async def` and does its own
+    # awaiting (currently only /claimnode -- opening a confirmation
+    # window awaits the same connector scan app/checkin_api.py's own
+    # route already awaits, and spawning its background watcher needs a
+    # running event loop under it, not a bare to_thread() call) --
+    # every other command handler is a plain sync function run off the
+    # loop via asyncio.to_thread (see _run_command below).
+    is_async: bool = False
 
     def definition(self) -> dict:
         """The Discord-facing command definition -- name, description,
-        options ONLY, never `handler`/`always_ephemeral`, which mean
-        nothing to Discord's own PUT .../commands body (see
-        app/discord_bot.py's register_commands()).
+        options ONLY, never `handler`/`always_ephemeral`/`needs_context`/
+        `is_async`, which mean nothing to Discord's own PUT
+        .../commands body (see app/discord_bot.py's register_commands()).
         """
         return {"name": self.name, "description": self.description, "options": self.options}
 
@@ -1503,6 +2041,16 @@ COMMANDS: list[Command] = [
         options=[],
         handler=_cmd_setupcheck,
         always_ephemeral=True,
+        needs_context=True,
+    ),
+    Command(
+        name="claimnode",
+        description="Prove a specific radio is yours and bind it to your account",
+        options=[_CLAIMNODE_BOARD_OPTION, _CLAIMNODE_NAME_OPTION],
+        handler=_cmd_claimnode,
+        always_ephemeral=True,
+        needs_context=True,
+        is_async=True,
     ),
 ]
 
@@ -1549,16 +2097,30 @@ def _fresh_timestamp(raw: str) -> bool:
 # ---- dispatch, the 3-second budget, and the deferred follow-up --------
 
 
-async def _run_command(entry: Command, body: dict) -> dict:
-    """Run one command's SYNC handler against a fresh connection, off
-    the event loop (asyncio.to_thread) -- every handler above does
-    blocking sqlite3 work, same as the rest of this codebase's
+async def _run_command(entry: Command, body: dict, ctx: CommandContext) -> dict:
+    """Run one command's handler against a fresh connection.
+
+    Two shapes: a plain SYNC handler (every command except /claimnode)
+    runs off the event loop via asyncio.to_thread, same as before this
+    module had any async command handler at all -- every handler above
+    does blocking sqlite3 work, same as the rest of this codebase's
     request handlers, and this is the one place that gives it a thread
-    instead of stalling the loop for however long the query takes.
+    instead of stalling the loop for however long the query takes. An
+    ASYNC one (entry.is_async -- see that field's own docstring) is
+    awaited directly instead, the same "mix plain sqlite3 calls into an
+    async handler with no to_thread" convention _run_interactive() above
+    already uses for /link and /join's own modal submits.
+
+    entry.needs_context (see CommandContext's own docstring) appends
+    `ctx` as a third positional argument; every other handler keeps the
+    plain (conn, body) shape untouched.
     """
     conn = connect()
     try:
-        return await asyncio.to_thread(entry.handler, conn, body)
+        args = (conn, body, ctx) if entry.needs_context else (conn, body)
+        if entry.is_async:
+            return await entry.handler(*args)
+        return await asyncio.to_thread(entry.handler, *args)
     finally:
         conn.close()
 
@@ -1629,7 +2191,9 @@ async def _finish_deferred(task: "asyncio.Task[dict]", body: dict, app_id: str,
     await _patch_followup(app_id, token, data, http_client=http_client)
 
 
-async def _dispatch(body: dict, cfg: dict, *, http_client: httpx.AsyncClient | None = None) -> dict:
+async def _dispatch(
+    body: dict, cfg: dict, *, app_state=None, http_client: httpx.AsyncClient | None = None,
+) -> dict:
     """Run the named command under _HANDLER_BUDGET_SECONDS. Finishes in
     time -> its own answer, type 4. Times out -> type 5 immediately
     (carrying the ephemeral flag for a command that is always ephemeral,
@@ -1640,6 +2204,12 @@ async def _dispatch(body: dict, cfg: dict, *, http_client: httpx.AsyncClient | N
     name or a handler that raises within the budget both produce a
     short, ephemeral, sanitized error -- never a stack trace back to
     Discord.
+
+    `app_state` is this process's request.app.state (see
+    CommandContext's own docstring) -- the route below passes it
+    through; a bare call (as most of this module's own tests make)
+    leaves it None, which every handler that reads it already treats
+    the same as "nothing cached yet."
     """
     data = body.get("data") or {}
     name = data.get("name")
@@ -1647,7 +2217,8 @@ async def _dispatch(body: dict, cfg: dict, *, http_client: httpx.AsyncClient | N
     if entry is None:
         return _response(_RESPONSE_CHANNEL_MESSAGE, _ephemeral("Unknown command."))
 
-    task = asyncio.create_task(_run_command(entry, body))
+    ctx = CommandContext(app_state=app_state, http_client=http_client, cfg=cfg)
+    task = asyncio.create_task(_run_command(entry, body, ctx))
     try:
         result = await asyncio.wait_for(asyncio.shield(task), timeout=_HANDLER_BUDGET_SECONDS)
     except asyncio.TimeoutError:
@@ -1720,7 +2291,7 @@ async def discord_interactions_endpoint(request: Request):
     if itype == _TYPE_PING:
         return JSONResponse({"type": _RESPONSE_PONG})
     if itype == _TYPE_APPLICATION_COMMAND:
-        return JSONResponse(await _dispatch(body, cfg))
+        return JSONResponse(await _dispatch(body, cfg, app_state=request.app.state))
     if itype in (_TYPE_MESSAGE_COMPONENT, _TYPE_MODAL_SUBMIT):
         # Same key-authenticated surface /link's modal submit needs
         # (app/account_api.py's own POST /api/account/link-key
