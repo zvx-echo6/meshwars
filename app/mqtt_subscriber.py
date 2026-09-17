@@ -641,7 +641,12 @@ class _BrokerConnection:
             # Opened HERE, on the paho callback thread -- see module
             # docstring's threading section for why this must not be a
             # connection shared with (or created on) any other thread.
-            self._own_conn = connect()
+            # pooled=False: this connection is deliberately long-lived
+            # and its .close() (on disconnect, below) is relied on for
+            # WAL's close-triggers-a-checkpoint side effect -- a pooled
+            # .close() would only release it back to the free list
+            # instead of really closing it, silently dropping that.
+            self._own_conn = connect(pooled=False)
         now = int(time.time())
         ts = decoded.get("ts")
         packet_id = str(decoded["id"])
