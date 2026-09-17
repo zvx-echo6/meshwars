@@ -196,6 +196,46 @@ def test_submit_persists_row_and_survives_restart(db_path):
 
 
 # ---------------------------------------------------------------------
+# 13b. Web-role process: submit() works with no drain loop at all
+# ---------------------------------------------------------------------
+
+def test_submit_persists_row_with_no_drain_loop_running(db_path):
+    """The scenario a web/worker role split actually depends on
+    (docker-compose.yml's `meshwars` service, app/config.py's
+    run_background_tasks=False): a process that NEVER calls
+    McIngestor.start() -- so it owns no worker task and never touches
+    _worker_task -- must still be able to durably accept a batch via
+    POST /api/mc/ingest -> submit(). See this module's own docstring
+    for why that split only works because submit() is a single
+    WriteSession INSERT, not something that needs the drain loop.
+    """
+    _seed_player(db_path, player_id=1)
+
+    ingestor = McIngestor()
+    # The web role never calls .start() -- assert that up front, so
+    # this test actually exercises "no drain loop", not just "we didn't
+    # happen to call it yet".
+    assert ingestor._worker_task is None
+
+    accepted = _run(ingestor.submit(1, "keyhash-web-role", [_ping()], NOW))
+    assert accepted is True
+
+    # Still no worker task after submit() -- submit() itself never
+    # creates one, and nothing else in this test did either.
+    assert ingestor._worker_task is None
+
+    rows = _queue_rows(db_path)
+    assert len(rows) == 1
+    assert rows[0]["player_id"] == 1
+    assert rows[0]["key_hash"] == "keyhash-web-role"
+    assert rows[0]["claimed_at"] is None
+    # Nothing drains it on this process -- the row just sits there,
+    # exactly as durable-queue design intends, until some OTHER
+    # process's worker (run_background_tasks=True) claims it.
+    assert _queue_rows(db_path) == rows
+
+
+# ---------------------------------------------------------------------
 # 14. Oldest-first claim, delete on success
 # ---------------------------------------------------------------------
 

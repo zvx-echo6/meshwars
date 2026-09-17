@@ -40,7 +40,10 @@ log = logging.getLogger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("startup: meshview=%s db=%s", settings.meshview_url, settings.db_path)
+    log.info(
+        "startup: meshview=%s db=%s run_background_tasks=%s",
+        settings.meshview_url, settings.db_path, settings.run_background_tasks,
+    )
     init_db()
 
     # Which upstream source paints the Meshtastic board -- DB-backed now
@@ -62,70 +65,93 @@ async def lifespan(app: FastAPI):
         _conn.close()
     log.info("meshtastic paint source: %s", _paint_source)
 
+    # Every background loop below (plus the Discord outbox drain task
+    # further down) is gated on settings.run_background_tasks: this
+    # process either owns ALL of them (the dedicated worker role) or
+    # NONE of them (a web role, HTTP only) -- see that setting's own
+    # comment in app/config.py. app.state still gets a real, constructed
+    # instance of every one of these objects either way (not just when
+    # running background tasks), because several HTTP routes reach
+    # through request.app.state.mc_ingestor / .checkin_poller for
+    # request-path work that has nothing to do with the loop itself
+    # (McIngestor.authenticate()/.submit(), CheckinPoller.
+    # directory_snapshot()) -- only the loop-starting .start()/
+    # create_task() calls are conditional, never the construction.
     client = MeshviewClient()
     ingestor = Ingestor(client)
-    task = asyncio.create_task(ingestor.run_forever(), name="ingest")
+    task = None
+    if settings.run_background_tasks:
+        task = asyncio.create_task(ingestor.run_forever(), name="ingest")
 
     mc_ingestor = McIngestor()
-    if settings.mc_ingest_enabled:
+    if settings.run_background_tasks and settings.mc_ingest_enabled:
         await mc_ingestor.start()
 
     # FreqMapper (app/freqmapper_ingest.py): an alternative Meshtastic
     # paint source to meshview's position-packet feed above. Started
-    # UNCONDITIONALLY -- run_forever() no longer gates on
-    # freqmapper_config.enabled and exit early the way it once gated on
-    # settings.freqmapper_enabled; `enabled` is a runtime toggle now
-    # (like settings.mc_ingest_enabled's own gate below, but living
-    # inside the task's own loop rather than guarding whether the task
-    # is created at all), so the loop has to keep running to notice an
-    # operator flipping it on later. A fresh install with FreqMapper
-    # never configured still starts this task; it simply does nothing
-    # each cycle until enabled and an api_key are both set.
+    # UNCONDITIONALLY (subject to run_background_tasks) -- run_forever()
+    # no longer gates on freqmapper_config.enabled and exit early the
+    # way it once gated on settings.freqmapper_enabled; `enabled` is a
+    # runtime toggle now (like settings.mc_ingest_enabled's own gate
+    # above, but living inside the task's own loop rather than guarding
+    # whether the task is created at all), so the loop has to keep
+    # running to notice an operator flipping it on later. A fresh
+    # install with FreqMapper never configured still starts this task
+    # (on the worker role); it simply does nothing each cycle until
+    # enabled and an api_key are both set.
     freqmapper_ingestor = FreqMapperIngestor()
-    freqmapper_task = asyncio.create_task(freqmapper_ingestor.run_forever(), name="freqmapper-ingest")
+    freqmapper_task = None
+    if settings.run_background_tasks:
+        freqmapper_task = asyncio.create_task(freqmapper_ingestor.run_forever(), name="freqmapper-ingest")
 
     # Net check-ins (app/checkin.py). Shares `client` (the same
     # MeshviewClient the position-packet Ingestor above already holds)
     # for its default Meshtastic connector, rather than opening a second
     # connection pool to the same meshview host -- see CheckinPoller's
-    # docstring. Started UNCONDITIONALLY, unlike before checkin_net/
-    # checkin_config existed (this used to be gated on
-    # settings.checkin_enabled at process startup) -- the whole point of
-    # moving that flag into checkin_config is that an admin can toggle
-    # it at runtime with no restart, which only works if the loop is
-    # always running to notice the toggle. The loop itself checks
+    # docstring. Started UNCONDITIONALLY (subject to run_background_tasks),
+    # unlike before checkin_net/checkin_config existed (this used to be
+    # gated on settings.checkin_enabled at process startup) -- the whole
+    # point of moving that flag into checkin_config is that an admin can
+    # toggle it at runtime with no restart, which only works if the loop
+    # is always running to notice the toggle. The loop itself checks
     # checkin_config.enabled on every cycle and does nothing when it is
     # off (see CheckinPoller._poll_once) -- a fresh install with no nets
-    # configured yet still starts a background task, but that task polls
-    # nothing until an admin adds a net and turns it on.
+    # configured yet still starts a background task (on the worker
+    # role), but that task polls nothing until an admin adds a net and
+    # turns it on.
     checkin_poller = CheckinPoller(client)
-    await checkin_poller.start()
+    if settings.run_background_tasks:
+        await checkin_poller.start()
 
-    # MQTT connector kind (app/mqtt_subscriber.py). Started unconditionally,
-    # same reasoning as checkin_poller just above: it reconciles which
-    # brokers to hold open against checkin_net's current enabled 'mqtt'
-    # rows on its own interval, so a fresh install with no mqtt nets
-    # configured yet still starts the task, but it simply holds no
-    # connections until an admin adds one. A wholly separate background
-    # task from checkin_poller, not folded into it -- see that module's
-    # docstring for why a persistent broker subscription has no business
-    # living inside a 30-second poll loop.
+    # MQTT connector kind (app/mqtt_subscriber.py). Started unconditionally
+    # (subject to run_background_tasks), same reasoning as checkin_poller
+    # just above: it reconciles which brokers to hold open against
+    # checkin_net's current enabled 'mqtt' rows on its own interval, so
+    # a fresh install with no mqtt nets configured yet still starts the
+    # task, but it simply holds no connections until an admin adds one.
+    # A wholly separate background task from checkin_poller, not folded
+    # into it -- see that module's docstring for why a persistent broker
+    # subscription has no business living inside a 30-second poll loop.
     mqtt_subscriber = MqttSubscriber()
-    await mqtt_subscriber.start()
+    if settings.run_background_tasks:
+        await mqtt_subscriber.start()
 
     # Discord outbox drain loop (app/discord_notify.py): posts
     # end-of-month honors app/results.py's freeze_month() already queued
-    # to discord_outbox. Started UNCONDITIONALLY, same reasoning as
-    # freqmapper_ingestor and checkin_poller above: announcements_enabled()
-    # is a runtime setting (DISCORD_WEBHOOK_ANNOUNCEMENTS), and the loop
-    # has to keep running to notice an operator configuring one later. A
-    # fresh install with no webhook set still starts this task; it simply
-    # does nothing each cycle until one is set. A bare function, not a
-    # class instance like the other background workers here -- it holds
-    # no persistent connection or client to gracefully release, so there
-    # is no discord_notify.stop() to call at shutdown, only the task
-    # cancellation every other task here already gets.
-    discord_task = asyncio.create_task(discord_notify.run_forever(), name="discord-outbox")
+    # to discord_outbox. Started UNCONDITIONALLY (subject to
+    # run_background_tasks), same reasoning as freqmapper_ingestor and
+    # checkin_poller above: announcements_enabled() is a runtime setting
+    # (DISCORD_WEBHOOK_ANNOUNCEMENTS), and the loop has to keep running
+    # to notice an operator configuring one later. A fresh install with
+    # no webhook set still starts this task (on the worker role); it
+    # simply does nothing each cycle until one is set. A bare function,
+    # not a class instance like the other background workers here -- it
+    # holds no persistent connection or client to gracefully release, so
+    # there is no discord_notify.stop() to call at shutdown, only the
+    # task cancellation every other task here already gets.
+    discord_task = None
+    if settings.run_background_tasks:
+        discord_task = asyncio.create_task(discord_notify.run_forever(), name="discord-outbox")
 
     app.state.client = client
     app.state.ingestor = ingestor
@@ -141,23 +167,35 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log.info("shutdown: stopping ingest")
+        # Each .stop()/.set() call below is unconditional and harmless
+        # even when settings.run_background_tasks was False and the
+        # matching loop never started (Ingestor.stop()/FreqMapperIngestor
+        # .stop() just set an asyncio.Event nothing is waiting on;
+        # McIngestor.stop()/CheckinPoller.stop()/MqttSubscriber.stop()
+        # each no-op when their own task handle is None -- see those
+        # methods). Only cancelling a task that was actually created
+        # needs a None-guard: cancelling `None` raises AttributeError,
+        # not a graceful no-op the way those .stop() methods are.
         ingestor.stop()
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         freqmapper_ingestor.stop()
-        freqmapper_task.cancel()
-        try:
-            await freqmapper_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        discord_task.cancel()
-        try:
-            await discord_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        if freqmapper_task is not None:
+            freqmapper_task.cancel()
+            try:
+                await freqmapper_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if discord_task is not None:
+            discord_task.cancel()
+            try:
+                await discord_task
+            except (asyncio.CancelledError, Exception):
+                pass
         # /claimnode's own background watchers (app/discord_interactions.py)
         # -- each one otherwise keeps polling and PATCHing a Discord
         # message for up to five minutes after whatever started it;

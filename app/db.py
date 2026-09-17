@@ -3253,10 +3253,29 @@ def _ensure_parent_dir(path: str) -> None:
 # is the repeated PRAGMA-and-remap cost of *opening* a connection, and
 # the repeated checkpoint cost of *closing* the last reference to one:
 # a connection that goes idle and comes back stays open the whole time.
-_POOL_MAX = 16  # PRAGMA cache_size=-65536 is 64 MiB per live connection;
-                # see PRAGMAS' own comment on why that number was sized
-                # against "a dozen" concurrent connections -- an
-                # unbounded pool would blow well past that budget.
+# PRAGMA cache_size=-65536 is 64 MiB per live connection -- see PRAGMAS'
+# own comment on why that number was sized against "a dozen" concurrent
+# connections held by a SINGLE process (this was 16 before the web/
+# worker role split -- docker-compose.yml's `meshwars`/`meshwars-worker`
+# services, app/config.py's run_background_tasks). That single-process
+# assumption is gone: a deployment now runs up to 4 processes sharing
+# one game.db (3 `--workers` in the web role, plus 1 worker-role
+# process), and _POOL_MAX bounds the IDLE free list PER PROCESS, so the
+# steady-state ceiling this budget has to respect is now
+# (this constant) * 64 MiB * (process count), not * 1. Left at 16, that
+# steady-state ceiling would be 4 * 16 * 64 MiB = 4 GiB -- comfortably
+# over CT 119's entire 4.0 GiB, before a single byte goes to Python,
+# FastAPI, or the OS itself (see docker-compose.yml's mem_limit comment
+# for that box's full budget). Lowered to 4 so the FLEET-WIDE steady-
+# state ceiling stays exactly what it was before the split --
+# 4 processes * 4 = 16 pooled connections total, same 16 this was
+# already sized against, just divided across processes instead of piled
+# into one. This bounds the IDLE list only, not concurrent usage: a
+# burst of concurrent borrows beyond 4 still succeeds (connect() opens
+# a fresh connection when the free list is empty -- see connect()
+# below), it just isn't retained in the idle list afterward, so a burst
+# does not permanently inflate a process's steady-state memory floor.
+_POOL_MAX = 4
 _POOL: collections.deque = collections.deque()
 _POOL_LOCK = threading.Lock()  # plain, not asyncio: borrow/return must
                                 # work from any thread (paho's callback
@@ -3666,97 +3685,124 @@ def init_db() -> None:
         # than let the app start up against a half-migrated table.
         _migrate_freqmapper_verification_verification_id(conn)
 
-        # Places Worth Going seed (app/places_seed.py): reference data
-        # shipped with the code, same as app/reference/places.csv, but
-        # loaded into `place`/`place_cell` rather than kept in memory --
-        # see that module's docstring for why. Imported here rather than
-        # at module level to avoid a circular import (places_seed does
-        # not import this module back, but keeping the import local
-        # keeps db.py's own import graph exactly what it was before this
-        # landed).
-        #
-        # BACKGROUNDED (2026-09-07), not awaited here: a first load of
-        # the worldwide seed measured ~200s, and this function runs
-        # inside FastAPI's lifespan startup (app/main.py), which blocks
-        # uvicorn from accepting ANY connection -- including /health --
-        # until it returns. A slow load here meant a slow or, past
-        # mw-deploy's 180s health-check timeout, outright FAILED deploy,
-        # for a feature that degrades fine without its data for a few
-        # minutes (app/places_api.py's routes just return no markers
-        # until the load finishes -- nothing crashes on an empty
-        # `place` table). Runs against its own fresh connection, not the
-        # `conn` this function is using: sqlite3 connections are not
-        # safe to hand to another thread while this one keeps using
-        # them, and `connect()` is already how every other request-
-        # serving codepath gets its own (see that function's docstring,
-        # "each coroutine should grab its own"). A failure here must
-        # not take the whole app down --
-        # the place tables just stay empty (or stale) and the places
-        # feature quietly has no data, logged loudly, rather than the
-        # server failing to boot (or, now, failing to ever finish this
-        # background load) over a reference-data problem.
-        def _load_places_seed_background() -> None:
-            from .places_seed import load_places_seed
-            seed_conn = connect()
+        # Startup WRITES -- gated on settings.run_background_tasks
+        # (app/config.py). Schema creation and the MIGRATIONS loop and
+        # the two migration functions above are NOT in this block: every
+        # process needs a fully migrated schema before it can serve a
+        # single request, and that DDL is idempotent, so every process
+        # running it redundantly is free. Everything below is different:
+        # each of these either spawns a background thread of its own
+        # (places-seed) or performs an INSERT/UPDATE bootstrap
+        # (checkin/freqmapper/discord config) that is only meant to run
+        # ONCE per boot fleet-wide, not once per process. With N web
+        # workers plus a worker process all calling init_db() (every
+        # process does, unconditionally, just above this block), leaving
+        # these ungated would mean N+1 places-seed threads all loading
+        # the same ~2M rows concurrently, and N+1 processes racing the
+        # same one-time config bootstrap INSERTs -- wasted work at best,
+        # a lock-contention pile-up at worst. Exactly one process (the
+        # dedicated worker) should have run_background_tasks=True.
+        if settings.run_background_tasks:
+            # Places Worth Going seed (app/places_seed.py): reference
+            # data shipped with the code, same as app/reference/
+            # places.csv, but loaded into `place`/`place_cell` rather
+            # than kept in memory -- see that module's docstring for
+            # why. Imported here rather than at module level to avoid a
+            # circular import (places_seed does not import this module
+            # back, but keeping the import local keeps db.py's own
+            # import graph exactly what it was before this landed).
+            #
+            # BACKGROUNDED (2026-09-07), not awaited here: a first load
+            # of the worldwide seed measured ~200s, and this function
+            # runs inside FastAPI's lifespan startup (app/main.py),
+            # which blocks uvicorn from accepting ANY connection --
+            # including /health -- until it returns. A slow load here
+            # meant a slow or, past mw-deploy's 180s health-check
+            # timeout, outright FAILED deploy, for a feature that
+            # degrades fine without its data for a few minutes
+            # (app/places_api.py's routes just return no markers until
+            # the load finishes -- nothing crashes on an empty `place`
+            # table). Runs against its own fresh connection, not the
+            # `conn` this function is using: sqlite3 connections are
+            # not safe to hand to another thread while this one keeps
+            # using them, and `connect()` is already how every other
+            # request-serving codepath gets its own (see that
+            # function's docstring, "each coroutine should grab its
+            # own"). A failure here must not take the whole app down --
+            # the place tables just stay empty (or stale) and the
+            # places feature quietly has no data, logged loudly, rather
+            # than the server failing to boot (or, now, failing to ever
+            # finish this background load) over a reference-data
+            # problem.
+            def _load_places_seed_background() -> None:
+                from .places_seed import load_places_seed
+                seed_conn = connect()
+                try:
+                    load_places_seed(seed_conn)
+                except Exception:
+                    log.exception("places_seed: background load failed -- places feature will have no/stale data")
+                finally:
+                    seed_conn.close()
+
+            threading.Thread(
+                target=_load_places_seed_background, name="places-seed-load", daemon=True
+            ).start()
+
+            # Net check-ins (app/checkin.py): one-time bootstrap of
+            # checkin_net/checkin_config from settings.py, so a database
+            # that has never had a net row gets exactly today's
+            # production behavior reproduced as DB rows, and every
+            # later boot is a no-op. Local import, same reason and same
+            # pattern as places_seed just above (checkin.py imports
+            # WriteSession from this module, so importing it back at
+            # module load time here would close a cycle; importing it
+            # inside this already-running function does not, since by
+            # the time init_db() is called this module has finished
+            # executing). Non-fatal for the same reason places_seed's
+            # failure is non-fatal: a check-in feature with no nets
+            # configured is a quiet, recoverable state (an operator can
+            # always add nets through the admin API), not a reason to
+            # refuse to serve the rest of the site.
             try:
-                load_places_seed(seed_conn)
+                from .checkin import seed_nets_from_env
+                seed_nets_from_env(conn)
             except Exception:
-                log.exception("places_seed: background load failed -- places feature will have no/stale data")
-            finally:
-                seed_conn.close()
+                log.exception("checkin: seed_nets_from_env failed -- check-in nets may be empty")
 
-        threading.Thread(
-            target=_load_places_seed_background, name="places-seed-load", daemon=True
-        ).start()
+            # FreqMapper connector config (app/freqmapper_ingest.py):
+            # the same one-time bootstrap shape as seed_nets_from_env
+            # just above, migrating settings.py's freqmapper_*/
+            # mt_paint_source values onto the freqmapper_config
+            # singleton so an operator can edit them through
+            # app/admin_ops.py's /api/admin/paint without a restart.
+            # Local import, same circular-import reason as checkin.py's
+            # own import just above (freqmapper_ingest.py imports
+            # WriteSession from this module).
+            try:
+                from .freqmapper_ingest import seed_freqmapper_config_from_env
+                seed_freqmapper_config_from_env(conn)
+            except Exception:
+                log.exception("freqmapper: seed_freqmapper_config_from_env failed -- config may be unseeded")
 
-        # Net check-ins (app/checkin.py): one-time bootstrap of
-        # checkin_net/checkin_config from settings.py, so a database that
-        # has never had a net row gets exactly today's production
-        # behavior reproduced as DB rows, and every later boot is a
-        # no-op. Local import, same reason and same pattern as
-        # places_seed just above (checkin.py imports WriteSession from
-        # this module, so importing it back at module load time here
-        # would close a cycle; importing it inside this already-running
-        # function does not, since by the time init_db() is called this
-        # module has finished executing). Non-fatal for the same reason
-        # places_seed's failure is non-fatal: a check-in feature with no
-        # nets configured is a quiet, recoverable state (an operator can
-        # always add nets through the admin API), not a reason to refuse
-        # to serve the rest of the site.
-        try:
-            from .checkin import seed_nets_from_env
-            seed_nets_from_env(conn)
-        except Exception:
-            log.exception("checkin: seed_nets_from_env failed -- check-in nets may be empty")
-
-        # FreqMapper connector config (app/freqmapper_ingest.py): the
-        # same one-time bootstrap shape as seed_nets_from_env just
-        # above, migrating settings.py's freqmapper_*/mt_paint_source
-        # values onto the freqmapper_config singleton so an operator can
-        # edit them through app/admin_ops.py's /api/admin/paint without
-        # a restart. Local import, same circular-import reason as
-        # checkin.py's own import just above (freqmapper_ingest.py
-        # imports WriteSession from this module).
-        try:
-            from .freqmapper_ingest import seed_freqmapper_config_from_env
-            seed_freqmapper_config_from_env(conn)
-        except Exception:
-            log.exception("freqmapper: seed_freqmapper_config_from_env failed -- config may be unseeded")
-
-        # Discord announcements (app/discord_notify.py): the same
-        # one-time bootstrap shape as seed_freqmapper_config_from_env
-        # just above, migrating settings.py's discord_webhook_*/
-        # discord_team_emoji values onto the discord_config singleton so
-        # an operator can edit them through app/admin_ops.py's
-        # /api/admin/discord without a restart or an env-var edit. Local
-        # import, same circular-import reason as freqmapper_ingest.py's
-        # own import just above (discord_notify.py imports WriteSession
-        # from this module).
-        try:
-            from .discord_notify import seed_discord_config_from_env
-            seed_discord_config_from_env(conn)
-        except Exception:
-            log.exception("discord: seed_discord_config_from_env failed -- config may be unseeded")
+            # Discord announcements (app/discord_notify.py): the same
+            # one-time bootstrap shape as seed_freqmapper_config_from_env
+            # just above, migrating settings.py's discord_webhook_*/
+            # discord_team_emoji values onto the discord_config
+            # singleton so an operator can edit them through
+            # app/admin_ops.py's /api/admin/discord without a restart
+            # or an env-var edit. Local import, same circular-import
+            # reason as freqmapper_ingest.py's own import just above
+            # (discord_notify.py imports WriteSession from this
+            # module). Added after this whole block was first written
+            # around just places-seed/checkin/freqmapper -- gated here
+            # for the identical reason those are: it is the same
+            # one-time-per-fleet INSERT/UPDATE bootstrap shape, not a
+            # per-process concern.
+            try:
+                from .discord_notify import seed_discord_config_from_env
+                seed_discord_config_from_env(conn)
+            except Exception:
+                log.exception("discord: seed_discord_config_from_env failed -- config may be unseeded")
     finally:
         conn.close()
 

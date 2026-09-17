@@ -11,6 +11,33 @@ class Settings(BaseSettings):
     # Storage
     db_path: str = "/data/game.db"
 
+    # Web/worker role split (docker-compose.yml's `meshwars` vs
+    # `meshwars-worker` services): when True (the default -- a single
+    # all-in-one process is still a fully supported deployment), this
+    # process's app/main.py lifespan() starts all five background loops
+    # (ingest, mc_ingest, freqmapper_ingest, checkin poller, mqtt
+    # subscriber -- plus the Discord outbox drain loop, added after this
+    # comment was first sized against "five") and app/db.py's init_db()
+    # performs its startup WRITES (the places-seed background thread,
+    # and the checkin/freqmapper env bootstraps). When False, this
+    # process serves HTTP only: none of those loops start and none of
+    # those writes run, so it never contends with a real owner of them
+    # for the same rows. Schema creation and migrations in init_db()
+    # are NOT gated by this flag -- every process needs a fully migrated
+    # schema before it can serve a single request, and that DDL is
+    # idempotent, so running it redundantly in every process is free.
+    #
+    # Exactly ONE process in a deployment must have this True -- the
+    # dedicated worker service. Every web-role process (however many
+    # `--workers` uvicorn runs) must have it False: two owners of the
+    # same background loop would duplicate every poll, and two owners
+    # of the same startup write would race the same INSERTs. The durable
+    # `mc_ingest_queue` table (app/db.py) is what makes this split safe
+    # at all -- a web-role process can still accept a POST /api/mc/ingest
+    # batch (McIngestor.submit() is a single WriteSession INSERT, not a
+    # loop) with no drain loop of its own; the worker process drains it.
+    run_background_tasks: bool = True
+
     # Places Worth Going seed (app/places_seed.py): the loader normally
     # skips its own reconcile pass when the seed's sha256 content hash
     # matches what the last successful load recorded (see that module's
