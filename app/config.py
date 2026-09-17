@@ -150,7 +150,36 @@ class Settings(BaseSettings):
     # the viewport endpoint above.
     places_near_cache_seconds: int = 60
 
+    # Durable queue (app/db.py's mc_ingest_queue, app/mc_ingest.py's
+    # McIngestor): mc_queue_max is now a row-count cap on that table
+    # (was an asyncio.Queue maxsize before the durable-queue migration),
+    # enforced by McIngestor.submit() so an unbounded backlog can never
+    # grow the database without limit -- same contract as before,
+    # POST /api/mc/ingest still answers "queue full" (503) at this cap.
     mc_queue_max: int = 10000
+    # How long the background worker sleeps between drain polls when it
+    # finds nothing to claim (see McIngestor._run_worker()) -- it never
+    # sleeps while there's a backlog, so this only bounds the worst-case
+    # delay from "batch accepted" to "batch processed" when the queue is
+    # otherwise idle. Short on purpose: scoring uses each ping's own
+    # `ts`, not processing time (see app/mc_ingest.py's
+    # _process_one_ping), so this delay never affects scoring -- it only
+    # affects how quickly a fresh batch shows up on the live board.
+    mc_queue_drain_interval_seconds: float = 1.0
+    # How many durable-queue rows (each row is one submitted HTTP batch,
+    # not one ping) the worker claims per drain pass. Bounds how long a
+    # single claim-and-process pass can run before the loop checks for
+    # cancellation/housekeeping again; a real backlog drains over
+    # several passes rather than one huge one.
+    mc_queue_drain_batch_size: int = 25
+    # A queue row that has failed this many times is dead-lettered --
+    # left in the table (attempts and last_error recorded on the row, so
+    # an operator can see why) but never claimed again, the same
+    # "attempts < max_attempts" WHERE-clause convention
+    # discord_outbox_max_attempts already uses for the exact same
+    # "a poison row must not wedge the queue forever" problem. See
+    # McIngestor._claim_batch()/_mark_failed().
+    mc_queue_max_attempts: int = 5
     mc_max_batch_pings: int = 50
     mc_key_cache_seconds: int = 60
     # About 100 mph. Two jobs: it logs an implausible-speed warning, and

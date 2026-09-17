@@ -1,15 +1,30 @@
-"""MeshCore wardriving ingest: queue and worker.
+"""MeshCore wardriving ingest: durable queue and worker.
 
 This module receives batches of position "pings" pushed by the MeshCore
 companion app (MeshMapper) during wardriving sessions. The HTTP handler in
 app/api.py that accepts these batches must answer in single-digit
 milliseconds: MeshMapper gives the request ten seconds and does not retry
 on failure or timeout, so the request path only authenticates the caller,
-checks that the batch is well formed, and hands it to an in-memory queue.
+checks that the batch is well formed, and hands it to the durable queue
+(app/db.py's mc_ingest_queue table) via McIngestor.submit() -- a single
+small INSERT, not a batch's worth of processing.
 
 All real work -- attributing pings to a player, converting coordinates to
 a grid cell, deduping, and writing to the database -- happens here in the
-background worker, off the request path entirely.
+background worker, off the request path entirely, reading its backlog
+from mc_ingest_queue rather than an in-process asyncio.Queue. That used
+to be the design: a batch accepted by the HTTP handler went straight into
+an in-memory queue that only this process's own worker task ever drained.
+It lost every pending batch on restart -- and every deploy restarts --
+silently discarding real player scoring data, and would have made a
+web/worker process split (accepting batches on one process, draining them
+on another) simply not work: a batch accepted by the web process into its
+own private queue would sit there forever, since nothing on that process
+ever drains it. The durable queue fixes both: a batch survives a restart,
+and, once a web/worker split actually exists (a separate change -- this
+module doesn't implement it), a batch accepted by ANY process is visible
+to and processable by ANY worker, because it lives in the shared database
+rather than one process's heap.
 """
 from __future__ import annotations
 
@@ -25,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import mc_scoring, results
 from .config import settings
-from .db import _WRITE_LOCK, connect
+from .db import _WRITE_LOCK, WriteSession, connect
 from .grid import cell_center, cell_id, distance_m, in_play_area, valid_coord
 from .place_scoring import credit_places
 
@@ -354,10 +369,10 @@ _AUTH_NOT_FOUND = AuthResult("not_found")
 
 
 class McIngestor:
-    """Bounded queue + background worker for MeshCore ingest batches."""
+    """Durable queue (app/db.py's mc_ingest_queue) + background worker
+    for MeshCore ingest batches."""
 
     def __init__(self) -> None:
-        self._queue: asyncio.Queue = asyncio.Queue(maxsize=settings.mc_queue_max)
         self._worker_task: asyncio.Task | None = None
         self._key_cache: dict[str, tuple[float, AuthResult]] = {}
         self._rate_limit_hits: dict[str, list[float]] = {}
@@ -365,7 +380,10 @@ class McIngestor:
 
     async def start(self) -> None:
         self._worker_task = asyncio.create_task(self._run_worker(), name="mc-ingest-worker")
-        log.info("mc ingest worker started; queue_max=%d", settings.mc_queue_max)
+        log.info(
+            "mc ingest worker started; queue_max=%d drain_interval=%.1fs",
+            settings.mc_queue_max, settings.mc_queue_drain_interval_seconds,
+        )
 
     async def stop(self) -> None:
         if self._worker_task is None:
@@ -492,37 +510,185 @@ class McIngestor:
 
     # ---- submission ---------------------------------------------------
 
-    def submit(self, player_id: int, key_hash: str, pings: list, received_at: int) -> bool:
-        """Enqueue one batch for background processing. Non-blocking;
-        returns False if the queue is full. Must stay fast -- this runs on
-        the request path.
+    async def submit(self, player_id: int, key_hash: str, pings: list, received_at: int) -> bool:
+        """Durably enqueue one batch: INSERT a row into mc_ingest_queue
+        and return True, or return False -- without inserting -- if the
+        queue is already at settings.mc_queue_max rows. Same contract as
+        the old in-memory queue's put_nowait()/QueueFull: the caller
+        (app/api.py's POST /api/mc/ingest) still answers "queue full"
+        (503) exactly the same way.
+
+        Must stay fast -- this runs on the request path -- but this is a
+        single small write (one COUNT(*) plus one INSERT), so it uses
+        the same WriteSession()/_WRITE_LOCK discipline every other quick
+        write in this codebase uses (app/account_api.py, app/ingest.py,
+        etc. -- see app/db.py's WriteSession docstring) directly in this
+        coroutine, rather than asyncio.to_thread: to_thread is reserved
+        in this module for _process_batch's genuinely slow, per-ping
+        scoring work below, not for a single-row insert.
         """
-        try:
-            self._queue.put_nowait((player_id, key_hash, pings, received_at))
-            return True
-        except asyncio.QueueFull:
-            return False
+        payload = json.dumps(pings)
+        now = int(time.time())
+        async with WriteSession() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM mc_ingest_queue").fetchone()[0]
+            if count >= settings.mc_queue_max:
+                return False
+            conn.execute(
+                "INSERT INTO mc_ingest_queue"
+                "(player_id, key_hash, payload, received_at, enqueued_at, attempts) "
+                "VALUES (?, ?, ?, ?, ?, 0)",
+                (player_id, key_hash, payload, received_at, now),
+            )
+        return True
 
     # ---- worker ---------------------------------------------------
 
     async def _run_worker(self) -> None:
         try:
+            await self._reset_stale_claims()
+        except Exception:
+            log.exception("mc ingest: failed to release stale queue claims at startup")
+        try:
             while True:
                 try:
-                    item = await asyncio.wait_for(self._queue.get(), timeout=300)
-                except asyncio.TimeoutError:
-                    await self._maybe_housekeeping()
-                    continue
-                player_id, key_hash, pings, received_at = item
-                try:
-                    await self._process_batch(player_id, key_hash, pings, received_at)
+                    claimed = await self._claim_batch()
                 except Exception:
-                    log.exception("mc ingest: batch processing failed for player %s", player_id)
-                finally:
-                    self._queue.task_done()
+                    log.exception("mc ingest: failed to claim from durable queue")
+                    claimed = []
+                for row in claimed:
+                    await self._process_queued_row(row)
                 await self._maybe_housekeeping()
+                if not claimed:
+                    # Nothing to do -- wait a short beat before polling
+                    # again rather than busy-looping. While there IS a
+                    # backlog, the next iteration claims immediately
+                    # (no sleep), so a burst drains as fast as the
+                    # database allows rather than one drain_interval
+                    # chunk at a time.
+                    await asyncio.sleep(settings.mc_queue_drain_interval_seconds)
         except asyncio.CancelledError:
             raise
+
+    async def _reset_stale_claims(self) -> None:
+        """Release any row a previous run of this process claimed but
+        never finished (a crash mid-batch, or an unclean shutdown that
+        skipped stop()). Safe to run unconditionally on every worker
+        start: this process's OWN worker task has not claimed anything
+        yet (this runs before the claim loop starts), so any row still
+        showing claimed_at here belongs to a run that is definitely no
+        longer alive -- never one genuinely in flight right now.
+        """
+        async with WriteSession() as conn:
+            released = conn.execute(
+                "UPDATE mc_ingest_queue SET claimed_at = NULL WHERE claimed_at IS NOT NULL"
+            ).rowcount
+        if released:
+            log.warning(
+                "mc ingest: released %d durable-queue row(s) claimed by a previous run",
+                released,
+            )
+
+    async def _claim_batch(self) -> list[dict]:
+        """Atomically claim up to settings.mc_queue_drain_batch_size
+        unclaimed, non-dead-lettered rows, oldest id first, and return
+        them as plain dicts.
+
+        The UPDATE ... WHERE id IN (SELECT ... LIMIT ?) ... RETURNING
+        form is what makes this safe against a second worker: the row
+        selection and the claimed_at write happen inside ONE statement,
+        inside ONE BEGIN IMMEDIATE/COMMIT (via WriteSession, which holds
+        app/db.py's global _WRITE_LOCK for the duration) -- there is no
+        window between "decide which rows to take" and "mark them taken"
+        for a second claimer to land in. With exactly one worker (today's
+        deployment) this is belt-and-braces; it is what makes the same
+        code correct if a web/worker split later runs more than one.
+
+        Excludes rows already at settings.mc_queue_max_attempts (the
+        dead-letter cutoff -- see _mark_failed below) via the same plain
+        WHERE-clause convention discord_notify.py's own drain query uses
+        for discord_outbox_max_attempts: a poisoned row simply stops
+        matching this query, so it can never wedge the rows behind it,
+        without needing a separate "dead" flag.
+
+        RETURNING's row order is not documented SQL semantics to rely
+        on, so the result is sorted by id in Python before returning --
+        that is what actually guarantees "oldest first" processing, not
+        an assumption about statement execution order.
+        """
+        now = int(time.time())
+        async with WriteSession() as conn:
+            rows = conn.execute(
+                "UPDATE mc_ingest_queue SET claimed_at = ? "
+                "WHERE id IN ("
+                "  SELECT id FROM mc_ingest_queue"
+                "  WHERE claimed_at IS NULL AND attempts < ?"
+                "  ORDER BY id LIMIT ?"
+                ") "
+                "RETURNING id, player_id, key_hash, payload, received_at, attempts",
+                (now, settings.mc_queue_max_attempts, settings.mc_queue_drain_batch_size),
+            ).fetchall()
+        return sorted((dict(r) for r in rows), key=lambda r: r["id"])
+
+    async def _process_queued_row(self, row: dict) -> None:
+        """Process one claimed row and either delete it (success) or
+        record the failure and release its claim for retry (see
+        _mark_failed). Never raises -- a single bad row must not stop
+        the rest of this drain pass or take down the worker task.
+        """
+        row_id = row["id"]
+        try:
+            pings = json.loads(row["payload"])
+        except Exception:
+            # Not a transient failure -- this payload can never parse,
+            # no matter how many times it's retried. Still routed
+            # through the ordinary attempts/last_error path rather than
+            # deleted outright: it ages out via the same dead-letter
+            # cutoff as a real processing failure, and stays visible to
+            # an operator (last_error) instead of vanishing silently.
+            log.exception("mc ingest: queue row %d has unparseable payload", row_id)
+            await self._mark_failed(row_id, row["attempts"], "payload is not valid JSON")
+            return
+
+        try:
+            await self._process_batch(row["player_id"], row["key_hash"], pings, row["received_at"])
+        except Exception:
+            log.exception(
+                "mc ingest: batch processing failed for queue row %d (player %s)",
+                row_id, row["player_id"],
+            )
+            await self._mark_failed(row_id, row["attempts"], "batch processing raised -- see server log")
+            return
+
+        await self._mark_processed(row_id)
+
+    async def _mark_processed(self, row_id: int) -> None:
+        async with WriteSession() as conn:
+            conn.execute("DELETE FROM mc_ingest_queue WHERE id = ?", (row_id,))
+
+    async def _mark_failed(self, row_id: int, prior_attempts: int, error: str) -> None:
+        """Record a failed attempt and release the row's claim so the
+        next drain pass can retry it -- unless this was the attempt that
+        crossed settings.mc_queue_max_attempts, in which case it is
+        logged loudly (this is the one place an operator finds out a
+        batch is stuck) and left in place: _claim_batch's own WHERE
+        clause (attempts < mc_queue_max_attempts) never selects it
+        again, so it stops being retried without blocking any row behind
+        it, but it is never silently dropped -- it stays in
+        mc_ingest_queue, attempts and last_error intact, until an
+        operator looks at it.
+        """
+        attempts = prior_attempts + 1
+        async with WriteSession() as conn:
+            conn.execute(
+                "UPDATE mc_ingest_queue SET attempts = ?, last_error = ?, claimed_at = NULL WHERE id = ?",
+                (attempts, error, row_id),
+            )
+        if attempts >= settings.mc_queue_max_attempts:
+            log.error(
+                "mc ingest: queue row %d dead-lettered after %d attempts -- will not be "
+                "retried; last_error=%r",
+                row_id, attempts, error,
+            )
 
     async def _process_batch(self, player_id, key_hash, pings, received_at) -> None:
         # All database work for a batch runs in a single thread call, under

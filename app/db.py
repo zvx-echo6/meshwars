@@ -475,6 +475,64 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     PRIMARY KEY (player_id, protocol, day)
 );
 
+-- Durable queue for MeshCore wardriving batches accepted by
+-- POST /api/mc/ingest, replacing the in-process asyncio.Queue
+-- McIngestor (app/mc_ingest.py) used to hold them in before this table
+-- existed. That queue lost every pending batch on restart -- and every
+-- deploy restarts -- silently discarding real player scoring data. One
+-- row per accepted HTTP batch (not one row per ping): `payload` is the
+-- JSON-serialized `pings` list exactly as POSTed, so the worker can
+-- replay it through the same McIngestor._process_batch_sync() a batch
+-- pulled straight off the old in-memory queue always went through.
+--
+-- Per-ping processing is idempotent (player_cell_ping's own PRIMARY KEY
+-- (player_id, protocol, cell_id, ts) makes the INSERT OR IGNORE dedup
+-- check in _process_one_ping gate every downstream effect -- scoring,
+-- place credit, repeater-observation recording, last-fix update -- so
+-- reprocessing an already-processed ping is a safe no-op, not a double
+-- score), which is what makes at-least-once delivery (claim, process,
+-- DELETE on success) the correct and simplest choice here rather than
+-- needing a second dedup layer on top of this table. See
+-- McIngestor._process_queued_row()'s own comment for the full
+-- reasoning.
+--
+-- claimed_at marks a row a worker has picked up but not yet finished:
+-- the claim itself is a single atomic UPDATE ... RETURNING (see
+-- McIngestor._claim_batch()) so two workers can never claim the same
+-- row, even though this deployment only ever runs one. A claim that
+-- outlives its worker (a crash mid-batch) is released back
+-- (claimed_at = NULL) by McIngestor._reset_stale_claims() the next time
+-- a worker starts -- safe because a claim surviving into a fresh
+-- process start can only be orphaned, never genuinely in flight.
+--
+-- attempts/last_error are the same "a poison row must not wedge the
+-- queue forever" shape discord_outbox already uses (see
+-- settings.discord_outbox_max_attempts): a row that keeps failing is
+-- left in the table, never deleted, but stops being claimed once
+-- attempts reaches settings.mc_queue_max_attempts (a plain WHERE
+-- clause in the claim query, not a separate "dead" flag) -- an operator
+-- can still see exactly which batch is stuck and why via last_error.
+--
+-- Brand new table, no existing deployed shape to ALTER, so CREATE TABLE
+-- IF NOT EXISTS here is sufficient on its own -- same reasoning as
+-- player_cell_repeater_credit/repeater_observation above; no MIGRATIONS
+-- entry needed.
+CREATE TABLE IF NOT EXISTS mc_ingest_queue (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id     INTEGER NOT NULL,
+    key_hash      TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    received_at   INTEGER NOT NULL,
+    enqueued_at   INTEGER NOT NULL,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    claimed_at    INTEGER
+);
+-- Drives both McIngestor._claim_batch()'s own query (claimed_at IS NULL
+-- AND attempts < ? ORDER BY id) and, indirectly, submit()'s COUNT(*)
+-- capacity check.
+CREATE INDEX IF NOT EXISTS idx_mc_ingest_queue_claim ON mc_ingest_queue(claimed_at, attempts, id);
+
 -- One row per FreqMapper coverage event ever processed
 -- (app/freqmapper_ingest.py). verification_id is that event's whole
 -- identity -- for a verified_tx event, the event's own `verification_id`

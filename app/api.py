@@ -744,7 +744,7 @@ async def mc_ingest(request: Request) -> JSONResponse:
     if not data or len(data) > settings.mc_max_batch_pings:
         return JSONResponse({"error": "bad request"}, status_code=400)
 
-    accepted = ingestor.submit(principal.player_id, key_hash, data, int(time.time()))
+    accepted = await ingestor.submit(principal.player_id, key_hash, data, int(time.time()))
     if not accepted:
         return JSONResponse({"error": "queue full"}, status_code=503)
 
