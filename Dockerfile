@@ -90,8 +90,19 @@ ENV FORWARDED_ALLOW_IPS=127.0.0.1
 # read-only and needs nothing.
 USER meshwars
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -fsS http://localhost:8090/health || exit 1
+# /health now runs a real DB round-trip (see app/main.py's health()
+# docstring for why a static 200 was dangerous: it stayed green through
+# an outage where every user-facing endpoint was timing out). So a slow
+# or wedged DB must show up here as a FAILED probe, not a fast one that
+# happens to be checking nothing --timeout is capped at the same 5s the
+# curl call itself enforces (-m 5), so a hang is caught by curl's own
+# deadline rather than racing Docker's. --start-period stays generous
+# (180s) because a cold start runs schema migration and kicks off the
+# places seed load in the background -- both legitimate, neither should
+# read as unhealthy while still booting. --interval/--retries unchanged
+# so one slow blip doesn't flap the container.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+  CMD curl -fsS -m 5 http://localhost:8090/health || exit 1
 
 # Shell form (rather than the previous exec-form JSON array) so
 # $FORWARDED_ALLOW_IPS -- set by ENV above, overridable at run time via

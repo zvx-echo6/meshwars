@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 
 from .api import mount
 from .auth import http_exception_as_error_body
@@ -224,4 +225,40 @@ mount(app)
 
 @app.get("/health")
 async def health():
+    """A green /health must mean "a real request can be served right
+    now" -- not merely "the process is alive". Before this, the handler
+    below was `return {"ok": True}`: it touched nothing, so during the
+    outage where every user-facing endpoint timed out, this route kept
+    answering in single-digit milliseconds and Docker, and mw-deploy's
+    own health poll, both stayed green for the whole outage. A
+    healthcheck that cannot fail when the site is broken is worse than
+    no healthcheck at all -- it is false confidence with a badge on it.
+
+    So this now opens a connection the same way every other route does
+    (db.connect(), the ordinary, unshortcutted path -- no side-channel
+    connection that could stay healthy while the real one is starved)
+    and runs one cheap, indexed, single-row read against `season`, the
+    smallest always-present table in the schema (PRIMARY KEY lookup via
+    `LIMIT 1`; never `place`/`place_cell`, which are large and exist
+    specifically to be excluded from anything that must stay fast).
+    Zero rows is still success -- a fresh DB with no season row yet, or
+    one mid-seed-load, is a legitimately servable app, so this is
+    checking "the DB is reachable and responsive", not "the data is
+    complete". Any exception -- connect() failing, the query timing out
+    behind a lock, whatever -- means the DB path a real request would
+    take is not currently usable, so this reports 503 with the
+    exception's class name only (no stack trace, no secrets) rather
+    than reporting healthy anyway.
+    """
+    try:
+        conn = connect()
+        try:
+            conn.execute("SELECT id FROM season LIMIT 1").fetchone()
+        finally:
+            conn.close()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": type(exc).__name__},
+        )
     return {"ok": True}
