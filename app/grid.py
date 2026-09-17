@@ -6,6 +6,7 @@ uniform and predictable everywhere (geohash cells warp with latitude).
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 CELL_LAT_DEG = 0.0027
 CELL_LON_DEG = 0.00384
@@ -40,8 +41,20 @@ def cell_indices(cid: str) -> tuple[int, int]:
     return (int(lat_str), int(lon_str))
 
 
+@lru_cache(maxsize=131072)
 def cell_bounds(cid: str) -> tuple[float, float, float, float]:
-    """Return (south, west, north, east) for a cell id."""
+    """Return (south, west, north, east) for a cell id.
+
+    Pure function of `cid` alone (CELL_LAT_DEG/CELL_LON_DEG are fixed
+    module constants, no settings/time/DB dependence), and every caller
+    unpacks the returned tuple into scalars rather than mutating it, so
+    it is safe to memoize. Cached with an explicit bound rather than
+    maxsize=None: the live grid holds on the order of ~40,000 owned
+    tiles, so 131072 (2**17) comfortably covers a full board's worth of
+    distinct cell ids -- including some churn/expansion headroom --
+    without letting the cache grow unbounded if something one day feeds
+    it a huge or adversarial spread of ids.
+    """
     lat_str, lon_str = cid.split("_")
     lat_idx = int(lat_str)
     lon_idx = int(lon_str)

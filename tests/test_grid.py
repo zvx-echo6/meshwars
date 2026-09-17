@@ -15,7 +15,7 @@ credited.
 """
 from __future__ import annotations
 
-from app.grid import ring_expand
+from app.grid import cell_bounds, ring_expand
 
 
 def test_ring_expand_of_a_single_cell_is_a_3x3_block():
@@ -42,3 +42,42 @@ def test_ring_expand_adds_exactly_one_ring_not_two():
     expanded = ring_expand({"10_20"})
     assert "12_20" not in expanded
     assert "10_22" not in expanded
+
+
+def test_cell_bounds_is_memoized_and_returns_stable_equal_results():
+    """cell_bounds() is decorated with functools.lru_cache (see grid.py's
+    comment on why it is safe to memoize). Same cid twice must return
+    equal results while the underlying computation runs only once, per
+    cache_info()'s hit/miss counters."""
+    cell_bounds.cache_clear()
+    first = cell_bounds("10_20")
+    second = cell_bounds("10_20")
+    assert first == second
+    info = cell_bounds.cache_info()
+    assert info.hits == 1
+    assert info.misses == 1
+
+
+def test_cell_bounds_differs_by_cell_id():
+    cell_bounds.cache_clear()
+    assert cell_bounds("10_20") != cell_bounds("11_21")
+
+
+def test_cell_bounds_cached_values_match_a_freshly_computed_reference():
+    """A spread of cell ids: the lru_cache-wrapped function's result must
+    match what the same math would produce uncached (the cache must
+    never distort the computation, only skip re-running it)."""
+    def _reference(cid: str) -> tuple[float, float, float, float]:
+        lat_idx, lon_idx = (int(part) for part in cid.split("_"))
+        south = lat_idx * 0.0027
+        north = (lat_idx + 1) * 0.0027
+        west = lon_idx * 0.00384
+        east = (lon_idx + 1) * 0.00384
+        return (south, west, north, east)
+
+    cell_bounds.cache_clear()
+    for cid in ("0_0", "10_20", "-5_-3", "1234_-987", "-1_0"):
+        # First call (miss) and second call (hit) must both match the
+        # reference, and must match each other.
+        assert cell_bounds(cid) == _reference(cid)
+        assert cell_bounds(cid) == _reference(cid)

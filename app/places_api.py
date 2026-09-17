@@ -25,6 +25,7 @@ scoring rule these parks use is computed once at seed time
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import logging
@@ -243,7 +244,41 @@ def _park_boundaries_in_viewport(
 # _PLACES_CACHE_MAX bounds it: OrderedDict
 # gives O(1) move-to-end on a hit and pop-oldest on overflow, i.e. a plain
 # LRU, with no extra bookkeeping structure needed.
-_PLACES_CACHE: "OrderedDict[str, tuple[float, bytes, str]]" = OrderedDict()
+
+# GZIP_COMPRESSLEVEL matches app/main.py's app.add_middleware(GZipMiddleware,
+# minimum_size=1000) call -- compresslevel is left at GZipMiddleware's own
+# default (9) there. Same value app/mc_api.py's _CachedBody uses, kept as
+# its own module-level constant rather than imported -- this module is
+# deliberately self-contained from mc_api's cache, per the comment above.
+_GZIP_COMPRESSLEVEL = 9
+
+
+class _CachedBody:
+    """One places-cache entry: the plaintext serialized bytes plus
+    (lazily) the same bytes gzip-compressed, sharing one ETag between
+    the two. See app/mc_api.py's identical _CachedBody for the full
+    reasoning (same pattern, same py-spy finding: GZipMiddleware
+    recompresses identical cached bytes on every gzip-accepting request,
+    not just the first) -- duplicated here rather than imported, same as
+    the rest of this cache, so this module's cache can change without
+    touching that one's.
+    """
+
+    __slots__ = ("built_at", "body", "etag", "gzip_body")
+
+    def __init__(self, built_at: float, body: bytes, etag: str) -> None:
+        self.built_at = built_at
+        self.body = body
+        self.etag = etag
+        self.gzip_body: bytes | None = None  # filled on first gzip-accepting request
+
+    def gzipped(self) -> bytes:
+        if self.gzip_body is None:
+            self.gzip_body = gzip.compress(self.body, compresslevel=_GZIP_COMPRESSLEVEL)
+        return self.gzip_body
+
+
+_PLACES_CACHE: "OrderedDict[str, _CachedBody]" = OrderedDict()
 _PLACES_CACHE_MAX = 512
 
 
@@ -258,6 +293,14 @@ def _coord_key(value: float) -> str:
     return f"{value:.3f}"
 
 
+def _wants_gzip(request: Request | None) -> bool:
+    """True only when the request explicitly says it can decode gzip.
+    See app/mc_api.py's identical helper."""
+    if request is None:
+        return False
+    return "gzip" in request.headers.get("accept-encoding", "")
+
+
 def cached_places_response(key: str, ttl: int, build, request: Request | None) -> Response:
     """Serve `build()`'s result as JSON, reusing the serialized bytes for
     up to `ttl` seconds under `key`. See the _PLACES_CACHE comment above
@@ -269,22 +312,37 @@ def cached_places_response(key: str, ttl: int, build, request: Request | None) -
     ETag is still computed and still honours an incoming If-None-Match,
     since minting a validator costs nothing extra on top of the
     serialization this route was doing anyway.
+
+    Gzip: one ETag covers both the plaintext and gzip representations of
+    an entry. See app/mc_api.py's cached_json_response docstring for the
+    full reasoning (same choice, same justification) -- gzip is a
+    transport coding of the same JSON content, not a different
+    representation, and the Vary: Accept-Encoding this sends whenever
+    gzip bytes are served keeps Caddy (and any other cache in front)
+    bucketing the two encodings separately regardless of a shared etag.
     """
     now = time.monotonic()
+    gzip_ok = _wants_gzip(request)
 
-    def answer(body: bytes, etag: str) -> Response:
+    def answer(entry: _CachedBody) -> Response:
+        etag = entry.etag
         headers = {"ETag": etag}
         if ttl > 0:
             headers["Cache-Control"] = f"public, max-age={ttl}"
+        if gzip_ok:
+            headers["Vary"] = "Accept-Encoding"
         if request is not None and request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers=headers)
-        return Response(content=body, media_type="application/json", headers=headers)
+        if gzip_ok:
+            headers["Content-Encoding"] = "gzip"
+            return Response(content=entry.gzipped(), media_type="application/json", headers=headers)
+        return Response(content=entry.body, media_type="application/json", headers=headers)
 
     if ttl > 0:
         hit = _PLACES_CACHE.get(key)
-        if hit is not None and now - hit[0] < ttl:
+        if hit is not None and now - hit.built_at < ttl:
             _PLACES_CACHE.move_to_end(key)
-            return answer(hit[1], hit[2])
+            return answer(hit)
 
     # ensure_ascii=False + allow_nan=False, matching JSONResponse.render
     # (starlette.responses) byte-for-byte -- both routes returned a
@@ -298,12 +356,13 @@ def cached_places_response(key: str, ttl: int, build, request: Request | None) -
         build(), ensure_ascii=False, allow_nan=False, separators=(",", ":")
     ).encode("utf-8")
     etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+    entry = _CachedBody(now, body, etag)
     if ttl > 0:
-        _PLACES_CACHE[key] = (now, body, etag)
+        _PLACES_CACHE[key] = entry
         _PLACES_CACHE.move_to_end(key)
         if len(_PLACES_CACHE) > _PLACES_CACHE_MAX:
             _PLACES_CACHE.popitem(last=False)
-    return answer(body, etag)
+    return answer(entry)
 
 
 @router.get("/api/places")

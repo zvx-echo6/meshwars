@@ -828,6 +828,25 @@ def _mark_seen(conn, connector: str, packet_id: str, seen_at: int) -> None:
 # checkin_seen_message row for either case.
 
 
+def _checkin_http_limits() -> httpx.Limits:
+    """Shared httpx.Limits for CoreScopeClient/BeaconClient below.
+
+    httpx's default keepalive_expiry is 5 seconds, but CheckinPoller
+    only calls back into a given client every
+    settings.checkin_poll_interval_seconds (30s by default) --
+    see run_forever's sleep between _poll_once() calls. That means the
+    pooled connection is ALWAYS already dead by the time the next poll
+    happens, so every single poll pays a fresh TCP+TLS handshake
+    instead of reusing the warm connection (confirmed in a prod py-spy
+    profile: 0.24s in ssl.py's do_handshake). Deriving keepalive_expiry
+    from the actual configured interval (doubled, for margin against
+    a slow poll cycle or a net's own processing time pushing the next
+    request out past one plain interval) rather than hardcoding a
+    constant keeps this correct if the interval is ever tuned.
+    """
+    return httpx.Limits(keepalive_expiry=settings.checkin_poll_interval_seconds * 2)
+
+
 class CoreScopeClient:
     """HTTP client for one CoreScope instance's two check-in feeds: a
     channel's messages, and the public-key node directory used by the
@@ -857,6 +876,7 @@ class CoreScopeClient:
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=httpx.Timeout(15.0, connect=5.0),
+            limits=_checkin_http_limits(),
             headers={"Accept": "application/json", "User-Agent": "meshwars/1.0"},
         )
 
@@ -994,6 +1014,7 @@ class BeaconClient:
         self._client = httpx.AsyncClient(
             base_url=base_url,
             timeout=httpx.Timeout(15.0, connect=5.0),
+            limits=_checkin_http_limits(),
             headers={"Accept": "application/json", "User-Agent": "meshwars/1.0"},
         )
         # channel NAME -> instance-local numeric id, and when that cache

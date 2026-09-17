@@ -31,6 +31,7 @@ MC_PROTOCOL explicitly, same as before this module had a second caller.
 from __future__ import annotations
 
 import re
+import gzip
 import hashlib
 import json
 import math
@@ -428,8 +429,57 @@ def season_team_checkin_points(conn, season_id: int) -> dict[str, float]:
 
 # ---- board response cache ---------------------------------------------
 
-# key -> (built_at_monotonic, serialized JSON bytes, etag). Small and
-# bounded: one entry per cached route, never per request or per caller.
+# GZIP_COMPRESSLEVEL matches app/main.py's app.add_middleware(GZipMiddleware,
+# minimum_size=1000) call -- compresslevel is left at GZipMiddleware's own
+# default (9) there, so this reproduces the same compression this response
+# would have gotten from the middleware, just computed once per cache
+# rebuild instead of once per request. See _CachedBody below for why this
+# module compresses at all instead of always leaning on the middleware.
+_GZIP_COMPRESSLEVEL = 9
+
+
+class _CachedBody:
+    """One board cache entry: the plaintext serialized bytes plus (lazily)
+    the same bytes gzip-compressed, sharing one ETag between the two.
+
+    Starlette's GZipMiddleware (confirmed by reading the installed
+    starlette==0.38.6 source, app/main.py wires it in ahead of this
+    response) recompresses the body on EVERY request that sends
+    Accept-Encoding: gzip -- including a cache HIT, where the bytes being
+    compressed are byte-for-byte identical to the last request's. A
+    py-spy profile of production found 0.57s of own-time in
+    gzip.py:_write_raw from exactly this, and it scales with request
+    count, not board size, so it gets worse the more viewers are
+    watching an unchanged board.
+
+    gzip_body is populated the first time a request wants it (rather than
+    eagerly at build time) so a build that never gets a gzip-accepting
+    request never pays for one, but it is computed at most ONCE per cache
+    generation -- every later gzip-accepting request within the same TTL
+    window reuses it, which is the whole point of this class existing
+    instead of the plain (built_at, body, etag) tuple this replaces. No
+    lock guards the lazy fill: every caller of cached_json_response runs
+    synchronously on the event loop with no `await` between the None
+    check and the assignment (confirmed -- no run_in_threadpool/to_thread
+    wraps it anywhere), so two requests can never interleave inside it.
+    """
+
+    __slots__ = ("built_at", "body", "etag", "gzip_body")
+
+    def __init__(self, built_at: float, body: bytes, etag: str) -> None:
+        self.built_at = built_at
+        self.body = body
+        self.etag = etag
+        self.gzip_body: bytes | None = None  # filled on first gzip-accepting request
+
+    def gzipped(self) -> bytes:
+        if self.gzip_body is None:
+            self.gzip_body = gzip.compress(self.body, compresslevel=_GZIP_COMPRESSLEVEL)
+        return self.gzip_body
+
+
+# key -> cache entry. Small and bounded: one entry per cached route, never
+# per request or per caller.
 #
 # The etag lives INSIDE the per-key entry, deliberately. app/api.py's
 # /get-nodes deliberately splits its cache into mt_board_authed and
@@ -440,7 +490,17 @@ def season_team_checkin_points(conn, season_id: int) -> dict[str, float]:
 # public one, and the server would answer 304 to a client holding a body it
 # was never entitled to. Keying the etag with the bytes it was computed from
 # makes that impossible by construction rather than by care.
-_BOARD_CACHE: dict[str, tuple[float, bytes, str]] = {}
+_BOARD_CACHE: dict[str, _CachedBody] = {}
+
+
+def _wants_gzip(request: Request | None) -> bool:
+    """True only when the request explicitly says it can decode gzip.
+    request=None (a caller that never passes one -- see app/api.py's
+    /get-nodes) always means "no": a plaintext-only client that got
+    served gzip bytes could never decode them."""
+    if request is None:
+        return False
+    return "gzip" in request.headers.get("accept-encoding", "")
 
 
 def cached_json_response(key: str, build, request: Request | None = None) -> Response:
@@ -461,32 +521,54 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
     this cache for no gain a reader could ever perceive.
 
     settings.board_cache_seconds = 0 disables it and rebuilds every time.
+
+    Gzip: one ETag covers BOTH the plaintext and gzip representations of
+    a given entry (not one each). They are the same underlying JSON
+    content -- gzip here is a transport coding, not a different
+    representation -- and Caddy sits in front in production, bucketing
+    its own cache by the Vary: Accept-Encoding this sends, so a client
+    or intermediate cache holding the gzip bytes will only ever replay
+    an If-None-Match it received alongside those same gzip bytes back
+    against a request Caddy still routes into the gzip Vary bucket. A
+    single shared etag keeps the 304 logic identical for both encodings
+    (one lookup, one compare) and sidesteps the historical mod_deflate
+    "-gzip suffix" mess entirely, at no correctness cost given Vary is
+    always sent whenever gzip bytes are.
     """
     ttl = settings.board_cache_seconds
     now = time.monotonic()
+    gzip_ok = _wants_gzip(request)
 
-    def answer(body: bytes, etag: str) -> Response:
+    def answer(entry: _CachedBody) -> Response:
+        etag = entry.etag
+        headers = {"ETag": etag}
+        if gzip_ok:
+            headers["Vary"] = "Accept-Encoding"
         # A client that already holds these exact bytes gets 304 and no body,
         # which lets it skip both the transfer and -- the expensive half --
         # re-indexing an unchanged board into geojson-vt. First load carries
         # no If-None-Match, so it falls through to the full 200 below.
         if request is not None and request.headers.get("if-none-match") == etag:
-            return Response(status_code=304, headers={"ETag": etag})
-        return Response(content=body, media_type="application/json", headers={"ETag": etag})
+            return Response(status_code=304, headers=headers)
+        if gzip_ok:
+            headers["Content-Encoding"] = "gzip"
+            return Response(content=entry.gzipped(), media_type="application/json", headers=headers)
+        return Response(content=entry.body, media_type="application/json", headers=headers)
 
     if ttl > 0:
         hit = _BOARD_CACHE.get(key)
-        if hit is not None and now - hit[0] < ttl:
-            return answer(hit[1], hit[2])
+        if hit is not None and now - hit.built_at < ttl:
+            return answer(hit)
 
     body = json.dumps(build(), separators=(",", ":")).encode()
     # Hashed once per REBUILD, not per request -- the whole point of caching
     # the serialized bytes is that neither serializing nor digesting them
     # happens on the hot path.
     etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+    entry = _CachedBody(now, body, etag)
     if ttl > 0:
-        _BOARD_CACHE[key] = (now, body, etag)
-    return answer(body, etag)
+        _BOARD_CACHE[key] = entry
+    return answer(entry)
 
 
 def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
