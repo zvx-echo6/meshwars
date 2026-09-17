@@ -371,3 +371,38 @@ def test_wal_file_does_not_grow_unboundedly(db_path):
         f"pool (ceiling {CEILING_BYTES}) -- pooled connections may be preventing "
         f"WAL checkpointing; consider a periodic PRAGMA wal_checkpoint(TRUNCATE)."
     )
+
+
+def test_connections_are_always_opened_in_wal_mode(db_path):
+    """WAL must stay on. Without it SQLite falls back to a rollback
+    journal, where a writer takes an exclusive lock on the whole
+    database file and readers and writers block each other outright --
+    on a ~2 GB database with background pollers writing continuously,
+    that serializes the entire application onto one lock. It has bitten
+    this project before: the symptom was the site becoming, in the
+    operator's words, "super beyond slow", with no single slow endpoint
+    to blame, because everything was queued behind the same file lock.
+
+    Nothing errors when WAL is lost -- it just degrades, silently and
+    everywhere at once -- so this pins it. journal_mode is persisted in
+    the database file rather than per-connection, but the PRAGMA list
+    is what establishes it on a fresh database, and this asserts both
+    that the PRAGMA is still declared and that a borrowed connection
+    actually reports wal.
+    """
+    assert any(
+        "journal_mode" in pragma.lower() and "wal" in pragma.lower()
+        for pragma in db.PRAGMAS
+    ), "PRAGMA journal_mode=WAL was removed from app/db.py's PRAGMAS"
+
+    conn = db.connect()
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        conn.close()
+
+    unpooled = db.connect(pooled=False)
+    try:
+        assert unpooled.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        unpooled.close()
