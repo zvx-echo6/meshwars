@@ -6,6 +6,7 @@ single writer (the poll loop / scheduler).
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import os
 import sqlite3
@@ -2701,7 +2702,19 @@ PRAGMAS = [
 ]
 
 # In-process write lock. SQLite serializes writes at the file level, but
-# this lock prevents BEGIN IMMEDIATE collisions across our own coroutines.
+# this lock prevents BEGIN IMMEDIATE collisions across our own coroutines
+# that go through WriteSession specifically (see that class below). Most
+# of this codebase's OTHER writers (admin_ops.py, admin_api.py,
+# nodes_api.py, join_api.py, mc_ingest.py, mqtt_subscriber.py,
+# place_rotation.py, places_seed.py -- dozens of call sites) run their
+# own manual BEGIN IMMEDIATE / COMMIT / ROLLBACK on a connection from
+# connect() WITHOUT going through this lock at all. Those rely entirely
+# on SQLite's own file-level locking (BEGIN IMMEDIATE + busy_timeout
+# below) to serialize against each other and against WriteSession, which
+# only works if every such caller genuinely holds a DISTINCT physical
+# connection -- see the pool design below, which preserves that
+# invariant on purpose rather than sharing one connection across
+# concurrent callers.
 _WRITE_LOCK = asyncio.Lock()
 
 
@@ -2711,10 +2724,72 @@ def _ensure_parent_dir(path: str) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
-def connect() -> sqlite3.Connection:
-    """Open a fresh connection. Each coroutine should grab its own."""
+# ---- connection pool --------------------------------------------------
+#
+# connect() used to open a brand new physical sqlite3 connection (full
+# PRAGMA list re-run, including the mmap_size remap and a from-scratch
+# 64 MiB page cache) for every single call, then the caller's own
+# conn.close() would close it -- and closing the LAST connection to a
+# WAL database triggers a checkpoint. Measured on prod with py-spy: that
+# open+close cycle was ~22% of all real CPU work, and WriteSession's
+# conn.close() alone (app/db.py's write path) was the single most
+# expensive leaf function in the whole profile.
+#
+# The obvious fix -- one connection reused per thread -- is WRONG here:
+# this app runs as a single uvicorn process with no --workers, i.e. one
+# event-loop thread hosting every concurrently in-flight request
+# coroutine. A thread-local connection would be shared by ALL of them,
+# which breaks the invariant the write sites above actually depend on
+# (distinct physical connections, serialized by SQLite's own file lock).
+# Concretely: app/checkin_api.py's confirm_start/confirm_accept hold a
+# connect()'d connection across a real `await` (an outbound HTTP fan-out
+# to MeshCore-family connectors, via confirm_scan_all_connectors) and
+# THEN run a manual BEGIN IMMEDIATE on it, outside _WRITE_LOCK. Under a
+# shared connection, a second concurrent caller's BEGIN IMMEDIATE on
+# that SAME connection either raises "cannot start a transaction within
+# a transaction" instead of blocking/retrying, or -- worse -- silently
+# becomes part of the first caller's transaction, so an unrelated
+# ROLLBACK can erase writes a completely different request already
+# believes succeeded. That is a real, load-bearing hazard, not a
+# hypothetical: confirm_status/confirm_accept are player-facing,
+# frequently-polled endpoints (its own docstring: "poll status every
+# few seconds"), so two players' requests overlapping there is routine.
+#
+# So instead: a free list of IDLE, already-PRAGMA'd connections, with
+# EXCLUSIVE borrowing. connect() pops one whole connection off the free
+# list (or makes a fresh one if the list is empty) and hands it to
+# exactly one caller; nobody else can see it until that caller's
+# .close() releases it back. Two concurrent callers therefore always
+# get two distinct physical connections, exactly as today -- the
+# invariant above is preserved exactly, not weakened. What's eliminated
+# is the repeated PRAGMA-and-remap cost of *opening* a connection, and
+# the repeated checkpoint cost of *closing* the last reference to one:
+# a connection that goes idle and comes back stays open the whole time.
+_POOL_MAX = 16  # PRAGMA cache_size=-65536 is 64 MiB per live connection;
+                # see PRAGMAS' own comment on why that number was sized
+                # against "a dozen" concurrent connections -- an
+                # unbounded pool would blow well past that budget.
+_POOL: collections.deque = collections.deque()
+_POOL_LOCK = threading.Lock()  # plain, not asyncio: borrow/return must
+                                # work from any thread (paho's callback
+                                # thread, asyncio.to_thread workers, the
+                                # event loop thread), and never blocks.
+
+
+class _PoolEntry:
+    """One idle, already-PRAGMA'd connection sitting in the free list,
+    tagged with the db_path it was opened against."""
+
+    __slots__ = ("conn", "db_path")
+
+    def __init__(self, conn: sqlite3.Connection, db_path: str) -> None:
+        self.conn = conn
+        self.db_path = db_path
+
+
+def _make_real_connection(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(
-        settings.db_path,
+        db_path,
         detect_types=sqlite3.PARSE_DECLTYPES,
         isolation_level=None,  # autocommit; we manage txns explicitly
         check_same_thread=False,
@@ -2723,6 +2798,162 @@ def connect() -> sqlite3.Connection:
     for pragma in PRAGMAS:
         conn.execute(pragma)
     return conn
+
+
+def _probe_alive(conn: sqlite3.Connection) -> bool:
+    """Cheap liveness check for a connection that has been sitting idle
+    in the free list. A pooled connection must never turn a transient
+    fault (the underlying file handle going bad, the process having
+    fork()'d, whatever) into a permanent one for the rest of the
+    process's life -- so a dead connection found here is discarded, not
+    handed to the caller."""
+    try:
+        conn.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+
+
+class _PooledConnectionProxy:
+    """What connect() actually returns for a pooled borrow: a thin
+    wrapper around one real, exclusively-owned sqlite3.Connection.
+
+    Every attribute/method other than close() delegates straight
+    through to the real connection via __getattr__, so this is
+    source-compatible with plain sqlite3.Connection for every one of
+    this module's ~100 call sites (none of which do `with conn:`,
+    isinstance(conn, sqlite3.Connection), or touch a dunder on conn
+    itself -- confirmed by inspection before this change landed;
+    they all just call .execute/.executemany/.executescript/.commit/
+    .rollback/.close and read .in_transaction).
+
+    close() does NOT close the underlying connection -- it RELEASES
+    it back to the free list for the next borrower. See
+    _release_connection().
+    """
+
+    __slots__ = ("_real", "_db_path", "_released")
+
+    def __init__(self, real: sqlite3.Connection, db_path: str) -> None:
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_db_path", db_path)
+        object.__setattr__(self, "_released", False)
+
+    def close(self) -> None:
+        # Idempotent ON PURPOSE: a double close() must never push the
+        # same real connection onto the free list twice -- that would
+        # hand one physical connection to two concurrent borrowers,
+        # exactly the bug this whole design exists to prevent.
+        if self._released:
+            return
+        object.__setattr__(self, "_released", True)
+        _release_connection(self._real, self._db_path)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._real, name, value)
+
+
+def _release_connection(conn: sqlite3.Connection, db_path: str) -> None:
+    try:
+        if conn.in_transaction:
+            # Non-negotiable: a leaked open transaction would poison
+            # the next borrower -- their first statement would silently
+            # execute as part of THIS caller's half-finished write.
+            conn.rollback()
+    except Exception:
+        # The connection is unusable for some other reason (dead
+        # handle, etc.) -- never hand a poisoned connection back to the
+        # free list. Best-effort close and drop it; the next connect()
+        # call just opens a fresh one.
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return
+
+    with _POOL_LOCK:
+        if len(_POOL) < _POOL_MAX:
+            _POOL.append(_PoolEntry(conn, db_path))
+            return
+    # Over the cap -- close it for real, outside the lock (closing
+    # doesn't need it, and there's no reason to hold the lock while a
+    # WAL checkpoint potentially runs).
+    conn.close()
+
+
+def _drain_pool_for_tests() -> None:
+    """Test-only: close and clear every idle connection in the free
+    list. The pool is process-global state, so without this a
+    connection opened (and PRAGMA'd, or tagged with a db_path) under
+    one test could be handed to a later test via the free list --
+    see tests/conftest.py's autouse fixture, which calls this between
+    every test."""
+    with _POOL_LOCK:
+        entries = list(_POOL)
+        _POOL.clear()
+    for entry in entries:
+        try:
+            entry.conn.close()
+        except Exception:
+            pass
+
+
+def connect(pooled: bool = True) -> sqlite3.Connection:
+    """Borrow a connection. Each concurrent caller gets its own
+    EXCLUSIVE physical connection -- see the pool design comment above
+    for why that invariant is preserved, not weakened, by pooling.
+
+    pooled=False is the escape hatch for a caller that deliberately
+    wants a private, unpooled connection whose .close() really closes
+    (and, in WAL mode, really checkpoints) -- e.g.
+    app/mqtt_subscriber.py's self._own_conn, which is intentionally
+    long-lived on paho's own callback thread and closed on disconnect
+    for exactly that checkpoint side effect. Do not add pooled=False
+    anywhere else without the same kind of deliberate reasoning: every
+    other call site in this codebase is fine (and faster) pooled.
+    """
+    current_path = settings.db_path
+
+    if not pooled:
+        return _make_real_connection(current_path)
+
+    while True:
+        with _POOL_LOCK:
+            try:
+                entry = _POOL.popleft()
+            except IndexError:
+                entry = None
+
+        if entry is None:
+            real = _make_real_connection(current_path)
+            break
+
+        if entry.db_path != current_path:
+            # Stale: this idle connection points at a different
+            # database file than settings.db_path names right now (the
+            # test suite monkeypatches db_path per test) -- never hand
+            # a borrower a connection to the wrong file. Close it for
+            # real and try the next idle entry.
+            try:
+                entry.conn.close()
+            except Exception:
+                pass
+            continue
+
+        if not _probe_alive(entry.conn):
+            try:
+                entry.conn.close()
+            except Exception:
+                pass
+            continue
+
+        real = entry.conn
+        break
+
+    return _PooledConnectionProxy(real, current_path)
 
 
 def _migrate_session_privacy(conn: sqlite3.Connection) -> None:

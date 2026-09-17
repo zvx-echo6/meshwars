@@ -16,7 +16,24 @@ os.environ.setdefault("MESHVIEW_BASE_URL", "https://example.invalid")
 
 import pytest
 
+from app import db
 from app.db import MIGRATIONS, SCHEMA
+
+
+@pytest.fixture(autouse=True)
+def _drain_db_connection_pool():
+    """app/db.py's connection pool (app.db._POOL) is process-global,
+    shared by every test in this run -- without this, a connection
+    opened (PRAGMA'd, and tagged with a db_path) under one test could be
+    handed to a LATER test via the free list. That would break tests
+    like test_write_session.py's test_lock_released_when_begin_immediate_fails,
+    which monkeypatches db.PRAGMAS and relies on that actually taking
+    effect on the next connect() call. Draining before AND after covers
+    a test that leaves connections idle in the pool either way.
+    """
+    db._drain_pool_for_tests()
+    yield
+    db._drain_pool_for_tests()
 
 
 @pytest.fixture(autouse=True)
