@@ -829,6 +829,24 @@ def test_month_title_invalid_month_returns_unchanged():
     assert discord_notify._month_title("garbage") == "garbage"
 
 
+# ---- _day_title / _week_range_title ------------------------------------
+
+
+def test_day_title_formats_weekday_month_day_no_year():
+    assert discord_notify._day_title("2026-09-09") == "Wednesday, September 9"
+
+
+def test_week_range_title_same_month():
+    assert discord_notify._week_range_title("2026-09-06", "2026-09-12") == "September 6–12"
+
+
+def test_week_range_title_crosses_month_boundary():
+    assert (
+        discord_notify._week_range_title("2026-08-30", "2026-09-05")
+        == "August 30 – September 5"
+    )
+
+
 def test_build_month_honors_embed_title_uses_month_name_not_key(conn):
     embed = discord_notify.build_month_honors_embed(conn, "2026-08", "mc", _sample_result())
     title = embed["embeds"][0]["title"]
@@ -1647,6 +1665,25 @@ def test_build_weekly_recap_embed_empty_data_returns_none(conn):
     assert discord_notify.build_weekly_recap_embed(conn, "mc", now - 7 * 86400, now) is None
 
 
+def test_build_weekly_recap_embed_title_says_week_of_with_no_iso_date(conn):
+    """The title names the board and a human week range ("Week of
+    September ..."), never the raw "YYYY-MM-DD to YYYY-MM-DD" ISO form
+    the owner already rejected for month keys -- that rejection applies
+    to every date this module renders, not just a month."""
+    _enable_discord(conn)
+    tz = ZoneInfo(settings.checkin_net_timezone)
+    start_ts = int(datetime(2026, 9, 6, tzinfo=tz).timestamp())
+    end_ts = int(datetime(2026, 9, 13, tzinfo=tz).timestamp())
+    _wr_season(conn, 1, started_at=start_ts - 1_000_000, ends_at=end_ts + 1_000_000)
+    _wr_player(conn, 1, "P1", "RED")
+    _wr_capture(conn, 1, "c1", start_ts + 100, 1, "RED")
+
+    embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
+    title = embed["embeds"][0]["title"]
+    assert title == "MeshCore · Week of September 6–12"
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", title)
+
+
 def test_build_weekly_recap_embed_placement_changes_section(conn):
     """Placement changes renders RANK MOVEMENT, not squares gained (the
     owner's own correction -- a squares-gained figure is positive for
@@ -1791,7 +1828,9 @@ def test_weekly_exploration_section_header_says_new_not_first(conn):
     embed = discord_notify.build_weekly_recap_embed(conn, "mc", start_ts, end_ts)
     field = next(f for f in embed["embeds"][0]["fields"] if f["name"] == "Exploration")
     lines = field["value"].splitlines()
-    assert lines[0] == "**1** new summit and **0** new parks"
+    # A zero count is omitted, not spelled out as "and **0** new parks".
+    assert lines[0] == "**1** new summit"
+    assert "**0**" not in field["value"]
     assert "first" not in field["value"].lower()
 
 
@@ -2242,13 +2281,37 @@ def test_net_wrapup_provider_renders_checkins_and_notable_streak(conn):
     item = items[0]
     assert item["kind"] == "net_wrapup:1"
     assert item["key"] == "1:2026-09-09"
-    assert item["payload"]["embeds"][0]["title"] == "Wednesday MC — 2026-09-09"
+    assert item["payload"]["embeds"][0]["title"] == "Wednesday MC · Wednesday, September 9"
     field = item["payload"]["embeds"][0]["fields"][0]
     assert field["name"] == "Check-ins"
     assert "**2** checked in" in field["value"]
-    assert "l3@n" in field["value"] and "**3**-net streak" in field["value"]
+    assert "**On a streak**" in field["value"]
+    assert "l3@n" in field["value"] and "**3** nets" in field["value"]
+    assert "**Also checked in**" in field["value"]
     assert "Raptor" in field["value"]
-    assert "-net streak" not in field["value"].split("Raptor")[1].split("\n")[0]  # streak of 1 is not "notable"
+    assert "nets" not in field["value"].split("Also checked in**")[1]  # streak of 1 is not "notable"
+
+
+def test_net_wrapup_title_uses_the_nets_own_label_verbatim_and_no_iso_date(conn):
+    """The title is built from checkin_net.label AS-IS -- an unusual,
+    deliberately-not-a-normal-net-name label proves this function never
+    hardcodes, renames, shortens, or rewrites it -- joined to a human day
+    (never the raw "YYYY-MM-DD" net_date string, which must not appear
+    anywhere in the title at all)."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_player(conn, 1, "P", "RED")
+    weird_label = "!!! Freq51 MC (NORTH) -- Operator's Own Name 42 !!!"
+    _wr_net(conn, 1, weird_label)
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=0, net_id=1,
+                message_id="m1", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    title = items[0]["payload"]["embeds"][0]["title"]
+    assert title == f"{weird_label} · Wednesday, September 9"
+    assert "2026-09-09" not in title
 
 
 # ---- net wrap-up: capped, sorted check-in list ------------------------
@@ -2279,8 +2342,11 @@ def test_net_wrapup_caps_named_players_and_shows_exact_remainder(conn):
     assert len(items) == 1
     field = items[0]["payload"]["embeds"][0]["fields"][0]
     lines = field["value"].splitlines()
-    named_lines = lines[1:-1]
-    assert len(named_lines) == 12
+    # None of these 30 check-ins carries a notable streak (_wr_many_
+    # checkins seeds streak=1 for all of them), so every shown player
+    # lands in the single "Also checked in" comma-separated line.
+    also_line = next(l for l in lines if l.startswith("Player01"))
+    assert len(also_line.split(", ")) == 12
     assert lines[-1] == "*and 18 more*"
 
 
@@ -2321,11 +2387,12 @@ def test_net_wrapup_streak_players_sort_first_by_streak_descending(conn):
 
     items = discord_notify.net_wrapup_provider(conn, thu_8am)
     field = items[0]["payload"]["embeds"][0]["fields"][0]
-    lines = field["value"].splitlines()
-    # lines[0] is the headline count -- named players start at lines[1].
-    assert lines[1].startswith("BigStreak")
-    assert lines[2].startswith("SmallStreak")
-    assert lines[3].startswith("NoStreak")
+    value = field["value"]
+    assert "**On a streak**" in value
+    assert "**Also checked in**" in value
+    # BigStreak (5) ahead of SmallStreak (2) within "On a streak", and
+    # both ahead of NoStreak (1), relegated to "Also checked in".
+    assert value.index("BigStreak") < value.index("SmallStreak") < value.index("NoStreak")
 
 
 def test_net_wrapup_exactly_the_cap_count_shows_no_remainder_line(conn):
@@ -2343,8 +2410,104 @@ def test_net_wrapup_exactly_the_cap_count_shows_no_remainder_line(conn):
     field = items[0]["payload"]["embeds"][0]["fields"][0]
     lines = field["value"].splitlines()
     assert lines[0] == "**12** checked in"
-    assert len(lines) == 13  # headline + all 12 named, nothing more
+    also_line = next(l for l in lines if l.startswith("Player01"))
+    assert len(also_line.split(", ")) == 12  # all 12 named, nothing more
     assert not any("more" in line for line in lines)
+
+
+def test_net_wrapup_streak_section_ordered_others_one_comma_line(conn):
+    """Streak holders land under "On a streak", streak descending then
+    name; everyone else lands in ONE comma-separated line under "Also
+    checked in", each with their own team dot."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_player(conn, 1, "Littleaton", "RED")
+    _wr_player(conn, 2, "Malice", "RED")
+    _wr_player(conn, 3, "HVRB0UR", "BLUE")
+    _wr_player(conn, 4, "Londy-D", "BLUE")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=1, streak=4,
+                net_id=1, message_id="m1", net_date="2026-09-09")
+    _wr_checkin(conn, season_id=1, player_id=2, awarded_at=2, streak=4,
+                net_id=1, message_id="m2", net_date="2026-09-09")
+    _wr_checkin(conn, season_id=1, player_id=3, awarded_at=3, streak=1,
+                net_id=1, message_id="m3", net_date="2026-09-09")
+    _wr_checkin(conn, season_id=1, player_id=4, awarded_at=4, streak=1,
+                net_id=1, message_id="m4", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    field = items[0]["payload"]["embeds"][0]["fields"][0]
+    lines = field["value"].splitlines()
+    streak_idx = lines.index("**On a streak**")
+    also_idx = lines.index("**Also checked in**")
+    # Two streak lines, one per streak holder -- stable by name since both
+    # tie at streak=4.
+    assert lines[streak_idx + 1] == "Littleaton · **4** nets"
+    assert lines[streak_idx + 2] == "Malice · **4** nets"
+    # Everyone else in ONE comma-separated line, in name order.
+    assert lines[also_idx + 1] == "HVRB0UR, Londy-D"
+
+
+def test_net_wrapup_no_streak_holders_omits_on_a_streak_section(conn):
+    """When nobody in the capped set has a notable streak, "On a streak"
+    is absent entirely -- not rendered empty."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_many_checkins(conn, 3)  # all streak=1, not notable
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    field = items[0]["payload"]["embeds"][0]["fields"][0]
+    assert "On a streak" not in field["value"]
+    assert "Also checked in" in field["value"]
+
+
+def test_net_wrapup_everyone_on_a_streak_omits_also_checked_in_section(conn):
+    """When every shown player has a notable streak, "Also checked in" is
+    absent entirely -- there is nobody left to put in it."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_net(conn, 1, "Wednesday MC")
+    _wr_player(conn, 1, "Streaker1", "RED")
+    _wr_player(conn, 2, "Streaker2", "RED")
+    _wr_checkin(conn, season_id=1, player_id=1, awarded_at=1, streak=3,
+                net_id=1, message_id="m1", net_date="2026-09-09")
+    _wr_checkin(conn, season_id=1, player_id=2, awarded_at=2, streak=2,
+                net_id=1, message_id="m2", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    field = items[0]["payload"]["embeds"][0]["fields"][0]
+    assert "On a streak" in field["value"]
+    assert "Also checked in" not in field["value"]
+
+
+def test_net_wrapup_field_value_stays_within_1024_chars_with_long_names(conn):
+    """A capped-at-12 roster of unusually long names must still never
+    hand Discord an over-long field value -- _join_team_field()'s own
+    1024-character backstop trims from the end, same as
+    build_month_honors_embed()'s "By team" field does for the same
+    reason."""
+    _enable_discord(conn)
+    _wr_season(conn, 1)
+    _wr_net(conn, 1, "Wednesday MC")
+    for i in range(1, 13):
+        name = f"Player-{'X' * 90}-{i:02d}"
+        _wr_player(conn, i, name, "RED")
+        _wr_checkin(conn, season_id=1, player_id=i, awarded_at=i, streak=1,
+                    net_id=1, message_id=f"m{i}", net_date="2026-09-09")
+    tz = ZoneInfo("America/Boise")
+    thu_8am = int(datetime(2026, 9, 10, 8, 0, tzinfo=tz).timestamp())
+
+    items = discord_notify.net_wrapup_provider(conn, thu_8am)
+    field = items[0]["payload"]["embeds"][0]["fields"][0]
+    assert len(field["value"]) <= discord_notify._MAX_FIELD_VALUE_CHARS
+    assert field["value"].endswith(discord_notify._TRUNCATION_MARKER)
 
 
 # ---- net wrap-up: self-healing dueness (outage recovery) --------------

@@ -302,6 +302,54 @@ def _month_title(month: str) -> str:
     return f"{_MONTH_NAMES[m - 1]} {year}"
 
 
+# Full weekday names, Monday-first -- Python's own date.weekday() order --
+# in the exact same "one spelled-out list, reused everywhere a weekday
+# name is needed" style _MONTH_NAMES above already establishes. Used only
+# by _day_title() below; never a second, differently-ordered list.
+_WEEKDAY_NAMES = [
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+]
+
+
+def _day_title(date_str: str) -> str:
+    """"2026-09-09" -> "Wednesday, September 9" -- weekday name, month
+    name (reusing _MONTH_NAMES, never a second copy of it), and the bare
+    day-of-month number with no leading zero. Deliberately no year: the
+    owner's own "the 2026-09 is ugly" rejection of a raw ISO string
+    applies to every date this module renders, not just _month_title()'s
+    own "YYYY-MM" key, and every caller of this function names a date at
+    most a few days old, where a year would only add noise. Used for the
+    net wrap-up's own title (build_net_wrapup_embed()) -- never for the
+    net's own `label`, which is the operator's configured name and is
+    never touched by this function.
+    """
+    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    return f"{_WEEKDAY_NAMES[d.weekday()]}, {_MONTH_NAMES[d.month - 1]} {d.day}"
+
+
+def _week_range_title(start_date: str, end_date: str) -> str:
+    """Two ISO dates ("2026-09-06", "2026-09-12") -> a human week range:
+    "September 6-12" (en dash, no surrounding spaces) when both fall in
+    the same calendar month, or "August 30 - September 5" (en dash WITH
+    surrounding spaces) when the week crosses a month boundary -- the
+    month name is stated once when it doesn't change, and once per side
+    when it does, rather than ever repeating "September 6 to September
+    12" the way a naive template would. The en dash is written as a
+    \\u escape, matching _SEP's own escaped-non-ASCII precedent above so
+    this file stays plain ASCII on disk. Used for the weekly recap's own
+    title (build_weekly_recap_embed()); like _day_title() above, never
+    a year -- these are always the two ends of a recently completed week.
+    """
+    s = datetime.strptime(start_date, "%Y-%m-%d").date()
+    e = datetime.strptime(end_date, "%Y-%m-%d").date()
+    if s.month == e.month:
+        return f"{_MONTH_NAMES[s.month - 1]} {s.day}\u2013{e.day}"
+    return (
+        f"{_MONTH_NAMES[s.month - 1]} {s.day} \u2013 "
+        f"{_MONTH_NAMES[e.month - 1]} {e.day}"
+    )
+
+
 def _total_embed_chars(embeds: list) -> int:
     """Sum of title + description + footer text + each field's
     name/value, across every embed given -- the same text Discord
@@ -1752,10 +1800,16 @@ def _weekly_exploration_section(conn, protocol: str, season_id: int | None,
     # Display word is "new", not "first" -- the owner's own call, purely
     # presentational (see the per-player line below for the fuller note).
     # "claimed" dropped too: it was padding the owner never asked for.
-    lines = [
-        f"**{_fmt_number(n_summits)}** new summit{'' if n_summits == 1 else 's'} "
-        f"and **{_fmt_number(n_parks)}** new park{'' if n_parks == 1 else 's'}"
-    ]
+    # A zero count is left out rather than spelled out: "1 new summit and
+    # 0 new parks" reads as a gap, not a fact. The section itself is
+    # never rendered with both at zero -- no qualifying rows means no
+    # section at all.
+    counts = []
+    if n_summits:
+        counts.append(f"**{_fmt_number(n_summits)}** new summit{'' if n_summits == 1 else 's'}")
+    if n_parks:
+        counts.append(f"**{_fmt_number(n_parks)}** new park{'' if n_parks == 1 else 's'}")
+    lines = [" and ".join(counts)]
 
     # ONE unattributed elevation figure -- deliberately no player name
     # anywhere near it, even though every row it is drawn from has one.
@@ -1851,7 +1905,7 @@ def build_weekly_recap_embed(conn, protocol: str, start_ts: int, end_ts: int) ->
     start_date = datetime.fromtimestamp(start_ts, tz=tz).date().isoformat()
     end_date = datetime.fromtimestamp(end_ts - 1, tz=tz).date().isoformat()
     embed = {
-        "title": f"{proto_label} — Weekly Recap ({start_date} to {end_date})",
+        "title": f"{proto_label}{_SEP}Week of {_week_range_title(start_date, end_date)}",
         "fields": fields,
     }
     # Same absolute-or-omitted rule as every other embed's own `url` in
@@ -2120,32 +2174,55 @@ def build_net_wrapup_embed(conn, net, net_date: str) -> dict | None:
     mc_checkin_award.streak, already computed and stored at award time --
     never recomputed here.
 
-    The named-player list is CAPPED at _MAX_NET_WRAPUP_NAMED_PLAYERS,
-    sorted first so the players worth naming survive the cut: those with
-    a notable (>=2) streak first, by streak descending, then everyone
-    else, stable by name -- a busy night's chronological roster (the
-    order these rows actually arrive in, ORDER BY awarded_at) is not
-    itself a meaningful order to cut at, but "who's on a streak" is
-    exactly the kind of thing a reader wants to see even when the full
-    list doesn't fit. When the true count exceeds the cap, one italic
-    "*and N more*" line is appended -- N is the exact remainder, so a
-    capped list never leaves the reader guessing how many names were
-    left out (unlike _join_team_field()'s own bare "(truncated)"
-    marker). The headline "**<N>** checked in" count above the list is
-    always the TRUE total from `rows`, never the capped count -- the cap
-    only shortens which names are SHOWN, it must never make the night
-    look smaller than it was.
+    The named-player list is CAPPED at _MAX_NET_WRAPUP_NAMED_PLAYERS
+    across two sections rather than one flat, one-name-per-line roster --
+    owner feedback on a real posted wrap-up: "wall of text ... most with
+    nothing to say." Players are sorted first so the ones worth naming
+    survive the cut: those with a notable (>=2) streak first, by streak
+    descending, then everyone else, stable by name -- a busy night's
+    chronological roster (the order these rows actually arrive in, ORDER
+    BY awarded_at) is not itself a meaningful order to cut at, but "who's
+    on a streak" is exactly the kind of thing a reader wants to see even
+    when the full list doesn't fit. Streak holders are kept ahead of
+    plain attendees when the cap trims the roster, for the same reason.
+    Once capped:
 
-    Reuses _join_team_field() for the line list -- the exact same
-    per-field 1024-character trim (dropping the LAST lines first, a
-    truncation marker in their place) build_month_honors_embed()'s "By
-    team" fields and the weekly recap's own sections already rely on.
-    With the cap above in place this is now the BACKSTOP it was always
-    meant to be (see _MAX_NET_WRAPUP_NAMED_PLAYERS's own comment) rather
-    than the only guard: at most 13 lines (12 names plus the count line,
-    plus one more for "and N more") reach it, well under
-    _MAX_FIELD_VALUE_CHARS in every realistic case, but it stays in
-    place regardless.
+    - "On a streak" -- one line per streak holder, "<dot><name> <_SEP>
+      **<streak>** nets", in the same streak-descending order. Omitted
+      entirely when nobody in the capped set has a notable streak.
+    - "Also checked in" -- every other shown player in ONE
+      comma-separated paragraph, each with their own team dot, in the
+      same stable-by-name order. Omitted entirely when every shown
+      player already appears under "On a streak".
+
+    When the true count exceeds the cap, one final italic "*and N more*"
+    line is appended -- N is the exact remainder, so a capped list never
+    leaves the reader guessing how many names were left out (unlike
+    _join_team_field()'s own bare "(truncated)" marker). The headline
+    "**<N>** checked in" count above both sections is always the TRUE
+    total from `rows`, never the capped count -- the cap only shortens
+    which names are SHOWN, it must never make the night look smaller
+    than it was.
+
+    Reuses _join_team_field() to assemble the final field value -- the
+    exact same per-field 1024-character trim (dropping the LAST lines
+    first, a truncation marker in their place) build_month_honors_embed()'s
+    "By team" fields and the weekly recap's own sections already rely on.
+    With the cap above in place this is the BACKSTOP it was always meant
+    to be (see _MAX_NET_WRAPUP_NAMED_PLAYERS's own comment) rather than
+    the only guard -- at most a double handful of lines (the headline,
+    two section headings, up to 12 names, and one "and N more") reach it,
+    well under _MAX_FIELD_VALUE_CHARS in every realistic case, but it
+    stays in place regardless, including against a roster of unusually
+    long names within the cap.
+
+    The title is "{net['label']}{_SEP}{_day_title(net_date)}" -- the
+    net's own configured label, verbatim, never rewritten or shortened
+    (see this function's own signature: `net` is read, not renamed), a
+    human day ("Wednesday, September 9", never the raw "net_date" ISO
+    string -- see _day_title()'s own docstring for why), joined by the
+    same _SEP spaced dot every other multi-token line in this module
+    uses.
 
     Returns None when nobody checked in for this net on this date -- a
     quiet night posts NOTHING, never an empty "0 checked in" message
@@ -2189,12 +2266,22 @@ def build_net_wrapup_embed(conn, net, net_date: str) -> dict | None:
     # shrink to match a capped list.
     lines = [f"**{_fmt_number(len(rows))}** checked in"]
     shown = ranked_rows[:_MAX_NET_WRAPUP_NAMED_PLAYERS]
-    for r in shown:
-        streak = r["streak"] or 0
-        line = f"{_team_dot(emoji, r['team'])}{r['player_name']}"
-        if streak >= 2:
-            line += f"{_SEP}**{_fmt_number(streak)}**-net streak"
-        lines.append(line)
+    # `shown` already arrives in the ranked order above -- streak holders
+    # (streak descending) first, then everyone else (stable by name) --
+    # so splitting it in place preserves both sections' own required
+    # order with no re-sort of either half.
+    streak_holders = [r for r in shown if (r["streak"] or 0) >= 2]
+    others = [r for r in shown if (r["streak"] or 0) < 2]
+    if streak_holders:
+        lines.append("")
+        lines.append("**On a streak**")
+        for r in streak_holders:
+            dot = _team_dot(emoji, r["team"])
+            lines.append(f"{dot}{r['player_name']}{_SEP}**{_fmt_number(r['streak'])}** nets")
+    if others:
+        lines.append("")
+        lines.append("**Also checked in**")
+        lines.append(", ".join(f"{_team_dot(emoji, r['team'])}{r['player_name']}" for r in others))
     remaining = len(ranked_rows) - len(shown)
     if remaining > 0:
         # Unconditional whenever the roster overflows the cap -- never
@@ -2206,7 +2293,7 @@ def build_net_wrapup_embed(conn, net, net_date: str) -> dict | None:
     checkins_value = _join_team_field(lines, None)
 
     embed = {
-        "title": f"{net['label']} — {net_date}",
+        "title": f"{net['label']}{_SEP}{_day_title(net_date)}",
         "fields": [{"name": "Check-ins", "value": checkins_value, "inline": False}][:_MAX_EMBED_FIELDS],
     }
     # Same absolute-or-omitted rule as every other embed's own `url` in
