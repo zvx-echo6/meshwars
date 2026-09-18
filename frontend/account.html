@@ -100,8 +100,8 @@
          GET /auth/providers (see frontend/signin-email.js's own header
          comment for why), so it's always shown here. -->
     <section id="account-signed-out" class="account-panel" hidden>
-      <div class="account-title">Sign in</div>
-      <p class="account-hint">Sign in to see your connected sign-in methods, your linked player, and your active sessions.</p>
+      <div class="account-title">Sign in or create an account</div>
+      <p class="account-hint">Signing in with any method below creates your account if you don't have one yet. Already playing without an account? Sign in, then link your player to it.</p>
       <!-- DELETE /api/account clears the session cookie and sends the
            browser here with ?deleted=1 (account.js's
            handleDeleteAccountSubmit()) -- the same "land back on THIS
@@ -425,6 +425,12 @@
               <h3 id="account-wizard-heading-done" class="account-title" tabindex="-1">You're in</h3>
               <p id="account-join-success" class="account-hint"></p>
               <div id="account-join-key-slot"></div>
+              <!-- MeshCore only -- filled by buildMeshcoreSetupSteps() in
+                   account.js with the same six steps docs.html#setup-meshcore
+                   walks through, so the join wizard ends with what to do
+                   next instead of only a link to go read it elsewhere.
+                   Left empty (and untouched) on the Meshtastic path. -->
+              <div id="account-join-mc-setup-steps"></div>
               <p id="account-join-closing-hint" class="account-hint"></p>
               <div class="account-wizard-actions">
                 <button type="button" id="account-wizard-done-continue-btn">I've saved my key</button>
@@ -1002,7 +1008,7 @@
     <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="/api">API documentation</a>. <a href="/privacy">Privacy</a>.</p>
   </footer>
 
-  <script src="/static/account.js?v=20260913-1" type="module"></script>
+  <script src="/static/account.js?v=20260918-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

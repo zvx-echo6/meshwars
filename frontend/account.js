@@ -237,6 +237,39 @@ function buildCopyRow(value) {
   return row;
 }
 
+// Canonical wording for MeshCore's six join-time setup steps -- copied
+// VERBATIM (do not reword or summarize) from frontend/docs.html's
+// #setup-meshcore <ol>, the one place this copy is meant to live. This
+// app has no template engine (static HTML + str.replace is the
+// convention, per this file's own module docstring), so this array is
+// the closest thing to a single source: it cannot include docs.html's
+// markup directly, so keep it in sync BY HAND whenever either changes.
+const MESHCORE_SETUP_STEPS = [
+  'Open MeshMapper, then Settings, then scroll to API Endpoints.',
+  'Toggle Custom API Endpoint on.',
+  'Paste <code>https://meshwars.com/api/mc/ingest</code> as the URL. Do not paste the <code>meshmapper://</code> link here -- that one is only for Import from Clipboard, not a web address.',
+  'Paste your API key into the API Key field, then save.',
+  '<strong>In the same API section, make sure Include Contact Key is on.</strong> This is the single most common reason a MeshCore player sees nothing happen: without it, MeshWars never learns which radio the batch came from, so nothing can be credited to you.',
+  'Start a wardriving session. Nothing is sent to MeshWars between sessions.',
+];
+
+// Renders MESHCORE_SETUP_STEPS as the same <ol class="rules-list">
+// docs.html and join.html both use (rules.css is already loaded on this
+// page). Each <li>'s content is one of the fixed, developer-authored
+// strings above -- never anything server- or user-supplied -- so
+// innerHTML here carries none of the risk this file's module docstring
+// warns dynamic values away from.
+function buildMeshcoreSetupSteps() {
+  const ol = document.createElement('ol');
+  ol.className = 'rules-list';
+  MESHCORE_SETUP_STEPS.forEach((stepHtml) => {
+    const li = document.createElement('li');
+    li.innerHTML = stepHtml;
+    ol.appendChild(li);
+  });
+  return ol;
+}
+
 function teamLine(team) {
   const span = document.createElement('span');
   span.textContent = team;
@@ -1087,11 +1120,13 @@ async function handleJoinSubmit(e) {
       document.getElementById('account-join-success').textContent =
         `You're registered for team ${data.team}.`;
       document.getElementById('account-join-key-slot').replaceChildren();
+      document.getElementById('account-join-mc-setup-steps').replaceChildren();
       doneContinueBtn.textContent = 'Continue';
     } else {
       document.getElementById('account-join-success').textContent =
         `You're registered for team ${data.team}. Copy your API key below — this is the only time it will ever be shown.`;
       document.getElementById('account-join-key-slot').replaceChildren(buildCopyRow(data.key));
+      document.getElementById('account-join-mc-setup-steps').replaceChildren(buildMeshcoreSetupSteps());
       doneContinueBtn.textContent = "I've saved my key";
     }
     buildJoinClosingHint(protocol);
@@ -1498,7 +1533,17 @@ function renderRadiosList(radios) {
   if (!radios || radios.length === 0) {
     const li = document.createElement('li');
     li.className = 'account-radios-empty';
-    li.textContent = 'No radios registered yet.';
+    // #setup-meshcore exists on /docs (frontend/docs.html) -- same
+    // anchor buildMeshcoreSetupSteps()'s wording is copied from above.
+    li.appendChild(document.createTextNode(
+      'No radios registered yet. MeshCore radios bind themselves the first time you wardrive with '
+      + 'MeshMapper set up — see the steps on the ',
+    ));
+    const docsLink = document.createElement('a');
+    docsLink.href = '/docs#setup-meshcore';
+    docsLink.textContent = 'Docs page';
+    li.appendChild(docsLink);
+    li.appendChild(document.createTextNode('.'));
     list.appendChild(li);
     return;
   }

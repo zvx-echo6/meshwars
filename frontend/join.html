@@ -73,7 +73,7 @@
   <link rel="stylesheet" href="/static/theme.css?v=20260905-1" />
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
   <link rel="stylesheet" href="/static/rules.css?v=20260904-3" />
-  <link rel="stylesheet" href="/static/join.css?v=20260904-8" />
+  <link rel="stylesheet" href="/static/join.css?v=20260918-4" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -107,18 +107,57 @@
       <p class="rules-sub">Register your Meshtastic or MeshCore radio, pick a team, and start claiming ground &mdash; then come back to the same page any time to check your setup or add another radio.</p>
     </header>
 
-    <p class="join-check-teaser">Already registered and want to add a radio, or check your setup? <a href="#status-check-panel">Jump down here</a>.</p>
+    <!-- Account-first fork. Replaces the old single "already have an
+         account?" teaser line that used to sit here (see git history) --
+         Matt wants creating an account presented as the front door, with
+         anonymous invite-code registration as the clearly-offered but
+         visually lighter side door, not an afterthought clause buried in
+         a sentence. Placed as the first thing after the page header, ahead
+         of even the "jump down here" teaser below, so it's the first
+         decision a visitor makes on this page.
 
-    <!-- Already have an account? There is nothing to sign in to HERE
-         any more -- see join.js's own module docstring for why /join
-         used to carry a sign-in panel above this section and no
-         longer does. This one line is the entire replacement: it
-         sends someone who has already authenticated to the ONE place
-         that flow now lives (frontend/account.js's own join panel,
-         inside #account-player-unlinked), rather than asking them to
-         authenticate a second time on a page that has no idea whether
-         they already did. -->
-    <p class="join-check-teaser">Already have a MeshWars account? <a href="/account">Sign in and join from there</a> instead — no invite code needed.</p>
+         Primary option reuses .protocol-block (the same bordered dark
+         card #mc-instructions/#mt-instructions already use further down
+         this page) purely for the visual weight a box gives it -- no new
+         box styling. Its button reuses #join-submit/#status-submit's own
+         look (see join.css, extended to include .join-primary-btn) rather
+         than inventing a second button style; the "Log in" button beside
+         it reuses that same sizing via .join-fork-secondary-btn, just
+         with a lighter, outline treatment. The "don't want an account"
+         option below is deliberately a bare, unboxed paragraph -- no
+         button, no card -- so it reads as the lesser-weight alternative
+         next to the whole fork. "Join here" links to #join-flow-panel,
+         the form section this whole page still leads to. -->
+    <!-- State-aware action row: signed-out markup (one primary button
+         plus a lighter-weight secondary "Log in" button) is what ships
+         in the HTML and is the permanent fallback -- join.js's
+         applyAccountForkState() only ever UPGRADES it once GET
+         /api/account confirms a live session, swapping the body copy
+         and collapsing both buttons into the single
+         #join-fork-primary-btn. See that function for what happens if
+         the check fails, errors, or is slow: nothing: this markup
+         stays exactly as it is. #join-fork-login-link (kept as its id
+         so join.js's existing getElementById lookup needs no change)
+         is now a real secondary/outline button, same size as
+         .join-primary-btn via .join-fork-secondary-btn in join.css,
+         just visually subordinate -- see that rule for why. The two
+         sit inside .join-fork-actions (flex + wrap + gap) so they wrap
+         onto their own line rather than overflowing on a narrow phone
+         screen, instead of the plain margin-left spacing the old link
+         version used. -->
+    <div class="join-account-fork">
+      <div class="protocol-block join-account-fork-primary">
+        <p><strong>Create an account</strong></p>
+        <p id="join-fork-body">An account is how you keep your player. Sign in from any device, add or swap radios, and never lose your place if your API key goes missing. You'll skip the invite code, too.</p>
+        <div class="join-fork-actions">
+          <a href="/account" class="join-primary-btn" id="join-fork-primary-btn">Create an account</a>
+          <a href="/account" class="join-fork-secondary-btn" id="join-fork-login-link">Log in</a>
+        </div>
+      </div>
+      <p><strong>Don't want to make an account?</strong> You can still play &mdash; <a href="#join-flow-panel">follow these instructions</a>. You'll register with just an invite code, and your API key is then the only way back into your player, so keep it somewhere safe.</p>
+    </div>
+
+    <p class="join-check-teaser">Already registered and want to add a radio, or check your setup? <a href="#status-check-panel">Jump down here</a>.</p>
 
     <!-- Sticky contents rail (rules.css's .rules-layout/.rules-toc,
          shared with /docs, /rules and /account) -- this page is a form
@@ -302,7 +341,7 @@
           <p class="hint">You're already registered &mdash; this key is only for coming back later, to add or change radios or check your setup.</p>
           <div class="join-warning-box key-warning-box">
             <strong>Closing or reloading this page loses it for good.</strong>
-            MeshWars stores only a one-way hash of your key, never the key itself, so there is no way for anyone, including an admin, to look it back up. The only fix for a lost key is a brand new one from an admin, which retires this one. Copy it somewhere safe before you do anything else.
+            MeshWars stores only a one-way hash of your key, never the key itself, so there is no way for anyone, including an admin, to look it back up. The only fix for a lost key is a brand new one from an admin, which retires this one. Copy it somewhere safe before you do anything else. Linking this player to an account is the other way back in. You can do that any time from the account page, as long as you still have this key.
           </div>
           <div id="key-slot" class="key-slot">
             <p class="key-slot-placeholder">Your key will appear here once you join.</p>
@@ -424,7 +463,7 @@
         <p>Nothing is pushed to MeshWars at all. MeshWars reads coverage from FreqMapper and picks up your node whenever it's heard somewhere FreqMapper covers — there is no session to start or batch to send.</p>
         <p>Squares are only claimed inside that coverage. Outside it, a correctly configured radio paints nothing and nothing will tell you why — that's a coverage gap, not a fault, and it's the first thing to check if you've followed every setup step and still see no movement. See the <a href="/about">About page</a> for where the game currently reaches.</p>
         <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last picked up your node, how many squares you hold, and what is wrong if anything is.</p>
-        <p>Lost your key? Nothing on a Meshtastic radio or in the Meshtastic app ever stores it &mdash; ask an operator for a new one.</p>
+        <p>Lost your key? Nothing on a Meshtastic radio or in the Meshtastic app ever stores it &mdash; ask an operator for a new one, or link your player to an account so it stays reachable even if the key is gone.</p>
       </div>
     </section>
 
@@ -602,7 +641,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
-  <script src="/static/join.js?v=20260913-1" type="module"></script>
+  <script src="/static/join.js?v=20260918-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>
