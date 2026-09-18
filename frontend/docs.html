@@ -129,6 +129,7 @@
         <li><a href="#start">Getting started</a></li>
         <li><a href="#setup-meshcore">Setting up MeshCore</a></li>
         <li><a href="#setup-meshtastic">Setting up Meshtastic</a></li>
+        <li><a href="#add-community">Adding your community</a></li>
         <li><a href="#account">Your account</a></li>
         <li><a href="#board">Reading the board</a></li>
         <li><a href="#results">Reading the results page</a></li>
@@ -200,6 +201,31 @@
             <figcaption>Registering a Meshtastic node on the join page.</figcaption>
           </figure>
           <p>A Meshtastic node cannot self-bind the way a MeshCore contact can -- the coverage data MeshWars reads carries nothing that points back to you, so registering it here is the only way it ever gets attached to your account.</p>
+        </section>
+
+        <section id="add-community">
+          <h2>Adding your community</h2>
+          <p>A community can get two separate things out of MeshWars: territory painting on the board, and a weekly net that earns its members check-in points. Which of those you need to ask for -- and how it gets set up -- depends on which protocol your community runs.</p>
+
+          <h3 id="add-community-meshcore">MeshCore</h3>
+          <p>Painting already works anywhere <a href="https://meshmapper.net" target="_blank" rel="noopener noreferrer">MeshMapper</a> runs -- it isn't limited to any particular community, so there's nothing to add for that part. What we can add for your community is a net check-in, so your members earn points for showing up to your regular net, not just for wardriving.</p>
+          <p>To set one up, we need a few things from you: a readable CoreScope or Beacon instance URL for your mesh, the name of the channel your net runs in, and the net's day, start and end time, and timezone.</p>
+          <p>Once we have that, we add it as a net on our side. It takes effect on the very next poll -- no restart needed -- and we set a start date on it so a message already sitting on your channel from before the net existed doesn't get paid out retroactively.</p>
+          <p>For a member's check-in to be credited, their node has to be identifiable to MeshWars -- see <a href="#account-checkin-name">Confirm my node</a> for how that works.</p>
+
+          <h3 id="add-community-meshtastic">Meshtastic</h3>
+          <p>Painting is different on this side: it depends on <a href="https://help.freqmapper.net/" target="_blank" rel="noopener noreferrer">FreqMapper</a>'s coverage reaching your community's area. FreqMapper verifies where a radio is actually heard, and that verification is rolling out community by community, so a community only paints once that rollout reaches it -- there's no separate step to request painting on its own.</p>
+          <p>Check-ins work the same way as MeshCore's, with a different source: we need a <a href="https://meshview.freq51.net" target="_blank" rel="noopener noreferrer">Meshview</a> instance or an MQTT broker we can read, and if your channel is encrypted, its channel key -- which we keep private and never expose. Instead of a channel name, a Meshtastic net is matched on a hashtag: members include it somewhere in their check-in message text, and that tag is what identifies the net.</p>
+          <p>Setup on our end is the same as MeshCore's -- added as a net in the operator panel, live on the next poll with no restart, and a start date so old messages don't retroactively pay out.</p>
+
+          <h3 id="add-community-request">How to ask</h3>
+          <p>Please reach out to malice in the <a href="https://freq51.net/discord" target="_blank" rel="noopener noreferrer">Intermountain Mesh Discord</a> or at <a href="mailto:admin@meshwars.com">admin@meshwars.com</a>. It helps if you have the following ready:</p>
+          <ul class="rules-list">
+            <li><strong>MeshCore:</strong> a readable CoreScope or Beacon instance URL, the channel name your net runs in, and the net's day, start/end time, and timezone.</li>
+            <li><strong>Meshtastic:</strong> a Meshview instance or MQTT broker we can read, the channel key if your channel is encrypted, and the hashtag your members will check in with.</li>
+          </ul>
+          <p>Once it's set up, your community shows up on the About page's <a href="/about#where">Where it's played</a> list.</p>
+          <p>Points are awarded once per player per day, so if two nets happen to fall on the same day, showing up to both won't pay out twice -- worth keeping in mind when picking a night for your net.</p>
         </section>
 
         <section id="account">
@@ -438,6 +464,10 @@
           <h2>What changed recently</h2>
           <p>Player-visible changes, newest first. The full history lives in the repository's <code>CHANGELOG.md</code>.</p>
           <ul class="docs-changelog">
+            <li>
+              <span class="docs-changelog-date">2026-09-18</span>
+              <strong>New: Adding your community</strong> -- how a mesh group gets added to MeshWars on MeshCore and on Meshtastic. See <a href="#add-community">Adding your community</a>.
+            </li>
             <li>
               <span class="docs-changelog-date">2026-09-05</span>
               <strong>You can sign in now, instead of only holding an API key.</strong> Connect GitHub, Google, Discord, a magic-link email, or a password from the account page -- it becomes your whole player dashboard: radios, setup-check, stats, honors, check-ins, team and security all in one place, and joining from inside it skips the invite code. See <a href="#account-signin">Accounts and signing in</a>.
