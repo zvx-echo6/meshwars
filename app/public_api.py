@@ -554,9 +554,9 @@ def _player_rows(conn, protocol: str, season_id: int, name: str | None = None) -
     if season is not None:
         explorer_points = dict(conn.execute(
             "SELECT player_id, SUM(points) FROM place_activation "
-            " WHERE player_id IN (%s) AND awarded_at >= ? AND awarded_at <= ? "
+            " WHERE player_id IN (%s) AND protocol = ? AND awarded_at >= ? AND awarded_at <= ? "
             " GROUP BY player_id" % marks,
-            (*ids, season["started_at"], season["ends_at"])).fetchall())
+            (*ids, protocol, season["started_at"], season["ends_at"])).fetchall())
 
     out = []
     for p in players:

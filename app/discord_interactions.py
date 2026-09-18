@@ -532,7 +532,7 @@ def _team_standings(conn, protocol: str) -> list[dict]:
     season = mc_api.active_season(conn, protocol)
     if not season:
         return []
-    totals = team_totals(conn, season["id"])
+    totals = team_totals(conn, season["id"], protocol)
     rows = [{"team": t, "total": totals.get(t, 0.0)} for t in mc_api.team_list()]
     rows.sort(key=lambda r: (-r["total"], r["team"]))
     for i, r in enumerate(rows, 1):

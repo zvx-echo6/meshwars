@@ -528,7 +528,7 @@ def team_checkin_points(conn: sqlite3.Connection, season_id: int) -> dict[str, f
     return {r["team"]: (r["pts"] or 0.0) for r in rows}
 
 
-def team_place_points(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
+def team_place_points(conn: sqlite3.Connection, season_id: int, protocol: str) -> dict[str, float]:
     """Places Worth Going points (app/place_scoring.py) earned per team
     for a season, summed the same way team_checkin_points() is: by each
     activation's player's CURRENT team.
@@ -543,6 +543,11 @@ def team_place_points(conn: sqlite3.Connection, season_id: int) -> dict[str, flo
     without needing to special-case "the season isn't over yet" -- the
     same reasoning app/results.py uses to score a month live rather than
     waiting for it to close.
+
+    `protocol` is required (not defaulted) -- place_activation carries
+    a protocol column, and a missing filter here used to make both
+    boards report an identical, doubled exploration figure. A default
+    value would just make that bug easy to reintroduce silently.
     """
     season = conn.execute(
         "SELECT started_at, ends_at FROM mc_season WHERE id = ?", (season_id,)
@@ -552,13 +557,13 @@ def team_place_points(conn: sqlite3.Connection, season_id: int) -> dict[str, flo
     rows = conn.execute(
         "SELECT p.team AS team, SUM(a.points) AS pts "
         "  FROM place_activation a JOIN player p ON p.player_id = a.player_id "
-        " WHERE a.awarded_at >= ? AND a.awarded_at <= ? GROUP BY p.team",
-        (season["started_at"], season["ends_at"]),
+        " WHERE a.protocol = ? AND a.awarded_at >= ? AND a.awarded_at <= ? GROUP BY p.team",
+        (protocol, season["started_at"], season["ends_at"]),
     ).fetchall()
     return {r["team"]: (r["pts"] or 0.0) for r in rows}
 
 
-def team_totals(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
+def team_totals(conn: sqlite3.Connection, season_id: int, protocol: str) -> dict[str, float]:
     """A team's full standing for a season: squares held
     (team_tile_counts) plus net check-in points earned
     (team_checkin_points) plus Places Worth Going points earned
@@ -573,10 +578,13 @@ def team_totals(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
     shown or stored separately (see mc_season_team_tally's
     tiles/checkin_points columns); this is their sum, not a replacement
     for either.
+
+    `protocol` is required (not defaulted) and passed straight through
+    to team_place_points() -- see that function's docstring.
     """
     tiles = team_tile_counts(conn, season_id)
     points = team_checkin_points(conn, season_id)
-    place_points = team_place_points(conn, season_id)
+    place_points = team_place_points(conn, season_id, protocol)
     teams = set(tiles) | set(points) | set(place_points)
     return {
         t: tiles.get(t, 0) + points.get(t, 0.0) + place_points.get(t, 0.0)
@@ -658,7 +666,7 @@ def maybe_roll_season(conn: sqlite3.Connection, now: int, protocol: str) -> bool
     season_id = row["id"]
     tile_counts = team_tile_counts(conn, season_id)
     checkin_points = team_checkin_points(conn, season_id)
-    totals = team_totals(conn, season_id)
+    totals = team_totals(conn, season_id, protocol)
 
     all_teams = set(settings.teams_list) | set(tile_counts.keys()) | set(checkin_points.keys())
     for team in all_teams:

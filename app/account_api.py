@@ -2079,6 +2079,17 @@ async def account_stats(session: SessionPrincipal = Depends(require_session)) ->
                 streak = 0
             board["nets_checked_in"] = nets_checked_in
             board["checkin_streak"] = streak
+            # find_for()'s own last_checkin_net_date is season-scoped
+            # (it only looks inside the active season's window), while
+            # nets_checked_in/checkin_streak above are both all-time --
+            # so a player with prior-season check-in history but none
+            # yet this season would otherwise show "never" beside a
+            # live nonzero streak. latest_net_date (all-time, from the
+            # COUNT/MAX query above) is the value consistent with those
+            # two figures; override find_for()'s season-scoped one with
+            # it here, for this account-page response only -- find_for()
+            # itself is unchanged for its other callers.
+            board["last_checkin_net_date"] = latest_net_date
             boards[protocol] = board
     finally:
         conn.close()

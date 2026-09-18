@@ -302,6 +302,33 @@ def test_stats_gives_a_zero_streak_with_no_checkins_at_all(client, db_path):
     assert body["boards"]["mc"]["nets_checked_in"] == 0
 
 
+def test_stats_last_checkin_net_date_is_all_time_not_season_scoped(client, db_path):
+    """find_for()'s own last_checkin_net_date only looks inside the
+    ACTIVE season's window (app/mc_api.py's find_for(), ~line 1086),
+    while nets_checked_in/checkin_streak beside it on the account card
+    are both all-time (app/account_api.py's account_stats(), reading
+    its own COUNT/MAX query with no season_id filter). A player whose
+    only check-ins predate the current season used to show "never" next
+    to a live nonzero streak -- account_stats() now overrides
+    find_for()'s season-scoped value with the all-time one it already
+    computes for nets_checked_in, for this route's response only.
+    """
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id, display_name="OldTimer", team="RED")
+    # A closed prior season, entirely before the active one below.
+    old_season_id = _season(db_path, "mc", started_at=0, ends_at=1_000, status="closed")
+    _checkin(db_path, old_season_id, player_id, "2026-01-07", points=10, protocol="mc")
+    # The active season has no check-ins of its own.
+    _season(db_path, "mc", started_at=NOW - 1000, ends_at=NOW + 1_000_000)
+
+    body = client.get("/api/account/stats").json()
+
+    mc = body["boards"]["mc"]
+    assert mc["nets_checked_in"] == 1
+    assert mc["checkin_streak"] == 1
+    assert mc["last_checkin_net_date"] == "2026-01-07"
+
+
 def test_stats_breaks_down_both_boards_independently(client, db_path):
     account_id, _ = _login(client, db_path)
     player_id = _make_player(db_path, account_id=account_id, display_name="TwoBoards", team="RED")

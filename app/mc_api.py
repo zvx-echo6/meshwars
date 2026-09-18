@@ -692,7 +692,7 @@ def scores_for(protocol: str) -> dict:
         # wire it back in here.
         tile_counts = team_tile_counts(conn, season["id"])
         checkin_points = team_checkin_points(conn, season["id"])
-        explorer_points = team_place_points(conn, season["id"])
+        explorer_points = team_place_points(conn, season["id"], protocol)
         return {
             "season_id": season["id"],
             "started_at": season["started_at"],
@@ -1091,8 +1091,8 @@ def find_for(protocol: str, name: str) -> dict | None:
             last_checkin_net_date = ci[1]
             ep = conn.execute(
                 "SELECT SUM(points) FROM place_activation "
-                " WHERE player_id = ? AND awarded_at >= ? AND awarded_at <= ?",
-                (pid, season["started_at"], season["ends_at"]),
+                " WHERE player_id = ? AND protocol = ? AND awarded_at >= ? AND awarded_at <= ?",
+                (pid, protocol, season["started_at"], season["ends_at"]),
             ).fetchone()
             explorer_points = ep[0] or 0.0
 

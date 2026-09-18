@@ -61,11 +61,12 @@ def _checkin(conn, season_id, player_id, net_date, points, protocol="mc", streak
     )
 
 
-def _place_activation(conn, place_id, player_id, points, awarded_at, week_start="2026-01-07"):
+def _place_activation(conn, place_id, player_id, points, awarded_at, week_start="2026-01-07",
+                       protocol="mc"):
     conn.execute(
-        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at) "
-        "VALUES (?,?,?,?,?)",
-        (place_id, player_id, week_start, points, awarded_at),
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+        "VALUES (?,?,?,?,?,?)",
+        (place_id, player_id, week_start, points, awarded_at, protocol),
     )
 
 
@@ -189,3 +190,51 @@ def test_find_for_zero_breakdown_with_no_activity(conn, monkeypatch):
     assert result["explorer_points"] == 0
     assert result["total_points"] == 0
     assert result["last_checkin_net_date"] is None
+
+
+def test_find_for_explorer_points_is_per_board_not_summed_mc(conn, monkeypatch):
+    """A player registered on both boards (one player row can hold both
+    an 'mc' and an 'mt' radio -- see find_for()'s own docstring) must
+    get each board's OWN Explorer figure back, not the two boards'
+    activations added together. place_activation.protocol is what
+    keeps them apart; without that filter this would return 109 (10 +
+    99), the combined total, instead of just this board's 10.
+
+    Two separate tests (this one and the _mt one below), each with
+    their own `conn` fixture instance, rather than two find_for() calls
+    in one test -- find_for() closes its connection in a `finally` once
+    it returns, and this file's monkeypatch hands it the shared fixture
+    connection, so a second call in the same test would run against an
+    already-closed database.
+    """
+    monkeypatch.setattr(mc_api_module, "connect", lambda: conn)
+
+    _player(conn, 1, "RED", "dual-board")
+    _bind_node(conn, 1, "mc", "!dual-mc")
+    _bind_node(conn, 1, "mt", "!dual-mt")
+    _season(conn, "mc", started_at=NOW - 1000, ends_at=NOW + 1000)
+    _season(conn, "mt", started_at=NOW - 1000, ends_at=NOW + 1000)
+
+    _place_activation(conn, 1, player_id=1, points=10, awarded_at=NOW, protocol="mc")
+    _place_activation(conn, 2, player_id=1, points=99, awarded_at=NOW, protocol="mt")
+
+    result = find_for("mc", "dual-board")
+    assert result["explorer_points"] == 10
+
+
+def test_find_for_explorer_points_is_per_board_not_summed_mt(conn, monkeypatch):
+    """See test_find_for_explorer_points_is_per_board_not_summed_mc's
+    docstring -- the 'mt' half of the same isolation check."""
+    monkeypatch.setattr(mc_api_module, "connect", lambda: conn)
+
+    _player(conn, 1, "RED", "dual-board")
+    _bind_node(conn, 1, "mc", "!dual-mc")
+    _bind_node(conn, 1, "mt", "!dual-mt")
+    _season(conn, "mc", started_at=NOW - 1000, ends_at=NOW + 1000)
+    _season(conn, "mt", started_at=NOW - 1000, ends_at=NOW + 1000)
+
+    _place_activation(conn, 1, player_id=1, points=10, awarded_at=NOW, protocol="mc")
+    _place_activation(conn, 2, player_id=1, points=99, awarded_at=NOW, protocol="mt")
+
+    result = find_for("mt", "dual-board")
+    assert result["explorer_points"] == 99
