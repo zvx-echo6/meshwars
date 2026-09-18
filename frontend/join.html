@@ -118,7 +118,7 @@
          inside #account-player-unlinked), rather than asking them to
          authenticate a second time on a page that has no idea whether
          they already did. -->
-    <p class="join-check-teaser">Already have a MeshWars account? <a href="/account">Sign in and join from there</a> instead — no invite code needed.</p>
+    <p class="join-check-teaser">Already have a MeshWars account? <a href="/account">Sign in and join from there</a> instead — no invite code needed. No account yet? You can create one after you join and link this player to it — that's how you get back in if you ever lose your key.</p>
 
     <!-- Sticky contents rail (rules.css's .rules-layout/.rules-toc,
          shared with /docs, /rules and /account) -- this page is a form
@@ -302,7 +302,7 @@
           <p class="hint">You're already registered &mdash; this key is only for coming back later, to add or change radios or check your setup.</p>
           <div class="join-warning-box key-warning-box">
             <strong>Closing or reloading this page loses it for good.</strong>
-            MeshWars stores only a one-way hash of your key, never the key itself, so there is no way for anyone, including an admin, to look it back up. The only fix for a lost key is a brand new one from an admin, which retires this one. Copy it somewhere safe before you do anything else.
+            MeshWars stores only a one-way hash of your key, never the key itself, so there is no way for anyone, including an admin, to look it back up. The only fix for a lost key is a brand new one from an admin, which retires this one. Copy it somewhere safe before you do anything else. Linking this player to an account is the other way back in. You can do that any time from the account page, as long as you still have this key.
           </div>
           <div id="key-slot" class="key-slot">
             <p class="key-slot-placeholder">Your key will appear here once you join.</p>
@@ -424,7 +424,7 @@
         <p>Nothing is pushed to MeshWars at all. MeshWars reads coverage from FreqMapper and picks up your node whenever it's heard somewhere FreqMapper covers — there is no session to start or batch to send.</p>
         <p>Squares are only claimed inside that coverage. Outside it, a correctly configured radio paints nothing and nothing will tell you why — that's a coverage gap, not a fault, and it's the first thing to check if you've followed every setup step and still see no movement. See the <a href="/about">About page</a> for where the game currently reaches.</p>
         <p>To check, paste your API key into the <a href="#status-check-panel">setup check</a> at the bottom of this page. It will tell you when MeshWars last picked up your node, how many squares you hold, and what is wrong if anything is.</p>
-        <p>Lost your key? Nothing on a Meshtastic radio or in the Meshtastic app ever stores it &mdash; ask an operator for a new one.</p>
+        <p>Lost your key? Nothing on a Meshtastic radio or in the Meshtastic app ever stores it &mdash; ask an operator for a new one. Nothing on a Meshtastic radio stores it, so linking your player to an account is the only way to keep this player reachable if the key is lost.</p>
       </div>
     </section>
 

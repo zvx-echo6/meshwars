@@ -425,6 +425,12 @@
               <h3 id="account-wizard-heading-done" class="account-title" tabindex="-1">You're in</h3>
               <p id="account-join-success" class="account-hint"></p>
               <div id="account-join-key-slot"></div>
+              <!-- MeshCore only -- filled by buildMeshcoreSetupSteps() in
+                   account.js with the same six steps docs.html#setup-meshcore
+                   walks through, so the join wizard ends with what to do
+                   next instead of only a link to go read it elsewhere.
+                   Left empty (and untouched) on the Meshtastic path. -->
+              <div id="account-join-mc-setup-steps"></div>
               <p id="account-join-closing-hint" class="account-hint"></p>
               <div class="account-wizard-actions">
                 <button type="button" id="account-wizard-done-continue-btn">I've saved my key</button>
