@@ -442,6 +442,24 @@ body {
   text-decoration: none;
 }
 
+/* .join-fork-login-link: the signed-out "Log in" companion beside
+   .join-primary-btn above. No secondary/ghost button style exists on
+   this page or in the shared stylesheets, so rather than invent one
+   this reuses the exact lesser-weight link treatment already
+   established on this same page (.join-check-teaser a /
+   .join-play-area p a) -- new only in that no earlier rule targeted a
+   link sitting directly beside .join-primary-btn. Hidden entirely (not
+   just styled away) by join.js once a live session collapses this row
+   to the single signed-in button. */
+.join-fork-login-link {
+  margin-left: 12px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--mw-accent);
+  text-decoration: none;
+}
+.join-fork-login-link:hover { text-decoration: underline; }
+
 .join-error {
   background: #2a1414;
   border: 1px solid #663333;

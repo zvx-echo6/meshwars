@@ -527,6 +527,41 @@ async function applyInviteCodeHint() {
   }
 }
 
+// The account-first fork (join.html's .join-account-fork) ships
+// signed-out by default -- one "Create an account" button plus a
+// lesser-weight "Log in" link, both pointing at /account -- and this
+// only ever UPGRADES that to the signed-in variant: one "Go to your
+// account" button and body copy that no longer talks about creating an
+// account. Reuses the exact same signed-in check frontend/nav-auth.js
+// already makes for the nav bar on every page (GET /api/account -- 200
+// with a body means a live session, everything else, including a
+// network failure, means "not signed in"): that module doesn't expose
+// its result anywhere reusable, so this is the smallest possible
+// second call matching its existing pattern (same endpoint, same
+// res.ok check, same "any failure leaves the default state alone"
+// rule) rather than a new mechanism.
+//
+// If the check fails, errors, or is slow, this function does nothing
+// at all -- the signed-out markup already in the HTML is left exactly
+// as it rendered, never a blank or broken card.
+async function applyAccountForkState() {
+  try {
+    const res = await fetch('/api/account');
+    if (!res.ok) return;
+    await res.json();
+    const btn = document.getElementById('join-fork-primary-btn');
+    const loginLink = document.getElementById('join-fork-login-link');
+    const body = document.getElementById('join-fork-body');
+    if (!btn || !body) return;
+    btn.textContent = 'Go to your account';
+    if (loginLink) loginLink.hidden = true;
+    body.textContent = "You're signed in. Join from your account and your player is linked to it automatically — no invite code needed.";
+  } catch (err) {
+    // Offline, or the request otherwise never completed -- leave the
+    // signed-out markup exactly as it rendered by default.
+  }
+}
+
 function copyToClipboard(text, button) {
   const original = button.textContent;
   const revert = () => { button.textContent = original; };
@@ -1525,6 +1560,7 @@ function boot() {
   setupProtocolToggle();
   applyMeshtasticAvailability();
   applyInviteCodeHint();
+  applyAccountForkState();
   setupStatusKeyToggle();
   setupEndpointCopy();
   document.getElementById('join-submit').addEventListener('click', handleJoinClick);

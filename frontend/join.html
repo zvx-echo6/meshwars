@@ -73,7 +73,7 @@
   <link rel="stylesheet" href="/static/theme.css?v=20260905-1" />
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
   <link rel="stylesheet" href="/static/rules.css?v=20260904-3" />
-  <link rel="stylesheet" href="/static/join.css?v=20260918-2" />
+  <link rel="stylesheet" href="/static/join.css?v=20260918-3" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -126,11 +126,26 @@
          so it reads as the lesser-weight alternative next to it. "Join
          here" links to #join-flow-panel, the form section this whole page
          still leads to. -->
+    <!-- State-aware action row: signed-out markup (one primary button
+         plus a lesser-weight "Log in" link) is what ships in the HTML
+         and is the permanent fallback -- join.js's applyAccountForkState()
+         only ever UPGRADES it once GET /api/account confirms a live
+         session, swapping the body copy and collapsing both links into
+         the single #join-fork-primary-btn. See that function for what
+         happens if the check fails, errors, or is slow: nothing:
+         this markup stays exactly as it is. #join-fork-login-link has
+         no button styling of its own to reuse -- no secondary/ghost
+         button class exists on this page or in the shared stylesheets
+         -- so it reuses the plain lesser-weight link look already
+         established on this same page by .join-check-teaser a /
+         .join-play-area p a, rather than inventing a new button
+         style. -->
     <div class="join-account-fork">
       <div class="protocol-block join-account-fork-primary">
         <p><strong>Create an account</strong></p>
-        <p>An account is how you keep your player. Sign in from any device, add or swap radios, and never lose your place if your API key goes missing. You'll skip the invite code, too.</p>
-        <a href="/account" class="join-primary-btn">Create an account</a>
+        <p id="join-fork-body">An account is how you keep your player. Sign in from any device, add or swap radios, and never lose your place if your API key goes missing. You'll skip the invite code, too.</p>
+        <a href="/account" class="join-primary-btn" id="join-fork-primary-btn">Create an account</a>
+        <a href="/account" class="join-fork-login-link" id="join-fork-login-link">Log in</a>
       </div>
       <p><strong>Don't want to make an account?</strong> You can still play &mdash; <a href="#join-flow-panel">follow these instructions</a>. You'll register with just an invite code, and your API key is then the only way back into your player, so keep it somewhere safe.</p>
     </div>
@@ -619,7 +634,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin="anonymous"></script>
-  <script src="/static/join.js?v=20260913-1" type="module"></script>
+  <script src="/static/join.js?v=20260918-1" type="module"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>
