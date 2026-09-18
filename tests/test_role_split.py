@@ -3,9 +3,10 @@ run_background_tasks (default True -- a single all-in-one process is
 still fully supported) gates two things:
 
   * app/main.py's lifespan() -- whether this process starts any of its
-    six background loops (ingest, mc_ingest's queue-drain worker,
-    freqmapper_ingest, the checkin poller, the mqtt subscriber, and the
-    Discord outbox drain loop).
+    seven background loops (ingest, mc_ingest's queue-drain worker,
+    freqmapper_ingest, the checkin poller, the mqtt subscriber, the
+    Discord outbox drain loop, and app/mc_api.py's board cache
+    publisher).
   * app/db.py's init_db() -- whether this process performs its startup
     WRITES (the places-seed background thread, and the checkin/
     freqmapper/discord config env bootstraps). Schema creation and
@@ -184,6 +185,10 @@ async def _fake_discord_run_forever() -> None:
     await asyncio.Event().wait()
 
 
+async def _fake_board_publisher_run_forever() -> None:
+    await asyncio.Event().wait()
+
+
 async def _fake_cancel_all_claimnode_watches() -> None:
     pass
 
@@ -217,6 +222,7 @@ def _fake_loop_owners(monkeypatch):
     monkeypatch.setattr(main_module, "CheckinPoller", _FakeStartStopOwner)
     monkeypatch.setattr(main_module, "MqttSubscriber", _FakeStartStopOwner)
     monkeypatch.setattr(main_module.discord_notify, "run_forever", _fake_discord_run_forever)
+    monkeypatch.setattr(main_module.mc_api, "run_forever", _fake_board_publisher_run_forever)
     monkeypatch.setattr(
         main_module.discord_interactions,
         "cancel_all_claimnode_watches",
@@ -237,12 +243,13 @@ def test_lifespan_starts_no_loops_when_run_background_tasks_false(db_path, monke
             assert app.state.ingest_task is None
             assert app.state.freqmapper_task is None
             assert app.state.discord_task is None
+            assert app.state.board_publisher_task is None
             assert app.state.mc_ingestor.started is False
             assert app.state.checkin_poller.started is False
             assert app.state.mqtt_subscriber.started is False
 
             names = {t.get_name() for t in asyncio.all_tasks()}
-            for forbidden in ("ingest", "freqmapper-ingest", "discord-outbox"):
+            for forbidden in ("ingest", "freqmapper-ingest", "discord-outbox", "board-cache-publisher"):
                 assert forbidden not in names
 
         # Shutdown (the `finally` block inside lifespan) must not raise
@@ -269,12 +276,13 @@ def test_lifespan_starts_all_loops_when_run_background_tasks_true(db_path, monke
             assert isinstance(app.state.ingest_task, asyncio.Task)
             assert isinstance(app.state.freqmapper_task, asyncio.Task)
             assert isinstance(app.state.discord_task, asyncio.Task)
+            assert isinstance(app.state.board_publisher_task, asyncio.Task)
             assert app.state.mc_ingestor.started is True
             assert app.state.checkin_poller.started is True
             assert app.state.mqtt_subscriber.started is True
 
             names = {t.get_name() for t in asyncio.all_tasks()}
-            for expected in ("ingest", "freqmapper-ingest", "discord-outbox"):
+            for expected in ("ingest", "freqmapper-ingest", "discord-outbox", "board-cache-publisher"):
                 assert expected in names
 
         # Clean shutdown: every task got cancelled and awaited, every
@@ -287,6 +295,7 @@ def test_lifespan_starts_all_loops_when_run_background_tasks_true(db_path, monke
         assert app.state.ingest_task.cancelled()
         assert app.state.freqmapper_task.cancelled()
         assert app.state.discord_task.cancelled()
+        assert app.state.board_publisher_task.cancelled()
 
     asyncio.run(_drive())
 

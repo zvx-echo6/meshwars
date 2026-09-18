@@ -30,14 +30,17 @@ MC_PROTOCOL explicitly, same as before this module had a second caller.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import gzip
 import hashlib
 import json
+import logging
 import math
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
@@ -45,13 +48,15 @@ from fastapi.responses import JSONResponse, Response
 from .auth import Principal, new_rate_limit_bucket, require_api_key_principal
 from .client_ip import get_client_ip
 from .config import settings
-from .db import connect
+from .db import connect, WriteSession
 from .grid import cell_bounds
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .mc_scoring import team_checkin_points, team_place_points, team_tile_counts
 from .places_api import _stable_tiebreak
 from .sessions import SessionPrincipal, optional_session, require_session
 from . import results
+
+log = logging.getLogger("mc_api")
 
 router = APIRouter()
 
@@ -534,6 +539,36 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
     (one lookup, one compare) and sidesteps the historical mod_deflate
     "-gzip suffix" mess entirely, at no correctness cost given Vary is
     always sent whenever gzip bytes are.
+
+    Three tiers, cheapest first:
+
+    1. This process's own _BOARD_CACHE (unchanged from before board_cache
+       existed) -- a warm process answers from memory, no DB touched at
+       all.
+    2. board_cache (app/db.py): the worker-published table (see that
+       table's own SCHEMA comment and run_forever() below). A web-role
+       process's _BOARD_CACHE is only ever filled from here or from #3
+       below, never by its own rebuild while the worker is keeping this
+       row fresh -- reading it is one indexed PRIMARY KEY lookup, nothing
+       like the cost `build()` pays. The row found here is copied into
+       _BOARD_CACHE so the NEXT request in this same process hits tier 1
+       instead of the DB again.
+    3. `build()`, inline, exactly as before this table existed. This is
+       the cold-start fallback -- a fresh deploy before the worker's
+       first publish pass, or any key nothing ever publishes (the /get-
+       nodes routes' 'mt_board_authed'/'mt_board_public' keys, which are
+       looked up here too but never written by run_forever(), so this
+       always misses for them and they rebuild exactly as before) -- and
+       it is also what keeps a web-role process correct even if the
+       worker role is entirely down: this function never hard-depends on
+       the publisher having run.
+
+    ttl = 0 skips ALL THREE tiers of caching, including this table: not
+    just "don't read _BOARD_CACHE", the full contract
+    settings.board_cache_seconds = 0 already promised (rebuild every
+    call, no caching at all) -- reading a possibly-stale table row would
+    quietly break that promise for whoever set ttl to 0 specifically to
+    avoid stale output (e.g. a test).
     """
     ttl = settings.board_cache_seconds
     now = time.monotonic()
@@ -560,6 +595,11 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
         if hit is not None and now - hit.built_at < ttl:
             return answer(hit)
 
+        row_entry = _read_board_cache_row(key)
+        if row_entry is not None:
+            _BOARD_CACHE[key] = row_entry
+            return answer(row_entry)
+
     body = json.dumps(build(), separators=(",", ":")).encode()
     # Hashed once per REBUILD, not per request -- the whole point of caching
     # the serialized bytes is that neither serializing nor digesting them
@@ -569,6 +609,58 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
     if ttl > 0:
         _BOARD_CACHE[key] = entry
     return answer(entry)
+
+
+def _read_board_cache_row(key: str) -> _CachedBody | None:
+    """board_cache (app/db.py) read for cached_json_response's tier-2
+    fallback -- see that function's own docstring for when this is
+    reached. A plain connect()/SELECT, not WriteSession: this only ever
+    reads, on the request path, so it must stay a single cheap indexed
+    lookup rather than anything that waits on the write lock.
+
+    Swallows EVERY exception (not just _safe_query's narrower "no such
+    table" -> None guard used elsewhere in this module), deliberately
+    broader here: this table is purely an optimization tier between
+    _BOARD_CACHE and build() -- see cached_json_response's own
+    docstring -- and cached_json_response is a shared, generic helper
+    with callers (tests/test_response_gzip_cache.py's generic cache
+    tests among them, plus any future non-board use) that have never
+    depended on a real, migrated database being reachable at all. A bad
+    or unset db_path, a database file that doesn't exist yet, a schema
+    that hasn't been migrated in some caller's test fixture -- none of
+    that may ever turn this opportunistic read into a 500 or a test
+    failure for a caller that was never relying on it; build() is always
+    a correct fallback regardless of why this lookup failed.
+
+    built_at on the returned entry is THIS process's own time.monotonic()
+    at read time, not the row's wall-clock built_at -- correct because
+    _BOARD_CACHE's own TTL logic (see cached_json_response above) only
+    ever compares built_at against a LATER time.monotonic() call in the
+    same process; stamping it "now" simply starts that process's own TTL
+    window fresh from this read, so the next board_cache_seconds worth of
+    requests in THIS process hit tier 1 (_BOARD_CACHE) before trying the
+    table again. It is deliberately NOT used to reject a stale row --
+    see cached_json_response's own docstring for why an out-of-date board
+    beats a rebuild.
+    """
+    try:
+        conn = connect()
+        try:
+            row = conn.execute(
+                "SELECT body, gzip_body, etag FROM board_cache WHERE cache_key = ?",
+                (key,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        log.debug("board_cache: read failed for key %s, falling back to inline build", key, exc_info=True)
+        return None
+    if row is None:
+        return None
+    entry = _CachedBody(time.monotonic(), bytes(row["body"]), row["etag"])
+    if row["gzip_body"] is not None:
+        entry.gzip_body = bytes(row["gzip_body"])
+    return entry
 
 
 def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
@@ -654,6 +746,115 @@ async def mc_board(request: Request) -> Response:
     return cached_json_response(
         "mc_board", lambda: board_for(MC_PROTOCOL, include_meta=False), request
     )
+
+
+# ---- board cache publisher (worker role only) ---------------------------
+#
+# The build FUNCTIONS this loop publishes into board_cache, keyed exactly
+# like _BOARD_CACHE / cached_json_response's own `key` argument. Only
+# 'mc_board' -- /api/mc/board's own cache key -- is worth publishing here:
+# it is the measured 4.2MB/~6.8s-rebuild route (see run_forever()'s own
+# docstring), and its build is a fixed, parameterless closure, unlike
+# /get-nodes's 'mt_board_authed'/'mt_board_public' keys (app/api.py),
+# which depend on the calling session (session=None vs. a real
+# SessionPrincipal) and so are not something a session-less background
+# loop can build on a caller's behalf in the first place. Their rebuild
+# cost has not been measured/reported as a problem the way /api/mc/board's
+# was, so they are deliberately left exactly as before: cached_json_response
+# still opportunistically checks board_cache for them (see that
+# function's docstring), it will just always miss since nothing ever
+# writes those keys, and they fall through to their existing inline
+# rebuild-on-miss behavior, unchanged.
+_PUBLISHED_BOARD_BUILDS: dict[str, Callable[[], list[dict]]] = {
+    "mc_board": lambda: board_for(MC_PROTOCOL, include_meta=False),
+}
+
+
+async def _publish_board_once() -> None:
+    """One board_cache publish cycle: rebuild every key in
+    _PUBLISHED_BOARD_BUILDS and upsert its row. Best-effort per key, same
+    "a publish failure must never take down the loop or leave a half
+    -written cycle" contract app/checkin.py's
+    _refresh_mc_directory_if_stale gives mc_directory_cache -- a web-role
+    reader just keeps serving whatever row (or in-process copy) it
+    already has until the next successful cycle here writes a newer one.
+
+    Builds and serializes OUTSIDE the WriteSession -- board_for() only
+    reads, and json.dumps/gzip.compress are pure CPU, so neither needs
+    the write lock held; only the INSERT ... ON CONFLICT itself does.
+    Computes the gzip bytes eagerly (unlike _CachedBody.gzipped(), which
+    fills its own gzip_body lazily on first gzip-accepting request) --
+    the whole point of a worker-published row is that a web process
+    reading it pays for neither serialization nor compression, so both
+    representations must already be finished before the row is written.
+    """
+    for key, build in _PUBLISHED_BOARD_BUILDS.items():
+        try:
+            body = json.dumps(build(), separators=(",", ":")).encode()
+            etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+            gzip_body = gzip.compress(body, compresslevel=_GZIP_COMPRESSLEVEL)
+            async with WriteSession() as conn:
+                conn.execute(
+                    "INSERT INTO board_cache(cache_key, body, gzip_body, etag, built_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(cache_key) DO UPDATE SET"
+                    " body = excluded.body, gzip_body = excluded.gzip_body,"
+                    " etag = excluded.etag, built_at = excluded.built_at",
+                    (key, body, gzip_body, etag, int(time.time())),
+                )
+        except Exception:
+            log.exception("board_cache: failed to publish key %s", key)
+
+
+async def run_forever() -> None:
+    """Background loop that keeps board_cache (app/db.py) fresh --
+    started UNCONDITIONALLY (subject to settings.run_background_tasks) by
+    app/main.py's lifespan, the same wiring and shutdown handling
+    (asyncio.create_task, cancelled and awaited in that function's
+    `finally` block) every other worker-role loop there gets; see that
+    module's own comment block for why every loop is gated on the SAME
+    flag rather than each having its own switch.
+
+    Exists because of a measured production problem: after the
+    web/worker split (docker-compose.yml's `meshwars` (uvicorn --workers
+    3, run_background_tasks=false) vs. `meshwars-worker`
+    (run_background_tasks=true) services), app/mc_api.py's _BOARD_CACHE
+    is a per-PROCESS dict -- each of the three web workers held its own
+    copy of /api/mc/board's ~4.2MB payload and rebuilt it independently
+    on every settings.board_cache_seconds (10s) TTL miss, up to three
+    ~6.8s rebuilds per window, on processes that are also serving user
+    requests (observed: web container at 134-187% CPU vs. the worker
+    container's 0.3%, which was doing none of that work). This loop moves
+    every one of those rebuilds onto the worker, which has CPU to spare
+    and serves no requests of its own -- a web process's
+    cached_json_response now only ever reads the finished row (see that
+    function's docstring for its tier-2 fallback).
+
+    Publishes on settings.board_cache_seconds's own cadence -- deliberately
+    NOT a separate setting: that value already means "how stale a board
+    is allowed to get" everywhere else in this module (it is
+    _BOARD_CACHE's own TTL), so publishing on the same cadence keeps a
+    single knob with one meaning instead of two intervals an operator
+    would have to reason about together. A row this loop just wrote is at
+    most one board_cache_seconds old by the time ANY reader (in-process
+    hit, table hit, or a future publish cycle) looks at it -- exactly the
+    staleness bound the pre-existing per-process cache already promised,
+    just no longer paid for on a request path.
+
+    Never raises out of the loop -- same fire-and-forget contract
+    app/discord_notify.py's run_forever() gives its own poll cycle: a bad
+    cycle must not crash the process or stop every later cycle (and every
+    later web-role read) from ever seeing a fresh board again.
+    """
+    log.info("board cache publisher loop starting (cache_key(s): %s)", ", ".join(_PUBLISHED_BOARD_BUILDS))
+    while True:
+        try:
+            await _publish_board_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("board cache publisher: cycle failed")
+        await asyncio.sleep(max(settings.board_cache_seconds, 1))
 
 
 def scores_for(protocol: str) -> dict:

@@ -1366,6 +1366,59 @@ CREATE TABLE IF NOT EXISTS mc_directory_cache (
     fetched_at    INTEGER NOT NULL
 );
 
+-- Worker-published /api/mc/board response (app/mc_api.py's board_cache
+-- publisher run_forever(), cached_json_response()'s DB fallback). Same
+-- worker-writes/web-reads split as mc_directory_cache directly above,
+-- for the identical reason: after the web/worker split
+-- (docker-compose.yml's `meshwars`/`meshwars-worker` services,
+-- settings.run_background_tasks), app/mc_api.py's in-process
+-- _BOARD_CACHE is a per-PROCESS dict, so each of the `meshwars` web
+-- container's uvicorn workers held its own copy and rebuilt it
+-- independently on every settings.board_cache_seconds TTL miss -- up to
+-- 3 ~6.8s rebuilds per window, on processes that are also serving user
+-- requests (observed: web container at 134-187% CPU, worker at 0.3%).
+-- This table is how the worker (the ONLY writer, same WriteSession
+-- discipline as mc_directory_cache) publishes the finished payload so a
+-- web process's cache miss reads a row instead of rebuilding.
+--
+-- One row per cache_key -- today just 'mc_board' (/api/mc/board has
+-- exactly one cache key: the route takes no query parameters and always
+-- builds board_for(MC_PROTOCOL, include_meta=False), so the key space
+-- is a single, fixed entry, not something that grows with callers the
+-- way mc_directory_cache's connector_url or app/places_api.py's
+-- viewport-keyed _PLACES_CACHE do). /get-nodes' own cached_json_response
+-- keys ('mt_board_authed'/'mt_board_public') deliberately do NOT get a
+-- row here: this table opportunistically serves ANY key
+-- cached_json_response asks it for, but nothing publishes those two, so
+-- that route is unaffected and keeps rebuilding on its own miss exactly
+-- as before -- see cached_json_response's own docstring for why only
+-- 'mc_board' was worth precomputing.
+--
+-- body/gzip_body/etag are the FINISHED artifact -- already-serialized
+-- JSON bytes, already-gzip-compressed bytes, and the etag hashed from
+-- body -- so a web process reading this row does zero serialization and
+-- zero compression, only a lookup. Both representations are stored
+-- (unlike _CachedBody's own gzip_body, which the in-process cache fills
+-- lazily on first gzip-accepting request) because the whole point here
+-- is a web process never doing that compression itself either.
+--
+-- built_at is wall-clock (int(time.time()), like mc_directory_cache's
+-- fetched_at, not app/mc_api.py's own _CachedBody.built_at which is
+-- time.monotonic() and meaningless outside the process that set it) but
+-- is NOT used to reject a stale row on read: see
+-- cached_json_response's own docstring for why an out-of-date board
+-- beats a 7-second rebuild on a viewer's request, the same reasoning
+-- mc_directory_cache's SCHEMA comment gives for its own fetched_at.
+-- Kept anyway for operator visibility (how stale is the live row right
+-- now) the same way fetched_at is.
+CREATE TABLE IF NOT EXISTS board_cache (
+    cache_key TEXT PRIMARY KEY,
+    body      BLOB NOT NULL,
+    gzip_body BLOB,
+    etag      TEXT NOT NULL,
+    built_at  INTEGER NOT NULL
+);
+
 -- ---------------------------------------------------------------------
 -- Monthly results (app/results.py). A six-month season leaves five
 -- months with nothing to show, so each calendar month closes with its

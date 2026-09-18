@@ -15,7 +15,7 @@ from .auth import http_exception_as_error_body
 from .checkin import CheckinPoller
 from .config import settings
 from .db import connect, init_db
-from . import discord_interactions, discord_notify
+from . import discord_interactions, discord_notify, mc_api
 from .freqmapper_ingest import FreqMapperIngestor, load_freqmapper_config
 from .ingest import Ingestor
 from .log_redact import DiscordWebhookRedactionFilter
@@ -153,6 +153,19 @@ async def lifespan(app: FastAPI):
     if settings.run_background_tasks:
         discord_task = asyncio.create_task(discord_notify.run_forever(), name="discord-outbox")
 
+    # Board cache publisher (app/mc_api.py): rebuilds /api/mc/board's
+    # payload and publishes it to board_cache (app/db.py) on
+    # settings.board_cache_seconds's own cadence, so a web-role process's
+    # cached_json_response never has to rebuild it on a request path --
+    # see run_forever()'s own docstring for the measured production
+    # problem this replaces. Started UNCONDITIONALLY (subject to
+    # run_background_tasks), same bare-function/no-persistent-connection
+    # shape as discord_task just above -- nothing to gracefully release,
+    # only the task cancellation every loop here gets at shutdown.
+    board_publisher_task = None
+    if settings.run_background_tasks:
+        board_publisher_task = asyncio.create_task(mc_api.run_forever(), name="board-cache-publisher")
+
     app.state.client = client
     app.state.ingestor = ingestor
     app.state.ingest_task = task
@@ -162,6 +175,7 @@ async def lifespan(app: FastAPI):
     app.state.freqmapper_ingestor = freqmapper_ingestor
     app.state.freqmapper_task = freqmapper_task
     app.state.discord_task = discord_task
+    app.state.board_publisher_task = board_publisher_task
 
     try:
         yield
@@ -194,6 +208,12 @@ async def lifespan(app: FastAPI):
             discord_task.cancel()
             try:
                 await discord_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if board_publisher_task is not None:
+            board_publisher_task.cancel()
+            try:
+                await board_publisher_task
             except (asyncio.CancelledError, Exception):
                 pass
         # /claimnode's own background watchers (app/discord_interactions.py)
