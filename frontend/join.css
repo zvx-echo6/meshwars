@@ -436,7 +436,8 @@ body {
    #status-submit, but still needs these two: a <button> centers its own
    text and never underlines by default, an inline <a> does neither. */
 .join-primary-btn {
-  display: block;
+  display: inline-block;
+  width: auto;
   text-align: center;
   text-decoration: none;
 }
