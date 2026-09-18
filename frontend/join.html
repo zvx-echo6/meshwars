@@ -73,7 +73,7 @@
   <link rel="stylesheet" href="/static/theme.css?v=20260905-1" />
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
   <link rel="stylesheet" href="/static/rules.css?v=20260904-3" />
-  <link rel="stylesheet" href="/static/join.css?v=20260904-8" />
+  <link rel="stylesheet" href="/static/join.css?v=20260918-1" />
   <link rel="stylesheet"
         href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -107,18 +107,35 @@
       <p class="rules-sub">Register your Meshtastic or MeshCore radio, pick a team, and start claiming ground &mdash; then come back to the same page any time to check your setup or add another radio.</p>
     </header>
 
-    <p class="join-check-teaser">Already registered and want to add a radio, or check your setup? <a href="#status-check-panel">Jump down here</a>.</p>
+    <!-- Account-first fork. Replaces the old single "already have an
+         account?" teaser line that used to sit here (see git history) --
+         Matt wants creating an account presented as the front door, with
+         anonymous invite-code registration as the clearly-offered but
+         visually lighter side door, not an afterthought clause buried in
+         a sentence. Placed as the first thing after the page header, ahead
+         of even the "jump down here" teaser below, so it's the first
+         decision a visitor makes on this page.
 
-    <!-- Already have an account? There is nothing to sign in to HERE
-         any more -- see join.js's own module docstring for why /join
-         used to carry a sign-in panel above this section and no
-         longer does. This one line is the entire replacement: it
-         sends someone who has already authenticated to the ONE place
-         that flow now lives (frontend/account.js's own join panel,
-         inside #account-player-unlinked), rather than asking them to
-         authenticate a second time on a page that has no idea whether
-         they already did. -->
-    <p class="join-check-teaser">Already have a MeshWars account? <a href="/account">Sign in and join from there</a> instead — no invite code needed. No account yet? You can create one after you join and link this player to it — that's how you get back in if you ever lose your key.</p>
+         Primary option reuses .protocol-block (the same bordered dark
+         card #mc-instructions/#mt-instructions already use further down
+         this page) purely for the visual weight a box gives it -- no new
+         box styling. Its button reuses #join-submit/#status-submit's own
+         look (see join.css, extended to include .join-primary-btn) rather
+         than inventing a second button style. The secondary option is
+         deliberately a bare, unboxed paragraph -- no button, no card --
+         so it reads as the lesser-weight alternative next to it. "Join
+         here" links to #join-flow-panel, the form section this whole page
+         still leads to. -->
+    <div class="join-account-fork">
+      <div class="protocol-block join-account-fork-primary">
+        <p><strong>Create an account</strong></p>
+        <p>An account is how you keep your player. Sign in from any device, add or swap radios, and never lose your place if your API key goes missing. You'll skip the invite code, too.</p>
+        <a href="/account" class="join-primary-btn">Create an account</a>
+      </div>
+      <p><strong>No account? <a href="#join-flow-panel">Join here</a> instead.</strong> You can register with just an invite code. Your API key is then the only way back into your player &mdash; keep it somewhere safe.</p>
+    </div>
+
+    <p class="join-check-teaser">Already registered and want to add a radio, or check your setup? <a href="#status-check-panel">Jump down here</a>.</p>
 
     <!-- Sticky contents rail (rules.css's .rules-layout/.rules-toc,
          shared with /docs, /rules and /account) -- this page is a form

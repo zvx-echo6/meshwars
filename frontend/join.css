@@ -412,7 +412,8 @@ body {
 }
 
 #join-submit,
-#status-submit {
+#status-submit,
+.join-primary-btn {
   width: 100%;
   background: var(--mw-raised);
   color: var(--mw-accent);
@@ -424,9 +425,21 @@ body {
   cursor: pointer;
 }
 #join-submit:hover,
-#status-submit:hover { background: var(--mw-line); }
+#status-submit:hover,
+.join-primary-btn:hover { background: var(--mw-line); }
 #join-submit:disabled,
 #status-submit:disabled { opacity: 0.5; cursor: default; }
+
+/* .join-primary-btn (the "Create an account" link in the account-first
+   fork near the top of the page, see join.html) is an <a>, not a
+   <button> -- it shares every declaration above with #join-submit/
+   #status-submit, but still needs these two: a <button> centers its own
+   text and never underlines by default, an inline <a> does neither. */
+.join-primary-btn {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+}
 
 .join-error {
   background: #2a1414;
