@@ -442,23 +442,58 @@ body {
   text-decoration: none;
 }
 
-/* .join-fork-login-link: the signed-out "Log in" companion beside
-   .join-primary-btn above. No secondary/ghost button style exists on
-   this page or in the shared stylesheets, so rather than invent one
-   this reuses the exact lesser-weight link treatment already
-   established on this same page (.join-check-teaser a /
-   .join-play-area p a) -- new only in that no earlier rule targeted a
-   link sitting directly beside .join-primary-btn. Hidden entirely (not
-   just styled away) by join.js once a live session collapses this row
-   to the single signed-in button. */
-.join-fork-login-link {
-  margin-left: 12px;
-  font-size: 0.8125rem;
-  font-weight: 700;
-  color: var(--mw-accent);
-  text-decoration: none;
+/* .join-fork-actions wraps .join-fork-primary-btn (the <a id=
+   "join-fork-primary-btn">) and .join-fork-secondary-btn below --
+   flex + wrap + gap, the same idiom .add-radio-form and rules.css's
+   .rules-toc ul already use, so the pair sits side by side but drops
+   the second button to its own line rather than overflowing on a
+   narrow phone screen. Replaces the plain margin-left spacing the
+   older .join-fork-login-link (a styled <a>, no real button) used. */
+.join-fork-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
 }
-.join-fork-login-link:hover { text-decoration: underline; }
+
+/* .join-fork-secondary-btn: the signed-out "Log in" companion beside
+   .join-primary-btn -- a real secondary/outline button now, not a
+   link dressed as one. Matches .join-primary-btn's size exactly
+   (padding, font-size, font-weight, border-radius, and the same
+   display: inline-block / width: auto so it doesn't span full width
+   either, same reasoning as .join-primary-btn's own comment above)
+   so the pair reads as two sibling buttons, but visually
+   subordinate: transparent fill and an accent-colored border instead
+   of the primary's filled --mw-raised background, using the same
+   --mw-accent / --mw-accent-wash tokens already in play elsewhere on
+   this page, so both the gold and neon skins pick it up automatically
+   -- no new colors introduced. Hidden entirely (not just styled away)
+   by join.js's applyAccountForkState() once a live session collapses
+   this row to the single signed-in button -- the [hidden] override
+   below is needed for the same reason .protocol-badge[hidden] and
+   .node-picker-selected[hidden] need one above: this rule's own
+   `display: inline-block` outranks the browser's default
+   `[hidden] { display: none }` at equal specificity. */
+.join-fork-secondary-btn {
+  display: inline-block;
+  width: auto;
+  background: transparent;
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-accent);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+.join-fork-secondary-btn:hover { background: var(--mw-accent-wash); }
+.join-fork-secondary-btn:focus-visible {
+  outline: 2px solid var(--mw-accent);
+  outline-offset: 2px;
+}
+.join-fork-secondary-btn[hidden] { display: none; }
 
 .join-error {
   background: #2a1414;
