@@ -129,6 +129,7 @@
         <li><a href="#start">Getting started</a></li>
         <li><a href="#setup-meshcore">Setting up MeshCore</a></li>
         <li><a href="#setup-meshtastic">Setting up Meshtastic</a></li>
+        <li><a href="#responsible-mapping">Mapping responsibly</a></li>
         <li><a href="#add-community">Adding your community</a></li>
         <li><a href="#account">Your account</a></li>
         <li><a href="#board">Reading the board</a></li>
@@ -201,6 +202,15 @@
             <figcaption>Registering a Meshtastic node on the join page.</figcaption>
           </figure>
           <p>A Meshtastic node cannot self-bind the way a MeshCore contact can -- the coverage data MeshWars reads carries nothing that points back to you, so registering it here is the only way it ever gets attached to your account.</p>
+        </section>
+
+        <section id="responsible-mapping">
+          <h2>Mapping responsibly</h2>
+          <p>The mesh you're mapping is built and paid for by the people who run it, and it carries traffic they depend on -- mapping adds to that traffic. MeshWars encourages mapping, because that's how squares get claimed, but a community mesh is easy to wear out if enough people treat it carelessly, so this is worth saying plainly: map in a way that leaves the mesh better off than you found it, not worse.</p>
+          <p>MeshWars doesn't decide any of this. The people who run the mesh decide how it's configured. The region administrators inside MeshMapper and FreqMapper decide what mapping activity their region allows. MeshWars only reads the coverage that results and paints squares on a map -- it doesn't set anyone's radio configuration and doesn't tell operators how to run their networks.</p>
+          <p>If you run a region, both apps give you real controls over mapping activity within it -- restricting which wardriving modes are available, setting a floor on how often mappers can ping, capping how many people can map at once, and controlling enrollment through invite keys. The two platforms' controls don't line up one-for-one, so their own documentation is what to follow rather than anything summarized here: see <a href="https://wiki.meshmapper.net/admins/" target="_blank" rel="noopener noreferrer">MeshMapper's admin portal docs</a> and <a href="https://wiki.meshmapper.net/app_wardriving_modes/" target="_blank" rel="noopener noreferrer">wardriving modes</a>, or <a href="https://help.freqmapper.net/regional-administration/" target="_blank" rel="noopener noreferrer">FreqMapper's regional administration guide</a>.</p>
+          <p>If you're out mapping, both apps document lower-traffic ways to do it. FreqMapper's Silent Recon mode is receive-only; a region that requires it turns off intentional mapping transmissions entirely, though choosing it yourself still leaves a manual test available when you actually need one. MeshMapper's Smart Pinging holds back automatic pings in squares it's already mapped recently, so your airtime goes toward ground nobody's covered yet -- which is also just the better way to map: cover new ground instead of re-driving what's already done. Both apps' pinging limits exist for a reason; don't look for ways around them. And if a region administrator has set limits for their mesh, they set them for their mesh -- follow them. FreqMapper's own <a href="https://help.freqmapper.net/first-mapping-trip/" target="_blank" rel="noopener noreferrer">first-mapping-trip guide</a> is worth reading before you go.</p>
+          <p>One honest note: there's no protocol flag or documented way for a mesh operator to say "don't map my network." Nothing enforces that from outside the mesh. The only thing standing between mapping and a mesh that gets worse for everyone on it is the judgment of the people doing the mapping -- which is exactly why courtesy here matters more than it looks like it should.</p>
         </section>
 
         <section id="add-community">
