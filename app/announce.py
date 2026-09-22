@@ -313,13 +313,80 @@ def net_wrapup_provider(conn: sqlite3.Connection, now: int) -> list[dict]:
     return items
 
 
+def season_close_provider(conn: sqlite3.Connection, now: int) -> list[dict]:
+    """The most recently CLOSED mc_season per board that has no
+    `announcement` row yet -- same "most recent only, never a backlog"
+    shape month_provider() above uses for month_result, applied here to
+    mc_season for the identical reason: a season closes rarely (every
+    settings.mc_season_days) but mc_season keeps every past season's row
+    forever, so a naive scan on a fresh deployment or one recovering
+    from a long outage could otherwise announce every past season close
+    at once.
+
+    Both mc_season and mc_season_team_tally are tiny tables (one row per
+    season, and one row per team per season) -- cheap to read even
+    before the (kind, key) dueness check below has a chance to short-
+    circuit, same cost profile month_provider()'s own docstring
+    describes for month_result.
+
+    key = str(season_id) -- the SAME dedup key app/mc_scoring.py's
+    maybe_roll_season() already uses for Discord's own season-close
+    announcement (discord_notify.enqueue(..., key=str(season_id))), so
+    the two announcement paths can never disagree about which season
+    they are each talking about, even though they are otherwise fully
+    independent (this module never touches discord_outbox, and
+    maybe_roll_season() never touches `announcement`).
+
+    Age cutoff: settings.announcement_month_max_age_hours, the SAME
+    longer window month_provider() uses rather than the shared
+    announcement_max_age_hours every other provider here uses -- a
+    season close is at least as newsworthy as a month's, and, like a
+    month, can never be recreated once missed (there is no "next
+    season's" version of this announcement the way a fresh day or week
+    naturally provides one), so the same longer grace period applies.
+    Checked against the closing season's own `ends_at` -- cheap, no
+    second query -- before build_season_close_content() (which does hit
+    mc_season_team_tally) ever runs.
+    """
+    items: list[dict] = []
+    boards = [
+        row["protocol"] for row in conn.execute(
+            "SELECT DISTINCT protocol FROM mc_season WHERE status = 'closed' ORDER BY protocol"
+        ).fetchall()
+    ]
+    for board in boards:
+        latest = conn.execute(
+            "SELECT id, ends_at FROM mc_season WHERE protocol = ? AND status = 'closed' "
+            "ORDER BY id DESC LIMIT 1",
+            (board,),
+        ).fetchone()
+        if latest is None:
+            continue
+        season_id = latest["id"]
+        key = str(season_id)
+        already = conn.execute(
+            "SELECT 1 FROM announcement WHERE kind = 'season_close' AND key = ?", (key,),
+        ).fetchone()
+        if already is not None:
+            continue
+        if _period_too_old(latest["ends_at"], now, settings.announcement_month_max_age_hours):
+            continue
+        content = announce_content.build_season_close_content(conn, board, season_id, now)
+        if content is None:
+            continue
+        items.append(content)
+    return items
+
+
 # Every provider this module registers -- see this module's own
 # docstring for the provider shape (conn, now) -> list[Content]. Order
 # has no correctness meaning (each provider's dueness is independent,
 # decided entirely by its own (kind, key) checks against `announcement`)
-# but is kept in the same rough order the four Content builders appear
+# but is kept in the same rough order the five Content builders appear
 # in app/announce_content.py, for a reader comparing the two files.
-ANNOUNCEMENT_PROVIDERS: list = [daily_provider, weekly_provider, month_provider, net_wrapup_provider]
+ANNOUNCEMENT_PROVIDERS: list = [
+    daily_provider, weekly_provider, month_provider, net_wrapup_provider, season_close_provider,
+]
 
 
 def check_due(conn: sqlite3.Connection, now: int) -> int:

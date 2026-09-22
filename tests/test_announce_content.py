@@ -189,6 +189,55 @@ def test_daily_content_none_when_ranks_unchanged_and_no_gain(conn):
     assert content is None
 
 
+def test_daily_content_standings_section_has_every_team_unchanged_included(conn):
+    """Part 1's new requirement: a "Standings" section carrying EVERY
+    currently-ranked team, not just the movers -- including a team whose
+    rank did not change at all (rank == rank_was), which the movers-only
+    "Placement" section correctly leaves out entirely.
+    """
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    _player(conn, 3, "GREEN")
+    season_id = _season(conn, "mc")
+
+    # Before the day: RED=5 (1st), BLUE=3 (2nd), GREEN=1 (3rd) -- counts
+    # strictly ordered, no ties, so no tiebreak rule can hide the effect
+    # under test. Each team's cells sit on their OWN longitude band so
+    # none of these coordinates can ever collide with another team's
+    # cell_id -- only the explicit from_team= captures below are actual
+    # ownership transfers.
+    for i, off in enumerate((-500, -400, -300, -200, -100)):
+        _capture(conn, season_id, cell_id(43.0 + i * 0.1, -116.0), DAY_START + off, 1, "RED")
+    for i, off in enumerate((-500, -400, -300)):
+        _capture(conn, season_id, cell_id(43.0 + i * 0.1, -117.0), DAY_START + off, 2, "BLUE")
+    _capture(conn, season_id, cell_id(43.0, -118.0), DAY_START - 500, 3, "GREEN")
+
+    # During the day: BLUE takes 3 of RED's squares -- RED ends at 2,
+    # BLUE ends at 6. RED and BLUE swap 1st/2nd; GREEN, untouched at 1,
+    # stays strictly last both before and after -- its rank does not
+    # move at all across the window.
+    _capture(conn, season_id, cell_id(43.0, -116.0), DAY_START + 10, 2, "BLUE", from_team="RED")
+    _capture(conn, season_id, cell_id(43.1, -116.0), DAY_START + 20, 2, "BLUE", from_team="RED")
+    _capture(conn, season_id, cell_id(43.2, -116.0), DAY_START + 30, 2, "BLUE", from_team="RED")
+
+    content = ac.build_daily_content(conn, "mc", DAY_START, DAY_END, NOW)
+    assert content is not None
+
+    # The movers-only "Placement" section never mentions GREEN -- its
+    # own quiet-check/headline behavior must stay untouched.
+    placement_teams = {r["team"] for r in content["sections"][0]["rows"] if r["team"]}
+    assert "GREEN" not in placement_teams
+
+    standings = next(s for s in content["sections"] if s["heading"] == "Standings")
+    by_team = {r["team"]: r for r in standings["rows"]}
+    assert set(by_team) == {"RED", "BLUE", "GREEN"}
+    assert by_team["GREEN"]["rank"] == 3
+    assert by_team["GREEN"]["rank_was"] == 3
+    assert by_team["BLUE"]["rank"] == 1 and by_team["BLUE"]["rank_was"] == 2
+    assert by_team["RED"]["rank"] == 2 and by_team["RED"]["rank_was"] == 1
+    _assert_content_is_plain(content)
+
+
 def test_daily_content_key_is_local_date_that_just_ended(conn):
     _player(conn, 1, "RED")
     _player(conn, 2, "BLUE")
@@ -248,9 +297,39 @@ def test_weekly_content_placement_and_exploration(conn):
     headings = [s["heading"] for s in content["sections"]]
     assert "Placement" in headings
     assert "Exploration" in headings
+    assert "Standings" in headings
     explore = next(s for s in content["sections"] if s["heading"] == "Exploration")
     assert explore["rows"][0]["value"] == 2
+
+    # Part 1's clearly-named field: the weekly new-places count, for a
+    # consumer (app/mesh_render.py's "New Places visited: <n>" line)
+    # that wants the number directly rather than digging it back out of
+    # the Exploration section's own row.
+    assert content["new_places"] == 2
+
+    # Every currently-ranked team appears in Standings, RED and BLUE
+    # included, even though only they moved this window.
+    standings = next(s for s in content["sections"] if s["heading"] == "Standings")
+    standings_teams = {r["team"] for r in standings["rows"]}
+    assert {"RED", "BLUE"} <= standings_teams
     _assert_content_is_plain(content)
+
+
+def test_weekly_content_new_places_is_zero_when_nothing_explored(conn):
+    """A week can fire on a rank move alone, with zero exploration --
+    `new_places` must still be a plain int (0), never None/missing, so a
+    consumer never has to special-case it.
+    """
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    season_id = _season(conn, "mc")
+    _capture(conn, season_id, cell_id(43.0, -116.0), WEEK_START - 300, 1, "RED")
+    _capture(conn, season_id, cell_id(43.1, -116.0), WEEK_START - 200, 2, "BLUE")
+    _capture(conn, season_id, cell_id(43.1, -116.0), WEEK_START + 10, 1, "RED", from_team="BLUE")
+
+    content = ac.build_weekly_content(conn, "mc", WEEK_START, WEEK_END, NOW)
+    assert content is not None
+    assert content["new_places"] == 0
 
 
 def test_weekly_content_none_on_quiet_week(conn):
@@ -356,6 +435,36 @@ def test_month_content_caps_awards_at_five(conn):
     assert len(content["sections"][0]["rows"]) <= ac._MAX_SECTION_ROWS
 
 
+def test_month_content_standings_excludes_zero_square_teams(conn):
+    """app/mesh_render.py's "MW <Month> Top 5" block reads THIS section
+    -- a team with zero squares this month is not worth announcing, same
+    rule build_season_close_content() applies to its own standings.
+    """
+    _player(conn, 1, "RED")
+    _player(conn, 2, "BLUE")
+    season_id = _season(conn, "mt")
+    _capture(conn, season_id, cell_id(43.0, -116.0), START + 10, 1, "RED")
+    _capture(conn, season_id, cell_id(43.1, -116.0), START + 20, 1, "RED")
+    # BLUE never captures anything -- month_standing still writes a
+    # BLUE row at 0 squares (every team gets a row), which must be
+    # excluded from Standings.
+    results.freeze_month(conn, "mt", MONTH, NOW)
+
+    zero_square_teams = {
+        r["team"] for r in conn.execute(
+            "SELECT team FROM month_standing WHERE month=? AND protocol=? AND squares=0",
+            (MONTH, "mt"),
+        ).fetchall()
+    }
+    assert "BLUE" in zero_square_teams  # sanity: this fixture exercises the 0-square case
+
+    content = ac.build_month_content(conn, "mt", MONTH, NOW)
+    standings = next(s for s in content["sections"] if s["heading"] == "Standings")
+    teams = {r["team"] for r in standings["rows"]}
+    assert teams == {"RED"}
+    assert standings["rows"][0]["value"] == 2
+
+
 # ---- net wrap-up ---------------------------------------------------------
 
 
@@ -379,7 +488,38 @@ def test_net_wrapup_happy_path(conn):
     rows = content["sections"][0]["rows"]
     assert rows[0]["player"] == "Alice"
     assert rows[0]["value"] == 4
+    # Part 3's addition, for app/mesh_render.py's "EMOJI NAME STREAK"
+    # streak rows -- the same TEAM_EMOJI map placement rows use.
+    assert rows[0]["team"] == "RED"
+
+    # No parenthesised part and no "Weekly Net" prefix on _net()'s own
+    # default label ("Boise Net") -- falls back to the whole label.
+    assert content["net_name"] == "Boise Net"
     _assert_content_is_plain(content)
+
+
+def test_net_wrapup_short_net_name_from_parenthesised_label(conn):
+    _player(conn, 1, "RED", name="Alice")
+    season_id = _season(conn, "mc")
+    net_row = _net(conn, 1, protocol="mc", label="Weekly Net (Freq51 MT)")
+    net_date = "2026-08-19"
+    _checkin_award(conn, season_id, 1, net_date, net_id=1, streak=1)
+
+    content = ac.build_net_wrapup_content(conn, net_row, net_date, NOW)
+    assert content is not None
+    assert content["net_name"] == "Freq51"
+
+
+def test_net_wrapup_short_net_name_strips_weekly_net_prefix_without_parens(conn):
+    _player(conn, 1, "RED", name="Alice")
+    season_id = _season(conn, "mc")
+    net_row = _net(conn, 1, protocol="mc", label="Weekly Net Tuesday")
+    net_date = "2026-08-19"
+    _checkin_award(conn, season_id, 1, net_date, net_id=1, streak=1)
+
+    content = ac.build_net_wrapup_content(conn, net_row, net_date, NOW)
+    assert content is not None
+    assert content["net_name"] == "Tuesday"
 
 
 def test_net_wrapup_none_when_nobody_checked_in(conn):
@@ -406,6 +546,178 @@ def test_net_wrapup_uses_nets_own_timezone(conn):
     tz = ZoneInfo("America/New_York")
     expected_start = int(datetime(2026, 8, 19, 18, tzinfo=tz).timestamp())
     assert content["period_start_ts"] == expected_start
+
+
+# ---- season close ----------------------------------------------------
+#
+# NEVER exercised against real production data: no MeshWars season has
+# ever actually closed (both current seasons run for ~145 more days as
+# of this writing, and mc_season_team_tally is empty in production).
+# Every test below builds its own mc_season/mc_season_team_tally rows
+# directly, exactly as app/mc_scoring.py's maybe_roll_season() would
+# have written them.
+
+
+def _close_season(conn, protocol, tallies, ends_at=NOW - 3600, started_at=0, winner=None,
+                   checkin_points=None):
+    """`checkin_points` is an optional {team: points} map -- defaults to
+    0 for every team (the column's own schema default) exactly like a
+    season with no check-in awards at all."""
+    checkin_points = checkin_points or {}
+    cur = conn.execute(
+        "INSERT INTO mc_season(protocol, started_at, ends_at, status, winner) "
+        "VALUES (?, ?, ?, 'closed', ?)",
+        (protocol, started_at, ends_at, winner),
+    )
+    season_id = cur.lastrowid
+    for team, tiles in tallies.items():
+        conn.execute(
+            "INSERT INTO mc_season_team_tally(season_id, team, tiles, checkin_points) "
+            "VALUES (?, ?, ?, ?)",
+            (season_id, team, tiles, checkin_points.get(team, 0)),
+        )
+    return season_id
+
+
+def test_season_close_content_happy_path(conn, monkeypatch):
+    monkeypatch.setattr(ac.settings, "oauth_public_base_url", "https://example.invalid")
+    season_id = _close_season(
+        conn, "mc",
+        {"GREEN": 6005, "RED": 2621, "YELLOW": 2262, "BLUE": 2164, "PURPLE": 1357},
+    )
+
+    content = ac.build_season_close_content(conn, "mc", season_id, NOW)
+    assert content is not None
+    assert content["kind"] == "season_close"
+    assert content["key"] == str(season_id)
+    assert content["board"] == "mc"
+    assert content["winner"] == "GREEN"
+    assert content["url"] == "https://example.invalid/results"
+    assert "GREEN" in content["headline"]
+
+    standings = content["sections"][0]["rows"]
+    assert standings[0]["team"] == "GREEN" and standings[0]["value"] == 6005
+    # The combined total is still carried as its own structured field --
+    # a rendering change (no number in the mesh block) must never mean a
+    # data change (JSON/API consumers still get both squares and total).
+    assert standings[0]["total"] == 6005  # no checkin/place points here, so total == squares
+    assert [r["team"] for r in standings] == ["GREEN", "RED", "YELLOW", "BLUE", "PURPLE"]
+    _assert_content_is_plain(content)
+
+
+def test_season_close_content_excludes_zero_tile_teams(conn):
+    season_id = _close_season(conn, "mc", {"GREEN": 100, "RED": 0})
+    content = ac.build_season_close_content(conn, "mc", season_id, NOW)
+    assert content is not None
+    teams = {r["team"] for r in content["sections"][0]["rows"]}
+    assert teams == {"GREEN"}
+
+
+def test_season_close_content_none_when_all_teams_zero(conn):
+    season_id = _close_season(conn, "mc", {"GREEN": 0, "RED": 0})
+    content = ac.build_season_close_content(conn, "mc", season_id, NOW)
+    assert content is None
+
+
+def test_season_close_content_none_when_season_does_not_exist(conn):
+    assert ac.build_season_close_content(conn, "mc", 999999, NOW) is None
+
+
+def test_season_close_content_ties_broken_alphabetically(conn):
+    """Same deterministic tiebreak every other ranking in this module
+    uses -- the SQL ORDER BY tiles DESC, team already gives this for
+    free, this proves it end to end."""
+    season_id = _close_season(conn, "mc", {"YELLOW": 100, "BLUE": 100})
+    content = ac.build_season_close_content(conn, "mc", season_id, NOW)
+    teams = [r["team"] for r in content["sections"][0]["rows"]]
+    assert teams == ["BLUE", "YELLOW"]
+    assert content["winner"] == "BLUE"
+
+
+def test_season_close_content_orders_by_combined_total_not_raw_tiles(conn):
+    """RED holds far fewer squares than GREEN but has a huge lead in
+    check-in + Places Worth Going points -- the SAME combined total
+    (app/mc_scoring.py's team_totals()) that decides mc_season.winner --
+    so RED must still take first place on the podium, even though the
+    displayed squares figure stays smaller than GREEN's."""
+    _player(conn, 1, "RED")
+    _place(conn, 1, "landmark")
+    season_id = _close_season(
+        conn, "mc", {"RED": 100, "GREEN": 6000}, checkin_points={"RED": 9000},
+    )
+    _place_activation(conn, 1, 1, 5000, awarded_at=NOW - 5000)
+
+    content = ac.build_season_close_content(conn, "mc", season_id, NOW)
+    standings = content["sections"][0]["rows"]
+
+    # RED's total: 100 + 9000 + 5000 = 14100, beats GREEN's 6000 --
+    # order follows the total, not the raw tile counts (RED 100 < GREEN
+    # 6000).
+    assert [r["team"] for r in standings] == ["RED", "GREEN"]
+    assert content["winner"] == "RED"
+
+    # The DISPLAYED numbers are still squares, not the combined total --
+    # RED's row reads its actual (smaller) tile count even while ranked
+    # first.
+    assert standings[0]["team"] == "RED" and standings[0]["value"] == 100
+    assert "100 squares" in standings[0]["text"]
+    assert standings[1]["team"] == "GREEN" and standings[1]["value"] == 6000
+    assert "6,000 squares" in standings[1]["text"] or "6000 squares" in standings[1]["text"]
+    assert "RED" in content["headline"] and "100" in content["headline"]
+
+    # The combined total that actually decided the order is still
+    # carried as its own structured field, distinct from the squares
+    # `value` above -- both survive even though the mesh render shows
+    # neither.
+    assert standings[0]["total"] == 14100
+    assert standings[1]["total"] == 6000
+
+
+def test_season_close_content_first_place_matches_stored_winner(conn):
+    """Invariant: when mc_season.winner is stored, the podium's first
+    place must equal it -- the ordinary case, where the computed order
+    already agrees with it."""
+    season_id = _close_season(
+        conn, "mc", {"GREEN": 6000, "RED": 100}, winner="GREEN",
+    )
+    content = ac.build_season_close_content(conn, "mc", season_id, NOW)
+    standings = content["sections"][0]["rows"]
+    assert standings[0]["team"] == "GREEN"
+    assert content["winner"] == "GREEN"
+
+
+def test_season_close_content_stored_winner_overrides_contradicting_order(conn, caplog):
+    """If the stored mc_season.winner ever disagrees with the podium's
+    own computed order, the stored winner must win outright -- this must
+    never announce a different winner than mc_season.winner / Discord --
+    and a warning naming both teams must be logged."""
+    _player(conn, 1, "RED")
+    _place(conn, 1, "landmark")
+    season_id = _close_season(
+        conn, "mc", {"RED": 100, "GREEN": 6000}, checkin_points={"RED": 9000},
+        # GREEN is stored as the winner even though RED's combined total
+        # (100 + 9000 + 5000 = 14100) actually beats GREEN's (6000).
+        winner="GREEN",
+    )
+    _place_activation(conn, 1, 1, 5000, awarded_at=NOW - 5000)
+
+    with caplog.at_level("WARNING"):
+        content = ac.build_season_close_content(conn, "mc", season_id, NOW)
+
+    standings = content["sections"][0]["rows"]
+    assert standings[0]["team"] == "GREEN"
+    assert content["winner"] == "GREEN"
+    assert any(
+        "RED" in record.getMessage() and "GREEN" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_season_close_content_url_none_without_base_url(conn, monkeypatch):
+    monkeypatch.setattr(ac.settings, "oauth_public_base_url", "")
+    season_id = _close_season(conn, "mc", {"GREEN": 100})
+    content = ac.build_season_close_content(conn, "mc", season_id, NOW)
+    assert content["url"] is None
 
 
 # ---- store_announcement --------------------------------------------------

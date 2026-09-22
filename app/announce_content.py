@@ -35,12 +35,16 @@ not share this problem -- only the check-in and exploration counts do.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .config import settings
+from . import mc_scoring
 from . import results
+
+log = logging.getLogger("announce_content")
 
 # Award keys in the order the results page already shows them (see
 # results.py's own comment on TEAM_AWARDS/PLAYER_AWARDS/PER_TEAM_AWARDS
@@ -129,25 +133,50 @@ def _ranked_teams(counts: dict[str, int]) -> list[str]:
     return [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
-def _placement_rows(conn: sqlite3.Connection, board: str, before_ts: int, after_ts: int
-                     ) -> tuple[list[dict], dict[str, int], dict[str, int]]:
-    """Rank-change rows for the window (before_ts, after_ts] -- one row
-    per team whose current rank (at after_ts) differs from its rank at
-    before_ts. A team absent from either snapshot has no rank to compare
-    and is left out entirely (no "new to the board" row here -- unlike
-    Discord's weekly recap, this module only ever reports a MOVE, never
-    an appearance/disappearance, since a terse LoRa-budget line has no
-    room for "new to the board" and still naming the team and a rank).
+def _team_ranks(conn: sqlite3.Connection, board: str, before_ts: int, after_ts: int
+                ) -> tuple[list[str], dict[str, int], dict[str, int], dict[str, int]]:
+    """Shared ranking arithmetic for the two row builders below --
+    computed ONCE per window since both the movers-only diff
+    (_placement_rows) and the full-roster standings list
+    (_standings_rows) need the exact same before/after ownership
+    snapshot, and re-deriving it a second, independent way would be
+    wasted work and a second chance for the two to disagree.
 
-    Returns (rows, before_counts, after_counts) -- the caller also needs
-    the raw counts to compute a biggest-gain row, and re-deriving them a
-    second time would be wasted work and a second chance to disagree.
+    Returns (after_order, before_rank, before_counts, after_counts):
+    after_order is team names in current rank order (index 0 = 1st);
+    before_rank maps a team that held at least one square BEFORE the
+    window to its rank then (1-indexed); before_counts/after_counts are
+    the raw square counts either side, which _biggest_gain_row() also
+    needs and would otherwise have to recompute a second time.
     """
     before = _team_counts(results.ownership_at(conn, board, before_ts))
     after = _team_counts(results.ownership_at(conn, board, after_ts))
     after_order = _ranked_teams(after)
     before_rank = {t: i + 1 for i, t in enumerate(_ranked_teams(before))}
+    return after_order, before_rank, before, after
 
+
+def _movers_rows(after_order: list[str], before_rank: dict[str, int]) -> list[dict]:
+    """Rank-change rows -- one row per team whose current rank differs
+    from its rank before the window. A team absent from the "before"
+    snapshot has no rank to compare and is left out entirely (no "new to
+    the board" row here -- unlike Discord's weekly recap, this module
+    only ever reports a MOVE, never an appearance/disappearance, since a
+    terse LoRa-budget line has no room for "new to the board" and still
+    naming the team and a rank).
+
+    MOVERS ONLY, deliberately kept this way even though _standings_rows()
+    below now also exists: build_daily_content()/build_weekly_content()'s
+    own "nothing happened" quiet check, and this module's one-line
+    dramatic-headline logic (_placement_headline()), both depend on an
+    EMPTY list meaning "no team's rank changed" -- the full always-non-
+    empty roster _standings_rows() returns would silently break that
+    check if used here instead.
+
+    Pure (no DB access): both this and _standings_rows() are derived from
+    the SAME _team_ranks() call a caller makes once, so the two row lists
+    can never disagree about what the ranking actually was.
+    """
     rows: list[dict] = []
     for i, team in enumerate(after_order):
         current_rank = i + 1
@@ -160,7 +189,40 @@ def _placement_rows(conn: sqlite3.Connection, board: str, before_ts: int, after_
             "delta": prior_rank - current_rank,  # positive = improved (moved to a better/lower-numbered rank)
             "rank": current_rank, "rank_was": prior_rank,
         })
-    return rows, before, after
+    return rows
+
+
+def _standings_rows(after_order: list[str], before_rank: dict[str, int]) -> list[dict]:
+    """The FULL roster's placement rows -- every team currently ranked,
+    unchanged teams included (rank == rank_was), not just the movers
+    _placement_rows() above reports. This is the "MORE than mesh
+    renders" data Part 1 of this module's own contract asks for: the
+    JSON API's consumers (and app/mesh_render.py's block renderer, which
+    needs a fixed Top-N board regardless of whether anyone moved) get
+    every team's row, never just the ones that changed.
+
+    A team with no square before the window (absent from before_rank)
+    has no real prior rank to report -- rather than invent a "new to the
+    board" case here (the terse one-line renderer's own reason for
+    leaving such a team out entirely does not apply to a full-roster
+    list, which cannot leave a currently-ranked team out), it is treated
+    as unchanged: rank_was defaults to the team's own current rank.
+    """
+    rows: list[dict] = []
+    for i, team in enumerate(after_order):
+        current_rank = i + 1
+        prior_rank = before_rank.get(team, current_rank)
+        if prior_rank == current_rank:
+            text = f"{team}: {_ordinal(current_rank)} (unchanged)"
+        else:
+            text = f"{team}: {_ordinal(current_rank)} (was {_ordinal(prior_rank)})"
+        rows.append({
+            "text": _clip(text, _ROW_TEXT_LIMIT),
+            "team": team, "player": None, "value": None, "unit": None,
+            "delta": prior_rank - current_rank,
+            "rank": current_rank, "rank_was": prior_rank,
+        })
+    return rows
 
 
 def _biggest_gain_row(before: dict[str, int], after: dict[str, int]) -> dict | None:
@@ -207,7 +269,8 @@ def build_daily_content(conn: sqlite3.Connection, board: str, start_ts: int, end
     `key` is the local date of the day that just ended -- the local
     date of start_ts, since [start_ts, end_ts) is that whole day.
     """
-    rows, before, after = _placement_rows(conn, board, start_ts - 1, end_ts - 1)
+    after_order, before_rank, before, after = _team_ranks(conn, board, start_ts - 1, end_ts - 1)
+    rows = _movers_rows(after_order, before_rank)
     gain_row = _biggest_gain_row(before, after)
     if not rows and gain_row is None:
         return None
@@ -227,6 +290,14 @@ def build_daily_content(conn: sqlite3.Connection, board: str, start_ts: int, end
     day = datetime.fromtimestamp(start_ts, tz=_tz()).date()
     period_label = f"{day.day} {day.strftime('%b')}"
 
+    # "Standings" carries EVERY currently-ranked team (unchanged included)
+    # -- see _standings_rows()'s own docstring for why this is additive,
+    # never a replacement for the movers-only "Placement" section above:
+    # app/mesh_render.py's block renderer needs a fixed Top-N board even
+    # on a day where nobody's rank moved but a gain row still fired.
+    sections = [{"heading": "Placement", "rows": section_rows}]
+    sections.append({"heading": "Standings", "rows": _standings_rows(after_order, before_rank)})
+
     return {
         "kind": "daily_recap",
         "key": f"{day.isoformat()}:{board}",
@@ -236,7 +307,7 @@ def build_daily_content(conn: sqlite3.Connection, board: str, start_ts: int, end
         "period_start_ts": start_ts,
         "period_end_ts": end_ts,
         "headline": headline,
-        "sections": [{"heading": "Placement", "rows": section_rows}],
+        "sections": sections,
         "url": None,
         "created_at": now,
     }
@@ -250,7 +321,8 @@ def build_weekly_content(conn: sqlite3.Connection, board: str, start_ts: int, en
     inside [start_ts, end_ts), filtered to this board). Returns None
     when nothing moved and nothing was explored.
     """
-    rows, _before, _after = _placement_rows(conn, board, start_ts - 1, end_ts - 1)
+    after_order, before_rank, _before, _after = _team_ranks(conn, board, start_ts - 1, end_ts - 1)
+    rows = _movers_rows(after_order, before_rank)
 
     explored = conn.execute(
         "SELECT COUNT(DISTINCT place_id) AS n FROM place_activation "
@@ -271,6 +343,11 @@ def build_weekly_content(conn: sqlite3.Connection, board: str, start_ts: int, en
             "team": None, "player": None, "value": explored, "unit": "places",
             "delta": None, "rank": None, "rank_was": None,
         }]})
+    # "Standings" carries EVERY currently-ranked team, unchanged included
+    # -- see _standings_rows()'s own docstring; additive, alongside the
+    # movers-only "Placement" section above, for the same reason
+    # build_daily_content() adds it.
+    sections.append({"heading": "Standings", "rows": _standings_rows(after_order, before_rank)})
 
     explore_fallback = None
     if explored:
@@ -298,7 +375,20 @@ def build_weekly_content(conn: sqlite3.Connection, board: str, start_ts: int, en
         "period_end_ts": end_ts,
         "headline": headline,
         "sections": sections,
-        "url": None,
+        # Clearly-named field, alongside (not instead of) the Exploration
+        # section's own row above -- app/mesh_render.py's weekly block
+        # reads THIS field directly for its "<n> new places · <domain>"
+        # line rather than digging a row's `value` back out of
+        # `sections`. Always an int (0 when nothing was explored but the
+        # week still fired on a rank move alone), never None, so the
+        # renderer never has to special-case a missing field.
+        "new_places": explored,
+        # No `/results` path -- unlike build_month_content()'s own url
+        # (a specific frozen month's results page), the weekly recap
+        # links to the site itself, and app/mesh_render.py's compact
+        # weekly block renders only the bare host anyway (see that
+        # module's own _domain_only()).
+        "url": settings.oauth_public_base_url.rstrip("/") if settings.oauth_public_base_url else None,
         "created_at": now,
     }
 
@@ -348,11 +438,12 @@ def build_month_content(conn: sqlite3.Connection, board: str, month: str, now: i
     winner = standings[0] if standings else None
     if winner is not None:
         # No month name here: period_label already carries it (and the
-        # renderer's own "{prefix} {period_label}: {headline}" line puts
-        # it right alongside), so restating it in the headline would
-        # just be spending bytes on the same fact twice. The sentence
-        # stays complete without it -- "RED wins with 3 squares" -- for
-        # a JSON consumer reading `headline` alone.
+        # one-line fallback renderer's own "{prefix} {period_label}:
+        # {headline}" line puts it right alongside), so restating it in
+        # the headline would just be spending bytes on the same fact
+        # twice. The sentence stays complete without it -- "RED wins
+        # with 3 squares" -- for a JSON consumer reading `headline`
+        # alone.
         headline = _clip(
             f"{winner['team']} wins with {_fmt_number(winner['squares'])} squares",
             _HEADLINE_LIMIT,
@@ -361,6 +452,27 @@ def build_month_content(conn: sqlite3.Connection, board: str, month: str, now: i
         headline = _clip(f"{period_label} is over", _HEADLINE_LIMIT)
 
     url = f"{settings.oauth_public_base_url.rstrip('/')}/results" if settings.oauth_public_base_url else None
+
+    # "Standings" -- every team that scored at least one square this
+    # month, ranked (month_standing's own ORDER BY squares DESC, team is
+    # already the correct order), zero-square teams excluded entirely.
+    # app/mesh_render.py's block reads THIS for its "MW <Month> Top 5"
+    # rows -- NOT the Honors section above (kept for JSON/API consumers
+    # and the one-line fallback only; see that module's own comment).
+    standings_rows = [
+        {
+            "text": _clip(f"{r['team']}: {_fmt_number(r['squares'])} squares", _ROW_TEXT_LIMIT),
+            "team": r["team"], "player": None, "value": r["squares"], "unit": "squares",
+            "delta": None, "rank": i + 1, "rank_was": None,
+        }
+        for i, r in enumerate(r for r in standings if r["squares"] > 0)
+    ]
+
+    sections = []
+    if section_rows:
+        sections.append({"heading": "Honors", "rows": section_rows})
+    if standings_rows:
+        sections.append({"heading": "Standings", "rows": standings_rows})
 
     return {
         "kind": "month_honors",
@@ -371,10 +483,200 @@ def build_month_content(conn: sqlite3.Connection, board: str, month: str, now: i
         "period_start_ts": start_ts,
         "period_end_ts": end_ts,
         "headline": headline,
-        "sections": [{"heading": "Honors", "rows": section_rows}] if section_rows else [],
+        "sections": sections,
         "url": url,
         "created_at": now,
     }
+
+
+def build_season_close_content(conn: sqlite3.Connection, board: str, season_id: int,
+                                now: int) -> dict | None:
+    """A closed MeshCore/Meshtastic season's final standings.
+
+    ORDERING: the podium is ordered by the SAME combined total that
+    decided `mc_season.winner` -- app/mc_scoring.py's team_totals()
+    (squares held, plus check-in points, plus Places Worth Going
+    points), the same figure Discord's own season-close embed
+    (app/discord_notify.py's build_season_close_embed()) is built from.
+    This module used to rank by mc_season_team_tally.tiles alone, which
+    could theoretically crown a DIFFERENT team the winner on the mesh
+    than Discord and the website just named -- the worst failure this
+    feature could have. Fixed here deliberately.
+
+    The combined total is reconstructed from what a closed season keeps:
+    mc_season_team_tally's own tiles and checkin_points columns (frozen
+    once, at close, by maybe_roll_season(), and stable afterward -- a
+    closed season's mc_tile/mc_checkin_award rows are never touched
+    again; only a NEW season's rows ever carry a new season_id), plus
+    app/mc_scoring.py's team_place_points() read live. Places Worth
+    Going points are never stored per-season anywhere -- place_activation
+    is scoped by week_start, not season_id, see that function's own
+    docstring -- so a live, time-windowed read is the only way to fold
+    them in at all, exactly the read maybe_roll_season() itself used to
+    decide the winner in the first place.
+
+    DISPLAY: app/mesh_render.py's default season_close render shows NO
+    number beside a podium team at all -- just the medal, the team
+    emoji, and the name (see that module's _medal_line()). The podium
+    is ORDERED by the combined total above, but a genuinely close
+    season can make a row look numerically "out of order" if a raw
+    figure were printed next to it (a team with fewer squares placed
+    above one with more) -- correct, since the total decided it, but it
+    reads as a bug to anyone hearing it on a radio, and this is the
+    single most-read message the system sends. Removing the number
+    removes the contradiction. This function still puts each team's
+    squares (`value`/`unit` below) AND its combined total (`total`
+    below) on every standings row as structured fields -- this is a
+    RENDERING choice, not a data one: JSON/API consumers, and any
+    future richer destination, still get both numbers.
+
+    INVARIANT: if this season has a stored `mc_season.winner` (not NULL
+    and not 'TIE'), the podium's first place always equals it. Should
+    the stored winner and the total computed here ever disagree (they
+    should not, but a closed season predating some scoring change, or
+    any other drift, must never announce a different winner than
+    mc_season.winner / Discord), the stored winner wins outright and a
+    warning is logged naming both -- this never silently announces its
+    own answer instead.
+
+    Returns None when this season has no tally rows at all yet (should
+    never happen for a season maybe_roll_season() actually closed, but
+    a season_id that does not exist, or one closed by a path that
+    skipped the tally, must not crash a due-check).
+
+    A team with 0 tiles is excluded entirely -- same "not worth
+    announcing" rule build_month_content()'s own Standings section
+    above applies.
+    """
+    season_row = conn.execute(
+        "SELECT started_at, ends_at, winner FROM mc_season WHERE id = ?", (season_id,),
+    ).fetchone()
+    if season_row is None:
+        return None
+
+    tally_rows = conn.execute(
+        "SELECT team, tiles, checkin_points FROM mc_season_team_tally "
+        " WHERE season_id = ? AND tiles > 0 ORDER BY tiles DESC, team",
+        (season_id,),
+    ).fetchall()
+    if not tally_rows:
+        return None
+
+    tiles_by_team = {r["team"]: r["tiles"] for r in tally_rows}
+
+    # Places Worth Going points aren't in the tally row at all (see the
+    # docstring above) -- the only place they exist for a closed season
+    # is this same live, time-windowed read maybe_roll_season() used.
+    place_points = mc_scoring.team_place_points(conn, season_id, board)
+    totals_by_team = {
+        r["team"]: r["tiles"] + r["checkin_points"] + place_points.get(r["team"], 0.0)
+        for r in tally_rows
+    }
+
+    # Ordered by the COMBINED total, ties broken alphabetically (the
+    # same deterministic tiebreak the tally query's own ORDER BY uses)
+    # -- deliberately NOT tiles_by_team, so a row below can print a
+    # smaller squares figure ABOVE a row with a larger one. That is the
+    # whole point: the number shown is squares, the order is the total
+    # that actually decided the season, and those two are allowed to
+    # disagree.
+    ranked_teams = sorted(tiles_by_team, key=lambda t: (-totals_by_team[t], t))
+
+    computed_winner = ranked_teams[0]
+    stored_winner = season_row["winner"]
+    if stored_winner and stored_winner != "TIE" and stored_winner != computed_winner:
+        log.warning(
+            "season %d close content: computed podium winner %s disagrees with stored "
+            "mc_season.winner %s -- using the stored winner",
+            season_id, computed_winner, stored_winner,
+        )
+        if stored_winner in tiles_by_team:
+            ranked_teams = [stored_winner] + [t for t in ranked_teams if t != stored_winner]
+            winner = stored_winner
+        else:
+            # The stored winner holds no tally row with tiles > 0, so it
+            # cannot be placed on a podium that only lists teams with
+            # squares -- fall back to the computed order; the warning
+            # above already flags this (very unlikely) drift.
+            winner = computed_winner
+    else:
+        winner = stored_winner if stored_winner and stored_winner != "TIE" else computed_winner
+
+    standings_rows = [
+        {
+            "text": _clip(f"{team}: {_fmt_number(tiles_by_team[team])} squares", _ROW_TEXT_LIMIT),
+            "team": team, "player": None, "value": tiles_by_team[team], "unit": "squares",
+            # The combined total that actually decided the podium ORDER
+            # (see this function's own ORDERING docstring above) -- kept
+            # here as its own structured field, distinct from `value`
+            # (squares), for JSON/API consumers and any future richer
+            # destination. app/mesh_render.py's default render uses
+            # neither field -- see its DISPLAY docstring above.
+            "total": totals_by_team[team],
+            "delta": None, "rank": i + 1, "rank_was": None,
+        }
+        for i, team in enumerate(ranked_teams)
+    ]
+
+    url = f"{settings.oauth_public_base_url.rstrip('/')}/results" if settings.oauth_public_base_url else None
+
+    return {
+        "kind": "season_close",
+        "key": str(season_id),
+        "board": board,
+        "net_id": None,
+        # No period_label the way a recurring day/week/month has one --
+        # a season close is a one-time event, not a period on a
+        # repeating clock, and app/mesh_render.py's fixed
+        # "MW SEASON OVER" title carries no date at all either way.
+        "period_label": None,
+        "period_start_ts": season_row["started_at"],
+        "period_end_ts": season_row["ends_at"],
+        "headline": _clip(
+            f"{winner} wins the season with {_fmt_number(tiles_by_team[winner])} squares",
+            _HEADLINE_LIMIT,
+        ),
+        "sections": [{"heading": "Standings", "rows": standings_rows}],
+        # app/mesh_render.py's "Congratulations <winner>!" line reads
+        # this directly rather than re-deriving it from sections[0]'s
+        # first row.
+        "winner": winner,
+        "url": url,
+        "created_at": now,
+    }
+
+
+def _short_net_name(label: str) -> str:
+    """checkin_net.label -> a short name for app/mesh_render.py's net
+    wrap-up title ("MW <short name> Net") -- "Weekly Net (Freq51 MC)"
+    becomes "Freq51", "Weekly Net (Coloradomesh MC)" becomes
+    "Coloradomesh".
+
+    Rule, in order: if `label` has a parenthesised part, take its text
+    and strip a trailing " MC"/" MT" (the board suffix an operator's own
+    label convention already carries -- redundant here since board is
+    already a separate Content field). Otherwise, strip a leading
+    "Weekly Net" and use what remains. If either path would leave
+    nothing usable, fall back to the whole label rather than an empty
+    title.
+    """
+    label = (label or "").strip()
+    if "(" in label and ")" in label:
+        start = label.index("(")
+        end = label.index(")", start)
+        inner = label[start + 1:end].strip()
+        for suffix in (" MC", " MT"):
+            if inner.endswith(suffix):
+                inner = inner[: -len(suffix)].strip()
+                break
+        return inner or label
+
+    prefix = "Weekly Net"
+    if label.startswith(prefix):
+        remainder = label[len(prefix):].strip()
+        return remainder or label
+
+    return label
 
 
 def build_net_wrapup_content(conn: sqlite3.Connection, net_row, net_date: str, now: int) -> dict | None:
@@ -394,7 +696,7 @@ def build_net_wrapup_content(conn: sqlite3.Connection, net_row, net_date: str, n
     board = net_row["protocol"]
 
     rows = conn.execute(
-        "SELECT a.player_id, a.streak, p.display_name FROM mc_checkin_award a "
+        "SELECT a.player_id, a.streak, p.display_name, p.team FROM mc_checkin_award a "
         "  JOIN player p ON p.player_id = a.player_id "
         " WHERE a.net_id = ? AND a.net_date = ?",
         (net_id, net_date),
@@ -412,7 +714,13 @@ def build_net_wrapup_content(conn: sqlite3.Connection, net_row, net_date: str, n
             text = f"{r['display_name']}: checked in"
         section_rows.append({
             "text": _clip(text, _ROW_TEXT_LIMIT),
-            "team": None, "player": r["display_name"], "value": r["streak"],
+            # `team` (added for app/mesh_render.py's "EMOJI NAME STREAK"
+            # streak rows -- the same TEAM_EMOJI map placement rows use)
+            # is the player's CURRENT team, same known caveat this
+            # module's own docstring already documents for check-in/
+            # exploration points: a player who switches teams re-
+            # attributes their historical check-in row to the new team.
+            "team": r["team"], "player": r["display_name"], "value": r["streak"],
             "unit": "streak" if r["streak"] is not None else None,
             "delta": None, "rank": None, "rank_was": None,
         })
@@ -434,6 +742,13 @@ def build_net_wrapup_content(conn: sqlite3.Connection, net_row, net_date: str, n
         "period_end_ts": period_end_ts,
         "headline": _clip(f"{count} checked in", _HEADLINE_LIMIT),
         "sections": [{"heading": "Check-ins", "rows": section_rows}],
+        # app/mesh_render.py's net wrap-up title ("MW <net_name> Net") --
+        # NOT the date (period_label already carries that, for JSON/API
+        # consumers and the other Content kinds' own titles, but the
+        # operator's own final spec for this block leaves the date out
+        # of the title entirely, same as "MW Weekly Top 5"/"MW Daily Top
+        # 5" carry no date either). See _short_net_name()'s own docstring.
+        "net_name": _short_net_name(net_row["label"]),
         "url": None,
         "created_at": now,
     }
