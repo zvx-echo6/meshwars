@@ -117,7 +117,9 @@
         <li><a href="#captures">Captures</a></li>
         <li><a href="#results">Results</a></li>
         <li><a href="#net">Net</a></li>
-        <li><a href="#recipes">Two worked examples</a></li>
+        <li><a href="#nets">Nets</a></li>
+        <li><a href="#announcements">Announcements</a></li>
+        <li><a href="#recipes">Three worked examples</a></li>
         </ul>
       </nav>
 
@@ -404,8 +406,98 @@
           <p><code>current_net_date</code> is only set while the net is actually open. <code>next_opens_at</code> is always the next start, so a reminder bot needs nothing else.</p>
         </section>
 
+        <section id="nets">
+          <h2>Nets</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/nets</p>
+          <p>The enabled check-in nets, by id, label and board. This is how you find a net's numeric <code>id</code> &mdash; the one <a href="#net">Net</a> above does not hand out and <a href="#announcements">Announcements</a>' <code>net_id</code> filter expects &mdash; so an operator can pick a net by name instead of guessing.</p>
+          <p>Needs <strong>no key</strong>, the same as Announcements below, and shares that route's rate limits and budget: present a key and you get the normal per-key budget instead of the anonymous tier.</p>
+          <pre class="api-pre">{
+  &quot;nets&quot;: [
+    {
+      &quot;id&quot;: 1,
+      &quot;label&quot;: &quot;Weekly Net (Freq51 MC)&quot;,
+      &quot;board&quot;: &quot;mc&quot;,
+      &quot;weekday&quot;: 2,
+      &quot;start_hour&quot;: 17,
+      &quot;end_hour&quot;: 23,
+      &quot;timezone&quot;: &quot;America/Boise&quot;
+    }
+  ]
+}</pre>
+          <p>Only enabled nets are listed, ordered by id. Nothing about how a net is polled &mdash; its connector, broker, channel or hashtag &mdash; is included; that is this operator's own upstream configuration, not something a caller choosing a net needs or should see.</p>
+        </section>
+
+        <section id="announcements">
+          <h2>Announcements</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/announcements?since=0</p>
+          <p>The public announcement feed &mdash; daily recaps, weekly recaps, month honors and weekly net wrap-ups. This is the one route on this page that needs <strong>no key</strong>, and that is deliberate: an announcement is already public broadcast news about a public game, headline results headed for an open radio channel anyone can already listen to. Gating it behind a key would protect nothing, and would only mean every bot author has to ask the operator for one before their bot could work at all.</p>
+          <p>A key is still welcome here. Present one and you are upgraded onto the normal per-key budget this page already documents, instead of the tighter anonymous tier below.</p>
+
+          <h3>Rate limits</h3>
+          <table class="rules-table">
+            <tbody>
+              <tr><th>No key</th><td>6 requests per hour, per IP address</td></tr>
+              <tr><th>With a key</th><td>the normal 120 requests per minute, per key (above)</td></tr>
+              <tr><th>Over either limit</th><td>429, with a <code>Retry-After</code> header giving the seconds to wait</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Polling with a cursor</h3>
+          <p><code>since</code> takes the <code>next_since</code> from your previous response; the first call omits it. This matters more here than anywhere else on this page: a bot that only wants NEW announcements from here on should fast-forward on its first run &mdash; make one call, keep its <code>next_since</code>, and throw away whatever announcements came with it &mdash; otherwise its very first poll replays the feed's whole history.</p>
+
+          <h3>Parameters</h3>
+          <table class="rules-table">
+            <tbody>
+              <tr><th><code>since</code></th><td>only announcements after this id; omit for the oldest available</td></tr>
+              <tr><th><code>kinds</code></th><td>comma-separated, e.g. <code>daily_recap,month_honors</code>; omit for every kind</td></tr>
+              <tr><th><code>board</code></th><td><code>meshcore</code> or <code>meshtastic</code> (<code>mc</code>/<code>mt</code> also accepted); omit for both</td></tr>
+              <tr><th><code>net_id</code></th><td>only wrap-ups for one weekly net &mdash; see <a href="#nets">Nets</a> above for the id/label list</td></tr>
+              <tr><th><code>limit</code></th><td>1&ndash;100, default 20</td></tr>
+              <tr><th><code>text_budget</code></th><td>20&ndash;1000 bytes &mdash; not characters &mdash; default 150</td></tr>
+            </tbody>
+          </table>
+
+          <pre class="api-pre">{
+  &quot;announcements&quot;: [
+    {
+      &quot;id&quot;: 214,
+      &quot;kind&quot;: &quot;net_wrapup&quot;,
+      &quot;key&quot;: &quot;3:2026-08-19&quot;,
+      &quot;board&quot;: &quot;meshcore&quot;,
+      &quot;net_id&quot;: 3,
+      &quot;created_at&quot;: 1787458001,
+      &quot;content&quot;: {
+        &quot;kind&quot;: &quot;net_wrapup&quot;,
+        &quot;period_label&quot;: &quot;Wed 19 Aug&quot;
+      },
+      &quot;text&quot;: &quot;MC net Wed 19 Aug: DrkSkyz streak 4, KB7WHO Ken streak 1&quot;
+    }
+  ],
+  &quot;next_since&quot;: 214,
+  &quot;poll_interval_seconds&quot;: 900
+}</pre>
+          <p><code>poll_interval_seconds</code> is the server's own recommended cadence &mdash; honour it rather than choosing your own interval. It is set well above how often anything genuinely new can appear, so a bot that just reads this number back picks a sane cadence instead of guessing.</p>
+
+          <h3><code>text</code> vs <code>content</code></h3>
+          <p><code>text</code> is the pre-rendered plain-text line, already fitted to <code>text_budget</code> bytes of UTF-8 &mdash; safe to relay straight onto a mesh channel as-is. <code>content</code> is the same announcement in its structured form, for a consumer that wants to format it differently. Using <code>text</code> is the easy path, and it exists so five different bots do not each reimplement UTF-8 byte-fitting and get it wrong.</p>
+
+          <h3>Caching</h3>
+          <p>Send back the <code>ETag</code> you were given as an <code>If-None-Match</code> header and get a 304 with no body when nothing has changed &mdash; cheaper for you and for the server than fetching the same page again.</p>
+
+          <h3>Kinds</h3>
+          <table class="rules-table">
+            <tbody>
+              <tr><th><code>daily_recap</code></th><td>which teams moved rank today, and the day's single biggest square gain</td></tr>
+              <tr><th><code>weekly_recap</code></th><td>the week's placement changes and new ground explored</td></tr>
+              <tr><th><code>month_honors</code></th><td>a closed month's final standings and awards</td></tr>
+              <tr><th><code>net_wrapup</code></th><td>one weekly net's check-ins, top streaks first</td></tr>
+            </tbody>
+          </table>
+          <p>A quiet period produces no announcement at all rather than an empty one &mdash; a day with no rank changes and no gains, for instance, adds nothing to the feed.</p>
+        </section>
+
         <section id="recipes">
-          <h2>Two worked examples</h2>
+          <h2>Three worked examples</h2>
 
           <h3>A status command</h3>
           <pre class="api-pre">H = {"X-API-Key": os.environ["MESHWARS_KEY"]}
@@ -434,6 +526,25 @@ while True:
         seen = max(seen, c["ts"])
     time.sleep(60)</pre>
           <p>Start <code>seen</code> at the current time rather than zero if you do not want the whole season announced on first run.</p>
+
+          <h3>Following announcements</h3>
+          <pre class="api-pre">since = requests.get("https://meshwars.com/api/v1/announcements").json()["next_since"]
+etag = None
+poll_interval = 900   # the server's own recommendation; overwritten below
+
+while True:
+    headers = {"If-None-Match": etag} if etag else {}
+    r = requests.get("https://meshwars.com/api/v1/announcements",
+                     params={"since": since}, headers=headers)
+    if r.status_code != 304:
+        body = r.json()
+        etag = r.headers.get("ETag")
+        poll_interval = body["poll_interval_seconds"]
+        for a in body["announcements"]:
+            print(a["text"])
+        since = body["next_since"]
+    time.sleep(poll_interval)</pre>
+          <p>The first call just reads <code>next_since</code> and throws away whatever announcements came with it &mdash; fast-forwarding to "now" so the first real poll does not print the whole season's history. No <code>X-API-Key</code> here; add one only if you want the larger per-key budget instead of the anonymous tier.</p>
         </section>
 
       </div>
