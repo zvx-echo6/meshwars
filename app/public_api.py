@@ -55,22 +55,27 @@ reports and a figure on the page can never disagree.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sqlite3
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from . import mc_api, results
+from .auth import new_rate_limit_bucket
 from .checkin import load_checkin_config
 from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL, hash_secret
 from .mc_scoring import team_checkin_points, team_tile_counts
+from .mesh_render import render_mesh
 
 log = logging.getLogger("public_api")
 
@@ -418,6 +423,7 @@ async def v1_index(request: Request) -> JSONResponse:
             "/api/v1/captures": "recent captures, newest first",
             "/api/v1/results": "monthly standings and honors",
             "/api/v1/net": "the weekly net, and who has checked in",
+            "/api/v1/announcements": "the public announcement feed -- no key required; poll with ?since=",
         },
     })
 
@@ -780,3 +786,308 @@ async def v1_net(request: Request, board: str = "meshcore") -> JSONResponse:
         })
     finally:
         conn.close()
+
+
+# ---- GET /api/v1/announcements -----------------------------------------
+#
+# The one keyless /api/v1 route -- see v1_announcements()'s own docstring
+# for why. Everything below this line is specific to that one route: its
+# own rate-limit tier, its own response cache. Neither is shared with the
+# machinery above, deliberately (see each one's own comment).
+
+# A fresh, route-local rate-limit budget for the anonymous tier -- built
+# once at import time, same as every other _BoundedHits in this codebase
+# (see app/auth.py's module docstring for why a call site never shares
+# one with another). Deliberately NOT the same dict _rate_limited() above
+# reads/writes (`_hits`): a keyless /api/v1/announcements caller must
+# never be able to spend, or be starved by, budget any keyed or
+# require_key=False route above tracks under the same address.
+_announcements_anon_limiter = new_rate_limit_bucket()
+
+
+def _announcements_guard(request: Request) -> JSONResponse | None:
+    """Authenticate and rate limit for GET /api/v1/announcements only --
+    NOT a call to _guard() above, because this route's shape is not one
+    _guard() supports: every other route either always requires a key or
+    always rate limits by address (v1_index, require_key=False); this
+    one is keyless-by-default but a valid key upgrades the caller onto
+    the normal per-key budget instead. Returns an error JSONResponse, or
+    None when the caller may proceed.
+
+    A key that fails to authenticate still 401s exactly like every other
+    route -- presenting a bad key is not the same thing as presenting no
+    key at all, and must not silently fall back to the (tighter)
+    anonymous tier.
+
+    Every 429 here carries a `Retry-After` header (seconds), which
+    _rate_limited()'s own 429 (used by every other route above) does
+    not -- this route is the one meant to be polled by unattended bots
+    with no human watching the response body, so the machine-readable
+    header matters more here than it has anywhere else in this module.
+    """
+    raw = request.headers.get(_KEY_HEADER, "")
+    if raw:
+        if _authenticate(raw) is None:
+            return JSONResponse(
+                {"error": "unauthorized", "detail": "unknown or revoked key"},
+                status_code=401,
+            )
+        # The normal per-key /api/v1 budget -- same _hits dict and same
+        # settings every other keyed route in this module shares, so a
+        # key's spend here counts against, and is counted by, its spend
+        # everywhere else. A key upgrades a caller onto this fast lane;
+        # it never adds a SECOND budget on top of it.
+        if _rate_limited(hash_secret(raw)):
+            return JSONResponse(
+                {"error": "rate limited",
+                 "detail": "%d requests per %d seconds"
+                           % (settings.public_api_rate_limit_requests,
+                              settings.public_api_rate_limit_window_seconds)},
+                status_code=429,
+                headers={"Retry-After": str(settings.public_api_rate_limit_window_seconds)},
+            )
+        return None
+
+    ip = _client_ip(request)
+    limit = settings.announcements_anon_rate_limit_requests
+    window = settings.announcements_anon_rate_limit_window_seconds
+    if _announcements_anon_limiter.limited(ip, limit=limit, window=window):
+        return JSONResponse(
+            {"error": "rate limited", "detail": "%d requests per %d seconds" % (limit, window)},
+            status_code=429,
+            headers={"Retry-After": str(window)},
+        )
+    return None
+
+
+# ---- response cache, modeled on app/places_api.py's cached_places_
+# response/_PLACES_CACHE (itself modeled on app/mc_api.py's
+# cached_json_response/_BOARD_CACHE) -- same shape: cache the SERIALIZED
+# bytes (so N pollers hitting an unchanged feed don't each pay their own
+# json.dumps), key the ETag inside the per-entry object (so a validator
+# minted against one entry's bytes can never 304 a request against a
+# different entry's), ttl = 0 disables the cache. Deliberately its own,
+# small, self-contained copy here rather than an import from either
+# sibling module -- same "this module's cache can change without
+# touching that one's" reasoning app/places_api.py's own comment gives
+# for not sharing app/mc_api.py's. No gzip tier: unlike the board or the
+# places viewport, a page of announcements is small (limit caps at 100
+# rows of short, budget-capped text), so there is no equivalent of the
+# py-spy finding that justified paying for that complexity there.
+_ANNOUNCEMENTS_CACHE_MAX = 512
+
+
+class _CachedAnnouncementsBody:
+    __slots__ = ("built_at", "body", "etag")
+
+    def __init__(self, built_at: float, body: bytes, etag: str) -> None:
+        self.built_at = built_at
+        self.body = body
+        self.etag = etag
+
+
+_ANNOUNCEMENTS_CACHE: "OrderedDict[str, _CachedAnnouncementsBody]" = OrderedDict()
+
+
+def _cached_announcements_response(key: str, ttl: int, build, request: Request) -> Response:
+    """Serve `build()`'s result as JSON, reusing the serialized bytes for
+    up to `ttl` seconds under `key` (the full set of query parameters
+    that affect the result -- see v1_announcements()'s own cache_key).
+
+    ETag: a strong validator (sha256 of the serialized body) is computed
+    and checked against an incoming If-None-Match on EVERY call, cache
+    hit or miss, ttl=0 or not -- minting one costs nothing extra on top
+    of the serialization this route already pays for. A polling bot
+    that has already seen everything currently in the feed sends the
+    same cursor and gets the same bytes back every time; honouring
+    If-None-Match means that costs this process a hash comparison and a
+    304, not a query and a full payload -- the whole point of a bot
+    being ABLE to poll this route on a tight interval in the first
+    place.
+    """
+    now = time.monotonic()
+
+    def answer(entry: _CachedAnnouncementsBody) -> Response:
+        headers = {"ETag": entry.etag}
+        if ttl > 0:
+            headers["Cache-Control"] = f"public, max-age={ttl}"
+        if request.headers.get("if-none-match") == entry.etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content=entry.body, media_type="application/json", headers=headers)
+
+    if ttl > 0:
+        hit = _ANNOUNCEMENTS_CACHE.get(key)
+        if hit is not None and now - hit.built_at < ttl:
+            _ANNOUNCEMENTS_CACHE.move_to_end(key)
+            return answer(hit)
+
+    # ensure_ascii=False + allow_nan=False, matching JSONResponse.render
+    # (starlette.responses) byte-for-byte -- see app/places_api.py's
+    # cached_places_response for why: content is ASCII by construction
+    # today (app/announce_content.py's own HARD RULE) but this keeps the
+    # bytes identical to what a plain JSONResponse would have sent
+    # regardless.
+    body = json.dumps(
+        build(), ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+    entry = _CachedAnnouncementsBody(now, body, etag)
+    if ttl > 0:
+        _ANNOUNCEMENTS_CACHE[key] = entry
+        _ANNOUNCEMENTS_CACHE.move_to_end(key)
+        if len(_ANNOUNCEMENTS_CACHE) > _ANNOUNCEMENTS_CACHE_MAX:
+            _ANNOUNCEMENTS_CACHE.popitem(last=False)
+    return answer(entry)
+
+
+# The recommended poll interval this route hands back in every response
+# (`poll_interval_seconds`) -- a fixed, documented constant, NOT
+# settings.announcement_poll_interval_seconds (that setting is
+# app/announce.py's own internal due-check cadence, 60s by default, an
+# entirely different concern: how often THIS SERVER checks whether a new
+# announcement is due, not how often an outside consumer should ask for
+# one). 900s (15 minutes) is generous headroom over how often anything
+# genuinely new can appear -- the fastest-moving provider, net_wrapup,
+# fires once per net -- so a forked bot that simply reads this number
+# picks a sane cadence instead of guessing (or, worse, polling every few
+# seconds "to be safe").
+_RECOMMENDED_POLL_INTERVAL_SECONDS = 900
+
+
+@router.get("/api/v1/announcements")
+async def v1_announcements(
+    request: Request,
+    since: int = 0,
+    kinds: str | None = None,
+    board: str | None = None,
+    net_id: int | None = None,
+    limit: int = 20,
+    text_budget: int = 150,
+) -> Response:
+    """The public announcement feed -- app/db.py's `announcement` table
+    (daily recaps, weekly recaps, month honors, net wrap-ups; see
+    app/announce.py for when each is built and app/announce_content.py
+    for their shape).
+
+    KEYLESS BY DESIGN -- the one route in this module that does not
+    require an X-API-Key (see _announcements_guard(), not _guard()).
+    Every other route in this file gates on a key mainly so a
+    misbehaving integration can be identified and revoked on its own
+    (see this module's own docstring); that reasoning does not apply
+    here. An announcement is already public broadcast news about a
+    public game -- headline honors and recaps destined for an open radio
+    channel anyone can listen to -- so gating it behind a key protects
+    nothing, and would only mean every third-party bot author has to
+    personally ask the operator for a key before their bot can work at
+    all. Instead, a keyless caller gets a tight, address-keyed rate
+    limit of its own (announcements_anon_rate_limit_requests per
+    announcements_anon_rate_limit_window_seconds); a caller who does
+    present a valid key is treated exactly like every other /api/v1
+    caller (the normal public_api_rate_limit_requests/window_seconds
+    per-key budget) -- a key upgrades you to the fast lane here, it is
+    just never required to use this route at all.
+
+    `since` is the poll cursor: only rows with id > since are returned,
+    ORDER BY id ASC (oldest first) -- unlike /api/v1/captures (newest
+    first), a consumer replaying a cursor across a restart or an outage
+    must see events in the order they actually happened, not have to
+    sort them itself. `next_since` is the highest id actually returned,
+    or the incoming `since` unchanged when nothing was -- so a consumer
+    can always poll again with `since=<next_since>` and never has to
+    track ids on its own.
+
+    `kinds` filters on `kind` (comma-separated, e.g.
+    "daily_recap,month_honors"); `board` accepts the same spellings
+    _BOARDS above does; `net_id` filters to one checkin_net's own
+    wrap-ups. `limit` (default 20) and `text_budget` (default 150,
+    MeshCore's own single-packet budget -- see app/mesh_render.py) are
+    both silently CLAMPED to their documented bounds rather than
+    rejected -- a caller passing an oversized limit gets the capped
+    response it should have asked for, not a 400.
+
+    `text` is each row's stored Content dict, rendered through
+    app/mesh_render.py's render_mesh() at the caller's own text_budget
+    -- render_mesh()'s own hard guarantee is that the result never
+    exceeds that many UTF-8 bytes, so a caller building a radio bot does
+    not need to reimplement that renderer just to know what would
+    actually fit on the air.
+
+    Served through _cached_announcements_response()
+    (settings.announcements_cache_seconds) -- see that function for the
+    ETag/304 contract, which applies regardless of the cache TTL.
+    """
+    err = _announcements_guard(request)
+    if err:
+        return err
+
+    limit = max(1, min(limit, 100))
+    text_budget = max(20, min(text_budget, 1000))
+
+    kind_list = sorted({k.strip() for k in kinds.split(",") if k.strip()}) if kinds else None
+
+    proto = None
+    if board is not None:
+        proto = _protocol(board)
+        if proto is None:
+            return JSONResponse(
+                {"error": "unknown board",
+                 "detail": "board must be one of: meshcore, meshtastic"},
+                status_code=400,
+            )
+
+    cache_key = "|".join([
+        str(since),
+        ",".join(kind_list) if kind_list else "",
+        proto or "",
+        str(net_id) if net_id is not None else "",
+        str(limit),
+        str(text_budget),
+    ])
+
+    def build() -> dict:
+        query = ("SELECT id, kind, key, board, net_id, content, created_at "
+                  "  FROM announcement WHERE id > ?")
+        args: list = [since]
+        if kind_list:
+            marks = ",".join("?" * len(kind_list))
+            query += f" AND kind IN ({marks})"
+            args.extend(kind_list)
+        if proto is not None:
+            query += " AND board = ?"
+            args.append(proto)
+        if net_id is not None:
+            query += " AND net_id = ?"
+            args.append(net_id)
+        query += " ORDER BY id ASC LIMIT ?"
+        args.append(limit)
+
+        conn = connect()
+        try:
+            rows = conn.execute(query, args).fetchall()
+        finally:
+            conn.close()
+
+        next_since = since
+        items = []
+        for r in rows:
+            content = json.loads(r["content"])
+            items.append({
+                "id": r["id"],
+                "kind": r["kind"],
+                "key": r["key"],
+                "board": r["board"],
+                "net_id": r["net_id"],
+                "created_at": r["created_at"],
+                "content": content,
+                "text": render_mesh(content, budget_bytes=text_budget),
+            })
+            next_since = r["id"]
+
+        return {
+            "announcements": items,
+            "next_since": next_since,
+            "poll_interval_seconds": _RECOMMENDED_POLL_INTERVAL_SECONDS,
+        }
+
+    return _cached_announcements_response(
+        cache_key, settings.announcements_cache_seconds, build, request)

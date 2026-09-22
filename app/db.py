@@ -2639,6 +2639,51 @@ CREATE TABLE IF NOT EXISTS discord_pinned_message (
     pinned        INTEGER NOT NULL DEFAULT 0,
     updated_at    INTEGER NOT NULL
 );
+
+-- ---------------------------------------------------------------------
+-- The public announcement feed (app/announce_content.py): transport-
+-- neutral, structured Content -- a daily recap, a weekly recap, a
+-- month's honors, or one net's wrap-up -- built from the same scoring
+-- helpers app/results.py and Discord's own recaps already read, stored
+-- here so it is built exactly once and can be replayed to any consumer
+-- (a future public API route, a future radio-broadcast clock -- neither
+-- exists yet; this table is only the storage foundation for them).
+--
+-- `id` is the PUBLIC CURSOR, not an opaque surrogate key: a consumer
+-- polls with "?since=<id>" and reads every row with id > since, in
+-- insertion order -- a plain AUTOINCREMENT already gives that ordering
+-- for free, with no separate sequence column to keep in step. `kind` +
+-- `key` is the same dedup shape discord_outbox already uses for its own
+-- announcements just above (see that table's own comment) -- `key` is
+-- the Content's own natural key (a date, an ISO week, a "YYYY-MM", or a
+-- "<net_id>:<net_date>" -- see each builder in announce_content.py),
+-- unique only together with `kind`, since two different kinds can
+-- legitimately share the same literal key string without colliding.
+-- store_announcement()'s INSERT OR IGNORE against the UNIQUE index
+-- below is what makes re-building an already-stored Content a no-op
+-- rather than a duplicate row -- the same reason a re-freeze of an
+-- already-announced month drops its Discord repost silently instead of
+-- posting twice.
+--
+-- `content` is the whole built Content dict, json.dumps()'d whole --
+-- no per-field column for headline/sections/etc, the same choice
+-- discord_outbox.payload and board_cache.body already make for a blob
+-- that only ever needs to be read back out whole, never queried by one
+-- of its own fields. `board` and `net_id` are pulled out as real
+-- columns anyway (duplicating what is also inside `content`) purely so
+-- a consumer can filter/join on them in SQL without parsing the JSON
+-- first; net_id is NULL for every kind except net_wrapup, the only one
+-- scoped to a single checkin_net row rather than a whole board.
+CREATE TABLE IF NOT EXISTS announcement (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    board       TEXT NOT NULL,          -- 'mc' | 'mt'
+    net_id      INTEGER,                -- NULL except for net_wrapup
+    content     TEXT NOT NULL,          -- json.dumps() of the Content dict
+    created_at  INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_announcement_key ON announcement(kind, key);
 """
 
 
