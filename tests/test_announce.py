@@ -1,7 +1,8 @@
 """Tests for app/announce.py -- the missing "when" between
 app/announce_content.py's Content builders and app/mesh_render.py's
-renderer: _daily_period() (pure date math), the four providers
-(daily_provider, weekly_provider, month_provider, net_wrapup_provider),
+renderer: _daily_period() (pure date math), the five providers
+(daily_provider, weekly_provider, month_provider, net_wrapup_provider,
+season_close_provider),
 check_due() (the provider loop, mirroring app/discord_notify.py's
 check_due_time_driven()), and maybe_run() (its own interval-gated
 wrapper, mirroring app/discord_notify.py's _check_due_time_driven_once()
@@ -137,6 +138,28 @@ def _freeze(conn, protocol, month, closed_at):
 
 def _announcement_count(conn) -> int:
     return conn.execute("SELECT COUNT(*) AS n FROM announcement").fetchone()["n"]
+
+
+def _close_season(conn, protocol, ends_at, tallies, winner=None):
+    """A closed mc_season row plus its mc_season_team_tally rows --
+    what app/mc_scoring.py's maybe_roll_season() itself writes on a real
+    close, reproduced directly here (bypassing that function) since
+    these tests need full control over `ends_at` for the age-cutoff
+    checks, same reasoning _freeze() above gives for month_result.
+    `tallies` is a {team: tiles} dict.
+    """
+    cur = conn.execute(
+        "INSERT INTO mc_season(protocol, started_at, ends_at, status, winner) "
+        "VALUES (?, ?, ?, 'closed', ?)",
+        (protocol, ends_at - 1, ends_at, winner),
+    )
+    season_id = cur.lastrowid
+    for team, tiles in tallies.items():
+        conn.execute(
+            "INSERT INTO mc_season_team_tally(season_id, team, tiles) VALUES (?, ?, ?)",
+            (season_id, team, tiles),
+        )
+    return season_id
 
 
 # ---- _daily_period ---------------------------------------------------
@@ -357,7 +380,7 @@ def test_fresh_database_with_old_frozen_months_produces_zero_announcements(conn)
     """The exact scenario this feature must never repeat: a fresh
     deployment (or one resuming after a long outage) against a database
     whose only history is old, never-announced frozen months. check_due()
-    across ALL FOUR providers must store nothing at all."""
+    across EVERY registered provider must store nothing at all."""
     now = int(time.time())
     for i, month in enumerate(["2020-01", "2020-02", "2020-03"]):
         _freeze(conn, "mc", month, closed_at=1577836800 + i * 86400)
@@ -416,6 +439,88 @@ def test_net_wrapup_provider_age_cutoff_skips_a_stale_occurrence(conn):
     # well past the 72h default cutoff.
     much_later = int(datetime(2026, 9, 15, 8, 0, tzinfo=tz).timestamp())
     assert announce.net_wrapup_provider(conn, much_later) == []
+
+
+# ---- season_close_provider -------------------------------------------
+
+
+def test_season_close_provider_produces_content_for_a_recently_closed_season(conn):
+    now = int(datetime(2026, 9, 2, 10, 0, tzinfo=TZ).timestamp())
+    season_id = _close_season(conn, "mc", ends_at=now - 3600,
+                               tallies={"GREEN": 6005, "RED": 2621}, winner="GREEN")
+
+    items = announce.season_close_provider(conn, now)
+    assert len(items) == 1
+    assert items[0]["kind"] == "season_close"
+    assert items[0]["key"] == str(season_id)
+    assert items[0]["winner"] == "GREEN"
+
+
+def test_season_close_provider_no_closed_season_yields_nothing(conn):
+    now = int(datetime(2026, 9, 2, 10, 0, tzinfo=TZ).timestamp())
+    _season(conn, "mc", status="active")
+    assert announce.season_close_provider(conn, now) == []
+
+
+def test_season_close_provider_not_due_once_a_row_for_that_key_exists(conn):
+    now = int(datetime(2026, 9, 2, 10, 0, tzinfo=TZ).timestamp())
+    season_id = _close_season(conn, "mc", ends_at=now - 3600, tallies={"GREEN": 100})
+    first = announce.season_close_provider(conn, now)
+    assert len(first) == 1
+    conn.execute(
+        "INSERT INTO announcement(kind, key, board, net_id, content, created_at) "
+        "VALUES ('season_close', ?, 'mc', NULL, '{}', 0)",
+        (str(season_id),),
+    )
+    assert announce.season_close_provider(conn, now) == []
+
+
+def test_season_close_provider_zero_tally_teams_excluded_and_all_zero_yields_nothing(conn):
+    """A team with 0 tiles is excluded from the standings entirely (same
+    rule build_month_content()'s own Standings section applies); a
+    season where literally nobody scored anything yields no content at
+    all -- there is nothing to congratulate anyone for.
+    """
+    now = int(datetime(2026, 9, 2, 10, 0, tzinfo=TZ).timestamp())
+    _close_season(conn, "mc", ends_at=now - 3600, tallies={"GREEN": 0, "RED": 0})
+    assert announce.season_close_provider(conn, now) == []
+
+
+def test_season_close_provider_uses_its_own_longer_backlog_window(conn):
+    """settings.announcement_month_max_age_hours (the longer window),
+    NOT the shared settings.announcement_max_age_hours -- a season close
+    is at least as newsworthy as a month's and equally unrecreatable.
+    """
+    ends_at = int(datetime(2026, 9, 1, 0, 0, tzinfo=TZ).timestamp())
+    _close_season(conn, "mc", ends_at=ends_at, tallies={"GREEN": 100})
+
+    now_5d = ends_at + 5 * 86400
+    items = announce.season_close_provider(conn, now_5d)
+    assert len(items) == 1
+
+
+def test_season_close_provider_age_cutoff_still_applies_past_its_own_longer_window(conn):
+    ends_at = int(datetime(2026, 9, 1, 0, 0, tzinfo=TZ).timestamp())
+    _close_season(conn, "mc", ends_at=ends_at, tallies={"GREEN": 100})
+
+    now_8d = ends_at + 8 * 86400
+    assert announce.season_close_provider(conn, now_8d) == []
+
+
+def test_season_close_provider_only_most_recent_closed_season_per_board(conn):
+    """Same no-backlog shape month_provider()'s own docstring describes
+    for month_result: mc_season keeps every past season's row forever,
+    so only the single MOST RECENTLY closed season per board is ever
+    considered -- an older closed season with no announcement row is
+    never separately announced once a newer one has closed.
+    """
+    now = int(datetime(2026, 9, 2, 10, 0, tzinfo=TZ).timestamp())
+    _close_season(conn, "mc", ends_at=now - 10_000_000, tallies={"RED": 50})
+    newest_id = _close_season(conn, "mc", ends_at=now - 3600, tallies={"GREEN": 100})
+
+    items = announce.season_close_provider(conn, now)
+    assert len(items) == 1
+    assert items[0]["key"] == str(newest_id)
 
 
 # ---- check_due -------------------------------------------------------
