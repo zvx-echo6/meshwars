@@ -117,6 +117,7 @@
         <li><a href="#captures">Captures</a></li>
         <li><a href="#results">Results</a></li>
         <li><a href="#net">Net</a></li>
+        <li><a href="#nets">Nets</a></li>
         <li><a href="#announcements">Announcements</a></li>
         <li><a href="#recipes">Three worked examples</a></li>
         </ul>
@@ -405,6 +406,27 @@
           <p><code>current_net_date</code> is only set while the net is actually open. <code>next_opens_at</code> is always the next start, so a reminder bot needs nothing else.</p>
         </section>
 
+        <section id="nets">
+          <h2>Nets</h2>
+          <p class="api-route"><span class="api-verb">GET</span> /api/v1/nets</p>
+          <p>The enabled check-in nets, by id, label and board. This is how you find a net's numeric <code>id</code> &mdash; the one <a href="#net">Net</a> above does not hand out and <a href="#announcements">Announcements</a>' <code>net_id</code> filter expects &mdash; so an operator can pick a net by name instead of guessing.</p>
+          <p>Needs <strong>no key</strong>, the same as Announcements below, and shares that route's rate limits and budget: present a key and you get the normal per-key budget instead of the anonymous tier.</p>
+          <pre class="api-pre">{
+  &quot;nets&quot;: [
+    {
+      &quot;id&quot;: 1,
+      &quot;label&quot;: &quot;Weekly Net (Freq51 MC)&quot;,
+      &quot;board&quot;: &quot;mc&quot;,
+      &quot;weekday&quot;: 2,
+      &quot;start_hour&quot;: 17,
+      &quot;end_hour&quot;: 23,
+      &quot;timezone&quot;: &quot;America/Boise&quot;
+    }
+  ]
+}</pre>
+          <p>Only enabled nets are listed, ordered by id. Nothing about how a net is polled &mdash; its connector, broker, channel or hashtag &mdash; is included; that is this operator's own upstream configuration, not something a caller choosing a net needs or should see.</p>
+        </section>
+
         <section id="announcements">
           <h2>Announcements</h2>
           <p class="api-route"><span class="api-verb">GET</span> /api/v1/announcements?since=0</p>
@@ -429,7 +451,7 @@
               <tr><th><code>since</code></th><td>only announcements after this id; omit for the oldest available</td></tr>
               <tr><th><code>kinds</code></th><td>comma-separated, e.g. <code>daily_recap,month_honors</code>; omit for every kind</td></tr>
               <tr><th><code>board</code></th><td><code>meshcore</code> or <code>meshtastic</code> (<code>mc</code>/<code>mt</code> also accepted); omit for both</td></tr>
-              <tr><th><code>net_id</code></th><td>only wrap-ups for one weekly net</td></tr>
+              <tr><th><code>net_id</code></th><td>only wrap-ups for one weekly net &mdash; see <a href="#nets">Nets</a> above for the id/label list</td></tr>
               <tr><th><code>limit</code></th><td>1&ndash;100, default 20</td></tr>
               <tr><th><code>text_budget</code></th><td>20&ndash;1000 bytes &mdash; not characters &mdash; default 150</td></tr>
             </tbody>

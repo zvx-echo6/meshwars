@@ -423,6 +423,7 @@ async def v1_index(request: Request) -> JSONResponse:
             "/api/v1/captures": "recent captures, newest first",
             "/api/v1/results": "monthly standings and honors",
             "/api/v1/net": "the weekly net, and who has checked in",
+            "/api/v1/nets": "the enabled check-in nets by id/label/board -- no key required",
             "/api/v1/announcements": "the public announcement feed -- no key required; poll with ?since=",
         },
     })
@@ -790,10 +791,14 @@ async def v1_net(request: Request, board: str = "meshcore") -> JSONResponse:
 
 # ---- GET /api/v1/announcements -----------------------------------------
 #
-# The one keyless /api/v1 route -- see v1_announcements()'s own docstring
-# for why. Everything below this line is specific to that one route: its
-# own rate-limit tier, its own response cache. Neither is shared with the
-# machinery above, deliberately (see each one's own comment).
+# The first keyless /api/v1 route -- see v1_announcements()'s own
+# docstring for why. Everything below this line is specific to that
+# shape (keyless-by-default, a valid key upgrades you): its own
+# rate-limit tier, its own response cache. Neither is shared with the
+# machinery above, deliberately (see each one's own comment). GET
+# /api/v1/nets, further down, is keyless for the same reason and
+# deliberately reuses this same guard and cache rather than growing a
+# second copy of either.
 
 # A fresh, route-local rate-limit budget for the anonymous tier -- built
 # once at import time, same as every other _BoundedHits in this codebase
@@ -1091,3 +1096,64 @@ async def v1_announcements(
 
     return _cached_announcements_response(
         cache_key, settings.announcements_cache_seconds, build, request)
+
+
+# ---- GET /api/v1/nets ----------------------------------------------------
+
+
+@router.get("/api/v1/nets")
+async def v1_nets(request: Request) -> Response:
+    """The enabled check-in nets -- id, label, board, and schedule -- so
+    a third-party bot's operator can choose a net BY NAME and pass its
+    `id` to /api/v1/announcements?net_id= or elsewhere, instead of
+    guessing a numeric id nothing else on this surface hands out.
+
+    KEYLESS, sharing v1_announcements()'s own _announcements_guard()
+    rather than a second copy of it -- this route is the same
+    keyless-with-key-upgrade shape for the same reason: a net's
+    schedule is already shown on the site's own check-in pages, so
+    gating it behind a key protects nothing.
+
+    Only rows with enabled = 1, ordered by id -- a disabled net is not
+    a choice a caller should be offered.
+
+    NEVER returns `connector_url`, `broker_username`, `broker_password`,
+    `channel_key`, `topic_root`, `channel`, or `hashtag`. `broker_
+    password` and `channel_key` are outright secrets (see app/db.py's
+    checkin_net table comment); the rest name this operator's own
+    private upstream infrastructure -- which connector, which broker,
+    which channel or hashtag it polls -- that has no bearing on a
+    caller picking a net by name and would only leak deployment detail
+    nobody asked for. This is intentionally stricter than the admin
+    surface's own app/admin_ops.py:_scrub_secrets(), which hides only
+    the two secrets because an admin is allowed to see the rest of
+    their own config. Do not widen this response to match that shape;
+    ask Matt first.
+    """
+    err = _announcements_guard(request)
+    if err:
+        return err
+
+    def build() -> dict:
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, label, protocol, weekday, start_hour, end_hour, timezone "
+                "  FROM checkin_net WHERE enabled = 1 ORDER BY id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {
+            "nets": [{
+                "id": r["id"],
+                "label": r["label"],
+                "board": r["protocol"],
+                "weekday": r["weekday"],
+                "start_hour": r["start_hour"],
+                "end_hour": r["end_hour"],
+                "timezone": r["timezone"],
+            } for r in rows],
+        }
+
+    return _cached_announcements_response(
+        "nets", settings.announcements_cache_seconds, build, request)

@@ -137,6 +137,44 @@ def _insert_announcement(path: str, content: dict) -> int:
     return row_id
 
 
+def _insert_net(
+    path: str,
+    *,
+    label: str = "Weekly Net (Freq51 MC)",
+    protocol: str = "mc",
+    kind: str = "corescope",
+    weekday: int = 2,
+    start_hour: int = 17,
+    end_hour: int = 23,
+    timezone: str = "America/Boise",
+    enabled: int = 1,
+    connector_url: str = "https://SECRET-UPSTREAM.example.test",
+    channel: str = "SECRET-CHANNEL-NAME",
+    hashtag: str = "#SECRET-HASHTAG",
+    broker_username: str = "SECRET-BROKER-USER",
+    broker_password: str = "SECRET-BROKER-PASSWORD",
+    channel_key: str = "SECRET-CHANNEL-KEY==",
+    topic_root: str = "SECRET/TOPIC/ROOT",
+) -> int:
+    """INSERT a checkin_net row, defaulting every infrastructure/secret
+    column to a distinctive SECRET-* marker value, so a test can assert
+    none of those markers ever appear in a route's response body."""
+    conn = sqlite3.connect(path)
+    cur = conn.execute(
+        "INSERT INTO checkin_net(label, protocol, kind, connector_url, channel, hashtag, "
+        " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at, "
+        " broker_username, broker_password, channel_key, topic_root) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (label, protocol, kind, connector_url, channel, hashtag,
+         weekday, start_hour, end_hour, timezone, "2000-01-01", enabled, NOW,
+         broker_username, broker_password, channel_key, topic_root),
+    )
+    conn.commit()
+    net_id = cur.lastrowid
+    conn.close()
+    return net_id
+
+
 # ---- no key required ---------------------------------------------------
 
 
@@ -303,3 +341,106 @@ def test_ordering_is_id_ascending(client, db_path):
     resp = client.get("/api/v1/announcements")
     ids = [a["id"] for a in resp.json()["announcements"]]
     assert ids == [id1, id2, id3]
+
+
+# ---- GET /api/v1/nets -----------------------------------------------------
+
+
+def test_nets_returns_only_enabled_nets_ordered_by_id(client, db_path):
+    id1 = _insert_net(db_path, label="First", enabled=1)
+    _insert_net(db_path, label="Disabled", enabled=0)
+    id3 = _insert_net(db_path, label="Third", enabled=1)
+
+    resp = client.get("/api/v1/nets")
+    assert resp.status_code == 200
+    body = resp.json()
+    ids = [n["id"] for n in body["nets"]]
+    assert ids == [id1, id3]
+    assert body["nets"][0]["label"] == "First"
+    assert body["nets"][1]["label"] == "Third"
+
+
+def test_nets_works_with_no_key(client, db_path):
+    _insert_net(db_path, label="Weekly Net (Freq51 MC)", protocol="mc",
+                weekday=2, start_hour=17, end_hour=23, timezone="America/Boise")
+
+    resp = client.get("/api/v1/nets")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "nets": [{
+            "id": body["nets"][0]["id"],
+            "label": "Weekly Net (Freq51 MC)",
+            "board": "mc",
+            "weekday": 2,
+            "start_hour": 17,
+            "end_hour": 23,
+            "timezone": "America/Boise",
+        }]
+    }
+
+
+def test_nets_never_leaks_secret_or_upstream_infrastructure_columns(client, db_path):
+    _insert_net(
+        db_path,
+        connector_url="https://SECRET-UPSTREAM.example.test",
+        channel="SECRET-CHANNEL-NAME",
+        hashtag="#SECRET-HASHTAG",
+        broker_username="SECRET-BROKER-USER",
+        broker_password="SECRET-BROKER-PASSWORD",
+        channel_key="SECRET-CHANNEL-KEY==",
+        topic_root="SECRET/TOPIC/ROOT",
+    )
+
+    resp = client.get("/api/v1/nets")
+    assert resp.status_code == 200
+    raw = resp.text
+
+    forbidden_values = [
+        "SECRET-UPSTREAM.example.test",
+        "SECRET-CHANNEL-NAME",
+        "SECRET-HASHTAG",
+        "SECRET-BROKER-USER",
+        "SECRET-BROKER-PASSWORD",
+        "SECRET-CHANNEL-KEY",
+        "SECRET/TOPIC/ROOT",
+    ]
+    for value in forbidden_values:
+        assert value not in raw
+
+    forbidden_keys = [
+        "connector_url", "broker_username", "broker_password",
+        "channel_key", "topic_root", "channel", "hashtag",
+    ]
+    body = resp.json()
+    net = body["nets"][0]
+    for key in forbidden_keys:
+        assert key not in net
+
+
+def test_nets_shares_keyless_rate_limit_with_announcements(client, db_path, monkeypatch):
+    monkeypatch.setattr(public_api_module.settings, "announcements_anon_rate_limit_requests", 6)
+    monkeypatch.setattr(public_api_module.settings, "announcements_anon_rate_limit_window_seconds", 3600)
+    _insert_net(db_path)
+
+    # Split the shared budget across both routes -- it is one bucket
+    # per address, not one per route.
+    for _ in range(3):
+        assert client.get("/api/v1/nets").status_code == 200
+    for _ in range(3):
+        assert client.get("/api/v1/announcements").status_code == 200
+
+    resp = client.get("/api/v1/nets")
+    assert resp.status_code == 429
+    assert resp.headers.get("Retry-After") == "3600"
+
+
+def test_nets_if_none_match_returns_304(client, db_path):
+    _insert_net(db_path)
+    first = client.get("/api/v1/nets")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+
+    second = client.get("/api/v1/nets", headers={"If-None-Match": etag})
+    assert second.status_code == 304
+    assert second.content == b""
