@@ -1493,9 +1493,19 @@ def _validate_source_fields(body, current: dict | None = None) -> tuple[dict, JS
     # documents for nets.
     channel = (body.get("channel") or "").strip()
     if kind in (KIND_CORESCOPE, KIND_BEACON):
-        if not channel:
-            return {}, JSONResponse(
-                {"error": "channel is required for a %s source" % kind}, status_code=400)
+        # Deliberately NOT required here, unlike the same kinds on a NET.
+        # A net's channel says which channel's messages carry check-ins,
+        # so a net without one has nothing to score. An observation
+        # source never reads it: both paths a source feeds are
+        # instance-wide directory calls, not channel-scoped message
+        # reads -- confirm_scan_connector goes to
+        # fetch_directory_search(name, limit) and
+        # _refresh_mc_directory_if_stale to fetch_directory(limit), and
+        # neither takes a channel (see app/checkin.py). Requiring one
+        # would make the operator invent a value nothing ever reads, and
+        # a wrong guess would look like configuration while changing
+        # nothing. Stored as submitted if given, purely as a label.
+        pass
     elif kind == KIND_MESHVIEW:
         channel = ""
     elif kind == KIND_MQTT_MESHTASTIC:
