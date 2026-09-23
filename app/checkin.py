@@ -285,17 +285,32 @@ def _distinct_connectors(conn, kinds: tuple[str, ...]) -> list[dict]:
     tables (same kind, same connector_url) comes back once, not twice,
     with no extra DISTINCT needed on top.
 
-    No `enabled` filter -- matches both single-table queries this
-    replaced, neither of which ever restricted itself to enabled=1 rows
-    (confirmation has to work regardless of a net's own schedule, and
-    directory discovery is keyed off the connectors _poll_mc is already
-    about to poll, which are enabled by construction).
+    The two halves deliberately disagree on `enabled`, and that split
+    is intentional, not an oversight:
+
+    - checkin_net: NO `enabled` filter -- matches this half's original
+      single-table query, which never restricted itself to enabled=1
+      rows (confirmation has to work regardless of a net's own
+      schedule, and directory discovery is keyed off the connectors
+      _poll_mc is already about to poll, which are enabled by
+      construction). LEAVE THIS HALF ALONE.
+    - observation_source: `enabled = 1` ONLY -- an observation_source
+      row has no scoring window to disable-by-proxy the way a
+      checkin_net row does (see that table's own comment in app/db.py),
+      so its `enabled` toggle is the ONLY switch an admin has. Without
+      this filter, flipping a source off still leaves it scanned and
+      merged into the directory -- the toggle would be a lie. A
+      checkin_net row has no such gap (disabling it already stops it
+      scoring; this function existing outside `enabled` is what lets
+      confirmation/discovery keep seeing it anyway, which is correct
+      for THAT table).
     """
     placeholders = ",".join("?" for _ in kinds)
     rows = conn.execute(
         f"SELECT kind, connector_url FROM checkin_net WHERE kind IN ({placeholders}) "
         f"UNION "
-        f"SELECT kind, connector_url FROM observation_source WHERE kind IN ({placeholders})",
+        f"SELECT kind, connector_url FROM observation_source "
+        f"WHERE kind IN ({placeholders}) AND enabled = 1",
         kinds + kinds,
     ).fetchall()
     return [dict(r) for r in rows]
@@ -1875,7 +1890,7 @@ def _build_directory_bridge(
 
 
 def _resolve_mc_identities(
-    conn, primary_directory: list[dict], other_directories: list[list[dict]],
+    conn, primary_directory: list[dict], other_directories: list[tuple[str, list[dict]]],
     primary_connector: str | None = None,
 ) -> dict[str, int]:
     """normalized sender name -> player_id, the single map
@@ -1887,35 +1902,95 @@ def _resolve_mc_identities(
     was retired rather than kept as a fallback.
 
     `primary_directory` is the feed's OWN connector's cached directory
-    (see CheckinPoller._poll_mc_feed); `other_directories` is every
-    OTHER connector's cached directory currently being polled this
-    cycle, consulted only to WIDEN the search -- see the module
-    docstring's "which directory" note under the MeshCore identity
-    section. Both passes run through the exact same
-    _build_directory_bridge, so both apply its ambiguity refusals
-    identically; the only difference between them is which directory
-    entries are on the table, and the primary pass's answers win over
-    the cross-connector pass's on any remaining overlap (a player whose
-    contact resolves on their own net's connector is never second-
-    guessed by a match found elsewhere). A single connector (the common
-    case today) makes other_directories empty and this collapses to
-    exactly the original one-directory behavior.
+    (see CheckinPoller._poll_mc_feed); `other_directories` is a list of
+    (connector_url, directory) pairs, one per OTHER connector currently
+    being polled this cycle, consulted only to WIDEN the search -- see
+    the module docstring's "which directory" note under the MeshCore
+    identity section. Every pass runs through the exact same
+    _build_directory_bridge, so all of them apply its ambiguity
+    refusals identically; the only difference between them is which
+    directory entries are on the table, and the primary pass's answers
+    win over the cross-connector passes' on any remaining overlap (a
+    player whose contact resolves on their own net's connector is
+    never second-guessed by a match found elsewhere). A single
+    connector (the common case today) makes other_directories empty
+    and this collapses to exactly the original one-directory behavior.
+
+    Each OTHER connector gets its OWN bridge, built and indexed against
+    ONLY that connector's own directory -- never flattened together
+    into one shared index the way this used to work. A public-key
+    prefix (or a display name) is only 8 hex characters wide, so two
+    completely unrelated nodes on two DIFFERENT meshes can share one by
+    pure coincidence; within either mesh alone that prefix is still
+    unique and resolves with total confidence, but a union index would
+    see 2 entries under it and refuse the match as ambiguous -- turning
+    a confident single-mesh resolution into a false refusal purely
+    because an unrelated mesh happened to collide with it. Keeping each
+    connector's bridge separate until the merge below is what avoids
+    that: ambiguity is only ever judged within the directory a name or
+    key actually came from.
+
+    The merge across those per-connector bridges applies its own rule,
+    name by name: if exactly one other connector resolves a name, or
+    several agree on the SAME player, that stands (agreement across
+    independent meshes is not ambiguity, it's corroboration); if two or
+    more resolve the SAME name to DIFFERENT players, THAT is genuine
+    ambiguity and is refused, logged the same way a same-connector
+    collision already is. This is a strictly weaker refusal rule than
+    the old flattened union used -- it can only turn former false
+    refusals into resolutions, never the reverse, since a genuine
+    within-connector collision is still caught by _build_directory_bridge
+    itself before it ever reaches this merge.
 
     `primary_connector`, when given, is passed through to
-    _build_directory_bridge's PRIMARY-pass call only (never the cross-
-    connector pass) so it can record each resolved contact's current
-    directory name (checkin_node_name, app/db.py) against a single,
-    unambiguous connector -- see that function's own docstring for why
-    the cross-connector pass, built from a union across other
-    connectors, never does this.
+    _build_directory_bridge's PRIMARY-pass call only (never any other
+    pass) so it can record each resolved contact's current directory
+    name (checkin_node_name, app/db.py) against a single, unambiguous
+    connector -- see that function's own docstring for why the
+    cross-connector passes, each built from one other connector's own
+    directory, never do this.
     """
     now = int(time.time())
     primary_bridge = _build_directory_bridge(conn, primary_directory, connector=primary_connector, now=now)
-    if other_directories:
-        other_nodes = [node for nodes in other_directories for node in nodes]
-        other_bridge = _build_directory_bridge(conn, other_nodes)
-    else:
-        other_bridge = {}
+
+    # One bridge PER other connector -- see the docstring above for why
+    # flattening these together (the old behavior) is what let an
+    # unrelated mesh's coincidental prefix/name collision refuse a
+    # match that was perfectly unambiguous within its own mesh.
+    per_connector_bridges = [
+        (url, _build_directory_bridge(conn, nodes)) for url, nodes in other_directories
+    ]
+
+    other_bridge: dict[str, int] = {}
+    all_other_names = {name for _, bridge in per_connector_bridges for name in bridge}
+    for name in all_other_names:
+        # Which connectors resolved this name, grouped by WHICH player
+        # they resolved it to -- not by connector, since several
+        # connectors agreeing on one player is the common, fine case.
+        by_player: dict[int, list[str]] = {}
+        for url, bridge in per_connector_bridges:
+            player_id = bridge.get(name)
+            if player_id is not None:
+                by_player.setdefault(player_id, []).append(url)
+        if len(by_player) == 1:
+            # Either only one connector resolved it, or several did and
+            # agreed on the same player -- not ambiguous either way.
+            other_bridge[name] = next(iter(by_player))
+        else:
+            # Different OTHER connectors resolved the same name to
+            # different players -- genuine ambiguity, unlike a
+            # coincidental cross-mesh key collision. Refuse it exactly
+            # like a same-connector collision would.
+            log.warning(
+                "checkin: mc name %r resolves to different players across "
+                "other connectors (%s), refusing to resolve (ambiguous)",
+                name,
+                "; ".join(
+                    f"player {player_id} via {', '.join(urls)}"
+                    for player_id, urls in by_player.items()
+                ),
+            )
+
     # Primary wins any remaining overlap -- see the docstring above.
     for name, other_player_id in other_bridge.items():
         primary_player_id = primary_bridge.get(name)
@@ -2628,7 +2703,10 @@ class CheckinPoller:
             return
 
         primary_dir = self._mc_directory.get(connector_url, [])
-        other_dirs = [self._mc_directory.get(u, []) for u in all_connectors if u != connector_url]
+        # (connector_url, directory) pairs, one per OTHER connector --
+        # see _resolve_mc_identities' docstring for why it needs each
+        # one kept separate rather than flattened into a single list.
+        other_dirs = [(u, self._mc_directory.get(u, [])) for u in all_connectors if u != connector_url]
 
         async with WriteSession() as conn:
             resolved = _resolve_mc_identities(conn, primary_dir, other_dirs, primary_connector=connector_url)
