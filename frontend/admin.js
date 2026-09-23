@@ -1424,38 +1424,21 @@ function netKindHasHashtag(kind) { return kind !== 'corescope' && kind !== 'beac
 function netKindIsMeshCore(kind) { return kind === 'corescope' || kind === 'beacon'; }
 function netKindIsMqtt(kind) { return kind === 'mqtt' || kind === 'mqtt_meshtastic'; }
 
-// mqtt/mqtt_meshtastic's connector is a broker address, not an http(s)
-// URL like the other three -- an https example there reads as a typo
-// instruction rather than guidance. Keyed by kind so updateNetFormKind
-// can swap the connector field's placeholder to match whatever's
-// selected. mqtt_meshtastic's is the official public broker's own
-// address -- naming it here doubles as the value
-// prefillOfficialMqttDefaults below applies to a fresh form.
+// mqtt's connector is a broker address, not an http(s) URL like the
+// other kinds -- an https example there reads as a typo instruction
+// rather than guidance. Keyed by kind so updateNetFormKind/
+// updateSourceFormKind can swap the connector field's placeholder to
+// match whatever's selected. mqtt_meshtastic has no entry here: its
+// connector row is hidden outright (see updateNetFormKind below) since
+// there is only one official broker and nothing for an operator to
+// type -- app/admin_ops.py's _validate_connector_url forces it
+// server-side regardless of what this form would send.
 const NET_CONNECTOR_URL_EXAMPLES = {
   corescope: 'https://live.mwmesh.com',
   beacon: 'https://map.meshcore.coloradomesh.org',
   meshview: 'https://meshview.freq51.net',
   mqtt: 'mqtt://broker.example.org:1883',
-  mqtt_meshtastic: 'mqtts://mqtt.meshtastic.org:8883',
 };
-
-// The official public Meshtastic broker's well-known default
-// credentials (documented by Meshtastic itself, not a secret this form
-// is leaking). Called only from updateNetFormKind's own guard below --
-// a FRESH form (editingNetId === null) that just switched TO
-// mqtt_meshtastic -- and even then only fills a field the operator has
-// not already typed something into. Never applies to an existing row:
-// nf-broker-password is blank-means-keep there (see saveNet's own
-// comment), so silently filling it would silently overwrite whatever
-// secret is actually stored the next time the operator hits Save.
-function prefillOfficialMqttDefaults() {
-  const connector = document.getElementById('nf-connector');
-  if (!connector.value.trim()) connector.value = NET_CONNECTOR_URL_EXAMPLES.mqtt_meshtastic;
-  const username = document.getElementById('nf-broker-username');
-  if (!username.value.trim()) username.value = 'meshdev';
-  const password = document.getElementById('nf-broker-password');
-  if (!password.value) password.value = 'large4cats';
-}
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
@@ -1543,7 +1526,17 @@ function renderNetRow(n) {
   // 'mc' and otherwise indistinguishable in this row, so a protocol
   // badge would leave an operator unable to tell them apart.
   info.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
-  info.appendChild(el('span', { className: 'adm-mono', text: n.connector_url }));
+  // mqtt_meshtastic's connector_url is always the same official broker
+  // address (see app/admin_ops.py's _validate_connector_url) -- not
+  // operator config, so showing it here the same way a real
+  // operator-chosen connector_url is shown would be misleading. The
+  // kind badge above already says which broker family this is; the
+  // topic root (the field that actually narrows this row) stands in
+  // for it instead. Every other kind still shows its real connector_url.
+  info.appendChild(el('span', {
+    className: 'adm-mono',
+    text: n.kind === 'mqtt_meshtastic' ? ('topic root: ' + n.topic_root) : n.connector_url,
+  }));
   // channel and hashtag are no longer simple opposites for mqtt/
   // mqtt_meshtastic (see netKindHasChannel/netKindHasHashtag above) --
   // show whichever of the two this row actually has a value for; every
@@ -1836,18 +1829,26 @@ function updateNetFormKind() {
     select.replaceChildren();
   }
   const isMqtt = netKindIsMqtt(kind);
+  const isOfficialMqtt = kind === 'mqtt_meshtastic';
+  // mqtt_meshtastic has exactly one broker, one address, one set of
+  // published credentials -- connector_url/broker_username/
+  // broker_password are not operator choices for this kind (see
+  // app/checkin.py's OFFICIAL_MESHTASTIC_* constants and
+  // app/admin_ops.py's _validate_connector_url/_validate_mqtt_fields,
+  // which force all three server-side regardless of what this form
+  // sends), so those rows never appear for it -- only topic root,
+  // channel, and channel key are real choices. The static hint below
+  // replaces the connector row so the operator can still see what
+  // broker it will use.
+  document.getElementById('nf-connector-row').hidden = isOfficialMqtt;
+  document.getElementById('nf-official-broker-hint').hidden = !isOfficialMqtt;
   document.getElementById('nf-mqtt-row-1').hidden = !isMqtt;
-  document.getElementById('nf-mqtt-row-2').hidden = !isMqtt;
+  document.getElementById('nf-broker-username').hidden = isOfficialMqtt;
+  document.getElementById('nf-mqtt-row-2').hidden = !isMqtt || isOfficialMqtt;
   document.getElementById('nf-mqtt-row-3').hidden = !isMqtt;
-  document.getElementById('nf-mqtt-meshtastic-hint').hidden = kind !== 'mqtt_meshtastic';
+  document.getElementById('nf-mqtt-meshtastic-hint').hidden = !isOfficialMqtt;
   const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
   document.getElementById('nf-connector').placeholder = 'connector URL, e.g. ' + example;
-  // Official-broker prefill -- only a FRESH form (editingNetId is set
-  // before this runs during an edit, see startEditNet) that just
-  // switched to the kind that needs it. See
-  // prefillOfficialMqttDefaults's own comment above for why it never
-  // touches an existing row.
-  if (kind === 'mqtt_meshtastic' && editingNetId === null) prefillOfficialMqttDefaults();
 }
 
 async function loadNetChannels(b) {
@@ -2035,7 +2036,14 @@ function renderSourceRow(n) {
   const info = el('div', { className: 'adm-net-info' });
   info.appendChild(el('strong', { text: n.label }));
   info.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
-  info.appendChild(el('span', { className: 'adm-mono', text: n.connector_url }));
+  // Same "not operator config" reasoning as renderNetRow's identical
+  // check above -- mqtt_meshtastic's connector_url is always the one
+  // official broker address, so the topic root stands in for it here
+  // too.
+  info.appendChild(el('span', {
+    className: 'adm-mono',
+    text: n.kind === 'mqtt_meshtastic' ? ('topic root: ' + n.topic_root) : n.connector_url,
+  }));
   // Blank for a kind that has nothing to narrow by (meshview) -- see
   // _validate_source_fields in app/admin_ops.py -- so only shown when
   // there's actually a value.
@@ -2106,9 +2114,16 @@ function updateSourceFormKind() {
     select.replaceChildren();
   }
   const isMqtt = netKindIsMqtt(kind);
+  const isOfficialMqtt = kind === 'mqtt_meshtastic';
+  // Same "one broker, nothing to choose" reasoning as
+  // updateNetFormKind's identical block above.
+  document.getElementById('sf-connector-row').hidden = isOfficialMqtt;
+  document.getElementById('sf-official-broker-hint').hidden = !isOfficialMqtt;
   document.getElementById('sf-mqtt-row-1').hidden = !isMqtt;
-  document.getElementById('sf-mqtt-row-2').hidden = !isMqtt;
+  document.getElementById('sf-broker-username').hidden = isOfficialMqtt;
+  document.getElementById('sf-mqtt-row-2').hidden = !isMqtt || isOfficialMqtt;
   document.getElementById('sf-mqtt-row-3').hidden = !isMqtt;
+  document.getElementById('sf-mqtt-meshtastic-hint').hidden = !isOfficialMqtt;
   const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
   document.getElementById('sf-connector').placeholder = 'connector URL, e.g. ' + example;
 }

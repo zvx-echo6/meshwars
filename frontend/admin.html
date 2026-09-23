@@ -261,9 +261,10 @@
             </label>
             <input type="text" id="nf-label" autocomplete="off" placeholder="label, e.g. Wednesday Net" />
           </div>
-          <div class="adm-form">
+          <div class="adm-form" id="nf-connector-row">
             <input type="text" id="nf-connector" autocomplete="off" placeholder="connector URL, e.g. https://live.mwmesh.com" />
           </div>
+          <p class="adm-hint" id="nf-official-broker-hint" hidden>Uses the official Meshtastic broker at mqtt.meshtastic.org.</p>
           <div class="adm-form" id="nf-channel-row">
             <input type="text" id="nf-channel" autocomplete="off" placeholder="channel" />
             <button type="button" id="nf-load-channels" class="adm-btn adm-btn-quiet">Load channels</button>
@@ -351,9 +352,10 @@
             </label>
             <input type="text" id="sf-label" autocomplete="off" placeholder="label, e.g. Boise discovery" />
           </div>
-          <div class="adm-form">
+          <div class="adm-form" id="sf-connector-row">
             <input type="text" id="sf-connector" autocomplete="off" placeholder="connector URL, e.g. https://live.mwmesh.com" />
           </div>
+          <p class="adm-hint" id="sf-official-broker-hint" hidden>Uses the official Meshtastic broker at mqtt.meshtastic.org.</p>
           <div class="adm-form" id="sf-channel-row">
             <input type="text" id="sf-channel" autocomplete="off" placeholder="channel" />
             <button type="button" id="sf-load-channels" class="adm-btn adm-btn-quiet">Load channels</button>
@@ -363,6 +365,7 @@
             <input type="text" id="sf-topic-root" autocomplete="off" placeholder="topic root, e.g. msh/US (blank = subscribe broadly)" />
             <input type="text" id="sf-broker-username" autocomplete="off" placeholder="broker username (optional)" />
           </div>
+          <p class="adm-hint" id="sf-mqtt-meshtastic-hint" hidden>Topic root and channel are both REQUIRED for the official Meshtastic broker &mdash; e.g. topic root <code>msh/US</code>, channel <code>LongFast</code>.</p>
           <div class="adm-form" id="sf-mqtt-row-2" hidden>
             <label class="adm-field-label adm-field-label-wide">Broker password
               <input type="password" id="sf-broker-password" autocomplete="off" placeholder="leave blank to keep current" />

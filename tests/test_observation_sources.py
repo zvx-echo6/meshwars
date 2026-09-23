@@ -25,6 +25,9 @@ from fastapi.testclient import TestClient
 import app.db as db
 from app.admin_ops import router as admin_router
 from app.auth import http_exception_as_error_body
+from app.checkin import (
+    OFFICIAL_MESHTASTIC_MQTT_PASSWORD, OFFICIAL_MESHTASTIC_MQTT_URL, OFFICIAL_MESHTASTIC_MQTT_USERNAME,
+)
 from app.db import MIGRATIONS, SCHEMA
 from app.sessions import SESSION_COOKIE_NAME, create_session
 
@@ -96,9 +99,20 @@ def _mqtt_meshtastic_source(**overrides) -> dict:
     body = {
         "label": "Public Meshtastic Broker",
         "kind": "mqtt_meshtastic",
-        "connector_url": "mqtt://mqtt.meshtastic.org:1883",
         "topic_root": "msh/US",
         "channel": "LongFast",
+    }
+    body.update(overrides)
+    return body
+
+
+def _mqtt_source(**overrides) -> dict:
+    body = {
+        "label": "Private Broker Source",
+        "kind": "mqtt",
+        "connector_url": "mqtt://broker.private:1883",
+        "broker_username": "brokeruser",
+        "broker_password": "brokerpw",
     }
     body.update(overrides)
     return body
@@ -175,13 +189,14 @@ def test_submitted_protocol_agreeing_with_kind_is_accepted(client):
 
 
 # ---------------------------------------------------------------------
-# connector_url scheme
+# connector_url scheme -- plain mqtt only; mqtt_meshtastic has nothing
+# for a caller to get right or wrong here, see the section below
 # ---------------------------------------------------------------------
 
 def test_mqtt_kind_requires_mqtt_scheme_connector_url(client):
     resp = client.post(
         "/api/admin/observation/sources/create",
-        json=_mqtt_meshtastic_source(connector_url="https://not-a-broker.example"),
+        json=_mqtt_source(connector_url="https://not-a-broker.example"),
     )
     assert resp.status_code == 400
 
@@ -189,7 +204,7 @@ def test_mqtt_kind_requires_mqtt_scheme_connector_url(client):
 def test_mqtt_kind_accepts_mqtts_scheme(client):
     resp = client.post(
         "/api/admin/observation/sources/create",
-        json=_mqtt_meshtastic_source(connector_url="mqtts://mqtt.meshtastic.org:8883"),
+        json=_mqtt_source(connector_url="mqtts://broker.private:8883"),
     )
     assert resp.status_code == 201
 
@@ -239,6 +254,55 @@ def test_mqtt_meshtastic_with_both_fields_is_accepted(client):
 
 
 # ---------------------------------------------------------------------
+# mqtt_meshtastic: connector_url/broker_username/broker_password are
+# forced to the official broker's published values, never accepted from
+# the caller -- there is only one such broker, so these are not choices.
+# ---------------------------------------------------------------------
+
+def test_mqtt_meshtastic_no_connector_or_credentials_succeeds_with_official_values(client):
+    body = _mqtt_meshtastic_source()
+    assert "connector_url" not in body
+    assert "broker_username" not in body
+    assert "broker_password" not in body
+    resp = client.post("/api/admin/observation/sources/create", json=body)
+    assert resp.status_code == 201
+    source_id = resp.json()["id"]
+
+    conn = sqlite3.connect(db.settings.db_path)
+    row = conn.execute(
+        "SELECT connector_url, broker_username, broker_password FROM observation_source WHERE id = ?",
+        (source_id,),
+    ).fetchone()
+    conn.close()
+    assert row[0] == OFFICIAL_MESHTASTIC_MQTT_URL
+    assert row[1] == OFFICIAL_MESHTASTIC_MQTT_USERNAME
+    assert row[2] == OFFICIAL_MESHTASTIC_MQTT_PASSWORD
+
+
+def test_mqtt_meshtastic_submitted_credentials_are_overridden_not_persisted(client):
+    resp = client.post(
+        "/api/admin/observation/sources/create",
+        json=_mqtt_meshtastic_source(
+            connector_url="mqtts://some-other-broker.example:8883",
+            broker_username="not-meshdev",
+            broker_password="not-large4cats",
+        ),
+    )
+    assert resp.status_code == 201
+    source_id = resp.json()["id"]
+
+    conn = sqlite3.connect(db.settings.db_path)
+    row = conn.execute(
+        "SELECT connector_url, broker_username, broker_password FROM observation_source WHERE id = ?",
+        (source_id,),
+    ).fetchone()
+    conn.close()
+    assert row[0] == OFFICIAL_MESHTASTIC_MQTT_URL
+    assert row[1] == OFFICIAL_MESHTASTIC_MQTT_USERNAME
+    assert row[2] == OFFICIAL_MESHTASTIC_MQTT_PASSWORD
+
+
+# ---------------------------------------------------------------------
 # plain mqtt: channel is OPTIONAL
 # ---------------------------------------------------------------------
 
@@ -257,69 +321,108 @@ def test_plain_mqtt_blank_channel_is_accepted(client):
 
 
 # ---------------------------------------------------------------------
-# secrets: keep-on-blank, explicit clear, invalid base64
+# channel_key: keep-on-blank, explicit clear -- unchanged for BOTH mqtt
+# kinds, tested here against mqtt_meshtastic since that's the kind whose
+# OTHER secret (broker_password) is now forced instead of operator-set.
 # ---------------------------------------------------------------------
 
-def test_blank_secrets_on_update_keep_stored_values(client):
+def test_channel_key_blank_on_update_keeps_stored_value(client):
     create_resp = client.post(
         "/api/admin/observation/sources/create",
-        json=_mqtt_meshtastic_source(
-            broker_password="s3cret", channel_key=base64.b64encode(bytes(range(16))).decode(),
-        ),
+        json=_mqtt_meshtastic_source(channel_key=base64.b64encode(bytes(range(16))).decode()),
     )
     source_id = create_resp.json()["id"]
-    assert create_resp.json()["has_broker_password"] is True
     assert create_resp.json()["has_channel_key"] is True
 
-    # Blank submission on update -- must NOT wipe the stored secrets.
+    # Blank submission on update -- must NOT wipe the stored channel_key.
     update_resp = client.post(
         "/api/admin/observation/sources/update",
-        json={**_mqtt_meshtastic_source(broker_password="", channel_key=""), "id": source_id},
+        json={**_mqtt_meshtastic_source(channel_key=""), "id": source_id},
     )
     assert update_resp.status_code == 200
-    assert update_resp.json()["has_broker_password"] is True
     assert update_resp.json()["has_channel_key"] is True
 
     # And the real value really is unchanged (checked directly against
     # storage, since the API never echoes it back -- see _scrub_secrets).
     conn = sqlite3.connect(db.settings.db_path)
     row = conn.execute(
-        "SELECT broker_password, channel_key FROM observation_source WHERE id = ?", (source_id,)
+        "SELECT channel_key FROM observation_source WHERE id = ?", (source_id,)
     ).fetchone()
     conn.close()
-    assert row[0] == "s3cret"
-    assert row[1] == base64.b64encode(bytes(range(16))).decode()
+    assert row[0] == base64.b64encode(bytes(range(16))).decode()
 
 
-def test_clear_broker_password_and_channel_key_blank_them(client):
+def test_clear_channel_key_blanks_it(client):
     create_resp = client.post(
         "/api/admin/observation/sources/create",
-        json=_mqtt_meshtastic_source(
-            broker_password="s3cret", channel_key=base64.b64encode(bytes(range(16))).decode(),
-        ),
+        json=_mqtt_meshtastic_source(channel_key=base64.b64encode(bytes(range(16))).decode()),
     )
     source_id = create_resp.json()["id"]
 
     update_resp = client.post(
         "/api/admin/observation/sources/update",
-        json={
-            **_mqtt_meshtastic_source(),
-            "id": source_id,
-            "clear_broker_password": True,
-            "clear_channel_key": True,
-        },
+        json={**_mqtt_meshtastic_source(), "id": source_id, "clear_channel_key": True},
     )
     assert update_resp.status_code == 200
-    assert update_resp.json()["has_broker_password"] is False
     assert update_resp.json()["has_channel_key"] is False
 
     conn = sqlite3.connect(db.settings.db_path)
     row = conn.execute(
-        "SELECT broker_password, channel_key FROM observation_source WHERE id = ?", (source_id,)
+        "SELECT channel_key FROM observation_source WHERE id = ?", (source_id,)
     ).fetchone()
     conn.close()
     assert row[0] == ""
-    assert row[1] == ""
+
+
+# ---------------------------------------------------------------------
+# plain mqtt broker_password: keep-on-blank, explicit clear -- still a
+# real operator secret for this kind, unlike mqtt_meshtastic's (now
+# forced) broker_password.
+# ---------------------------------------------------------------------
+
+def test_mqtt_broker_password_blank_on_update_keeps_stored_value(client):
+    create_resp = client.post(
+        "/api/admin/observation/sources/create",
+        json=_mqtt_source(broker_password="s3cret"),
+    )
+    source_id = create_resp.json()["id"]
+    assert create_resp.json()["has_broker_password"] is True
+
+    update_resp = client.post(
+        "/api/admin/observation/sources/update",
+        json={**_mqtt_source(broker_password=""), "id": source_id},
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["has_broker_password"] is True
+
+    conn = sqlite3.connect(db.settings.db_path)
+    row = conn.execute(
+        "SELECT broker_password FROM observation_source WHERE id = ?", (source_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == "s3cret"
+
+
+def test_mqtt_clear_broker_password_blanks_it(client):
+    create_resp = client.post(
+        "/api/admin/observation/sources/create",
+        json=_mqtt_source(broker_password="s3cret"),
+    )
+    source_id = create_resp.json()["id"]
+
+    update_resp = client.post(
+        "/api/admin/observation/sources/update",
+        json={**_mqtt_source(), "id": source_id, "clear_broker_password": True},
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["has_broker_password"] is False
+
+    conn = sqlite3.connect(db.settings.db_path)
+    row = conn.execute(
+        "SELECT broker_password FROM observation_source WHERE id = ?", (source_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == ""
 
 
 def test_invalid_base64_channel_key_is_400(client):

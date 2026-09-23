@@ -43,6 +43,7 @@ from .checkin import (
     checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
     MC_PROTOCOL as CHK_MC,
     KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_MQTT_MESHTASTIC, KIND_PROTOCOL,
+    OFFICIAL_MESHTASTIC_MQTT_URL, OFFICIAL_MESHTASTIC_MQTT_USERNAME, OFFICIAL_MESHTASTIC_MQTT_PASSWORD,
 )
 from .config import settings
 from .db import connect, get_cursor
@@ -701,14 +702,25 @@ def _validate_kind_and_protocol(body) -> tuple[str, str, JSONResponse | None]:
 
 def _validate_connector_url(body, kind: str, noun: str) -> tuple[str, JSONResponse | None]:
     """connector_url shape check, shared by nets and observation
-    sources: mqtt(s):// for the two mqtt-family kinds (a broker, not
+    sources: mqtt(s):// for the plain KIND_MQTT kind (a broker, not
     an HTTP API -- see app/db.py's checkin_net comment on
     connector_url), http(s):// for every other kind. `noun` is just
     "net" or "source", so the mqtt-specific message names the right
     thing.
+
+    KIND_MQTT_MESHTASTIC is not "every other kind" here, and deliberately
+    does not fall into either branch above: there is exactly one official
+    public Meshtastic broker (app/checkin.py's OFFICIAL_MESHTASTIC_MQTT_URL),
+    so its address is not something an operator supplies or gets wrong --
+    whatever the caller submitted for connector_url is never even read,
+    let alone validated, for this kind. Forcing it here (rather than
+    letting a bad value reach the database and fail at poll time) is what
+    makes typos and drift for this field structurally impossible.
     """
+    if kind == KIND_MQTT_MESHTASTIC:
+        return OFFICIAL_MESHTASTIC_MQTT_URL, None
     connector_url = (body.get("connector_url") or "").strip().rstrip("/")
-    if kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC):
+    if kind == KIND_MQTT:
         if not (connector_url.startswith("mqtt://") or connector_url.startswith("mqtts://")):
             return "", JSONResponse(
                 {"error": "connector_url must be an mqtt:// or mqtts:// URL for a %s %s" % (kind, noun)},
@@ -723,40 +735,59 @@ def _validate_mqtt_fields(body, kind: str, current: dict | None, noun: str) -> t
     """broker_username/broker_password/channel_key/topic_root -- shared
     by nets and observation sources, blank/unused for every kind but
     the two mqtt-family ones (KIND_MQTT, KIND_MQTT_MESHTASTIC).
-    broker_username/topic_root are plain config, taken straight from
-    the request every time. broker_password/channel_key are SECRETS
-    (see app/db.py's checkin_net/observation_source comments): an
-    empty submitted value means KEEP THE EXISTING one, not "clear it"
-    -- a config screen that always echoes '' back into these inputs
-    (since neither table's GET route ever returns the real value, see
-    _scrub_secrets below) would otherwise silently wipe a
-    password/key on every unrelated edit to that row. `current` (the
-    existing row, None on create) is what lets a blank submission mean
-    "unchanged" -- on create there is nothing to keep, so blank stays
-    blank there regardless. clear_broker_password/clear_channel_key
-    are the explicit way to actually blank one out, since a plain
-    empty string can no longer mean that.
 
-    mqtt_meshtastic REQUIRES topic_root (channel is validated by the
-    caller, since the two validators disagree on whether channel is
-    even a column) -- this, together with the caller's channel check,
-    is the safety property that matters most here: the official public
-    Meshtastic broker carries global traffic, and requiring both a
-    topic root and a channel is what guarantees an operator can never
+    For plain KIND_MQTT, broker_username/topic_root are plain config,
+    taken straight from the request every time, and broker_password is a
+    SECRET (see app/db.py's checkin_net/observation_source comments): an
+    empty submitted value means KEEP THE EXISTING one, not "clear it" --
+    a config screen that always echoes '' back into that input (since
+    neither table's GET route ever returns the real value, see
+    _scrub_secrets below) would otherwise silently wipe a password on
+    every unrelated edit to that row. `current` (the existing row, None
+    on create) is what lets a blank submission mean "unchanged" -- on
+    create there is nothing to keep, so blank stays blank there
+    regardless. clear_broker_password is the explicit way to actually
+    blank it out, since a plain empty string can no longer mean that.
+
+    For KIND_MQTT_MESHTASTIC, broker_username/broker_password are NOT
+    config at all -- there is exactly one official public Meshtastic
+    broker (app/checkin.py's OFFICIAL_MESHTASTIC_MQTT_USERNAME/
+    OFFICIAL_MESHTASTIC_MQTT_PASSWORD), so both are forced to those
+    constants and whatever the caller submitted for them (including a
+    clear_broker_password flag) is ignored outright -- there is nothing
+    for an operator to get right or wrong here, so no submitted value is
+    ever persisted over the official one. topic_root remains real,
+    operator-supplied config and REQUIRED for this kind (channel is
+    validated by the caller, since the two validators disagree on
+    whether channel is even a column) -- this, together with the
+    caller's channel check, is the safety property that matters most
+    here: the official broker carries global traffic, and requiring both
+    a topic root and a channel is what guarantees an operator can never
     accidentally subscribe `#` to the entire firehose, on a net or an
     observation source. `noun` is "net" or "source", for that message.
+
+    channel_key stays operator-supplied SECRET config for BOTH mqtt
+    kinds -- blank still means the Meshtastic default PSK (what LongFast
+    needs), a non-default channel still needs a real key typed in, and
+    there is no "official" value to force it to, unlike broker_username/
+    broker_password.
     """
     broker_username = ""
     topic_root = ""
     broker_password = (current.get("broker_password", "") if current else "")
     channel_key = (current.get("channel_key", "") if current else "")
-    if kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC):
-        broker_username = (body.get("broker_username") or "").strip()
+
+    if kind == KIND_MQTT_MESHTASTIC:
+        broker_username = OFFICIAL_MESHTASTIC_MQTT_USERNAME
+        broker_password = OFFICIAL_MESHTASTIC_MQTT_PASSWORD
         topic_root = (body.get("topic_root") or "").strip().strip("/")
-        if kind == KIND_MQTT_MESHTASTIC and not topic_root:
+        if not topic_root:
             return {}, JSONResponse(
                 {"error": "topic_root is required for a mqtt_meshtastic %s" % noun},
                 status_code=400)
+    elif kind == KIND_MQTT:
+        broker_username = (body.get("broker_username") or "").strip()
+        topic_root = (body.get("topic_root") or "").strip().strip("/")
 
         if body.get("clear_broker_password") is True:
             broker_password = ""
@@ -765,6 +796,7 @@ def _validate_mqtt_fields(body, kind: str, current: dict | None, noun: str) -> t
             if isinstance(submitted, str) and submitted:
                 broker_password = submitted
 
+    if kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC):
         if body.get("clear_channel_key") is True:
             channel_key = ""
         else:

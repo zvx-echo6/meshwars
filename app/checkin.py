@@ -243,6 +243,19 @@ KIND_MQTT = "mqtt"
 # way a blank topic_root on a private KIND_MQTT broker is allowed to.
 KIND_MQTT_MESHTASTIC = "mqtt_meshtastic"
 
+# The official public Meshtastic MQTT broker's address and default
+# credentials -- published in Meshtastic's own docs (meshtastic.org),
+# not a secret of ours, which is exactly why these live here as plain
+# constants instead of a config/env value: there is only ONE mqtt_meshtastic
+# broker, so an operator has nothing to choose for connector_url/
+# broker_username/broker_password -- app/admin_ops.py's
+# _validate_connector_url/_validate_mqtt_fields force every
+# KIND_MQTT_MESHTASTIC row to exactly these three, ignoring whatever a
+# caller submits for them.
+OFFICIAL_MESHTASTIC_MQTT_URL = "mqtts://mqtt.meshtastic.org:8883"
+OFFICIAL_MESHTASTIC_MQTT_USERNAME = "meshdev"
+OFFICIAL_MESHTASTIC_MQTT_PASSWORD = "large4cats"
+
 KIND_PROTOCOL = {
     KIND_CORESCOPE: MC_PROTOCOL,
     KIND_BEACON: MC_PROTOCOL,
