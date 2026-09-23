@@ -695,6 +695,11 @@ async def v1_captures(request: Request, board: str = "meshcore",
     own docstring's "one deliberate exception" paragraph: an X-API-Key
     is accountable rather than anonymous, so it is treated the same as
     a signed-in session for this one field.
+
+    event_type != 'release' excludes app/mc_scoring.py's release_tile()
+    rows: a release is not a capture and names no team or player (both
+    NULL) -- a bot announcing "RED just took a square from" a null team
+    would be a worse feed than simply not mentioning the release at all.
     """
     proto, err = _guard(request, board)
     if err:
@@ -708,7 +713,7 @@ async def v1_captures(request: Request, board: str = "meshcore",
             "SELECT l.cell_id, l.ts, l.by_team, l.from_team, l.by_air, p.display_name AS player "
             "  FROM mc_tile_capture_log l "
             "  LEFT JOIN player p ON p.player_id = l.by_player_id "
-            " WHERE l.season_id = ? AND l.ts > ? "
+            " WHERE l.season_id = ? AND l.ts > ? AND l.event_type != 'release' "
             " ORDER BY l.ts DESC LIMIT ?",
             (season["id"], since, limit),
         ).fetchall()

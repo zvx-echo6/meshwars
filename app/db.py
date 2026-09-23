@@ -849,14 +849,33 @@ CREATE TABLE IF NOT EXISTS mc_tile_capture (
 );
 
 -- Capture audit log: every flip, who did it, and who it was taken from.
+-- by_player_id/by_team are nullable and event_type exists (both added
+-- 2026-09-23 for automatic territory release, app/mc_ingest.py's
+-- _release_expired_tiles_sync()) because a release has no actor: nobody
+-- claimed anything, a cell just stopped having an owner. event_type
+-- distinguishes that ('release') from every row written before it
+-- existed and every row apply_paint() still writes today (default
+-- 'capture', covers both a fresh capture and a flip -- this table has
+-- never distinguished those two from each other, and release is the
+-- first event this log needs to tell apart from "someone painted this
+-- cell"). See app/results.py's ownership_at(), the sole source of truth
+-- for month standings: it reads event_type to treat a release as "no
+-- owner" for that cell from its ts on. On an existing deployed database,
+-- see db.py's _migrate_mc_tile_capture_log_nullable_actor() below for
+-- how by_player_id/by_team are relaxed to nullable (a table rebuild --
+-- this table is order 10^4-10^5 rows, not one of the large ones in this
+-- schema, so that is cheap) -- the event_type column itself is a plain
+-- MIGRATIONS ALTER (see MIGRATIONS below), a default-valued ADD COLUMN
+-- is metadata-only regardless of table size.
 CREATE TABLE IF NOT EXISTS mc_tile_capture_log (
     season_id    INTEGER NOT NULL,
     cell_id      TEXT NOT NULL,
     ts           INTEGER NOT NULL,
-    by_player_id INTEGER NOT NULL,
-    by_team      TEXT NOT NULL,
+    by_player_id INTEGER,
+    by_team      TEXT,
     from_team    TEXT,
     by_air       INTEGER NOT NULL DEFAULT 0,  -- claimed while moving at aircraft speed (see app/mc_ingest.py)
+    event_type   TEXT NOT NULL DEFAULT 'capture',  -- 'capture' (paint, first or flip) | 'release' (abandonment, app/mc_scoring.py's release_tile())
     PRIMARY KEY (season_id, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_mc_capture_log_cell ON mc_tile_capture_log(season_id, cell_id);
@@ -3433,6 +3452,17 @@ MIGRATIONS = [
     # either guard existed could have tripped either one.
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_clock_clamped INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_cell_cap_exceeded INTEGER NOT NULL DEFAULT 0",
+    # event_type (see mc_tile_capture_log's own SCHEMA comment above):
+    # a constant DEFAULT ADD COLUMN is a metadata-only change in SQLite
+    # (no rewrite of existing rows), so this is cheap regardless of the
+    # table's size. Every row written before this column existed was a
+    # capture or a flip -- release is brand new -- so 'capture' is not a
+    # guess, it is the only value any of them could have. The other half
+    # of this table's release-support migration (relaxing by_player_id/
+    # by_team to nullable) is NOT here -- see
+    # _migrate_mc_tile_capture_log_nullable_actor() below for why that
+    # one needs its own function rather than a plain ALTER.
+    "ALTER TABLE mc_tile_capture_log ADD COLUMN event_type TEXT NOT NULL DEFAULT 'capture'",
 ]
 
 PRAGMAS = [
@@ -3901,6 +3931,151 @@ def _migrate_freqmapper_verification_verification_id(conn: sqlite3.Connection) -
     log.info("freqmapper_verification migration: revert complete")
 
 
+def _migrate_mc_tile_capture_log_nullable_actor(conn: sqlite3.Connection) -> None:
+    """One-time migration: relax mc_tile_capture_log.by_player_id and
+    .by_team from NOT NULL to nullable, so a territory-release event
+    (app/mc_scoring.py's release_tile(), event_type='release') can be
+    logged with no actor -- a release has no player and no capturing
+    team to name; see that function's own docstring. Called from
+    init_db() itself, same reason _migrate_session_privacy() above is:
+    not a plain SQL statement the MIGRATIONS loop can run unguarded.
+
+    Gate: PRAGMA table_info's own `notnull` flag says directly whether
+    this database still has the old constraint. A fresh install never
+    does (SCHEMA above already declares both columns nullable), and a
+    previously-migrated one doesn't either, so every later boot after
+    the first migrated one is a true no-op.
+
+    SQLite's ALTER TABLE has no ALTER COLUMN / DROP CONSTRAINT verb
+    (https://www.sqlite.org/lang_altertable.html) -- relaxing a column
+    constraint means the standard 4-step rebuild: create a new table
+    with the desired shape, copy every row into it, drop the old table,
+    rename the new one into place. mc_tile_capture_log is not large by
+    this codebase's standards (order 10^4-10^5 rows on prod as of
+    2026-09-23, not the multi-GB tables elsewhere in this schema), so
+    that copy is genuinely cheap -- a few seconds, not a real cost to
+    budget around. Earlier drafts of this migration used SQLite's
+    writable_schema escape hatch to edit the stored CREATE TABLE text
+    directly instead of rebuilding, reasoning (correctly) that a pure
+    constraint relaxation can never invalidate an existing row. That
+    reasoning was sound but the trade was wrong: writable_schema is the
+    one pragma SQLite's own documentation calls out as able to corrupt
+    the database if misused, and spending that risk to avoid copying a
+    small table was backwards. The rebuild below is the boring,
+    reviewable, standard tool instead -- see
+    https://www.sqlite.org/lang_altertable.html#otheralter for the
+    documented pattern this follows.
+
+    Every row copied over in one INSERT...SELECT, and every explicit
+    index on the table recreated from `sqlite_master.sql` captured
+    BEFORE the drop (not hand-typed from memory -- this table has
+    already drifted from its own SCHEMA constant's aligned formatting
+    once, when the by_air column was added via a later ALTER TABLE ADD
+    COLUMN: sqlite_master.sql for a table that has been ALTERed no
+    longer matches the original CREATE TABLE text verbatim, which is
+    exactly the trap a hand-assumed index list could fall into).
+    sql IS NOT NULL excludes the PRIMARY KEY's own automatic
+    sqlite_autoindex_* entry, which carries no CREATE INDEX text of its
+    own and is recreated automatically by the PRIMARY KEY clause in the
+    new table below.
+
+    event_type is NOT filled in here: the MIGRATIONS loop above already
+    ran its own plain "ADD COLUMN event_type ... DEFAULT 'capture'" ALTER
+    (a metadata-only op, before this function is ever reached), so every
+    row already has a real event_type value by the time this SELECT
+    copies it -- both the historical rows PRAGMA gate's constant DEFAULT
+    just backfilled and any row this process itself wrote earlier today.
+
+    Wrapped in one explicit BEGIN IMMEDIATE/COMMIT (app/db.py's
+    connections run autocommit, isolation_level=None -- see
+    _make_real_connection()) so a failure at any step rolls the whole
+    rebuild back: the original table is never dropped until the new one
+    has been populated and row-counted equal to it, and a ROLLBACK on
+    any exception (including a row-count or index mismatch this
+    function raises itself) restores the pre-migration table exactly,
+    old constraint and all, for the next boot to retry cleanly.
+    """
+    cols = {row["name"]: row for row in conn.execute("PRAGMA table_info(mc_tile_capture_log)")}
+    if cols["by_player_id"]["notnull"] == 0 and cols["by_team"]["notnull"] == 0:
+        return  # already relaxed -- fresh install, or already migrated
+
+    log.info("mc_tile_capture_log migration: rebuilding table to relax by_player_id/by_team to nullable")
+
+    before_count = conn.execute("SELECT COUNT(*) FROM mc_tile_capture_log").fetchone()[0]
+    index_rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master "
+        " WHERE type = 'index' AND tbl_name = 'mc_tile_capture_log' AND sql IS NOT NULL"
+    ).fetchall()
+    expected_indexes = {r["name"] for r in index_rows}
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Defensive: a prior run that crashed AFTER commit-time cleanup
+        # but somehow left this staging table behind (should not happen
+        # -- it only ever exists mid-transaction, and a crash before
+        # COMMIT rolls the whole thing away) must not block a retry.
+        conn.execute("DROP TABLE IF EXISTS mc_tile_capture_log_new")
+        conn.execute(
+            "CREATE TABLE mc_tile_capture_log_new ("
+            "    season_id    INTEGER NOT NULL,"
+            "    cell_id      TEXT NOT NULL,"
+            "    ts           INTEGER NOT NULL,"
+            "    by_player_id INTEGER,"
+            "    by_team      TEXT,"
+            "    from_team    TEXT,"
+            "    by_air       INTEGER NOT NULL DEFAULT 0,"
+            "    event_type   TEXT NOT NULL DEFAULT 'capture',"
+            "    PRIMARY KEY (season_id, cell_id, ts)"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO mc_tile_capture_log_new"
+            "(season_id, cell_id, ts, by_player_id, by_team, from_team, by_air, event_type) "
+            "SELECT season_id, cell_id, ts, by_player_id, by_team, from_team, by_air, event_type "
+            "  FROM mc_tile_capture_log"
+        )
+
+        after_count = conn.execute("SELECT COUNT(*) FROM mc_tile_capture_log_new").fetchone()[0]
+        if after_count != before_count:
+            raise RuntimeError(
+                f"mc_tile_capture_log migration: row count mismatch after copy "
+                f"({before_count} -> {after_count}) -- refusing to proceed"
+            )
+
+        conn.execute("DROP TABLE mc_tile_capture_log")
+        conn.execute("ALTER TABLE mc_tile_capture_log_new RENAME TO mc_tile_capture_log")
+
+        # Recreated verbatim: by the time these run, the table has
+        # already been renamed back to mc_tile_capture_log, so each
+        # captured "CREATE INDEX ... ON mc_tile_capture_log(...)"
+        # statement binds to the new table exactly as it bound to the
+        # old one -- no text rewriting needed.
+        for row in index_rows:
+            conn.execute(row["sql"])
+
+        rebuilt_indexes = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master "
+                " WHERE type = 'index' AND tbl_name = 'mc_tile_capture_log' AND sql IS NOT NULL"
+            )
+        }
+        if rebuilt_indexes != expected_indexes:
+            raise RuntimeError(
+                "mc_tile_capture_log migration: index mismatch after rebuild -- "
+                f"expected {sorted(expected_indexes)}, got {sorted(rebuilt_indexes)}"
+            )
+
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    log.info(
+        "mc_tile_capture_log migration: complete (%d rows, %d index(es) recreated: %s)",
+        after_count, len(expected_indexes), ", ".join(sorted(expected_indexes)) or "none",
+    )
+
+
 def init_db() -> None:
     """Create schema and apply pragmas. Idempotent."""
     _ensure_parent_dir(settings.db_path)
@@ -3958,9 +4133,19 @@ def init_db() -> None:
         # than let the app start up against a half-migrated table.
         _migrate_freqmapper_verification_verification_id(conn)
 
+        # mc_tile_capture_log.by_player_id/by_team -> nullable (release
+        # events, see that function's own docstring for the full story:
+        # a standard create/copy/drop/rename table rebuild, wrapped in
+        # its own transaction) -- unguarded by try/except for the same
+        # reason as the two migrations just above: a
+        # failure here must stop boot loudly, not let the app start up
+        # still carrying the old constraint app/mc_scoring.py's
+        # release_tile() now assumes is gone.
+        _migrate_mc_tile_capture_log_nullable_actor(conn)
+
         # Startup WRITES -- gated on settings.run_background_tasks
         # (app/config.py). Schema creation and the MIGRATIONS loop and
-        # the two migration functions above are NOT in this block: every
+        # the three migration functions above are NOT in this block: every
         # process needs a fully migrated schema before it can serve a
         # single request, and that DDL is idempotent, so every process
         # running it redundantly is free. Everything below is different:

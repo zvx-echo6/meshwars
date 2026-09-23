@@ -1195,6 +1195,17 @@ class McIngestor:
             "%d stale player_ingest_stat rows, %d stale player_cell_repeater_credit rows",
             removed_pings, removed_stats, removed_credits,
         )
+        # Territory release sweep: its own transaction, separate from the
+        # retention deletes above -- "one transaction per sweep" means
+        # per RELEASE sweep, not that it has to share the ping/stat
+        # housekeeping's. Only the single-process meshwars-worker service
+        # runs background tasks at all (settings.run_background_tasks;
+        # the web service runs it False across 3 uvicorn workers -- see
+        # app/main.py), so this can never run twice at once.
+        async with _WRITE_LOCK:
+            summary = await asyncio.to_thread(self._release_expired_tiles_sync)
+        if summary is not None:
+            log.info("mc tile release sweep: %s", summary)
 
     def _housekeeping_sync(self) -> tuple:
         now_ts = int(time.time())
@@ -1231,6 +1242,82 @@ class McIngestor:
         finally:
             conn.close()
         return removed_pings, removed_stats, removed_credits
+
+    def _release_expired_tiles_sync(self) -> dict | None:
+        """One release sweep: find every cell in the active MeshCore
+        season whose owning team's score has sat at exactly 0 for
+        longer than settings.mc_tile_release_zero_hours
+        (mc_scoring.find_expired_tiles()), then either report what
+        would happen (settings.mc_tile_release_dry_run, the default) or
+        actually release them (mc_scoring.release_tile() -- see that
+        function's own docstring for exactly what a release does and
+        does not touch).
+
+        Returns None -- meaning "nothing to log" -- when the feature is
+        off (settings.mc_tile_release_enabled) or there is no active
+        MeshCore season yet; otherwise a summary dict the caller logs,
+        with the same shape whether this ran dry or for real (a
+        "dry_run" key tells them apart).
+
+        now_ts is this call's own real wall-clock time, used both as
+        "now" for finding expired tiles and, unchanged, as the ts every
+        released row is logged at -- never backdated to a paint's ts or
+        to a cell's own zero_ts, so an already-frozen month
+        (app/results.py's freeze_month()) is never retroactively
+        rewritten by a release that happens to be computed from
+        decay that finished well in its past.
+        """
+        if not settings.mc_tile_release_enabled:
+            return None
+        now_ts = int(time.time())
+        conn = connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            season = conn.execute(
+                "SELECT id FROM mc_season WHERE protocol = ? AND status = 'active' "
+                "ORDER BY id DESC LIMIT 1",
+                (PROTOCOL,),
+            ).fetchone()
+            if season is None:
+                conn.execute("COMMIT")
+                return None
+            season_id = season["id"]
+
+            expired = mc_scoring.find_expired_tiles(
+                conn, season_id, now_ts,
+                settings.mc_tile_release_zero_hours,
+                settings.mc_tile_release_max_per_sweep,
+            )
+            by_team: dict[str, int] = {}
+            for e in expired:
+                by_team[e.team] = by_team.get(e.team, 0) + 1
+            sample = [e.cell_id for e in expired[:10]]
+
+            if settings.mc_tile_release_dry_run:
+                conn.execute("COMMIT")
+                return {
+                    "dry_run": True,
+                    "season_id": season_id,
+                    "count": len(expired),
+                    "by_team": by_team,
+                    "sample_cell_ids": sample,
+                }
+
+            for e in expired:
+                mc_scoring.release_tile(conn, e.season_id, e.cell_id, e.team, now_ts)
+            conn.execute("COMMIT")
+            return {
+                "dry_run": False,
+                "season_id": season_id,
+                "count": len(expired),
+                "by_team": by_team,
+                "sample_cell_ids": sample,
+            }
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
 
 
 # ---- raw batch diagnostic log ---------------------------------------------

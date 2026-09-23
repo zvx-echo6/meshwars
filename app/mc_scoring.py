@@ -489,6 +489,163 @@ def apply_paint(
     return PaintResult("flipped", cell_id, team, score=new_score, from_team=owner_team)
 
 
+# ---- automatic release of long-abandoned territory ------------------------
+#
+# See app/config.py's mc_tile_release_* settings and
+# app/mc_ingest.py's _release_expired_tiles_sync() (the hourly sweep that
+# calls find_expired_tiles()/release_tile() below, hooked into the
+# existing _maybe_housekeeping()). Driven off the decay clock already
+# computed by decayed_score() above, not a new presence record: a real
+# visit that hears even one repeater scores and pushes last_update
+# forward, so only a cell that has genuinely heard nothing from its
+# owning team for the whole configured window is a candidate.
+
+
+def _zero_ts(score: float, last_update_ts: int) -> int:
+    """The exact wall-clock instant (unix seconds) at which a team's
+    linearly-decaying score for a cell reaches exactly 0, given where it
+    stood at last_update_ts -- the same inputs and the same
+    settings.mc_score_decay_per_day rate decayed_score() above reads,
+    just run forward to the floor instead of read back already-decayed.
+
+    score <= 0 returns last_update_ts itself: already at zero as of the
+    last write (upsert_team_score() never stores a negative score), so
+    there is nothing left to count down.
+
+    settings.mc_score_decay_per_day <= 0 (decay turned off entirely)
+    returns a instant far in the future rather than dividing by zero --
+    a positive score never reaches zero on its own with decay off, so
+    every caller's "how long has this been sitting at zero" comparison
+    should read as "never" here, not crash.
+    """
+    if score <= 0:
+        return last_update_ts
+    if settings.mc_score_decay_per_day <= 0:
+        return 2**62
+    days_to_zero = score / settings.mc_score_decay_per_day
+    return last_update_ts + int(days_to_zero * SECONDS_PER_DAY)
+
+
+@dataclass(frozen=True)
+class ExpiredTile:
+    """One cell find_expired_tiles() found past its release threshold."""
+    season_id: int
+    cell_id: str
+    team: str  # the owning team this cell would be released FROM
+    zero_ts: int  # when its score actually reached 0
+
+
+def find_expired_tiles(
+    conn: sqlite3.Connection,
+    season_id: int,
+    now_ts: int,
+    zero_hours: int,
+    limit: int | None,
+) -> list[ExpiredTile]:
+    """Every cell in `season_id` whose OWNING team's score reached
+    exactly 0 more than `zero_hours` ago, oldest zero_ts first (so a
+    capped sweep works down the longest-abandoned ground first), capped
+    at `limit` (None for no cap).
+
+    Read-only -- this only computes and returns candidates, following
+    the read/write split the rest of this module and app/results.py
+    both use. app/mc_ingest.py's _release_expired_tiles_sync() is the
+    only thing that turns this into a DELETE; Phase 3's read-only
+    projection against a snapshot database calls this directly too, for
+    exactly that reason -- measuring what WOULD happen must never be
+    able to change anything.
+
+    A cell whose owning team has no matching mc_tile_score row at all
+    is silently excluded (the INNER JOIN below never matches it), rather
+    than treated as an instant release. This should not happen in
+    practice -- apply_paint() always upserts the new owner's score in
+    the same transaction that creates or flips mc_tile's row, before
+    either INSERT/UPDATE runs -- but if it ever did, "don't touch a row
+    this function can't account for" is the only safe default; a
+    missing row is data this function cannot reason about, not evidence
+    of abandonment.
+    """
+    rows = conn.execute(
+        "SELECT mt.cell_id AS cell_id, mt.owner_team AS team, "
+        "       ms.score AS score, ms.last_update AS last_update "
+        "  FROM mc_tile mt "
+        "  JOIN mc_tile_score ms "
+        "    ON ms.season_id = mt.season_id AND ms.cell_id = mt.cell_id "
+        "   AND ms.team = mt.owner_team "
+        " WHERE mt.season_id = ?",
+        (season_id,),
+    ).fetchall()
+
+    threshold_seconds = zero_hours * 3600
+    out: list[ExpiredTile] = []
+    for r in rows:
+        zts = _zero_ts(r["score"], r["last_update"])
+        if now_ts - zts > threshold_seconds:
+            out.append(ExpiredTile(season_id, r["cell_id"], r["team"], zts))
+
+    out.sort(key=lambda e: e.zero_ts)
+    if limit is not None:
+        out = out[:limit]
+    return out
+
+
+def release_tile(
+    conn: sqlite3.Connection,
+    season_id: int,
+    cell_id: str,
+    team: str,
+    ts: int,
+) -> None:
+    """Release one abandoned cell: delete its mc_tile and mc_tile_capture
+    rows, and log the release to mc_tile_capture_log as its own event so
+    app/results.py's ownership_at() -- the SOLE source of truth for
+    month standings -- sees "no owner" here from `ts` on. The only
+    caller is app/mc_ingest.py's _release_expired_tiles_sync().
+
+    Deliberately does NOT touch mc_tile_score or mc_tile_unique_painter:
+    - mc_tile_score: other teams' scores on this cell are still
+      meaningful (a team quietly building score here while the departed
+      owner sat at zero should not lose that progress just because the
+      owner's row was cleaned up), and this team's own zeroed row is
+      itself the evidence this release was computed from -- deleting it
+      would make a re-run of find_expired_tiles() unable to explain
+      itself.
+    - mc_tile_unique_painter: history of who has already earned the
+      one-time unique-player bonus here must persist, so a player who
+      already earned it cannot re-earn it just by returning after the
+      cell reopens (see apply_paint()'s is_first_paint_for_player()
+      call).
+
+    `team` is the team being released FROM (mc_tile.owner_team at the
+    moment this runs) -- recorded as from_team, matching a flip's own
+    from_team. by_player_id/by_team are NULL and event_type is
+    'release': nobody claimed anything, there is no actor, and that is
+    exactly what distinguishes a release from an ordinary capture/flip
+    row (see mc_tile_capture_log's own SCHEMA comment in app/db.py).
+    `ts` is the caller's own real wall-clock time -- see
+    _release_expired_tiles_sync()'s docstring for why this is never
+    backdated to zero_ts or anything else in the past.
+
+    Caller must already hold app.db's write lock and an open write
+    transaction on `conn` -- same contract as apply_paint() above.
+    """
+    conn.execute(
+        "DELETE FROM mc_tile WHERE season_id = ? AND cell_id = ?",
+        (season_id, cell_id),
+    )
+    conn.execute(
+        "DELETE FROM mc_tile_capture WHERE season_id = ? AND cell_id = ?",
+        (season_id, cell_id),
+    )
+    conn.execute(
+        "INSERT INTO mc_tile_capture_log"
+        "(season_id, cell_id, ts, by_player_id, by_team, from_team, by_air, event_type) "
+        "VALUES (?, ?, ?, NULL, NULL, ?, 0, 'release')",
+        (season_id, cell_id, ts, team),
+    )
+    log.info("mc scoring: cell %s released from %s (zero score expired)", cell_id, team)
+
+
 def team_tile_counts(conn: sqlite3.Connection, season_id: int) -> dict[str, int]:
     """Tile count per team for a season -- squares held only, no
     check-in points folded in. Used by the API wherever the raw square
