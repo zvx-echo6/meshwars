@@ -124,6 +124,7 @@
           </button>
           <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
           <button type="button" class="adm-nav-item" data-section="nets">Nets</button>
+          <button type="button" class="adm-nav-item" data-section="observation">Observation</button>
           <button type="button" class="adm-nav-item" data-section="paint">Paint</button>
           <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
           <button type="button" class="adm-nav-item" data-section="months">Months</button>
@@ -244,6 +245,7 @@
                 <option value="beacon">MC: Beacon</option>
                 <option value="meshview">MT: Meshview</option>
                 <option value="mqtt">MT: MQTT</option>
+                <option value="mqtt_meshtastic">MT: Official Meshtastic broker</option>
               </select>
             </label>
             <input type="text" id="nf-label" autocomplete="off" placeholder="label, e.g. Wednesday Net" />
@@ -263,6 +265,7 @@
             <input type="text" id="nf-topic-root" autocomplete="off" placeholder="topic root, e.g. msh/US (blank = subscribe broadly)" />
             <input type="text" id="nf-broker-username" autocomplete="off" placeholder="broker username (optional)" />
           </div>
+          <p class="adm-hint" id="nf-mqtt-meshtastic-hint" hidden>Topic root and channel are both REQUIRED for the official Meshtastic broker &mdash; e.g. topic root <code>msh/US</code>, channel <code>LongFast</code>.</p>
           <div class="adm-form" id="nf-mqtt-row-2" hidden>
             <label class="adm-field-label adm-field-label-wide">Broker password
               <input type="password" id="nf-broker-password" autocomplete="off" placeholder="leave blank to keep current" />
@@ -315,6 +318,62 @@
             <button type="button" id="nf-cancel" class="adm-btn adm-btn-quiet" hidden>Cancel edit</button>
           </div>
           <div id="nf-result" class="adm-result"></div>
+        </section>
+
+        <section class="adm-section" data-section="observation" hidden>
+          <h2 class="adm-h2">Observation sources</h2>
+          <p class="adm-hint">A connector watched for node discovery and node confirmation only &mdash; it can never award check-in points. Use a check-in net above instead if you want scoring.</p>
+
+          <h3 class="adm-h3">Configured sources <span class="adm-count" id="sources-count"></span></h3>
+          <div id="sources"></div>
+
+          <h3 class="adm-h3" id="source-form-title">Add a source</h3>
+          <div class="adm-form" id="sf-kind-row">
+            <label class="adm-field-label">Connector
+              <select id="sf-kind">
+                <option value="corescope">MC: CoreScope</option>
+                <option value="beacon">MC: Beacon</option>
+                <option value="meshview">MT: Meshview</option>
+                <option value="mqtt">MT: MQTT</option>
+                <option value="mqtt_meshtastic">MT: Official Meshtastic broker</option>
+              </select>
+            </label>
+            <input type="text" id="sf-label" autocomplete="off" placeholder="label, e.g. Boise discovery" />
+          </div>
+          <div class="adm-form">
+            <input type="text" id="sf-connector" autocomplete="off" placeholder="connector URL, e.g. https://live.mwmesh.com" />
+          </div>
+          <div class="adm-form" id="sf-channel-row">
+            <input type="text" id="sf-channel" autocomplete="off" placeholder="channel" />
+            <button type="button" id="sf-load-channels" class="adm-btn adm-btn-quiet">Load channels</button>
+            <select id="sf-channel-select" hidden></select>
+          </div>
+          <div class="adm-form" id="sf-mqtt-row-1" hidden>
+            <input type="text" id="sf-topic-root" autocomplete="off" placeholder="topic root, e.g. msh/US (blank = subscribe broadly)" />
+            <input type="text" id="sf-broker-username" autocomplete="off" placeholder="broker username (optional)" />
+          </div>
+          <div class="adm-form" id="sf-mqtt-row-2" hidden>
+            <label class="adm-field-label adm-field-label-wide">Broker password
+              <input type="password" id="sf-broker-password" autocomplete="off" placeholder="leave blank to keep current" />
+            </label>
+            <label class="adm-check-label"><input type="checkbox" id="sf-clear-broker-password" class="adm-check" /> Clear</label>
+            <span class="adm-hint" id="sf-broker-password-hint"></span>
+          </div>
+          <div class="adm-form" id="sf-mqtt-row-3" hidden>
+            <label class="adm-field-label adm-field-label-wide">Channel key
+              <input type="password" id="sf-channel-key" autocomplete="off" placeholder="base64 PSK, blank = Meshtastic default" />
+            </label>
+            <label class="adm-check-label"><input type="checkbox" id="sf-clear-channel-key" class="adm-check" /> Clear</label>
+            <span class="adm-hint" id="sf-channel-key-hint"></span>
+          </div>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="sf-enabled" class="adm-check" checked /> Enabled</label>
+          </div>
+          <div class="adm-form">
+            <button type="button" id="sf-save" class="adm-btn">Add source</button>
+            <button type="button" id="sf-cancel" class="adm-btn adm-btn-quiet" hidden>Cancel edit</button>
+          </div>
+          <div id="sf-result" class="adm-result"></div>
         </section>
 
         <section class="adm-section" data-section="paint" hidden>

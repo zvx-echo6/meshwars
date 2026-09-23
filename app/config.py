@@ -760,6 +760,12 @@ class Settings(BaseSettings):
     mqtt_buffer_retention_hours: int = 48
     mqtt_reconcile_interval_seconds: int = 30
 
+    # Rows in checkin_seen_message (app/db.py) are pruned after this
+    # long. MUST stay greater than mqtt_buffer_retention_hours above
+    # (default 48): if a seen row is pruned while its buffer row still
+    # exists, the poller re-processes and re-settles that message.
+    checkin_seen_retention_hours: int = 168
+
     # ---- Account layer (app/sessions.py, app/account_api.py) -------------
     # A login session sitting above the existing hashed-API-key player
     # model -- see app/db.py's "Account layer" SCHEMA comment for the

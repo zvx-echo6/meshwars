@@ -42,7 +42,7 @@ from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
     checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
     MC_PROTOCOL as CHK_MC,
-    KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_PROTOCOL,
+    KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_MQTT_MESHTASTIC, KIND_PROTOCOL,
 )
 from .config import settings
 from .db import connect, get_cursor
@@ -69,11 +69,19 @@ _STALE_DAYS = 14
 # source rather than being retyped at every call site that needs it.
 _PROTOCOL_LABELS = {MC_PROTOCOL: "MeshCore", MT_PROTOCOL: "Meshtastic"}
 _DEFAULT_AWARD_DATES = 8
-# The admin-chosen field a net's connector actually is -- protocol
-# ('mc'/'mt') is derived FROM this on every write (see
-# _validate_net_fields and app/checkin.py's KIND_PROTOCOL), never
-# accepted as an independent choice, so the two can never disagree.
-_NET_KINDS = (KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT)
+# The admin-chosen field a net's (or observation source's) connector
+# actually is -- protocol ('mc'/'mt') is derived FROM this on every
+# write (see _validate_net_fields/_validate_source_fields below and
+# app/checkin.py's KIND_PROTOCOL), never accepted as an independent
+# choice, so the two can never disagree. Shared by BOTH checkin_net
+# and observation_source -- mqtt_meshtastic (the official public
+# Meshtastic broker) is a valid kind for either table, not just
+# observation sources: an operator can run a scoring net straight off
+# the public broker the same way they can off a private one, it just
+# has to be narrowed to one region and one channel first (see
+# _validate_net_fields' channel/hashtag block and _validate_mqtt_fields
+# below).
+_NET_KINDS = (KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_MQTT_MESHTASTIC)
 
 
 # ---- needs attention ---------------------------------------------------
@@ -647,6 +655,136 @@ async def admin_checkin_awards(request: Request, dates: int = _DEFAULT_AWARD_DAT
 # ---- check-in nets (app/checkin.py's CheckinPoller, app/db.py's checkin_net) --
 
 
+def _validate_label(body) -> tuple[str, JSONResponse | None]:
+    """label required -- the one field every connector row (net or
+    observation source) needs and validates identically. Shared so
+    that rule can only ever be stated once.
+    """
+    label = (body.get("label") or "").strip()
+    if not label:
+        return "", JSONResponse({"error": "label is required"}, status_code=400)
+    return label, None
+
+
+def _validate_kind_and_protocol(body) -> tuple[str, str, JSONResponse | None]:
+    """`kind` is the admin's actual choice -- which connector
+    implementation a row's connector_url speaks (see app/checkin.py's
+    CoreScopeClient/BeaconClient/MeshviewClient, and MqttSubscriber for
+    the two mqtt kinds). `protocol` is the scoring-board discriminator
+    and is DERIVED from kind here, never accepted as an independent
+    field: a caller MAY send `protocol` (existing behavior, and the
+    admin panel's own GET responses echo it back), but if they do it
+    must agree with what this kind derives to, or be rejected --
+    otherwise a client could persist a row whose protocol (and
+    therefore which scoring board/season/streak it feeds, for a net)
+    disagrees with which connector it is actually polled through.
+
+    Shared by _validate_net_fields and _validate_source_fields -- both
+    draw from the same _NET_KINDS/KIND_PROTOCOL vocabulary, so there is
+    exactly one place this agreement is enforced for either table.
+    Returns (kind, protocol, None) on success, or ("", "", response).
+    """
+    kind = body.get("kind")
+    if kind not in _NET_KINDS:
+        return "", "", JSONResponse(
+            {"error": "kind must be one of: " + ", ".join(_NET_KINDS)},
+            status_code=400)
+    protocol = KIND_PROTOCOL[kind]
+    explicit_protocol = body.get("protocol")
+    if explicit_protocol is not None and explicit_protocol != protocol:
+        return "", "", JSONResponse(
+            {"error": "protocol %r does not match kind %r (expected %r)" % (
+                explicit_protocol, kind, protocol)},
+            status_code=400)
+    return kind, protocol, None
+
+
+def _validate_connector_url(body, kind: str, noun: str) -> tuple[str, JSONResponse | None]:
+    """connector_url shape check, shared by nets and observation
+    sources: mqtt(s):// for the two mqtt-family kinds (a broker, not
+    an HTTP API -- see app/db.py's checkin_net comment on
+    connector_url), http(s):// for every other kind. `noun` is just
+    "net" or "source", so the mqtt-specific message names the right
+    thing.
+    """
+    connector_url = (body.get("connector_url") or "").strip().rstrip("/")
+    if kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC):
+        if not (connector_url.startswith("mqtt://") or connector_url.startswith("mqtts://")):
+            return "", JSONResponse(
+                {"error": "connector_url must be an mqtt:// or mqtts:// URL for a %s %s" % (kind, noun)},
+                status_code=400)
+    elif not (connector_url.startswith("http://") or connector_url.startswith("https://")):
+        return "", JSONResponse(
+            {"error": "connector_url must be an http:// or https:// URL"}, status_code=400)
+    return connector_url, None
+
+
+def _validate_mqtt_fields(body, kind: str, current: dict | None, noun: str) -> tuple[dict, JSONResponse | None]:
+    """broker_username/broker_password/channel_key/topic_root -- shared
+    by nets and observation sources, blank/unused for every kind but
+    the two mqtt-family ones (KIND_MQTT, KIND_MQTT_MESHTASTIC).
+    broker_username/topic_root are plain config, taken straight from
+    the request every time. broker_password/channel_key are SECRETS
+    (see app/db.py's checkin_net/observation_source comments): an
+    empty submitted value means KEEP THE EXISTING one, not "clear it"
+    -- a config screen that always echoes '' back into these inputs
+    (since neither table's GET route ever returns the real value, see
+    _scrub_secrets below) would otherwise silently wipe a
+    password/key on every unrelated edit to that row. `current` (the
+    existing row, None on create) is what lets a blank submission mean
+    "unchanged" -- on create there is nothing to keep, so blank stays
+    blank there regardless. clear_broker_password/clear_channel_key
+    are the explicit way to actually blank one out, since a plain
+    empty string can no longer mean that.
+
+    mqtt_meshtastic REQUIRES topic_root (channel is validated by the
+    caller, since the two validators disagree on whether channel is
+    even a column) -- this, together with the caller's channel check,
+    is the safety property that matters most here: the official public
+    Meshtastic broker carries global traffic, and requiring both a
+    topic root and a channel is what guarantees an operator can never
+    accidentally subscribe `#` to the entire firehose, on a net or an
+    observation source. `noun` is "net" or "source", for that message.
+    """
+    broker_username = ""
+    topic_root = ""
+    broker_password = (current.get("broker_password", "") if current else "")
+    channel_key = (current.get("channel_key", "") if current else "")
+    if kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC):
+        broker_username = (body.get("broker_username") or "").strip()
+        topic_root = (body.get("topic_root") or "").strip().strip("/")
+        if kind == KIND_MQTT_MESHTASTIC and not topic_root:
+            return {}, JSONResponse(
+                {"error": "topic_root is required for a mqtt_meshtastic %s" % noun},
+                status_code=400)
+
+        if body.get("clear_broker_password") is True:
+            broker_password = ""
+        else:
+            submitted = body.get("broker_password")
+            if isinstance(submitted, str) and submitted:
+                broker_password = submitted
+
+        if body.get("clear_channel_key") is True:
+            channel_key = ""
+        else:
+            submitted = body.get("channel_key")
+            if isinstance(submitted, str) and submitted:
+                channel_key = submitted.strip()
+
+        if channel_key:
+            try:
+                base64.b64decode(channel_key, validate=True)
+            except Exception:
+                return {}, JSONResponse(
+                    {"error": "channel_key must be valid base64"}, status_code=400)
+
+    return {
+        "broker_username": broker_username, "broker_password": broker_password,
+        "channel_key": channel_key, "topic_root": topic_root,
+    }, None
+
+
 def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONResponse | None]:
     """Validate and normalize a net's editable fields, shared by
     create and update below -- the same shape both routes need, so the
@@ -656,8 +794,8 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
     `current` is the existing checkin_net row being edited (a dict, as
     admin_checkin_net_update fetches before calling this), or None when
     creating -- it is consulted ONLY for the two mqtt secret fields
-    (broker_password/channel_key): see below for why those need the
-    existing row and every other field does not.
+    (broker_password/channel_key): see _validate_mqtt_fields for why
+    those need the existing row and every other field does not.
 
     Returns (fields, None) on success, where `fields` is ready to bind
     straight into an INSERT/UPDATE; on the first thing wrong, returns
@@ -666,45 +804,17 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
     if not isinstance(body, dict):
         return {}, JSONResponse({"error": "bad request"}, status_code=400)
 
-    label = (body.get("label") or "").strip()
-    if not label:
-        return {}, JSONResponse({"error": "label is required"}, status_code=400)
+    label, err = _validate_label(body)
+    if err is not None:
+        return {}, err
 
-    # `kind` is the admin's actual choice -- which connector
-    # implementation this net's connector_url speaks (see
-    # app/checkin.py's CoreScopeClient/BeaconClient/MeshviewClient).
-    # `protocol` is the scoring-board discriminator and is DERIVED from
-    # kind here, never accepted as an independent field: a caller MAY
-    # send `protocol` (existing behavior, and the admin panel's own GET
-    # /api/admin/checkin/nets response echoes it back), but if they do
-    # it must agree with what this kind derives to, or be rejected --
-    # otherwise a client could persist a net whose protocol (and
-    # therefore which scoring board/season/streak it feeds) disagrees
-    # with which connector it is actually polled through.
-    kind = body.get("kind")
-    if kind not in _NET_KINDS:
-        return {}, JSONResponse(
-            {"error": "kind must be one of: " + ", ".join(_NET_KINDS)},
-            status_code=400)
-    protocol = KIND_PROTOCOL[kind]
-    explicit_protocol = body.get("protocol")
-    if explicit_protocol is not None and explicit_protocol != protocol:
-        return {}, JSONResponse(
-            {"error": "protocol %r does not match kind %r (expected %r)" % (
-                explicit_protocol, kind, protocol)},
-            status_code=400)
+    kind, protocol, err = _validate_kind_and_protocol(body)
+    if err is not None:
+        return {}, err
 
-    connector_url = (body.get("connector_url") or "").strip().rstrip("/")
-    if kind == KIND_MQTT:
-        # A broker, not an HTTP API -- see app/db.py's checkin_net
-        # comment on connector_url.
-        if not (connector_url.startswith("mqtt://") or connector_url.startswith("mqtts://")):
-            return {}, JSONResponse(
-                {"error": "connector_url must be an mqtt:// or mqtts:// URL for a mqtt net"},
-                status_code=400)
-    elif not (connector_url.startswith("http://") or connector_url.startswith("https://")):
-        return {}, JSONResponse(
-            {"error": "connector_url must be an http:// or https:// URL"}, status_code=400)
+    connector_url, err = _validate_connector_url(body, kind, "net")
+    if err is not None:
+        return {}, err
 
     weekday = body.get("weekday")
     if not isinstance(weekday, int) or isinstance(weekday, bool) or not (0 <= weekday <= 6):
@@ -736,7 +846,7 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
                 {"error": "start_date must be YYYY-MM-DD or empty"}, status_code=400)
 
     # channel/hashtag: required for the kind that uses it, forced blank
-    # for the one that doesn't -- see app/db.py's checkin_net schema
+    # for the ones that don't -- see app/db.py's checkin_net schema
     # comment for why storage keeps the unused field '' rather than
     # whatever a caller happened to send for it. corescope and beacon
     # are both channel-scoped (see app/checkin.py's module docstring
@@ -744,6 +854,18 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
     # the channel NAME, never the instance-local numeric id BeaconClient
     # resolves it to at poll time (see that class -- the id means
     # nothing outside one Beacon instance and would silently go stale).
+    # meshview/mqtt/mqtt_meshtastic are all still scoring nets matched
+    # by hashtag, so hashtag stays required for every one of them --
+    # but channel is no longer forced blank for the mqtt-family two: it
+    # is what narrows the broker subscription to one Meshtastic channel
+    # (see app/mqtt_subscriber.py's topic_filters_for_row, which builds
+    # `<topic_root>/2/e/<channel>/#` from it). For plain mqtt it stays
+    # OPTIONAL -- blank means subscribe to the whole topic root. For
+    # mqtt_meshtastic it is REQUIRED, together with topic_root
+    # (enforced below, in _validate_mqtt_fields) -- the official public
+    # broker carries global traffic, and requiring both a topic root
+    # and a channel is what guarantees an operator can never
+    # accidentally subscribe `#` to the entire firehose.
     channel = (body.get("channel") or "").strip()
     hashtag = (body.get("hashtag") or "").strip()
     if kind in (KIND_CORESCOPE, KIND_BEACON):
@@ -751,55 +873,23 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
             return {}, JSONResponse(
                 {"error": "channel is required for a %s net" % kind}, status_code=400)
         hashtag = ""
-    else:
+    elif kind == KIND_MESHVIEW:
         if not hashtag:
             return {}, JSONResponse(
                 {"error": "hashtag is required for a Meshtastic net"}, status_code=400)
         channel = ""
+    else:
+        # kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC)
+        if not hashtag:
+            return {}, JSONResponse(
+                {"error": "hashtag is required for a Meshtastic net"}, status_code=400)
+        if kind == KIND_MQTT_MESHTASTIC and not channel:
+            return {}, JSONResponse(
+                {"error": "channel is required for a mqtt_meshtastic net"}, status_code=400)
 
-    # mqtt-only connector config -- blank/unused for every other kind,
-    # the same convention channel/hashtag above already use for the
-    # kind that doesn't need them. broker_username/topic_root are plain
-    # config, taken straight from the request every time. broker_password/
-    # channel_key are SECRETS (see app/db.py's checkin_net comment): an
-    # empty submitted value means KEEP THE EXISTING one, not "clear it"
-    # -- a config screen that always echoes '' back into these inputs
-    # (since GET /api/admin/checkin/nets never returns the real value,
-    # see _scrub_secrets below) would otherwise silently wipe a
-    # password/key on every unrelated edit to that net. `current` (the
-    # existing row, None on create) is what lets a blank submission mean
-    # "unchanged" -- on create there is nothing to keep, so blank stays
-    # blank there regardless. clear_broker_password/clear_channel_key
-    # are the explicit way to actually blank one out, since a plain
-    # empty string can no longer mean that.
-    broker_username = ""
-    topic_root = ""
-    broker_password = (current.get("broker_password", "") if current else "")
-    channel_key = (current.get("channel_key", "") if current else "")
-    if kind == KIND_MQTT:
-        broker_username = (body.get("broker_username") or "").strip()
-        topic_root = (body.get("topic_root") or "").strip().strip("/")
-
-        if body.get("clear_broker_password") is True:
-            broker_password = ""
-        else:
-            submitted = body.get("broker_password")
-            if isinstance(submitted, str) and submitted:
-                broker_password = submitted
-
-        if body.get("clear_channel_key") is True:
-            channel_key = ""
-        else:
-            submitted = body.get("channel_key")
-            if isinstance(submitted, str) and submitted:
-                channel_key = submitted.strip()
-
-        if channel_key:
-            try:
-                base64.b64decode(channel_key, validate=True)
-            except Exception:
-                return {}, JSONResponse(
-                    {"error": "channel_key must be valid base64"}, status_code=400)
+    mqtt_fields, err = _validate_mqtt_fields(body, kind, current, "net")
+    if err is not None:
+        return {}, err
 
     enabled = bool(body.get("enabled", True))
 
@@ -808,8 +898,7 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
         "channel": channel, "hashtag": hashtag, "weekday": weekday,
         "start_hour": start_hour, "end_hour": end_hour, "timezone": timezone,
         "start_date": start_date, "enabled": int(enabled),
-        "broker_username": broker_username, "broker_password": broker_password,
-        "channel_key": channel_key, "topic_root": topic_root,
+        **mqtt_fields,
     }, None
 
 
@@ -1217,11 +1306,15 @@ async def admin_checkin_channels(request: Request):
     invisible until the net silently never matches a message. Kind-
     aware: corescope and beacon each expose channels through a
     completely different endpoint and shape (see app/checkin.py's
-    CoreScopeClient/BeaconClient), and meshview/mqtt have no channel
-    concept at all (both are hashtag-scoped -- see the module
-    docstring), so this always returns a clean, explicit response for
-    that kind rather than an error the admin panel would have to
-    special-case.
+    CoreScopeClient/BeaconClient), and meshview/mqtt/mqtt_meshtastic
+    have no LISTABLE channel concept at all -- there is no channel-list
+    API on an MQTT broker, and meshview is hashtag-scoped (see the
+    module docstring), so for all three this always returns a clean,
+    explicit "not applicable" response rather than an error the admin
+    panel would have to special-case. mqtt and mqtt_meshtastic DO have
+    a channel field now (see _validate_net_fields/_validate_source_fields'
+    channel/hashtag handling) -- the operator just has to type it,
+    same as they already type topic_root.
 
     Read-only and short-timeout: this is a person filling out a form,
     not anything the poller depends on, so a slow or dead connector
@@ -1238,15 +1331,17 @@ async def admin_checkin_channels(request: Request):
         return JSONResponse(
             {"error": "kind must be one of: " + ", ".join(_NET_KINDS)}, status_code=400)
 
-    if kind in (KIND_MESHVIEW, KIND_MQTT):
-        # Not an error -- both Meshtastic-family kinds are hashtag-
-        # scoped, on every channel, so there is genuinely nothing to
-        # list here. See the docstring above. Checked BEFORE the
-        # connector_url validation below (unlike the http(s)-only kinds)
-        # since an mqtt connector is an mqtt(s):// broker URL, not an
-        # http(s):// one, and there is no fetch to make for either kind
-        # anyway -- no reason to require a connector param at all just
-        # to learn that.
+    if kind in (KIND_MESHVIEW, KIND_MQTT, KIND_MQTT_MESHTASTIC):
+        # Not an error -- there is genuinely nothing to list here for
+        # any of the three: meshview is hashtag-scoped on every
+        # channel, and mqtt/mqtt_meshtastic have no channel-listing API
+        # at all (a broker is not queried for its channel names -- the
+        # operator types one). See the docstring above. Checked BEFORE
+        # the connector_url validation below (unlike the http(s)-only
+        # kinds) since an mqtt connector is an mqtt(s):// broker URL,
+        # not an http(s):// one, and there is no fetch to make for any
+        # of these three anyway -- no reason to require a connector
+        # param at all just to learn that.
         return JSONResponse({"channels": [], "applicable": False})
 
     connector = (request.query_params.get("connector") or "").strip().rstrip("/")
@@ -1302,6 +1397,279 @@ async def admin_checkin_channels(request: Request):
                 raw = v
                 break
     return JSONResponse({"channels": _channel_names(raw), "applicable": True})
+
+
+# ---- observation sources (app/db.py's observation_source) -------------
+#
+# Discovery/confirmation-only connectors -- node discovery and node
+# confirmation (app/checkin_api.py's POST /api/checkin/confirm/accept,
+# and whatever discovery path task 2+ of this feature adds), NEVER
+# check-in scoring. See observation_source's own comment in app/db.py
+# for why this is a separate table from checkin_net rather than a net
+# with a blank start_date faking "no window": there is no window here
+# at all, only enabled/disabled.
+
+
+def _validate_source_fields(body, current: dict | None = None) -> tuple[dict, JSONResponse | None]:
+    """Validate and normalize an observation source's editable fields --
+    modeled closely on _validate_net_fields above (same _NET_KINDS/
+    KIND_PROTOCOL vocabulary, same connector_url and mqtt-secret
+    rules), but there is no scoring window on this table at all: the
+    weekday/start_hour/end_hour/timezone/start_date/hashtag columns
+    checkin_net carries simply do not exist on observation_source (see
+    that table's own comment in app/db.py), so this function never
+    reads or validates any of them -- a caller who submits one anyway
+    (the same request body shape a net create/update form might reuse)
+    has it silently ignored, not rejected.
+
+    `current` is the existing observation_source row being edited (a
+    dict, as admin_observation_source_update fetches before calling
+    this), or None when creating -- consulted ONLY for the two mqtt
+    secret fields, same "blank means keep" reasoning as
+    _validate_net_fields/_validate_mqtt_fields.
+
+    Returns (fields, None) on success, where `fields` is ready to bind
+    straight into an INSERT/UPDATE; on the first thing wrong, returns
+    ({}, response) with the 400 to hand back as-is.
+    """
+    if not isinstance(body, dict):
+        return {}, JSONResponse({"error": "bad request"}, status_code=400)
+
+    label, err = _validate_label(body)
+    if err is not None:
+        return {}, err
+
+    kind, protocol, err = _validate_kind_and_protocol(body)
+    if err is not None:
+        return {}, err
+
+    connector_url, err = _validate_connector_url(body, kind, "source")
+    if err is not None:
+        return {}, err
+
+    # channel: required for corescope/beacon (channel NAME, same
+    # convention as _validate_net_fields -- for beacon this is never
+    # the instance-local numeric id BeaconClient resolves it to at poll
+    # time, see that class), forced blank for meshview (there is no
+    # hashtag column on this table to fall back to scoping by -- a
+    # meshview source has nothing to narrow by at all, it only feeds
+    # discovery), optional for mqtt (blank means subscribe to the
+    # whole topic root), and REQUIRED for mqtt_meshtastic together with
+    # topic_root (enforced below, in _validate_mqtt_fields) -- same
+    # "never accidentally subscribe `#` to the whole public broker"
+    # safety property _validate_net_fields' channel/hashtag block
+    # documents for nets.
+    channel = (body.get("channel") or "").strip()
+    if kind in (KIND_CORESCOPE, KIND_BEACON):
+        if not channel:
+            return {}, JSONResponse(
+                {"error": "channel is required for a %s source" % kind}, status_code=400)
+    elif kind == KIND_MESHVIEW:
+        channel = ""
+    elif kind == KIND_MQTT_MESHTASTIC:
+        if not channel:
+            return {}, JSONResponse(
+                {"error": "channel is required for a mqtt_meshtastic source"}, status_code=400)
+    # KIND_MQTT: channel stays whatever was submitted -- optional.
+
+    mqtt_fields, err = _validate_mqtt_fields(body, kind, current, "source")
+    if err is not None:
+        return {}, err
+
+    enabled = bool(body.get("enabled", True))
+
+    return {
+        "label": label, "kind": kind, "protocol": protocol, "connector_url": connector_url,
+        "channel": channel, "enabled": int(enabled),
+        **mqtt_fields,
+    }, None
+
+
+@router.get("/api/admin/observation/sources")
+async def admin_observation_sources(request: Request):
+    """Every observation_source row (enabled or not), for the admin
+    panel's observation-sources section. last_poll_at/last_poll_error
+    come straight off each row -- see app/mqtt_subscriber.py's
+    _STATUS_UPDATE_SQL for the mqtt kinds, and whatever discovery path
+    task 2+ of this feature wires up for the rest -- same visibility
+    GET /api/admin/checkin/nets above gives nets, so a source that's
+    silently failing shows up here without anyone reading logs.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    conn = connect()
+    try:
+        sources = [dict(r) for r in conn.execute(
+            "SELECT * FROM observation_source ORDER BY id").fetchall()]
+        for s in sources:
+            s["enabled"] = bool(s["enabled"])
+    finally:
+        conn.close()
+    # Never the raw broker_password/channel_key -- see _scrub_secrets.
+    sources = [_scrub_secrets(s) for s in sources]
+    return JSONResponse({"sources": sources})
+
+
+@router.post("/api/admin/observation/sources/create")
+async def admin_observation_source_create(request: Request):
+    """Add an observation source. See app/db.py's observation_source
+    table for the model -- the same connector shape as checkin_net,
+    minus the scoring window, used only for node discovery and node
+    confirmation, never check-in scoring.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    fields, err = _validate_source_fields(body)
+    if err is not None:
+        return err
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "INSERT INTO observation_source(label, kind, protocol, connector_url, channel, "
+            " broker_username, broker_password, channel_key, topic_root, enabled, created_at) "
+            "VALUES (:label, :kind, :protocol, :connector_url, :channel, "
+            " :broker_username, :broker_password, :channel_key, :topic_root, :enabled, :created_at)",
+            {**fields, "created_at": now},
+        )
+        source_id = cur.lastrowid
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="observation_source_create",
+            detail=f"source_id={source_id} label={fields['label']!r} kind={fields['kind']}", now=now,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    log.info("admin: created observation source %d (%s, %s, %s)",
+              source_id, fields["label"], fields["kind"], fields["connector_url"])
+    return JSONResponse(_scrub_secrets({"id": source_id, "created_at": now, **fields}), status_code=201)
+
+
+@router.post("/api/admin/observation/sources/update")
+async def admin_observation_source_update(request: Request):
+    """Update every editable field of an existing source -- same
+    validation as create. Does not touch last_poll_at/last_poll_error
+    (those belong to whatever polls/subscribes it, on its own next
+    cycle against whatever this update just changed -- same "the
+    route never writes these two columns" rule
+    admin_checkin_net_update's own docstring states for nets).
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    source_id = body.get("id")
+    if not isinstance(source_id, int) or isinstance(source_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    conn = connect()
+    try:
+        # Fetched BEFORE validation, not after -- same reason as
+        # admin_checkin_net_update above: _validate_source_fields needs
+        # the source's EXISTING broker_password/channel_key to
+        # implement "blank submission means keep the existing secret"
+        # (see _validate_mqtt_fields' docstring). There is nothing to
+        # keep if this source doesn't exist, but that's caught below
+        # the same way it always was, just slightly later than
+        # source_id's own type check.
+        existing = conn.execute(
+            "SELECT * FROM observation_source WHERE id = ?", (source_id,)).fetchone()
+        if existing is None:
+            return JSONResponse({"error": "source not found"}, status_code=404)
+
+        fields, err = _validate_source_fields(body, current=dict(existing))
+        if err is not None:
+            return err
+
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE observation_source SET label=:label, kind=:kind, protocol=:protocol, "
+            " connector_url=:connector_url, channel=:channel, "
+            " broker_username=:broker_username, broker_password=:broker_password, "
+            " channel_key=:channel_key, topic_root=:topic_root, enabled=:enabled "
+            " WHERE id=:id",
+            {**fields, "id": source_id},
+        )
+        if cur.rowcount:
+            _log_admin_action(
+                conn, actor_account_id=session.account_id, action="observation_source_update",
+                detail=f"source_id={source_id} label={fields['label']!r} kind={fields['kind']}",
+            )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    if not cur.rowcount:
+        return JSONResponse({"error": "source not found"}, status_code=404)
+    log.info("admin: updated observation source %d", source_id)
+    return JSONResponse(_scrub_secrets({"id": source_id, **fields}))
+
+
+@router.post("/api/admin/observation/sources/delete")
+async def admin_observation_source_delete(request: Request):
+    """Remove an observation source. The caller must supply the
+    source's exact `label` as confirmation -- the same
+    player_id/net_id + label guard /api/admin/node/remove,
+    /api/admin/player/delete, and /api/admin/checkin/nets/delete
+    already use, for the same reason: a stale or mistyped id must not
+    silently delete the wrong source.
+
+    Deletes only the observation_source row.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    source_id = body.get("id") if isinstance(body, dict) else None
+    label = body.get("label") if isinstance(body, dict) else None
+    if not isinstance(source_id, int) or isinstance(source_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+    if not isinstance(label, str) or not label:
+        return JSONResponse({"error": "label is required"}, status_code=400)
+
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT label FROM observation_source WHERE id = ?", (source_id,)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "source not found"}, status_code=404)
+        if row["label"] != label:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "label does not match"}, status_code=409)
+        conn.execute("DELETE FROM observation_source WHERE id = ?", (source_id,))
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="observation_source_delete",
+            detail=f"source_id={source_id} label={label!r}",
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: deleted observation source %d (%s)", source_id, label)
+    return JSONResponse({"id": source_id, "deleted": True})
 
 
 # ---- paint source: meshview vs FreqMapper (app/db.py's freqmapper_config,

@@ -1032,6 +1032,82 @@ CREATE TABLE IF NOT EXISTS checkin_net (
 );
 CREATE INDEX IF NOT EXISTS idx_checkin_net_enabled ON checkin_net(enabled, protocol);
 
+-- ---------------------------------------------------------------------
+-- Observation sources: the SAME connector shape as checkin_net above
+-- (kind/protocol/connector_url/channel/topic_root/broker_username/
+-- broker_password/channel_key), used ONLY for node discovery and node
+-- confirmation (app/checkin_api.py's POST /api/checkin/confirm/accept,
+-- and whatever discovery path task 2+ of this feature adds) -- NEVER
+-- for check-in scoring. checkin_net conflated "a connector to poll" with
+-- "a scoring window," and the only way to stand up a connector that
+-- exists purely to see who is out there -- with no net to award against
+-- -- was to fake one as a net with a blank start_date (checkin_net's own
+-- '' means BLOCK ALL convention), a real net row doing a fake net's job.
+-- This table is that connector shape on its own, so a source can exist
+-- without pretending to be an unscoreable net.
+--
+-- The net-window columns on checkin_net -- weekday, start_hour,
+-- end_hour, timezone, start_date, hashtag -- are DELIBERATELY ABSENT
+-- here. There is no window because there is no scoring: a source is
+-- either enabled (being watched) or not, full stop. Anything that reads
+-- this table for scoring purposes is a bug, not a missing column.
+--
+-- Brand new table, no existing deployed shape to ALTER, so CREATE TABLE
+-- IF NOT EXISTS here is sufficient on its own -- same reasoning as
+-- checkin_net itself and every other brand-new table in this file; no
+-- MIGRATIONS entry needed.
+CREATE TABLE IF NOT EXISTS observation_source (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    label           TEXT NOT NULL,
+    protocol        TEXT NOT NULL,             -- 'mc' | 'mt' -- DERIVED
+                                                 -- from `kind` on every
+                                                 -- admin write, same
+                                                 -- convention as
+                                                 -- checkin_net.protocol
+                                                 -- (see app/checkin.py's
+                                                 -- KIND_PROTOCOL).
+    kind            TEXT NOT NULL,              -- 'corescope' | 'beacon' |
+                                                 -- 'meshview' | 'mqtt' |
+                                                 -- 'mqtt_meshtastic' --
+                                                 -- which upstream API this
+                                                 -- source's connector_url
+                                                 -- actually speaks, same
+                                                 -- vocabulary as
+                                                 -- checkin_net.kind (see
+                                                 -- app/checkin.py's
+                                                 -- KIND_* constants).
+    connector_url   TEXT NOT NULL,              -- base URL, no trailing
+                                                 -- slash. mqtt/mqtts://
+                                                 -- for the mqtt kinds (a
+                                                 -- broker), http(s):// for
+                                                 -- every other kind (an
+                                                 -- HTTP API).
+    channel         TEXT NOT NULL DEFAULT '',   -- corescope/beacon:
+                                                 -- channel NAME. mqtt/
+                                                 -- mqtt_meshtastic:
+                                                 -- channel to subscribe.
+                                                 -- meshview: unused, ''.
+    topic_root      TEXT NOT NULL DEFAULT '',   -- mqtt/mqtt_meshtastic
+                                                 -- only, e.g. 'msh/US'.
+                                                 -- Unused otherwise, ''.
+    broker_username TEXT NOT NULL DEFAULT '',
+    broker_password TEXT NOT NULL DEFAULT '',   -- SECRET -- never
+                                                 -- returned by the API,
+                                                 -- same _scrub_secrets
+                                                 -- convention as
+                                                 -- checkin_net.broker_password.
+    channel_key     TEXT NOT NULL DEFAULT '',   -- SECRET -- base64 PSK;
+                                                 -- '' means the
+                                                 -- Meshtastic default
+                                                 -- channel key, same as
+                                                 -- checkin_net.channel_key.
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      INTEGER NOT NULL,
+    last_poll_at    INTEGER,
+    last_poll_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_observation_source_enabled ON observation_source(enabled, protocol);
+
 -- Push-subscription buffer for the mqtt connector kind
 -- (app/mqtt_subscriber.py's MqttSubscriber). MQTT is a persistent
 -- broker connection, not a 30-second HTTP poll like every other
