@@ -640,7 +640,9 @@ CREATE INDEX IF NOT EXISTS idx_mc_ingest_queue_claim ON mc_ingest_queue(claimed_
 --
 --   ip_class -- a coarse 'datacenter' | 'unknown' label (see
 --   app/ip_class.py's classify_ip()), computed IN-PROCESS at write time
---   against a small bundled prefix list for major hosting providers.
+--   against a bundled snapshot of real hosting-provider IP ranges
+--   (app/reference/datacenter_prefixes.csv.gz, ~21,600 prefixes across
+--   eleven providers -- see that module's own docstring for sources).
 --   Deliberately never a reverse-DNS or any other outbound lookup --
 --   see that module's own docstring for why, and for the one incident
 --   ('unknown' is the honest default; ip_class.py is never asked to
