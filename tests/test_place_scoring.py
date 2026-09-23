@@ -4,13 +4,21 @@ gating (docs/features/places.md).
 """
 from __future__ import annotations
 
-import time
-
 from app.grid import cell_id
 from app.place_rotation import week_start_for_ts
 from app.place_scoring import WEEKLY_CAP_POINTS, credit_places, qualifying_place_firsts
 
-NOW = int(time.time())
+# Pinned, not wall-clock: the Places week rolls over at local midnight
+# Wednesday, America/Boise (week_start_for_ts() in app/place_rotation.py).
+# A live time.time() NOW would put NOW and NOW + 3600 (used below by
+# test_partially_credited_place_does_not_pay_again_same_week and
+# test_revisiting_a_cell_does_not_fall_through_to_the_lesser_place) in
+# DIFFERENT weeks for about an hour every Tuesday night, failing those
+# same-week assertions spuriously even though the app code is correct.
+# 2026-01-10 12:00:00 America/Boise is a Saturday noon -- days away from
+# the Wednesday-midnight boundary in either direction -- so every offset
+# used in this file (up to +/- a few hours) stays inside the same week.
+NOW = 1768071600
 WEEK = week_start_for_ts(NOW)
 
 
