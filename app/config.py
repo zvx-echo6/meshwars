@@ -547,6 +547,26 @@ class Settings(BaseSettings):
     # what stays reachable once this is blank again).
     admin_token: str = ""
 
+    # Whether _role_guard() (app/admin_api.py) requires ANY of session,
+    # role, or two-factor authentication before letting a request
+    # through -- not "require TOTP," the entire door. Defaults TRUE and
+    # MUST remain true on any deployment reachable from the internet:
+    # turning it off makes every route this file and app/admin_ops.py
+    # protect -- delete a player, revoke a key, edit a net, everything
+    # -- open to anyone who can reach the port, with no credential of
+    # any kind. There is exactly one situation where that is
+    # acceptable: a network-isolated preview/dev box (reachable only
+    # over the tailnet, with /admin and /api/admin/* already 404'd at
+    # its public host) whose database is periodically re-cloned from
+    # production -- which wipes every account, session, and
+    # account_totp row on every clone -- so a hand-built credential
+    # would have to be re-provisioned after every single re-clone just
+    # to look at the panel. The isolation IS the access control there,
+    # the same "local dev gets an escape hatch" reasoning
+    # account_session_cookie_secure above already leans on, just sized
+    # for a bigger surface.
+    admin_require_auth: bool = True
+
     # Address-keyed rate limit on POST /api/admin/roles/claim -- same
     # "without one this is a token-guessing oracle" reasoning
     # account_link_key_rate_limit_attempts/window_seconds gives for its
@@ -759,6 +779,12 @@ class Settings(BaseSettings):
     # poller's.
     mqtt_buffer_retention_hours: int = 48
     mqtt_reconcile_interval_seconds: int = 30
+
+    # Rows in checkin_seen_message (app/db.py) are pruned after this
+    # long. MUST stay greater than mqtt_buffer_retention_hours above
+    # (default 48): if a seen row is pruned while its buffer row still
+    # exists, the poller re-processes and re-settles that message.
+    checkin_seen_retention_hours: int = 168
 
     # ---- Account layer (app/sessions.py, app/account_api.py) -------------
     # A login session sitting above the existing hashed-API-key player
@@ -1287,6 +1313,80 @@ class Settings(BaseSettings):
     # signatures, it never authenticates an outbound call.
     discord_app_id: str = ""
     discord_public_key: str = ""
+
+    # ---- Public announcement feed (app/announce.py, app/announce_content.py,
+    # app/mesh_render.py) --------------------------------------------------
+    # app/announce_content.py builds transport-neutral Content and
+    # app/mesh_render.py renders it to a byte-budgeted line; app/announce.py
+    # is what decides WHEN one gets built, riding app/discord_notify.py's
+    # already-running run_forever() loop the same way that module's own
+    # TIME_DRIVEN_PROVIDERS due-check does (see that module's own
+    # docstring for why this app has no separate scheduler).
+
+    # An announcement whose own period ended more than this many hours ago
+    # is never built at all -- THE BACKLOG RULE, same "a long outage must
+    # never dump stale news all at once" reasoning discord_outbox_max_age_
+    # hours above already applies to the Discord queue, applied here one
+    # step earlier, before a Content is even built. Without this, a fresh
+    # deployment or a service down for weeks would, the moment it comes
+    # back, find every frozen month with no announcement row yet and
+    # announce all of them in one burst, days to weeks stale -- exactly
+    # the bug this app already shipped once on the Discord side and had
+    # to clean up by hand.
+    announcement_max_age_hours: int = 72
+
+    # The month announcement's OWN, longer backlog window -- see
+    # app/announce.py's month_provider(), which passes this instead of
+    # the shared setting above to its _period_too_old() check. A daily
+    # or weekly recap overtaken by fresher news within a few days is
+    # legitimately stale and should be dropped, same as
+    # announcement_max_age_hours already does -- but a month's
+    # announcement is a ONE-SHOT: month_provider() only ever considers
+    # the single most recently frozen month, and once a month's own
+    # announcement row exists (or its window has passed and it was
+    # skipped), store_announcement()'s exactly-once (kind, key) index
+    # means that month's announcement can never be built again, by
+    # design (a re-freeze is a silent no-op -- see app/db.py's
+    # `announcement` table comment). A 3-day outage or a deploy gap
+    # landing right on the 1st of the month, under the shared 72h
+    # window, would silently and PERMANENTLY lose that month's
+    # announcement forever, with nothing left to ever re-create it.
+    # 168h (7 days) gives real headroom over an ordinary outage, and a
+    # month's honors still read as current news a week after it closed
+    # -- unlike a daily recap, which does not.
+    announcement_month_max_age_hours: int = 168
+
+    # How often app/announce.py's maybe_run() checks whether anything is
+    # due -- its own cadence, independent of discord_outbox_poll_interval_
+    # seconds above, though both currently ride the same background loop.
+    # A due-check itself is cheap (see ANNOUNCEMENT_PROVIDERS' own
+    # cheapness rule), so this can stay short without real cost.
+    announcement_poll_interval_seconds: int = 60
+
+    # ---- GET /api/v1/announcements (app/public_api.py) --------------------
+    # This route is deliberately KEYLESS -- see the route's own docstring
+    # for the full reasoning (announcements are already-public broadcast
+    # news, not something an X-API-Key gates anything meaningful for).
+    # Two rate-limit tiers apply: an anonymous caller is bounded by
+    # address, tightly, on its OWN route-local bucket (never shared with
+    # public_api_rate_limit_requests/window_seconds above, or with any
+    # other limiter in this module -- see app/auth.py's module docstring
+    # for why a call site never shares a _BoundedHits instance); a caller
+    # presenting a valid key is instead bounded by the normal
+    # public_api_rate_limit_requests/window_seconds path every other
+    # /api/v1 route already uses -- a key upgrades you to the fast lane.
+    announcements_anon_rate_limit_requests: int = 6
+    announcements_anon_rate_limit_window_seconds: int = 3600
+
+    # How long a served /api/v1/announcements response (serialized bytes,
+    # keyed on the full set of query parameters that affect it -- since,
+    # or kinds, or board, or net_id, or limit, or text_budget) is reused
+    # before being rebuilt. Short: this is a feed callers are expected to
+    # poll every poll_interval_seconds (900, below) or faster during
+    # testing, and the underlying `announcement` table only grows a
+    # handful of times a day -- 30s costs a poller nothing it would
+    # notice and takes real load off a bot polling on a tight loop.
+    announcements_cache_seconds: int = 30
 
     @property
     def teams_list(self) -> list[str]:

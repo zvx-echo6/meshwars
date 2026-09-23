@@ -105,6 +105,15 @@ from .db import connect
 log = logging.getLogger("mqtt_subscriber")
 
 KIND_MQTT = "mqtt"
+# Mirrors app/checkin.py's KIND_MQTT_MESHTASTIC value exactly (not
+# imported from there -- this module already keeps its own local
+# KIND_MQTT rather than importing checkin.py's, so this follows the
+# same local-duplicate convention). _reconcile_once below treats it
+# identically to KIND_MQTT: same decode path, same buffer table, same
+# subscription logic -- the two kinds only ever differed in admin
+# defaults (checkin.py requires topic_root+channel for this one), which
+# is validated on write, not here.
+KIND_MQTT_MESHTASTIC = "mqtt_meshtastic"
 
 # ---- minimal protobuf wire-format decoding --------------------------------
 #
@@ -470,21 +479,119 @@ def _channel_name_from_topic(topic: str, marker: str) -> str:
     return ""
 
 
+# ---- subscribe-filter construction -----------------------------------------
+#
+# One _BrokerConnection is shared by every enabled net/source pointed at
+# the same connector_url (see class docstring below) -- several public-
+# broker rows configured for different regions/channels routinely share
+# ONE connector_url (e.g. every row against mqtt.meshtastic.org). The
+# connection must subscribe to the UNION of what each of those rows
+# needs, not just the first row's filter, or every row past the first is
+# silently starved of messages. These two pure helpers compute that.
+
+
+def topic_filters_for_row(row: dict) -> list[str]:
+    """One checkin_net/observation_source row -> the MQTT topic filter(s)
+    its subscription needs, narrowed as far as the row's own config
+    allows:
+
+      - topic_root AND channel both given: BOTH
+        "<root>/2/e/<channel>/#" and "<root>/2/json/<channel>/#" -- e.g.
+        topic_root='msh/US', channel='LongFast' ->
+        ["msh/US/2/e/LongFast/#", "msh/US/2/json/LongFast/#"]. BOTH
+        forms are required, not just whichever matches this row's own
+        expected traffic: which of /2/e/ or /2/json/ a given gateway
+        node publishes to is that GATEWAY's own, per-node
+        moduleConfig.mqtt.encryption_enabled toggle (see
+        decode_encrypted_envelope's docstring), not a property of the
+        channel -- a JSON-mode gateway never publishes to /2/e/ at all.
+        _handle_message (above) dispatches purely on which of those two
+        topic markers is present in an incoming topic, so subscribing to
+        only one of them would silently miss every gateway using the
+        other.
+      - topic_root only (no channel): "<root>/#" -- broad, region-wide
+        subscription, same as before per-channel narrowing existed.
+      - neither: "#" -- the whole broker, same "blank topic_root means
+        no narrowing" convention checkin_net.topic_root's own comment in
+        app/db.py already documents.
+    """
+    topic_root = (row.get("topic_root") or "").rstrip("/")
+    channel = (row.get("channel") or "").strip("/")
+    if topic_root and channel:
+        return [
+            "%s/2/e/%s/#" % (topic_root, channel),
+            "%s/2/json/%s/#" % (topic_root, channel),
+        ]
+    if topic_root:
+        return [topic_root + "/#"]
+    return ["#"]
+
+
+def topic_filter_union(rows: list[dict]) -> tuple[str, ...]:
+    """The deduped union of every row's topic_filters_for_row, for the
+    full set of rows sharing one broker connection -- what that single
+    connection must subscribe to so NONE of its rows is silently
+    starved (see the section comment above). Returned as a SORTED tuple
+    rather than in insertion order: this feeds directly into
+    _BrokerConnection.fingerprint, which must be stable across reconcile
+    cycles regardless of what order the SQL in _reconcile_once happens
+    to return rows in -- an unstable ordering would make fingerprint
+    flap between cycles even when the actual set of filters never
+    changed, forcing pointless reconnects.
+    """
+    filters: set[str] = set()
+    for row in rows:
+        filters.update(topic_filters_for_row(row))
+    return tuple(sorted(filters))
+
+
 # ---- broker connection -----------------------------------------------------
 
 _JSON_MARKER = "json"
 _ENCRYPTED_MARKER = "e"
 
+# One UPDATE per possible `source_table` tag (see MqttSubscriber.
+# _reconcile_once / _BrokerConnection._record_status) -- a lookup table
+# of fixed, hand-written SQL keyed by the tag, rather than formatting
+# the table name into a query string, so a row can never point
+# _record_status at an arbitrary/unintended table.
+_STATUS_UPDATE_SQL = {
+    "checkin_net": "UPDATE checkin_net SET last_poll_at = ?, last_poll_error = ? WHERE id = ?",
+    "observation_source": "UPDATE observation_source SET last_poll_at = ?, last_poll_error = ? WHERE id = ?",
+}
+
+# Same fixed-lookup-over-dynamic-SQL convention as _STATUS_UPDATE_SQL
+# above, for MqttSubscriber._reconcile_once's per-table SELECT: an
+# explicit, uniform column list from each table (never SELECT *) --
+# see that method's own comment on why observation_source and
+# checkin_net do not share a column shape.
+_ROWS_SELECT_SQL = {
+    "checkin_net": (
+        "SELECT id, connector_url, broker_username, broker_password, "
+        "topic_root, channel, channel_key FROM checkin_net "
+        "WHERE enabled = 1 AND kind IN (?, ?)"
+    ),
+    "observation_source": (
+        "SELECT id, connector_url, broker_username, broker_password, "
+        "topic_root, channel, channel_key FROM observation_source "
+        "WHERE enabled = 1 AND kind IN (?, ?)"
+    ),
+}
+
 
 class _BrokerConnection:
     """One persistent paho-mqtt connection to one broker (one
     connector_url), shared by every enabled mqtt net configured against
-    it -- the credentials/topic_root that shape the CONNECTION itself
-    are taken from the first such net (`nets[0]`), the same "a
-    connector_url is assumed to always mean one upstream configuration"
-    rule app/checkin.py's _mc_client_for/kind_by_connector already
-    apply to the other connector kinds. Per-net channel_key values are
-    NOT part of that assumption -- see decode_encrypted_envelope, which
+    it -- the CREDENTIALS that shape the connection itself are taken
+    from the first such net (`nets[0]`), the same "a connector_url is
+    assumed to always mean one upstream configuration" rule
+    app/checkin.py's _mc_client_for/kind_by_connector already apply to
+    the other connector kinds. What gets SUBSCRIBED, unlike credentials,
+    is NOT primary-net-only -- see topic_filter_union/fingerprint below
+    -- it is the union of every net's own topic_root/channel, since two
+    nets can legitimately want different regions/channels off the same
+    broker. Per-net channel_key values are likewise NOT part of the
+    primary-only assumption -- see decode_encrypted_envelope, which
     tries every net's key as a candidate, so nets sharing a broker are
     free to use different channel keys.
     """
@@ -522,10 +629,21 @@ class _BrokerConnection:
         to decide whether an already-open connection can simply be
         handed its updated net list (update_nets) or must be torn down
         and rebuilt.
+
+        The last element is the FILTER UNION (topic_filter_union), not a
+        single row's topic_root -- the connection must be torn down and
+        resubscribed whenever the SET OF FILTERS changes, which is
+        exactly what happens when an operator adds a second region or
+        channel on a broker that's already connected (e.g. a second row
+        pointed at mqtt.meshtastic.org): topic_root/credentials on the
+        EXISTING rows may not have changed at all, so a fingerprint built
+        from only the primary row's topic_root would never notice the
+        new row and it would silently never get subscribed -- the exact
+        bug this task fixes.
         """
         primary = self._nets[0]
         return (self.connector_url, primary["broker_username"],
-                primary["broker_password"], primary["topic_root"])
+                primary["broker_password"], topic_filter_union(self._nets))
 
     def connect(self) -> None:
         try:
@@ -567,13 +685,22 @@ class _BrokerConnection:
         return keys
 
     def _record_status(self, ok: bool, error: str | None) -> None:
-        """Write connection state onto every net sharing this broker --
-        see module docstring on why this uses its own short-lived
-        connection rather than self._own_conn (which is reserved for
-        the buffer-write path and may not exist yet, e.g. before the
-        first message ever arrives). Fires only on connect/disconnect
-        transitions (from paho's own callbacks), not per message, so a
-        fresh connection per call is not a hot path.
+        """Write connection state onto every net/source sharing this
+        broker -- see module docstring on why this uses its own
+        short-lived connection rather than self._own_conn (which is
+        reserved for the buffer-write path and may not exist yet, e.g.
+        before the first message ever arrives). Fires only on
+        connect/disconnect transitions (from paho's own callbacks), not
+        per message, so a fresh connection per call is not a hot path.
+
+        self._nets can now mix checkin_net and observation_source rows
+        (see MqttSubscriber._reconcile_once) -- an id is only meaningful
+        together with the table it came from, since checkin_net id 3 and
+        observation_source id 3 are unrelated rows. `source_table`
+        (stamped onto every row by _reconcile_once) is what keeps each
+        UPDATE pointed at the row's own table; getting this wrong would
+        silently write connection status onto an unrelated net/source
+        that happens to share the same numeric id.
         """
         now = int(time.time())
         conn = connect()
@@ -581,7 +708,7 @@ class _BrokerConnection:
             conn.execute("BEGIN IMMEDIATE")
             for n in self._nets:
                 conn.execute(
-                    "UPDATE checkin_net SET last_poll_at = ?, last_poll_error = ? WHERE id = ?",
+                    _STATUS_UPDATE_SQL[n["source_table"]],
                     (now, None if ok else (error or "")[:500], n["id"]),
                 )
             conn.execute("COMMIT")
@@ -599,13 +726,15 @@ class _BrokerConnection:
             log.warning("mqtt: connect failed for %s: %s", self.connector_url, reason_code)
             self._record_status(False, "connect failed: %s" % reason_code)
             return
-        topic_root = self._nets[0]["topic_root"] if self._nets else ""
-        # Narrow subscription when topic_root is configured, rather than
-        # '#' across the whole broker -- see checkin_net.topic_root's own
-        # comment in app/db.py.
-        sub_filter = (topic_root.rstrip("/") + "/#") if topic_root else "#"
-        client.subscribe(sub_filter)
-        log.info("mqtt: connected to %s, subscribed %s", self.connector_url, sub_filter)
+        # Subscribe to the UNION of every net/source sharing this
+        # broker (topic_filter_union), not just self._nets[0] -- see
+        # that helper's docstring and fingerprint's comment above for
+        # why. paho's subscribe() accepts a list of (topic, qos) tuples
+        # for exactly this "several filters, one broker" case, so this
+        # is a single subscribe() call rather than one per filter.
+        sub_filters = topic_filter_union(self._nets)
+        client.subscribe([(f, 0) for f in sub_filters])
+        log.info("mqtt: connected to %s, subscribed %s", self.connector_url, list(sub_filters))
         self._record_status(True, None)
 
     def _on_disconnect(self, client, userdata, flags=None, reason_code=None, properties=None) -> None:
@@ -720,20 +849,44 @@ class MqttSubscriber:
             raise
 
     async def _reconcile_once(self) -> None:
-        """Read the current set of enabled 'mqtt' nets, grouped by
-        connector_url, and make self._brokers match it: connect a new
-        broker, disconnect one that no longer has any enabled net, and
-        for one that persists, either hand it the refreshed net list
-        (credentials/topic_root unchanged -- see _BrokerConnection.
-        fingerprint) or tear down and reconnect (credentials/topic_root
-        changed -- those shape the connection itself, so nothing short
-        of a reconnect can pick them up).
+        """Read the current set of enabled mqtt/mqtt_meshtastic rows,
+        grouped by connector_url, and make self._brokers match it:
+        connect a new broker, disconnect one that no longer has any
+        enabled row, and for one that persists, either hand it the
+        refreshed row list (credentials/subscribed filters unchanged --
+        see _BrokerConnection.fingerprint) or tear down and reconnect
+        (credentials/filters changed -- those shape the connection
+        itself, so nothing short of a reconnect can pick them up).
+
+        Reads BOTH checkin_net AND observation_source -- an
+        observation_source row can be kind='mqtt'/'mqtt_meshtastic'
+        exactly like a checkin_net row (see app/db.py's
+        observation_source comment: same connector shape, no scoring
+        window), and this subscriber's job is "keep the buffer fed for
+        whatever wants a live broker connection," not "keep checkin_net
+        fed" -- an observation_source-only broker this method ignored
+        would never connect, and its buffer would stay permanently
+        empty. The two tables do NOT share a uniform column set
+        (observation_source has no weekday/start_hour/end_hour/
+        timezone/start_date/hashtag -- see its own comment in
+        app/db.py), so this selects only the columns this module
+        actually reads, explicitly, from each table -- never SELECT *,
+        which would hand back two differently-shaped row sets and break
+        every dict-keyed access below that assumes a uniform row. Each
+        row is tagged with `source_table` so _record_status (see its
+        own comment) can write connection status back to the table the
+        row actually came from.
         """
         db_conn = connect()
         try:
-            rows = [dict(r) for r in db_conn.execute(
-                "SELECT * FROM checkin_net WHERE enabled = 1 AND kind = ?", (KIND_MQTT,)
-            ).fetchall()]
+            rows: list[dict] = []
+            for table, sql in _ROWS_SELECT_SQL.items():
+                table_rows = [dict(r) for r in db_conn.execute(
+                    sql, (KIND_MQTT, KIND_MQTT_MESHTASTIC),
+                ).fetchall()]
+                for r in table_rows:
+                    r["source_table"] = table
+                rows.extend(table_rows)
         finally:
             db_conn.close()
 
@@ -756,12 +909,14 @@ class MqttSubscriber:
             # Compute the WOULD-BE fingerprint without constructing a
             # second live client (that would open a second paho
             # connection just to inspect a tuple) -- fingerprint only
-            # reads plain dict fields, so this reuses the same logic
-            # against the NEW group directly.
+            # reads plain dict fields (and topic_filter_union, itself
+            # pure), so this reuses the same logic against the NEW
+            # group directly.
             primary = group[0]
-            new_fp = (url, primary["broker_username"], primary["broker_password"], primary["topic_root"])
+            new_fp = (url, primary["broker_username"], primary["broker_password"],
+                      topic_filter_union(group))
             if existing.fingerprint != new_fp:
-                log.info("mqtt: reconnecting %s (credentials or topic_root changed)", url)
+                log.info("mqtt: reconnecting %s (credentials or subscribed filters changed)", url)
                 existing.disconnect()
                 bc = _BrokerConnection(url, group)
                 self._brokers[url] = bc

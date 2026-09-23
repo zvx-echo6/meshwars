@@ -121,6 +121,13 @@ async def config() -> dict:
         # "request tiles without a key" (watermarked but working).
         "carto_api_key": settings.carto_api_key,
         "join_meshtastic_enabled": settings.join_meshtastic_enabled,
+        # Lets frontend/admin.js decide whether to gate the panel on
+        # GET /api/account at all -- see that flag's own comment in
+        # app/config.py. Always surfaced (unlike join_invite_code below,
+        # which is opt-in): whether the admin door has a lock on it is
+        # not sensitive the way an invite code is, and the panel needs
+        # this before it can decide anything.
+        "admin_require_auth": settings.admin_require_auth,
         "play_area": {
             "north": settings.play_area_north,
             "south": settings.play_area_south,

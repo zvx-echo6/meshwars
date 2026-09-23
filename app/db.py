@@ -1032,6 +1032,82 @@ CREATE TABLE IF NOT EXISTS checkin_net (
 );
 CREATE INDEX IF NOT EXISTS idx_checkin_net_enabled ON checkin_net(enabled, protocol);
 
+-- ---------------------------------------------------------------------
+-- Observation sources: the SAME connector shape as checkin_net above
+-- (kind/protocol/connector_url/channel/topic_root/broker_username/
+-- broker_password/channel_key), used ONLY for node discovery and node
+-- confirmation (app/checkin_api.py's POST /api/checkin/confirm/accept,
+-- and whatever discovery path task 2+ of this feature adds) -- NEVER
+-- for check-in scoring. checkin_net conflated "a connector to poll" with
+-- "a scoring window," and the only way to stand up a connector that
+-- exists purely to see who is out there -- with no net to award against
+-- -- was to fake one as a net with a blank start_date (checkin_net's own
+-- '' means BLOCK ALL convention), a real net row doing a fake net's job.
+-- This table is that connector shape on its own, so a source can exist
+-- without pretending to be an unscoreable net.
+--
+-- The net-window columns on checkin_net -- weekday, start_hour,
+-- end_hour, timezone, start_date, hashtag -- are DELIBERATELY ABSENT
+-- here. There is no window because there is no scoring: a source is
+-- either enabled (being watched) or not, full stop. Anything that reads
+-- this table for scoring purposes is a bug, not a missing column.
+--
+-- Brand new table, no existing deployed shape to ALTER, so CREATE TABLE
+-- IF NOT EXISTS here is sufficient on its own -- same reasoning as
+-- checkin_net itself and every other brand-new table in this file; no
+-- MIGRATIONS entry needed.
+CREATE TABLE IF NOT EXISTS observation_source (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    label           TEXT NOT NULL,
+    protocol        TEXT NOT NULL,             -- 'mc' | 'mt' -- DERIVED
+                                                 -- from `kind` on every
+                                                 -- admin write, same
+                                                 -- convention as
+                                                 -- checkin_net.protocol
+                                                 -- (see app/checkin.py's
+                                                 -- KIND_PROTOCOL).
+    kind            TEXT NOT NULL,              -- 'corescope' | 'beacon' |
+                                                 -- 'meshview' | 'mqtt' |
+                                                 -- 'mqtt_meshtastic' --
+                                                 -- which upstream API this
+                                                 -- source's connector_url
+                                                 -- actually speaks, same
+                                                 -- vocabulary as
+                                                 -- checkin_net.kind (see
+                                                 -- app/checkin.py's
+                                                 -- KIND_* constants).
+    connector_url   TEXT NOT NULL,              -- base URL, no trailing
+                                                 -- slash. mqtt/mqtts://
+                                                 -- for the mqtt kinds (a
+                                                 -- broker), http(s):// for
+                                                 -- every other kind (an
+                                                 -- HTTP API).
+    channel         TEXT NOT NULL DEFAULT '',   -- corescope/beacon:
+                                                 -- channel NAME. mqtt/
+                                                 -- mqtt_meshtastic:
+                                                 -- channel to subscribe.
+                                                 -- meshview: unused, ''.
+    topic_root      TEXT NOT NULL DEFAULT '',   -- mqtt/mqtt_meshtastic
+                                                 -- only, e.g. 'msh/US'.
+                                                 -- Unused otherwise, ''.
+    broker_username TEXT NOT NULL DEFAULT '',
+    broker_password TEXT NOT NULL DEFAULT '',   -- SECRET -- never
+                                                 -- returned by the API,
+                                                 -- same _scrub_secrets
+                                                 -- convention as
+                                                 -- checkin_net.broker_password.
+    channel_key     TEXT NOT NULL DEFAULT '',   -- SECRET -- base64 PSK;
+                                                 -- '' means the
+                                                 -- Meshtastic default
+                                                 -- channel key, same as
+                                                 -- checkin_net.channel_key.
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      INTEGER NOT NULL,
+    last_poll_at    INTEGER,
+    last_poll_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_observation_source_enabled ON observation_source(enabled, protocol);
+
 -- Push-subscription buffer for the mqtt connector kind
 -- (app/mqtt_subscriber.py's MqttSubscriber). MQTT is a persistent
 -- broker connection, not a 30-second HTTP poll like every other
@@ -2639,6 +2715,51 @@ CREATE TABLE IF NOT EXISTS discord_pinned_message (
     pinned        INTEGER NOT NULL DEFAULT 0,
     updated_at    INTEGER NOT NULL
 );
+
+-- ---------------------------------------------------------------------
+-- The public announcement feed (app/announce_content.py): transport-
+-- neutral, structured Content -- a daily recap, a weekly recap, a
+-- month's honors, or one net's wrap-up -- built from the same scoring
+-- helpers app/results.py and Discord's own recaps already read, stored
+-- here so it is built exactly once and can be replayed to any consumer
+-- (a future public API route, a future radio-broadcast clock -- neither
+-- exists yet; this table is only the storage foundation for them).
+--
+-- `id` is the PUBLIC CURSOR, not an opaque surrogate key: a consumer
+-- polls with "?since=<id>" and reads every row with id > since, in
+-- insertion order -- a plain AUTOINCREMENT already gives that ordering
+-- for free, with no separate sequence column to keep in step. `kind` +
+-- `key` is the same dedup shape discord_outbox already uses for its own
+-- announcements just above (see that table's own comment) -- `key` is
+-- the Content's own natural key (a date, an ISO week, a "YYYY-MM", or a
+-- "<net_id>:<net_date>" -- see each builder in announce_content.py),
+-- unique only together with `kind`, since two different kinds can
+-- legitimately share the same literal key string without colliding.
+-- store_announcement()'s INSERT OR IGNORE against the UNIQUE index
+-- below is what makes re-building an already-stored Content a no-op
+-- rather than a duplicate row -- the same reason a re-freeze of an
+-- already-announced month drops its Discord repost silently instead of
+-- posting twice.
+--
+-- `content` is the whole built Content dict, json.dumps()'d whole --
+-- no per-field column for headline/sections/etc, the same choice
+-- discord_outbox.payload and board_cache.body already make for a blob
+-- that only ever needs to be read back out whole, never queried by one
+-- of its own fields. `board` and `net_id` are pulled out as real
+-- columns anyway (duplicating what is also inside `content`) purely so
+-- a consumer can filter/join on them in SQL without parsing the JSON
+-- first; net_id is NULL for every kind except net_wrapup, the only one
+-- scoped to a single checkin_net row rather than a whole board.
+CREATE TABLE IF NOT EXISTS announcement (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    board       TEXT NOT NULL,          -- 'mc' | 'mt'
+    net_id      INTEGER,                -- NULL except for net_wrapup
+    content     TEXT NOT NULL,          -- json.dumps() of the Content dict
+    created_at  INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_announcement_key ON announcement(kind, key);
 """
 
 

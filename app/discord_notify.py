@@ -2497,4 +2497,25 @@ async def run_forever() -> None:
             raise
         except Exception:
             log.exception("discord leaderboard: pass cycle failed")
+        try:
+            # A FIFTH feature riding this same already-alive loop: the
+            # public announcement feed (app/announce.py), its own
+            # interval gate (settings.announcement_poll_interval_seconds)
+            # applied by maybe_run() itself, via its own module-level
+            # gate -- same shape maybe_reconcile_roles()/maybe_run_
+            # leaderboard() above already use for theirs. It lives here
+            # ONLY because this codebase mandates ONE background loop
+            # with per-feature interval gates rather than a scheduler
+            # per kind (see TIME_DRIVEN_PROVIDERS's own docstring
+            # above) -- it is otherwise fully independent of Discord (no
+            # webhook, no outbox row), and a candidate for extraction
+            # into its own loop/module if this one keeps growing.
+            # Imported locally, same circular-import reason as
+            # discord_bot/discord_leaderboard above.
+            from . import announce
+            await announce.maybe_run(int(time.time()))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("announce: due-check cycle failed")
         await asyncio.sleep(max(settings.discord_outbox_poll_interval_seconds, 1))

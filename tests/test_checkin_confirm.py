@@ -243,6 +243,25 @@ def _make_mqtt_net(path: str, connector_url: str = MQTT_CONNECTOR_URL) -> None:
     conn.close()
 
 
+def _make_mqtt_source(path: str, connector_url: str = MQTT_CONNECTOR_URL, label: str = "Test MQTT Source") -> None:
+    """observation_source counterpart of _make_mqtt_net above -- same
+    connector shape, no scoring window at all (see app/db.py's
+    observation_source comment): confirmation/discovery must see this
+    row exactly as if it were a checkin_net row (see
+    app/checkin.py's _distinct_connectors), even with no checkin_net row
+    for this connector anywhere in the database.
+    """
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO observation_source"
+        "(label, protocol, kind, connector_url, channel, enabled, created_at) "
+        "VALUES (?, 'mt', 'mqtt', ?, '', 1, ?)",
+        (label, connector_url, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+
 class _FakeMeshviewClient:
     """Stands in for app.meshview_client.MeshviewClient the same way
     tests/test_ingest_integrity_gates.py's own FakeMeshviewClient
@@ -847,6 +866,65 @@ def test_mt_mqtt_connector_message_with_code_surfaces_candidate(client, db_path)
     body = status_resp.json()
     assert body["state"] == "found"
     assert body["candidates"][0]["node_ref"] == MT_NODE_REF
+
+
+# ---- an observation_source-only connector is scanned too (task 5) --------
+
+def test_mt_mqtt_observation_source_message_with_code_surfaces_candidate_with_no_checkin_net(client, db_path):
+    """A Meshtastic confirmation candidate must surface from an
+    observation_source row even when there is NO checkin_net row at
+    all for that broker -- observation_source exists precisely to feed
+    confirmation/discovery without a scoring window (see app/db.py's
+    observation_source comment and app/checkin.py's _distinct_connectors,
+    which unions both tables for exactly this scan). Modeled directly on
+    test_mt_mqtt_connector_message_with_code_surfaces_candidate above,
+    using _make_mqtt_source instead of _make_mqtt_net -- deliberately NO
+    checkin_net row anywhere in this database.
+    """
+    _make_mqtt_source(db_path)
+    _login(client, db_path)
+
+    start_resp = client.post("/api/checkin/confirm/start", json={"protocol": "mt"})
+    code = start_resp.json()["code"]
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO mqtt_message_buffer"
+        "(connector, packet_id, from_node, channel_name, text, ts, received_at) "
+        "VALUES (?, ?, ?, '', ?, ?, ?)",
+        (MQTT_CONNECTOR_URL, "43", MT_NODE_ID, f"broadcasting {code} now", NOW, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+    # Sanity: really no checkin_net row exists for this connector (or at
+    # all) -- the candidate below can only have come from observation_source.
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM checkin_net").fetchone()[0] == 0
+    conn.close()
+
+    status_resp = client.get("/api/checkin/confirm/status")
+    body = status_resp.json()
+    assert body["state"] == "found"
+    assert body["candidates"][0]["node_ref"] == MT_NODE_REF
+
+
+def test_connector_present_in_both_tables_is_scanned_once_not_twice(db_path):
+    """A connector configured identically (same kind, same
+    connector_url) in BOTH checkin_net and observation_source must be
+    scanned once, not twice -- see app/checkin.py's _distinct_connectors
+    docstring: plain UNION (not UNION ALL) on the full selected row is
+    what SQLite dedupes this on.
+    """
+    _make_mqtt_net(db_path)
+    _make_mqtt_source(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = checkin_module._distinct_connectors(conn, (checkin_module.KIND_MQTT,))
+    conn.close()
+
+    assert rows == [{"kind": "mqtt", "connector_url": MQTT_CONNECTOR_URL}]
 
 
 # ---- accept binds player_node correctly, protocol='mt' --------------------

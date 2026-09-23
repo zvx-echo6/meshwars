@@ -12,7 +12,11 @@
 // is decided server-side, on every single request, by app/admin_api.py's
 // _role_guard() -- this file's own gating (checkAccess() below) is a
 // UX nicety (don't show empty panels to someone who will just get 401s),
-// never the actual security boundary.
+// never the actual security boundary. The one exception is
+// settings.admin_require_auth being off (see checkAccess()'s own
+// comment) -- there, the server-side boundary IS "none," and this
+// file's job shifts to making that state impossible to miss rather
+// than hiding a panel nothing is protecting anyway.
 //
 // Everything below is plain DOM. No templating and no innerHTML with
 // data in it: player names and labels are operator-supplied and
@@ -20,7 +24,7 @@
 // into running anything.
 // =====================================================================
 
-let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/account
+let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/account, or synthetic 'operator' when admin_require_auth is off (see checkAccess())
 let allPlayers = [];
 let expanded = new Set();   // player ids left open across a refresh
 let allAccounts = [];       // GET /api/admin/accounts -- every account, not just linked ones
@@ -1384,29 +1388,51 @@ let allNets = [];
 let editingNetId = null;   // null while the form is adding, a net id while editing
 const NET_WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
-// The four connector kinds an operator can pick (see app/checkin.py's
-// KIND_CORESCOPE/KIND_BEACON/KIND_MESHVIEW/KIND_MQTT). `protocol`
-// ('mc'/'mt') is derived from this on the backend and is never sent by
-// this form -- see _validate_net_fields in app/admin_ops.py. Labels
-// match the select options in admin.html exactly; the badge reuses the
-// same short label so a row and the form agree on what to call a kind.
+// The five connector kinds an operator can pick (see app/checkin.py's
+// KIND_CORESCOPE/KIND_BEACON/KIND_MESHVIEW/KIND_MQTT/
+// KIND_MQTT_MESHTASTIC). `protocol` ('mc'/'mt') is derived from this
+// on the backend and is never sent by this form -- see
+// _validate_net_fields in app/admin_ops.py. Labels match the select
+// options in admin.html exactly; the badge reuses the same short
+// label so a row and the form agree on what to call a kind.
 const NET_KIND_LABELS = {
   corescope: 'MC: CoreScope',
   beacon: 'MC: Beacon',
   meshview: 'MT: Meshview',
   mqtt: 'MT: MQTT',
+  mqtt_meshtastic: 'MT: Official Meshtastic broker',
 };
-// corescope and beacon are both channel-scoped connectors (a net picks
-// one channel on the connector); meshview and mqtt are both
-// hashtag-scoped (found by their hashtag on any channel) -- see
-// app/checkin.py's module docstring.
-function netKindHasChannel(kind) { return kind !== 'meshview' && kind !== 'mqtt'; }
-function netKindIsMqtt(kind) { return kind === 'mqtt'; }
+// corescope and beacon are channel-scoped connectors (a net picks one
+// channel on the connector); meshview, mqtt and mqtt_meshtastic are
+// all hashtag-scoped nets (found by their hashtag on any channel) --
+// see app/checkin.py's module docstring. mqtt and mqtt_meshtastic
+// ALSO show the channel field even though they're hashtag-scoped:
+// channel narrows which Meshtastic channel the broker subscription
+// itself watches (see app/mqtt_subscriber.py's topic_filters_for_row),
+// a separate concern from the hashtag that identifies this net's own
+// messages once they arrive -- so for these two kinds the channel and
+// hashtag rows are no longer simple opposites of each other, and each
+// gets its own visibility check below rather than one being !the
+// other.
+function netKindHasChannel(kind) { return kind !== 'meshview'; }
+function netKindHasHashtag(kind) { return kind !== 'corescope' && kind !== 'beacon'; }
+// corescope/beacon poll an upstream channel-list API (see
+// loadNetChannels below); an MQTT broker has no such API -- GET
+// /api/admin/checkin/channels returns applicable: false for both mqtt
+// kinds -- so "Load channels" only ever makes sense for the MeshCore
+// two.
+function netKindIsMeshCore(kind) { return kind === 'corescope' || kind === 'beacon'; }
+function netKindIsMqtt(kind) { return kind === 'mqtt' || kind === 'mqtt_meshtastic'; }
 
 // mqtt's connector is a broker address, not an http(s) URL like the
-// other three -- an https example there reads as a typo instruction
-// rather than guidance. Keyed by kind so updateNetFormKind can swap
-// the connector field's placeholder to match whatever's selected.
+// other kinds -- an https example there reads as a typo instruction
+// rather than guidance. Keyed by kind so updateNetFormKind/
+// updateSourceFormKind can swap the connector field's placeholder to
+// match whatever's selected. mqtt_meshtastic has no entry here: its
+// connector row is hidden outright (see updateNetFormKind below) since
+// there is only one official broker and nothing for an operator to
+// type -- app/admin_ops.py's _validate_connector_url forces it
+// server-side regardless of what this form would send.
 const NET_CONNECTOR_URL_EXAMPLES = {
   corescope: 'https://live.mwmesh.com',
   beacon: 'https://map.meshcore.coloradomesh.org',
@@ -1500,8 +1526,23 @@ function renderNetRow(n) {
   // 'mc' and otherwise indistinguishable in this row, so a protocol
   // badge would leave an operator unable to tell them apart.
   info.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
-  info.appendChild(el('span', { className: 'adm-mono', text: n.connector_url }));
-  info.appendChild(el('span', { text: netKindHasChannel(n.kind) ? n.channel : n.hashtag }));
+  // mqtt_meshtastic's connector_url is always the same official broker
+  // address (see app/admin_ops.py's _validate_connector_url) -- not
+  // operator config, so showing it here the same way a real
+  // operator-chosen connector_url is shown would be misleading. The
+  // kind badge above already says which broker family this is; the
+  // topic root (the field that actually narrows this row) stands in
+  // for it instead. Every other kind still shows its real connector_url.
+  info.appendChild(el('span', {
+    className: 'adm-mono',
+    text: n.kind === 'mqtt_meshtastic' ? ('topic root: ' + n.topic_root) : n.connector_url,
+  }));
+  // channel and hashtag are no longer simple opposites for mqtt/
+  // mqtt_meshtastic (see netKindHasChannel/netKindHasHashtag above) --
+  // show whichever of the two this row actually has a value for; every
+  // other kind still only ever has one of them set.
+  if (n.channel) info.appendChild(el('span', { text: n.channel }));
+  if (n.hashtag) info.appendChild(el('span', { text: n.hashtag }));
   info.appendChild(el('span', { text: netWindowText(n) }));
   info.appendChild(el('span', {
     className: 'adm-badge ' + (n.enabled ? 'adm-badge-ok' : 'adm-badge-bad'),
@@ -1774,11 +1815,38 @@ async function clearPaintCursor(b) {
 function updateNetFormKind() {
   const kind = document.getElementById('nf-kind').value;
   document.getElementById('nf-channel-row').hidden = !netKindHasChannel(kind);
-  document.getElementById('nf-hashtag-row').hidden = netKindHasChannel(kind);
+  document.getElementById('nf-hashtag-row').hidden = !netKindHasHashtag(kind);
+  // Load channels only means anything for the MeshCore two -- see
+  // netKindIsMeshCore's own comment above. Switching away from them
+  // also clears any select a previous MeshCore kind left populated, so
+  // a stale channel list can't linger into a kind it was never loaded
+  // for.
+  const isMeshCore = netKindIsMeshCore(kind);
+  document.getElementById('nf-load-channels').hidden = !isMeshCore;
+  if (!isMeshCore) {
+    const select = document.getElementById('nf-channel-select');
+    select.hidden = true;
+    select.replaceChildren();
+  }
   const isMqtt = netKindIsMqtt(kind);
+  const isOfficialMqtt = kind === 'mqtt_meshtastic';
+  // mqtt_meshtastic has exactly one broker, one address, one set of
+  // published credentials -- connector_url/broker_username/
+  // broker_password are not operator choices for this kind (see
+  // app/checkin.py's OFFICIAL_MESHTASTIC_* constants and
+  // app/admin_ops.py's _validate_connector_url/_validate_mqtt_fields,
+  // which force all three server-side regardless of what this form
+  // sends), so those rows never appear for it -- only topic root,
+  // channel, and channel key are real choices. The static hint below
+  // replaces the connector row so the operator can still see what
+  // broker it will use.
+  document.getElementById('nf-connector-row').hidden = isOfficialMqtt;
+  document.getElementById('nf-official-broker-hint').hidden = !isOfficialMqtt;
   document.getElementById('nf-mqtt-row-1').hidden = !isMqtt;
-  document.getElementById('nf-mqtt-row-2').hidden = !isMqtt;
+  document.getElementById('nf-broker-username').hidden = isOfficialMqtt;
+  document.getElementById('nf-mqtt-row-2').hidden = !isMqtt || isOfficialMqtt;
   document.getElementById('nf-mqtt-row-3').hidden = !isMqtt;
+  document.getElementById('nf-mqtt-meshtastic-hint').hidden = !isOfficialMqtt;
   const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
   document.getElementById('nf-connector').placeholder = 'connector URL, e.g. ' + example;
 }
@@ -1939,6 +2007,248 @@ async function saveNet(b) {
     }
     resetNetForm();
     await loadNets();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+// ---- observation sources (app/db.py's observation_source) -------------
+//
+// A connector watched only for node discovery and node confirmation --
+// never check-in scoring (see app/admin_ops.py's own comment ahead of
+// its observation-source routes). Mirrors the nets section above --
+// same connector kinds, same MeshCore/mqtt row shape, same secret
+// handling and delete confirmation -- minus every scoring-window field
+// (weekday/start_hour/end_hour/timezone/start_date/hashtag): the
+// observation_source table has no such columns at all. Kind-keyed
+// helpers (NET_KIND_LABELS, netKindHasChannel, netKindIsMeshCore,
+// netKindIsMqtt, NET_CONNECTOR_URL_EXAMPLES) are reused as-is from the
+// nets section above rather than duplicated -- the connector-kind
+// vocabulary is identical for both tables.
+
+let allSources = [];
+let editingSourceId = null;   // null while the form is adding, a source id while editing
+
+function renderSourceRow(n) {
+  const wrap = el('div', { className: 'adm-net' });
+  const row = el('div', { className: 'adm-net-row' });
+  const info = el('div', { className: 'adm-net-info' });
+  info.appendChild(el('strong', { text: n.label }));
+  info.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
+  // Same "not operator config" reasoning as renderNetRow's identical
+  // check above -- mqtt_meshtastic's connector_url is always the one
+  // official broker address, so the topic root stands in for it here
+  // too.
+  info.appendChild(el('span', {
+    className: 'adm-mono',
+    text: n.kind === 'mqtt_meshtastic' ? ('topic root: ' + n.topic_root) : n.connector_url,
+  }));
+  // Blank for a kind that has nothing to narrow by (meshview) -- see
+  // _validate_source_fields in app/admin_ops.py -- so only shown when
+  // there's actually a value.
+  if (n.channel) info.appendChild(el('span', { text: n.channel }));
+  info.appendChild(el('span', {
+    className: 'adm-badge ' + (n.enabled ? 'adm-badge-ok' : 'adm-badge-bad'),
+    text: n.enabled ? 'enabled' : 'disabled',
+  }));
+  row.appendChild(info);
+  const actions = el('div', { className: 'adm-net-actions' });
+  actions.appendChild(btn('Edit', 'adm-btn-quiet', () => startEditSource(n)));
+  actions.appendChild(btn('Delete', 'adm-btn-danger', async (b) => {
+    const typed = window.prompt('Deleting removes this observation source.\n\nType ' + n.label + ' to confirm.');
+    if (!typed) return;
+    b.disabled = true;
+    try {
+      await post('/api/admin/observation/sources/delete', { id: n.id, label: typed });
+      setStatus('Deleted source ' + n.label, false);
+      if (editingSourceId === n.id) resetSourceForm();
+      await loadSources();
+    } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+  }));
+  row.appendChild(actions);
+  wrap.appendChild(row);
+
+  // Same health line the nets section shows -- last_poll_at/
+  // last_poll_error come straight off the row, see GET
+  // /api/admin/observation/sources.
+  const healthP = el('p', {
+    className: 'adm-net-health' + (n.last_poll_error ? ' adm-status-bad' : ''),
+  });
+  healthP.appendChild(el('span', { text: netHealthText(n) }));
+  wrap.appendChild(healthP);
+  return wrap;
+}
+
+function renderSources() {
+  const host = document.getElementById('sources');
+  const count = document.getElementById('sources-count');
+  host.replaceChildren();
+  count.textContent = allSources.length
+    ? (allSources.length + (allSources.length === 1 ? ' source' : ' sources')) : '';
+  if (!allSources.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No observation sources configured yet -- add one below.' }));
+    return;
+  }
+  allSources.forEach((n) => host.appendChild(renderSourceRow(n)));
+}
+
+async function loadSources() {
+  try {
+    const d = await api('/api/admin/observation/sources');
+    allSources = d.sources || [];
+    renderSources();
+  } catch (e) {
+    setStatus('Sources load failed: ' + e.message, true);
+  }
+}
+
+function updateSourceFormKind() {
+  const kind = document.getElementById('sf-kind').value;
+  document.getElementById('sf-channel-row').hidden = !netKindHasChannel(kind);
+  const isMeshCore = netKindIsMeshCore(kind);
+  document.getElementById('sf-load-channels').hidden = !isMeshCore;
+  if (!isMeshCore) {
+    const select = document.getElementById('sf-channel-select');
+    select.hidden = true;
+    select.replaceChildren();
+  }
+  const isMqtt = netKindIsMqtt(kind);
+  const isOfficialMqtt = kind === 'mqtt_meshtastic';
+  // Same "one broker, nothing to choose" reasoning as
+  // updateNetFormKind's identical block above.
+  document.getElementById('sf-connector-row').hidden = isOfficialMqtt;
+  document.getElementById('sf-official-broker-hint').hidden = !isOfficialMqtt;
+  document.getElementById('sf-mqtt-row-1').hidden = !isMqtt;
+  document.getElementById('sf-broker-username').hidden = isOfficialMqtt;
+  document.getElementById('sf-mqtt-row-2').hidden = !isMqtt || isOfficialMqtt;
+  document.getElementById('sf-mqtt-row-3').hidden = !isMqtt;
+  document.getElementById('sf-mqtt-meshtastic-hint').hidden = !isOfficialMqtt;
+  const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
+  document.getElementById('sf-connector').placeholder = 'connector URL, e.g. ' + example;
+}
+
+async function loadSourceChannels(b) {
+  const connector = document.getElementById('sf-connector').value.trim();
+  const kind = document.getElementById('sf-kind').value;
+  const out = document.getElementById('sf-result');
+  out.replaceChildren();
+  if (!connector) { out.textContent = 'Enter a connector URL first.'; return; }
+  b.disabled = true;
+  try {
+    const r = await api('/api/admin/checkin/channels?connector=' + encodeURIComponent(connector) +
+      '&kind=' + encodeURIComponent(kind));
+    const select = document.getElementById('sf-channel-select');
+    select.replaceChildren();
+    if (!r.applicable) {
+      select.hidden = true;
+      out.textContent = 'This connector kind has no channel list -- type the channel name by hand.';
+      b.disabled = false;
+      return;
+    }
+    (r.channels || []).forEach((c) => {
+      const name = typeof c === 'string' ? c : (c.name || c.channel || c.label || '');
+      if (!name) return;
+      select.appendChild(el('option', { value: name, text: name }));
+    });
+    if (select.children.length) {
+      select.hidden = false;
+      select.value = select.children[0].value;
+      document.getElementById('sf-channel').value = select.value;
+      out.textContent = 'Loaded ' + select.children.length + ' channels.';
+    } else {
+      select.hidden = true;
+      out.textContent = 'Connector returned no channels -- type the channel name by hand.';
+    }
+  } catch (e) {
+    out.textContent = 'Could not load channels: ' + e.message + ' -- type the channel name by hand.';
+  }
+  b.disabled = false;
+}
+
+function resetSourceForm() {
+  editingSourceId = null;
+  document.getElementById('sf-kind').value = 'corescope';
+  updateSourceFormKind();
+  document.getElementById('sf-label').value = '';
+  document.getElementById('sf-connector').value = '';
+  document.getElementById('sf-channel').value = '';
+  document.getElementById('sf-enabled').checked = true;
+  document.getElementById('sf-topic-root').value = '';
+  document.getElementById('sf-broker-username').value = '';
+  document.getElementById('sf-broker-password').value = '';
+  document.getElementById('sf-channel-key').value = '';
+  document.getElementById('sf-clear-broker-password').checked = false;
+  document.getElementById('sf-clear-channel-key').checked = false;
+  document.getElementById('sf-broker-password-hint').textContent = '';
+  document.getElementById('sf-channel-key-hint').textContent = '';
+  const select = document.getElementById('sf-channel-select');
+  select.hidden = true;
+  select.replaceChildren();
+  document.getElementById('source-form-title').textContent = 'Add a source';
+  document.getElementById('sf-save').textContent = 'Add source';
+  document.getElementById('sf-cancel').hidden = true;
+  // Deliberately does not touch sf-result -- same reason resetNetForm
+  // doesn't touch nf-result, see that function's own comment.
+}
+
+function startEditSource(n) {
+  editingSourceId = n.id;
+  document.getElementById('sf-kind').value = n.kind;
+  updateSourceFormKind();
+  document.getElementById('sf-label').value = n.label;
+  document.getElementById('sf-connector').value = n.connector_url;
+  document.getElementById('sf-channel').value = n.channel || '';
+  document.getElementById('sf-enabled').checked = !!n.enabled;
+  document.getElementById('sf-topic-root').value = n.topic_root || '';
+  document.getElementById('sf-broker-username').value = n.broker_username || '';
+  // Secrets are NEVER echoed back -- see startEditNet's own comment on
+  // the identical nf-broker-password/nf-channel-key pattern above.
+  document.getElementById('sf-broker-password').value = '';
+  document.getElementById('sf-channel-key').value = '';
+  document.getElementById('sf-clear-broker-password').checked = false;
+  document.getElementById('sf-clear-channel-key').checked = false;
+  document.getElementById('sf-broker-password-hint').textContent = n.has_broker_password ? 'currently set' : 'not set';
+  document.getElementById('sf-channel-key-hint').textContent = n.has_channel_key ? 'currently set (blank = Meshtastic default)' : 'not set -- using Meshtastic default key';
+  const select = document.getElementById('sf-channel-select');
+  select.hidden = true;
+  select.replaceChildren();
+  document.getElementById('source-form-title').textContent = 'Edit source';
+  document.getElementById('sf-save').textContent = 'Save source';
+  document.getElementById('sf-cancel').hidden = false;
+  document.getElementById('sf-result').replaceChildren();
+  document.getElementById('source-form-title').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function saveSource(b) {
+  const out = document.getElementById('sf-result');
+  out.replaceChildren();
+  const payload = {
+    label: document.getElementById('sf-label').value.trim(),
+    kind: document.getElementById('sf-kind').value,
+    connector_url: document.getElementById('sf-connector').value.trim(),
+    channel: document.getElementById('sf-channel').value.trim(),
+    enabled: document.getElementById('sf-enabled').checked,
+    topic_root: document.getElementById('sf-topic-root').value.trim(),
+    broker_username: document.getElementById('sf-broker-username').value.trim(),
+    // Blank means "keep the existing secret" on the backend -- same
+    // convention saveNet's identical payload fields document above.
+    broker_password: document.getElementById('sf-broker-password').value,
+    channel_key: document.getElementById('sf-channel-key').value.trim(),
+    clear_broker_password: document.getElementById('sf-clear-broker-password').checked,
+    clear_channel_key: document.getElementById('sf-clear-channel-key').checked,
+  };
+  b.disabled = true;
+  try {
+    if (editingSourceId === null) {
+      await post('/api/admin/observation/sources/create', payload);
+      out.textContent = 'Source added.';
+    } else {
+      await post('/api/admin/observation/sources/update', Object.assign({ id: editingSourceId }, payload));
+      out.textContent = 'Source updated.';
+    }
+    resetSourceForm();
+    await loadSources();
   } catch (e) {
     out.textContent = 'Failed: ' + e.message;
   }
@@ -2600,8 +2910,8 @@ function badge(id, value, bad) {
 
 async function refreshAll() {
   const loads = [
-    loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadPaint(),
-    loadDiscord(), loadTraffic(), loadCheckinAwards(),
+    loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadSources(),
+    loadPaint(), loadDiscord(), loadTraffic(), loadCheckinAwards(),
   ];
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
@@ -2654,7 +2964,45 @@ async function showApp() {
 // GET /api/account already carries `totp.enabled` (the same field the
 // account page's own TOTP panel reads), so this is known before a
 // single admin route is ever called.
+//
+// ---- settings.admin_require_auth: the one case this whole gate is
+// skipped -------------------------------------------------------------
+//
+// GET /config carries that flag (app/api.py) -- checked FIRST, before
+// GET /api/account. When it is false, app/admin_api.py's _role_guard()
+// itself already lets every /api/admin/* call through with no session,
+// role, or TOTP at all (see that flag's own comment in app/config.py),
+// so gating the PANEL on a session here would be a UI lie: someone with
+// no account whatsoever can already reach every route this page calls.
+// The panel is shown directly -- no sign-in check -- with a persistent
+// banner (showAuthOpenBanner() below) so nobody mistakes an open admin
+// surface for a signed-in one. This never applies to a real deployment:
+// the flag defaults true and must stay true anywhere reachable from the
+// internet.
 async function checkAccess() {
+  let authRequired = true;
+  try {
+    const cfgRes = await fetch('/config');
+    if (cfgRes.ok) {
+      const cfg = await cfgRes.json();
+      authRequired = cfg.admin_require_auth !== false;
+    }
+    // A failed/unreachable /config falls through with authRequired still
+    // true -- the normal, session-gated path below -- rather than ever
+    // guessing the surface is open because a request happened to fail.
+  } catch (e) {
+    // Same reasoning as above: leave authRequired true and let the
+    // ordinary GET /api/account attempt below report the real problem.
+  }
+
+  if (!authRequired) {
+    myRole = 'operator'; // matches the synthetic principal _role_guard() hands the backend, see its own comment
+    showAuthOpenBanner();
+    await showApp();
+    return;
+  }
+  hideAuthOpenBanner();
+
   let res;
   try {
     res = await fetch('/api/account');
@@ -2677,6 +3025,20 @@ async function checkAccess() {
   }
   myRole = data.role;
   await showApp();
+}
+
+// Persistent banner, shown for the entire visit whenever
+// settings.admin_require_auth is false (see checkAccess() above) --
+// never auto-hidden by anything except a re-run of checkAccess() that
+// finds auth required again (a flag flip, or simply /config answering
+// correctly on a retry after a transient failure).
+function showAuthOpenBanner() {
+  const b = document.getElementById('auth-open-banner');
+  if (b) b.hidden = false;
+}
+function hideAuthOpenBanner() {
+  const b = document.getElementById('auth-open-banner');
+  if (b) b.hidden = true;
 }
 
 document.getElementById('refresh-btn').addEventListener('click', function () {
@@ -2715,6 +3077,16 @@ document.getElementById('nf-save').addEventListener('click', function () { saveN
 document.getElementById('nf-cancel').addEventListener('click', function () {
   resetNetForm();
   document.getElementById('nf-result').replaceChildren();
+});
+document.getElementById('sf-kind').addEventListener('change', updateSourceFormKind);
+document.getElementById('sf-load-channels').addEventListener('click', function () { loadSourceChannels(this); });
+document.getElementById('sf-channel-select').addEventListener('change', function () {
+  document.getElementById('sf-channel').value = this.value;
+});
+document.getElementById('sf-save').addEventListener('click', function () { saveSource(this); });
+document.getElementById('sf-cancel').addEventListener('click', function () {
+  resetSourceForm();
+  document.getElementById('sf-result').replaceChildren();
 });
 document.getElementById('mo-freeze').addEventListener('click', function () { freezeMonth(this); });
 document.getElementById('pl-preview').addEventListener('click', function () { previewPlaces(this); });

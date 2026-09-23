@@ -199,6 +199,13 @@ MT_PROTOCOL = "mt"
 UNRESOLVED_SENDER_RETENTION_DAYS = 60
 _UNRESOLVED_PRUNE_INTERVAL_S = 3600.0
 
+# Gates CheckinPoller._maybe_prune_seen_messages the same way
+# _UNRESOLVED_PRUNE_INTERVAL_S gates the unresolved-sender prune above --
+# same hourly idiom app/mqtt_subscriber.py's _HOUSEKEEPING_INTERVAL_S
+# uses for mqtt_message_buffer. See _maybe_prune_seen_messages for the
+# retention setting itself and the invariant it must never violate.
+_SEEN_MESSAGE_PRUNE_INTERVAL_S = 3600.0
+
 # Connector KIND is the admin-chosen field (checkin_net.kind) -- which
 # upstream API a net's connector_url actually speaks. `protocol` above
 # is the scoring-board discriminator every award/season/streak query
@@ -229,13 +236,69 @@ KIND_CORESCOPE = "corescope"
 KIND_BEACON = "beacon"
 KIND_MESHVIEW = "meshview"
 KIND_MQTT = "mqtt"
+# The official public Meshtastic broker (mqtt.meshtastic.org). Identical
+# to KIND_MQTT for the subscriber -- same decode path, same buffer table
+# -- differing only in admin defaults, and in REQUIRING a topic_root and
+# channel so the subscription can never widen to the whole broker the
+# way a blank topic_root on a private KIND_MQTT broker is allowed to.
+KIND_MQTT_MESHTASTIC = "mqtt_meshtastic"
+
+# The official public Meshtastic MQTT broker's address and default
+# credentials -- published in Meshtastic's own docs (meshtastic.org),
+# not a secret of ours, which is exactly why these live here as plain
+# constants instead of a config/env value: there is only ONE mqtt_meshtastic
+# broker, so an operator has nothing to choose for connector_url/
+# broker_username/broker_password -- app/admin_ops.py's
+# _validate_connector_url/_validate_mqtt_fields force every
+# KIND_MQTT_MESHTASTIC row to exactly these three, ignoring whatever a
+# caller submits for them.
+OFFICIAL_MESHTASTIC_MQTT_URL = "mqtts://mqtt.meshtastic.org:8883"
+OFFICIAL_MESHTASTIC_MQTT_USERNAME = "meshdev"
+OFFICIAL_MESHTASTIC_MQTT_PASSWORD = "large4cats"
 
 KIND_PROTOCOL = {
     KIND_CORESCOPE: MC_PROTOCOL,
     KIND_BEACON: MC_PROTOCOL,
     KIND_MESHVIEW: MT_PROTOCOL,
     KIND_MQTT: MT_PROTOCOL,
+    KIND_MQTT_MESHTASTIC: MT_PROTOCOL,
 }
+
+
+def _distinct_connectors(conn, kinds: tuple[str, ...]) -> list[dict]:
+    """DISTINCT (kind, connector_url) pairs, of any of `kinds`, across
+    BOTH checkin_net AND observation_source -- shared by every caller
+    that has to reach a connector regardless of which table configured
+    it: confirm_scan_all_connectors, mt_confirm_scan_all_connectors, and
+    CheckinPoller's MeshCore directory discovery (_poll_mc). An
+    observation_source row exists purely to feed confirmation,
+    discovery, and (for the mqtt kinds) the shared message buffer -- see
+    app/db.py's observation_source comment -- so all three of those have
+    to see it exactly as if it were a checkin_net row. The SCORING path
+    (CheckinPoller._poll_once/_award_checkin) is the one deliberate
+    exception: it reads checkin_net alone, forever -- see that method's
+    own comment for why an observation_source must never be able to
+    award a point.
+
+    Plain UNION (not UNION ALL), which SQLite already dedupes on the
+    full selected row -- so a connector configured identically in both
+    tables (same kind, same connector_url) comes back once, not twice,
+    with no extra DISTINCT needed on top.
+
+    No `enabled` filter -- matches both single-table queries this
+    replaced, neither of which ever restricted itself to enabled=1 rows
+    (confirmation has to work regardless of a net's own schedule, and
+    directory discovery is keyed off the connectors _poll_mc is already
+    about to poll, which are enabled by construction).
+    """
+    placeholders = ",".join("?" for _ in kinds)
+    rows = conn.execute(
+        f"SELECT kind, connector_url FROM checkin_net WHERE kind IN ({placeholders}) "
+        f"UNION "
+        f"SELECT kind, connector_url FROM observation_source WHERE kind IN ({placeholders})",
+        kinds + kinds,
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def net_date_for_net(net, ts: int) -> str | None:
@@ -793,6 +856,42 @@ def _mark_seen(conn, connector: str, packet_id: str, seen_at: int) -> None:
     )
 
 
+def _prune_seen_messages() -> int:
+    """Delete checkin_seen_message rows older than
+    settings.checkin_seen_retention_hours -- same retention-housekeeping
+    idiom app/mqtt_subscriber.py's _prune_buffer already uses for
+    mqtt_message_buffer, mirrored here (own connection, own transaction)
+    rather than shared code since the two tables/modules are otherwise
+    unrelated. Pruned on `seen_at` (_mark_seen's own insert time), the
+    only timestamp this table carries.
+
+    settings.checkin_seen_retention_hours MUST stay greater than
+    settings.mqtt_buffer_retention_hours (see that setting's own
+    comment in app/config.py) -- checkin_seen_message is what stops
+    CheckinPoller's read-first dedupe (_seen) from re-crediting a
+    message mqtt_message_buffer still holds. If a seen row were pruned
+    while its buffer row still existed, the next poll would find no
+    checkin_seen_message row, treat the message as never settled, and
+    re-process (and, for a still-in-window registered sender,
+    re-award) it. Keeping this retention window strictly longer than
+    the buffer's own is what makes that ordering impossible: a buffer
+    row is always gone before the seen row that settled it could be.
+    """
+    cutoff = int(time.time()) - settings.checkin_seen_retention_hours * 3600
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute("DELETE FROM checkin_seen_message WHERE seen_at < ?", (cutoff,))
+        removed = cur.rowcount
+        conn.execute("COMMIT")
+        return removed
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
 # ---- MeshCore-family connector clients ---------------------------------
 #
 # Two kinds (KIND_CORESCOPE, KIND_BEACON) share one identity-resolution
@@ -1305,11 +1404,15 @@ async def confirm_scan_connector(kind: str, connector_url: str, name: str) -> li
 async def confirm_scan_all_connectors(conn, name: str) -> list[dict]:
     """confirm_scan_connector() above, unioned across every distinct
     (kind, connector_url) among this deployment's MeshCore-family
-    checkin_net rows -- regardless of whether that net's OWN weekly
-    window is open right now. Confirmation has to work any day, not
-    just net night: it is proving who owns a radio, not earning a
-    check-in, and app/checkin_api.py's endpoints never look at a net's
-    weekday/start_hour/end_hour at all.
+    checkin_net AND observation_source rows -- regardless of whether
+    that net's OWN weekly window is open right now. Confirmation has to
+    work any day, not just net night: it is proving who owns a radio,
+    not earning a check-in, and app/checkin_api.py's endpoints never
+    look at a net's weekday/start_hour/end_hour at all. An
+    observation_source connector has no schedule to look at in the
+    first place (see app/db.py's observation_source comment) but is
+    just as valid a place to prove radio ownership as a scoring net's
+    connector, so it belongs in this scan too -- see _distinct_connectors.
 
     Distinct on (kind, connector_url), not on net id -- the same
     "share by connector, not by net" idea CheckinPoller's own
@@ -1320,10 +1423,7 @@ async def confirm_scan_all_connectors(conn, name: str) -> list[dict]:
     deployment with several configured connectors doesn't pay for them
     one at a time inside a status poll a browser is waiting on.
     """
-    rows = conn.execute(
-        "SELECT DISTINCT kind, connector_url FROM checkin_net WHERE kind IN (?, ?)",
-        (KIND_CORESCOPE, KIND_BEACON),
-    ).fetchall()
+    rows = _distinct_connectors(conn, (KIND_CORESCOPE, KIND_BEACON))
     if not rows:
         return []
     results = await asyncio.gather(
@@ -1410,7 +1510,7 @@ def issue_unique_mt_confirm_code(conn) -> str:
 
 async def mt_confirm_scan_connector(kind: str, connector_url: str, code: str, conn) -> list[dict]:
     """One on-demand scan of a single Meshtastic-family connector
-    (KIND_MESHVIEW or KIND_MQTT) for any message containing `code`,
+    (KIND_MESHVIEW, KIND_MQTT, or KIND_MQTT_MESHTASTIC) for any message containing `code`,
     normalized to {node_ref, node_id, last_heard_epoch} -- `name` is
     filled in afterwards by mt_confirm_scan_all_connectors, which is
     the one place that can look it up once, across every connector's
@@ -1427,12 +1527,13 @@ async def mt_confirm_scan_connector(kind: str, connector_url: str, code: str, co
     single-request-then-close style above, not CheckinPoller's pooled,
     reused one) calling packets(portnum=1) -- the same upstream call
     _poll_mt_connector makes, just with no window/hashtag filtering
-    applied to what comes back. For KIND_MQTT there is no upstream call
-    at all: mqtt_message_buffer already holds every currently-buffered
-    message for this connector regardless of any net's window (see
-    _fetch_mqtt_messages's own docstring for why), so this is a plain
-    read of the same rows through the connection the caller already
-    holds.
+    applied to what comes back. For KIND_MQTT and KIND_MQTT_MESHTASTIC
+    there is no upstream call at all: mqtt_message_buffer already holds
+    every currently-buffered message for this connector regardless of
+    any net's window (see _fetch_mqtt_messages's own docstring for why),
+    so this is a plain read of the same rows through the connection the
+    caller already holds -- mqtt_meshtastic takes the same buffer-read
+    path as mqtt, same as everywhere else in this module.
 
     Tolerant of a down connector the same way every other client in
     this module is: a failed request logs and returns an empty list
@@ -1455,7 +1556,7 @@ async def mt_confirm_scan_connector(kind: str, connector_url: str, code: str, co
         return []
 
     raw_msgs: list[tuple[object, object, object]] = []  # (sender_id, text, ts)
-    if kind == KIND_MQTT:
+    if kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC):
         rows = conn.execute(
             "SELECT from_node, text, ts FROM mqtt_message_buffer WHERE connector = ?",
             (connector_url,),
@@ -1501,11 +1602,14 @@ async def mt_confirm_scan_connector(kind: str, connector_url: str, code: str, co
 async def mt_confirm_scan_all_connectors(conn, code: str) -> list[dict]:
     """mt_confirm_scan_connector() above, unioned across every distinct
     (kind, connector_url) among this deployment's Meshtastic-family
-    checkin_net rows (KIND_MESHVIEW, KIND_MQTT) -- regardless of
-    whether any of those nets' own weekly windows are open right now,
-    for the same reason confirm_scan_all_connectors (MeshCore) scans
-    regardless of net window: this is proving who holds a radio, not
-    earning a check-in.
+    checkin_net AND observation_source rows (KIND_MESHVIEW, KIND_MQTT,
+    KIND_MQTT_MESHTASTIC) -- regardless of whether any of those nets'
+    own weekly windows are open right now, for the same reason
+    confirm_scan_all_connectors (MeshCore) scans regardless of net
+    window: this is proving who holds a radio, not earning a check-in.
+    An observation_source connector carries no window to check in the
+    first place -- see _distinct_connectors and app/db.py's
+    observation_source comment.
 
     Distinct on (kind, connector_url), not on net id -- same "share by
     connector, not by net" reasoning confirm_scan_all_connectors and
@@ -1532,10 +1636,7 @@ async def mt_confirm_scan_all_connectors(conn, code: str) -> list[dict]:
     for), and the confirmation flow does not need a name to work, only
     to display one when it has one.
     """
-    rows = conn.execute(
-        "SELECT DISTINCT kind, connector_url FROM checkin_net WHERE kind IN (?, ?)",
-        (KIND_MESHVIEW, KIND_MQTT),
-    ).fetchall()
+    rows = _distinct_connectors(conn, (KIND_MESHVIEW, KIND_MQTT, KIND_MQTT_MESHTASTIC))
     if not rows:
         return []
     scan_results = await asyncio.gather(
@@ -2100,6 +2201,9 @@ class CheckinPoller:
         # gating this the same way those two already do avoids a mostly-
         # pointless DELETE on every cycle.
         self._last_unresolved_prune: float = 0.0
+        # Same gate, same reasoning, for _maybe_prune_seen_messages --
+        # see _SEEN_MESSAGE_PRUNE_INTERVAL_S.
+        self._last_seen_message_prune: float = 0.0
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self.run_forever(), name="checkin-poller")
@@ -2157,9 +2261,22 @@ class CheckinPoller:
         conn = connect()
         try:
             config = load_checkin_config(conn)
+            # checkin_net ONLY -- this is the SCORING path (feeds
+            # _award_checkin below). observation_source rows must never
+            # appear here: that table exists to feed confirmation/
+            # discovery/the mqtt buffer without ever being able to award
+            # a point -- see app/db.py's observation_source comment and
+            # _distinct_connectors' docstring for the other, deliberately
+            # wider, callers that DO read both tables.
             nets = [dict(r) for r in conn.execute(
                 "SELECT * FROM checkin_net WHERE enabled = 1 ORDER BY id"
             ).fetchall()]
+            # Whether ANY MeshCore connector exists at all -- checkin_net
+            # OR observation_source -- used ONLY to decide whether
+            # _poll_mc runs this cycle at all (see the `if mc_nets or
+            # mc_connectors:` gate below); the SCORING path stays
+            # checkin_net-only, per the comment just above on `nets`.
+            mc_connectors = _distinct_connectors(conn, (KIND_CORESCOPE, KIND_BEACON))
         finally:
             conn.close()
 
@@ -2171,14 +2288,17 @@ class CheckinPoller:
         # (channel-scoped feed + public-key directory), so both land in
         # mc_nets and are handled by _poll_mc below, which dispatches to
         # the right client per net's own `kind` (see _mc_client_for).
-        # meshview and mqtt are the two Meshtastic-family kinds -- both
-        # protocol='mt', both resolve identity directly off the sender
-        # node id via _load_mt_registered_players -- so both land in
-        # mt_nets and are handled by _poll_mt below, which dispatches
-        # per net's own `kind` to either MeshviewClient's HTTP fetch or
-        # mqtt_message_buffer's local read (see _poll_mt_connector).
+        # meshview, mqtt, and mqtt_meshtastic are the three Meshtastic-
+        # family kinds -- all protocol='mt', all resolve identity
+        # directly off the sender node id via _load_mt_registered_players
+        # -- so all three land in mt_nets and are handled by _poll_mt
+        # below, which dispatches per net's own `kind` to either
+        # MeshviewClient's HTTP fetch or mqtt_message_buffer's local read
+        # (see _poll_mt_connector) -- mqtt_meshtastic takes the SAME
+        # buffer-read path as mqtt there, differing only in admin
+        # defaults (see KIND_MQTT_MESHTASTIC's own header comment above).
         mc_nets = [n for n in nets if n["kind"] in (KIND_CORESCOPE, KIND_BEACON)]
-        mt_nets = [n for n in nets if n["kind"] in (KIND_MESHVIEW, KIND_MQTT)]
+        mt_nets = [n for n in nets if n["kind"] in (KIND_MESHVIEW, KIND_MQTT, KIND_MQTT_MESHTASTIC)]
 
         # The two protocols are independent and one going down must
         # never block the other -- each gets its own try/except, same
@@ -2188,7 +2308,19 @@ class CheckinPoller:
         # own checkin_net row rather than letting it take out every net
         # sharing that protocol.
         errors = []
-        if mc_nets:
+        # _poll_mc must run whenever there is EITHER an enabled MeshCore
+        # checkin_net row (mc_nets -- the SCORING half, per-net feed
+        # processing) OR any MeshCore connector at all via
+        # observation_source (mc_connectors -- the DISCOVERY half, wider
+        # by design): an observation-source-only deployment has no net
+        # to award against, but its directory still has to be refreshed,
+        # or a player bound solely through that source could never be
+        # found in the node picker. _poll_mc itself tolerates an empty
+        # `nets` list fine -- it already drives directory discovery off
+        # the wider _distinct_connectors union regardless of `nets`, and
+        # its per-net feed loop (the scoring half) simply has nothing to
+        # iterate when `nets` is empty.
+        if mc_nets or mc_connectors:
             try:
                 await self._poll_mc(mc_nets, config)
             except Exception as e:
@@ -2202,6 +2334,7 @@ class CheckinPoller:
                 errors.append("mt: %s" % e)
 
         await self._maybe_prune_unresolved_senders()
+        await self._maybe_prune_seen_messages()
 
         self.last_poll_at = int(time.time())
         self.last_poll_error = "; ".join(errors) if errors else None
@@ -2228,6 +2361,28 @@ class CheckinPoller:
             removed = cur.rowcount
         if removed:
             log.info("checkin: pruned %d stale checkin_unresolved_sender row(s)", removed)
+
+    async def _maybe_prune_seen_messages(self) -> None:
+        """Delete checkin_seen_message rows older than
+        settings.checkin_seen_retention_hours, at most once an hour --
+        see _SEEN_MESSAGE_PRUNE_INTERVAL_S and _prune_seen_messages'
+        own docstring for the retention invariant this must never
+        violate. Runs the actual DELETE off the event loop thread
+        (asyncio.to_thread), same as app/mqtt_subscriber.py's own
+        _maybe_housekeeping does for _prune_buffer -- deliberately NOT
+        called from that module's housekeeping instead: mqtt_subscriber
+        locally duplicates the KIND_ constants rather than importing
+        this module (see its own module docstring), and driving this
+        prune from there would be a new import edge for no reason --
+        checkin_seen_message is written by this class alone.
+        """
+        now = time.monotonic()
+        if now - self._last_seen_message_prune < _SEEN_MESSAGE_PRUNE_INTERVAL_S:
+            return
+        self._last_seen_message_prune = now
+        removed = await asyncio.to_thread(_prune_seen_messages)
+        if removed:
+            log.info("checkin: pruned %d stale checkin_seen_message row(s)", removed)
 
     # ---- client pooling ----------------------------------------------
 
@@ -2391,12 +2546,30 @@ class CheckinPoller:
     # ---- MeshCore polling ------------------------------------------------
 
     async def _poll_mc(self, nets: list[dict], config: dict) -> None:
-        connectors = sorted({n["connector_url"] for n in nets})
         # kind_by_connector: a connector_url is assumed to always mean
         # one upstream kind (see _mc_client_for) -- picking whichever
         # net currently on it happens to be first is just how that
         # kind gets discovered the first time this connector is touched.
         kind_by_connector = {n["connector_url"]: n["kind"] for n in nets}
+
+        # Directory DISCOVERY is deliberately wider than `nets` (which
+        # is checkin_net-only -- see _poll_once's own comment on why the
+        # scoring path must stay that way): an observation_source
+        # connector never scores, but it still has to populate the same
+        # node-picker directory a scoring connector does, or a player
+        # bound only through an observation_source could never be found
+        # in the picker at all. _distinct_connectors pulls the union;
+        # kind_by_connector is topped up from it (rather than replaced)
+        # so an observation_source-only connector still resolves to a
+        # kind here, the same way one from `nets` already does above.
+        conn = connect()
+        try:
+            union_rows = _distinct_connectors(conn, (KIND_CORESCOPE, KIND_BEACON))
+        finally:
+            conn.close()
+        for r in union_rows:
+            kind_by_connector.setdefault(r["connector_url"], r["kind"])
+        connectors = sorted(kind_by_connector)
         for url in connectors:
             await self._refresh_mc_directory_if_stale(kind_by_connector[url], url, config)
 
@@ -2572,22 +2745,22 @@ class CheckinPoller:
             # no meaningful way to disagree about which kind actually
             # serves it.
             kind = group[0]["kind"]
-            if kind == KIND_MQTT:
+            if kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC):
                 # mqtt_message_buffer is a local table written by
                 # app/mqtt_subscriber.py's MqttSubscriber, not an
                 # upstream HTTP API -- a failure reading it would be a
                 # real bug (a locked or corrupt db), not "upstream is
                 # down," so this deliberately does NOT call
                 # _record_net_ok/_record_net_error the way the HTTP kinds
-                # below do. last_poll_at/last_poll_error for an mqtt net
-                # belongs to MqttSubscriber -- it reflects BROKER
-                # connectivity, which this cycle's mere ability to read a
-                # local sqlite table says nothing about -- see that
-                # module's docstring. A genuine failure here is still
-                # logged and folds into _poll_once's whole-poller
-                # last_poll_error; it just never overwrites a specific
-                # net's own row the way the subscriber's connection-state
-                # writes do.
+                # below do. last_poll_at/last_poll_error for an mqtt or
+                # mqtt_meshtastic net belongs to MqttSubscriber -- it
+                # reflects BROKER connectivity, which this cycle's mere
+                # ability to read a local sqlite table says nothing about
+                # -- see that module's docstring. A genuine failure here
+                # is still logged and folds into _poll_once's whole-
+                # poller last_poll_error; it just never overwrites a
+                # specific net's own row the way the subscriber's
+                # connection-state writes do.
                 try:
                     await self._poll_mqtt_connector(connector_url, group, season_id, registered, now, config)
                 except Exception:

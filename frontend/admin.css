@@ -301,6 +301,29 @@ body {
   .adm-topbar .adm-btn { padding: 6px 10px; font-size: 0.75rem; }
 }
 
+/* Persistent, un-dismissible: settings.admin_require_auth is false and
+   this deployment's admin surface has no lock on it at all (admin.js's
+   showAuthOpenBanner()). Same --adm-bad severity tone every other
+   worst-case state in this file already uses (.adm-badge-bad,
+   .adm-status-bad), not a fourth colour invented for this one banner --
+   see this file's own :root comment on why severity stays off the
+   accent hue. Sits between the topbar and .adm-body so it is the first
+   thing under the fold, never scrolled past unnoticed. */
+.adm-auth-open-banner {
+  margin: 0 16px 12px;
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--adm-bad) 12%, transparent);
+  border: 1px solid var(--adm-bad);
+  border-radius: 6px;
+  color: var(--adm-bad-text);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+.adm-auth-open-banner strong {
+  display: block;
+  margin-bottom: 2px;
+}
+
 .adm-body {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
