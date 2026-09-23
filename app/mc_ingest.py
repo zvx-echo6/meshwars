@@ -393,6 +393,91 @@ class AuthResult:
 _AUTH_NOT_FOUND = AuthResult("not_found")
 
 
+# ---------------------------------------------------------------------
+# Automatic tile-release config: app/db.py's tile_release_config
+# singleton -- the same "seed once from settings, then the database
+# wins forever, read fresh every cycle, no restart to take an admin
+# edit" shape checkin_config/freqmapper_config/discord_config already
+# use for their own knobs (see app/checkin.py's load_checkin_config/
+# seed_nets_from_env for the fullest write-up of the pattern this
+# mirrors). Moves the four mc_tile_release_* knobs (app/config.py) off
+# env-and-restart onto the admin panel (app/admin_ops.py's
+# admin_tile_release_config_update), with the exact same shipped
+# defaults preserved through the one-time seed below -- disabled,
+# dry-run, 720h/200-per-sweep -- so a deployment upgrading into this
+# never changes behavior on the boot that adds the table. See
+# app/mc_scoring.py's TILE_RELEASE_ZERO_HOURS_FLOOR/
+# TILE_RELEASE_MAX_PER_SWEEP_* for the server-side bounds an admin edit
+# can never cross, enforced on the write route, not here.
+# ---------------------------------------------------------------------
+
+
+def load_tile_release_config(conn) -> dict:
+    """Fresh, uncached read of the tile_release_config singleton --
+    read on every housekeeping sweep (McIngestor._release_expired_tiles_sync
+    below) and by every admin route that needs the current numbers
+    (app/admin_ops.py), never cached in the process -- the same pattern
+    app/checkin.py's load_checkin_config uses for its own singleton:
+    an admin edit here takes effect on the very next sweep, no restart.
+
+    Falls back to config.py's original settings if the row is somehow
+    missing (a database whose migrations have not run yet) rather than
+    raising -- defensive, since app/db.py's MIGRATIONS seeds this row
+    unconditionally and it should always be there in practice.
+    """
+    row = conn.execute(
+        "SELECT enabled, zero_hours, dry_run, max_per_sweep "
+        "  FROM tile_release_config WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return {
+            "enabled": settings.mc_tile_release_enabled,
+            "zero_hours": settings.mc_tile_release_zero_hours,
+            "dry_run": settings.mc_tile_release_dry_run,
+            "max_per_sweep": settings.mc_tile_release_max_per_sweep,
+        }
+    return {
+        "enabled": bool(row["enabled"]),
+        "zero_hours": row["zero_hours"],
+        "dry_run": bool(row["dry_run"]),
+        "max_per_sweep": row["max_per_sweep"],
+    }
+
+
+def seed_tile_release_config_from_env(conn) -> None:
+    """One-time bootstrap, called from app/db.py's init_db() on every
+    startup: populates the tile_release_config singleton with exactly
+    what settings.mc_tile_release_* already describe, so a deployment
+    upgrading into this feature keeps behaving exactly as it did the
+    moment before this table existed -- same enabled/zero_hours/
+    dry_run/max_per_sweep values, just moved from env-var-and-restart
+    to database-and-admin-panel.
+
+    Only ever overwrites while updated_at is still 0 -- app/db.py's
+    MIGRATIONS already guarantees the row EXISTS (an unconditional
+    "INSERT OR IGNORE ...(id) VALUES (1)", bare column defaults, same
+    as checkin_config's own migration entry), so this only has to tell
+    "still this migration's bare defaults" apart from "an operator (or
+    an earlier boot of this same function) already wrote real values,"
+    the same guard seed_nets_from_env/seed_freqmapper_config_from_env/
+    seed_discord_config_from_env all use for their own singletons. A
+    no-op on every later boot.
+    """
+    row = conn.execute("SELECT updated_at FROM tile_release_config WHERE id = 1").fetchone()
+    if row is not None and row["updated_at"] == 0:
+        conn.execute(
+            "UPDATE tile_release_config SET enabled = ?, zero_hours = ?, dry_run = ?, "
+            " max_per_sweep = ?, updated_at = ? WHERE id = 1",
+            (
+                int(settings.mc_tile_release_enabled),
+                settings.mc_tile_release_zero_hours,
+                int(settings.mc_tile_release_dry_run),
+                settings.mc_tile_release_max_per_sweep,
+                int(time.time()),
+            ),
+        )
+
+
 class McIngestor:
     """Durable queue (app/db.py's mc_ingest_queue) + background worker
     for MeshCore ingest batches."""
@@ -1246,18 +1331,30 @@ class McIngestor:
     def _release_expired_tiles_sync(self) -> dict | None:
         """One release sweep: find every cell in the active MeshCore
         season whose owning team's score has sat at exactly 0 for
-        longer than settings.mc_tile_release_zero_hours
-        (mc_scoring.find_expired_tiles()), then either report what
-        would happen (settings.mc_tile_release_dry_run, the default) or
-        actually release them (mc_scoring.release_tile() -- see that
-        function's own docstring for exactly what a release does and
-        does not touch).
+        longer than the configured zero_hours (mc_scoring.
+        find_expired_tiles()), then either report what would happen
+        (dry_run, the default) or actually release them (mc_scoring.
+        release_tile() -- see that function's own docstring for exactly
+        what a release does and does not touch).
+
+        Config comes from load_tile_release_config(conn) above, read
+        FRESH inside this same call every time it runs -- never cached
+        on self or anywhere else in the process -- so an admin panel
+        edit (app/admin_ops.py's admin_tile_release_config_update)
+        takes effect on the very next sweep, no restart. zero_hours and
+        max_per_sweep are additionally clamped to
+        mc_scoring.TILE_RELEASE_ZERO_HOURS_FLOOR/
+        TILE_RELEASE_MAX_PER_SWEEP_* here, belt-and-braces against
+        whatever the stored row actually holds -- the write route
+        already refuses to save an out-of-bounds value, but this sweep
+        must never simply trust that nothing else could have written
+        one.
 
         Returns None -- meaning "nothing to log" -- when the feature is
-        off (settings.mc_tile_release_enabled) or there is no active
-        MeshCore season yet; otherwise a summary dict the caller logs,
-        with the same shape whether this ran dry or for real (a
-        "dry_run" key tells them apart).
+        off (cfg["enabled"]) or there is no active MeshCore season yet;
+        otherwise a summary dict the caller logs, with the same shape
+        whether this ran dry or for real (a "dry_run" key tells them
+        apart).
 
         now_ts is this call's own real wall-clock time, used both as
         "now" for finding expired tiles and, unchanged, as the ts every
@@ -1267,12 +1364,14 @@ class McIngestor:
         rewritten by a release that happens to be computed from
         decay that finished well in its past.
         """
-        if not settings.mc_tile_release_enabled:
-            return None
         now_ts = int(time.time())
         conn = connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            cfg = load_tile_release_config(conn)
+            if not cfg["enabled"]:
+                conn.execute("COMMIT")
+                return None
             season = conn.execute(
                 "SELECT id FROM mc_season WHERE protocol = ? AND status = 'active' "
                 "ORDER BY id DESC LIMIT 1",
@@ -1283,17 +1382,21 @@ class McIngestor:
                 return None
             season_id = season["id"]
 
+            zero_hours = max(cfg["zero_hours"], mc_scoring.TILE_RELEASE_ZERO_HOURS_FLOOR)
+            max_per_sweep = max(
+                mc_scoring.TILE_RELEASE_MAX_PER_SWEEP_FLOOR,
+                min(cfg["max_per_sweep"], mc_scoring.TILE_RELEASE_MAX_PER_SWEEP_CEILING),
+            )
+
             expired = mc_scoring.find_expired_tiles(
-                conn, season_id, now_ts,
-                settings.mc_tile_release_zero_hours,
-                settings.mc_tile_release_max_per_sweep,
+                conn, season_id, now_ts, zero_hours, max_per_sweep,
             )
             by_team: dict[str, int] = {}
             for e in expired:
                 by_team[e.team] = by_team.get(e.team, 0) + 1
             sample = [e.cell_id for e in expired[:10]]
 
-            if settings.mc_tile_release_dry_run:
+            if cfg["dry_run"]:
                 conn.execute("COMMIT")
                 return {
                     "dry_run": True,

@@ -491,14 +491,50 @@ def apply_paint(
 
 # ---- automatic release of long-abandoned territory ------------------------
 #
-# See app/config.py's mc_tile_release_* settings and
-# app/mc_ingest.py's _release_expired_tiles_sync() (the hourly sweep that
-# calls find_expired_tiles()/release_tile() below, hooked into the
-# existing _maybe_housekeeping()). Driven off the decay clock already
+# Config is DB-backed (app/db.py's tile_release_config singleton,
+# app/mc_ingest.py's load_tile_release_config/seed_tile_release_config_from_env),
+# not settings.py -- app/config.py's mc_tile_release_* settings are now
+# only the one-time seed source a fresh boot copies onto that row (see
+# seed_tile_release_config_from_env's own docstring), the same
+# "env-and-restart becomes database-and-admin-panel" move
+# checkin_config/freqmapper_config/discord_config already made for
+# their own features. app/mc_ingest.py's _release_expired_tiles_sync()
+# (the hourly sweep hooked into the existing _maybe_housekeeping())
+# reads that row fresh every cycle and calls find_expired_tiles()/
+# release_tile() below, which are unaware of where their zero_hours/
+# limit arguments came from. Driven off the decay clock already
 # computed by decayed_score() above, not a new presence record: a real
 # visit that hears even one repeater scores and pushes last_update
 # forward, so only a cell that has genuinely heard nothing from its
 # owning team for the whole configured window is a candidate.
+
+# Server-side floor/ceiling on the two admin-editable knobs that
+# actually bound the blast radius of a release sweep -- NOT themselves
+# operator-editable. Enforced on every write in
+# app/admin_ops.py's admin_tile_release_config_update (the only place an
+# operator can change these), and again, defensively, in
+# app/mc_ingest.py's _release_expired_tiles_sync against whatever is
+# actually stored, belt-and-braces against a bad row however it got
+# there (a value written before this floor existed, a hand-edited
+# database, etc).
+#
+# 168h (7 days): measured against a frozen board snapshot (2026-09-23),
+# a 72h threshold released 72.9% of the entire board in one sweep;
+# 720h (the feature's shipped default) released roughly 3%. 168h is
+# still an aggressive window relative to that 720h default, but it is
+# the shortest an operator is allowed to configure at all -- always
+# free to go higher, never lower.
+TILE_RELEASE_ZERO_HOURS_FLOOR = 168
+
+# Per-sweep release ceiling bounds: mc_tile_release_max_per_sweep's own
+# comment in app/config.py explains the blast-radius reasoning behind
+# the shipped default of 200; 2000 (10x that) is generous headroom for
+# draining a real backlog while still bounding a single sweep's damage
+# from a bad config or a clock problem. 1 is the practical floor --
+# 0 or negative would mean "release nothing," which is just
+# enabled=False spelled a confusing way.
+TILE_RELEASE_MAX_PER_SWEEP_FLOOR = 1
+TILE_RELEASE_MAX_PER_SWEEP_CEILING = 2000
 
 
 def _zero_ts(score: float, last_update_ts: int) -> int:

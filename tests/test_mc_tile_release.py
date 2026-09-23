@@ -337,8 +337,36 @@ def _release_log_count(db_path, season_id):
     return n
 
 
+def _set_tile_release_config_on_disk(db_path, *, enabled=None, zero_hours=None,
+                                      dry_run=None, max_per_sweep=None):
+    """Write straight into the tile_release_config singleton (app/db.py)
+    -- the DB, not settings.py, is what
+    McIngestor._release_expired_tiles_sync actually reads every sweep
+    now (app/mc_ingest.py's load_tile_release_config), so this replaces
+    the old monkeypatch.setattr(settings, "mc_tile_release_*", ...)
+    calls this test file used before that move. Only the columns
+    explicitly passed are touched -- the db_path fixture's own SCHEMA/
+    MIGRATIONS pass already seeded the row with the feature's original
+    settings.py-derived bare defaults (enabled=0, zero_hours=720,
+    dry_run=1, max_per_sweep=200), so a test only has to override what
+    it actually cares about, same as the monkeypatch calls it replaces
+    only ever set the handful of settings each test needed.
+    """
+    conn = sqlite3.connect(db_path)
+    if enabled is not None:
+        conn.execute("UPDATE tile_release_config SET enabled = ? WHERE id = 1", (int(enabled),))
+    if zero_hours is not None:
+        conn.execute("UPDATE tile_release_config SET zero_hours = ? WHERE id = 1", (zero_hours,))
+    if dry_run is not None:
+        conn.execute("UPDATE tile_release_config SET dry_run = ? WHERE id = 1", (int(dry_run),))
+    if max_per_sweep is not None:
+        conn.execute("UPDATE tile_release_config SET max_per_sweep = ? WHERE id = 1", (max_per_sweep,))
+    conn.commit()
+    conn.close()
+
+
 def test_feature_disabled_does_nothing(db_path, monkeypatch):
-    monkeypatch.setattr(settings, "mc_tile_release_enabled", False)
+    _set_tile_release_config_on_disk(db_path, enabled=False)
     season_id = _season_on_disk(db_path)
     _seed_owned_cell_on_disk(db_path, season_id, CELL, "RED", score=0.0,
                               last_update=NOW - THRESHOLD_S - 1)
@@ -352,8 +380,7 @@ def test_feature_disabled_does_nothing(db_path, monkeypatch):
 
 
 def test_dry_run_reports_but_changes_nothing(db_path, monkeypatch):
-    monkeypatch.setattr(settings, "mc_tile_release_enabled", True)
-    monkeypatch.setattr(settings, "mc_tile_release_dry_run", True)
+    _set_tile_release_config_on_disk(db_path, enabled=True, dry_run=True)
     season_id = _season_on_disk(db_path)
     _seed_owned_cell_on_disk(db_path, season_id, CELL, "RED", score=0.0,
                               last_update=NOW - THRESHOLD_S - 1)
@@ -370,8 +397,7 @@ def test_dry_run_reports_but_changes_nothing(db_path, monkeypatch):
 
 
 def test_live_run_releases_and_logs(db_path, monkeypatch):
-    monkeypatch.setattr(settings, "mc_tile_release_enabled", True)
-    monkeypatch.setattr(settings, "mc_tile_release_dry_run", False)
+    _set_tile_release_config_on_disk(db_path, enabled=True, dry_run=False)
     season_id = _season_on_disk(db_path)
     _seed_owned_cell_on_disk(db_path, season_id, CELL, "RED", score=0.0,
                               last_update=NOW - THRESHOLD_S - 1)
@@ -386,9 +412,7 @@ def test_live_run_releases_and_logs(db_path, monkeypatch):
 
 
 def test_per_sweep_ceiling_is_honoured(db_path, monkeypatch):
-    monkeypatch.setattr(settings, "mc_tile_release_enabled", True)
-    monkeypatch.setattr(settings, "mc_tile_release_dry_run", False)
-    monkeypatch.setattr(settings, "mc_tile_release_max_per_sweep", 2)
+    _set_tile_release_config_on_disk(db_path, enabled=True, dry_run=False, max_per_sweep=2)
     season_id = _season_on_disk(db_path)
     for i in range(5):
         cell = grid_cell_id(LAT + i * 0.05, LON)
@@ -427,8 +451,7 @@ def test_crafted_future_ts_cannot_postpone_release(db_path, monkeypatch):
     """
     monkeypatch.setattr(settings, "mc_clock_clamp_enabled", True)
     monkeypatch.setattr(settings, "mc_clock_clamp_seconds", 3600)
-    monkeypatch.setattr(settings, "mc_tile_release_enabled", True)
-    monkeypatch.setattr(settings, "mc_tile_release_dry_run", False)
+    _set_tile_release_config_on_disk(db_path, enabled=True, dry_run=False)
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

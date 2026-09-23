@@ -880,6 +880,43 @@ CREATE TABLE IF NOT EXISTS mc_tile_capture_log (
 );
 CREATE INDEX IF NOT EXISTS idx_mc_capture_log_cell ON mc_tile_capture_log(season_id, cell_id);
 
+-- Singleton, same upsert-by-fixed-id shape as `checkin_config`/
+-- `freqmapper_config`/`discord_config` above -- read FRESH by
+-- app/mc_ingest.py's McIngestor._release_expired_tiles_sync on every
+-- housekeeping sweep (never cached in the process -- see that
+-- module's load_tile_release_config), which is the whole point: an
+-- admin panel edit (app/admin_ops.py's admin_tile_release_config_update)
+-- takes effect on the very next sweep, no restart.
+--
+-- Moves app/config.py's mc_tile_release_* env settings (enabled,
+-- zero_hours, dry_run, max_per_sweep -- see that feature's own
+-- comment there for what each means) onto the admin panel;
+-- seed_tile_release_config_from_env (app/mc_ingest.py, called from
+-- init_db() below) bootstraps this row from those settings the first
+-- time it is ever read, the same one-time "settings.py is the seed,
+-- the database is the source of truth forever after" shape
+-- app/checkin.py's seed_nets_from_env uses for checkin_config.
+--
+-- zero_hours/max_per_sweep are NOT bounded by a CHECK constraint here
+-- -- the server-side floor/ceiling (app/mc_scoring.py's
+-- TILE_RELEASE_ZERO_HOURS_FLOOR/TILE_RELEASE_MAX_PER_SWEEP_*) are
+-- enforced in Python, at the one write route that can ever change
+-- this row (app/admin_ops.py's admin_tile_release_config_update,
+-- rejected with 400 below the floor) and again, defensively, by the
+-- sweep itself against whatever this row actually holds -- see that
+-- function's own comment for why a SQLite CHECK was not used instead
+-- (every other numeric column in this schema follows the same
+-- Python-side-validation convention, e.g. checkin_config's points/
+-- streak_bonus above).
+CREATE TABLE IF NOT EXISTS tile_release_config (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    zero_hours      INTEGER NOT NULL DEFAULT 720,
+    dry_run         INTEGER NOT NULL DEFAULT 1,
+    max_per_sweep   INTEGER NOT NULL DEFAULT 200,
+    updated_at      INTEGER NOT NULL DEFAULT 0
+);
+
 -- ---------------------------------------------------------------------
 -- Repeater observation evidence. Purely data collection for now -- future
 -- work will generate points of interest from what a square can actually
@@ -3463,6 +3500,19 @@ MIGRATIONS = [
     # _migrate_mc_tile_capture_log_nullable_actor() below for why that
     # one needs its own function rather than a plain ALTER.
     "ALTER TABLE mc_tile_capture_log ADD COLUMN event_type TEXT NOT NULL DEFAULT 'capture'",
+    # Seed the tile_release_config singleton with the defaults every
+    # fresh column above already carries, so the row exists
+    # unconditionally from the first boot after this migration runs --
+    # same reasoning as checkin_config's/freqmapper_config's own
+    # "INSERT OR IGNORE...VALUES (1)" migrations above: app/mc_ingest.py's
+    # release sweep and app/admin_ops.py's tile-release admin routes
+    # both assume it is always there. INSERT OR IGNORE:
+    # seed_tile_release_config_from_env() (app/mc_ingest.py, called from
+    # init_db() below) is what actually populates this row from
+    # settings.mc_tile_release_* on a truly fresh or upgrading install;
+    # this migration only has to guarantee the row EXISTS, not what it
+    # holds.
+    "INSERT OR IGNORE INTO tile_release_config(id) VALUES (1)",
 ]
 
 PRAGMAS = [
@@ -4261,6 +4311,21 @@ def init_db() -> None:
                 seed_discord_config_from_env(conn)
             except Exception:
                 log.exception("discord: seed_discord_config_from_env failed -- config may be unseeded")
+
+            # Automatic tile release (app/mc_ingest.py): the same
+            # one-time bootstrap shape as seed_discord_config_from_env
+            # just above, migrating settings.py's mc_tile_release_*
+            # values onto the tile_release_config singleton so an
+            # operator can edit them through app/admin_ops.py's
+            # tile-release admin routes without a restart or an
+            # env-var edit. Local import, same circular-import reason
+            # as discord_notify.py's own import just above
+            # (mc_ingest.py imports WriteSession from this module).
+            try:
+                from .mc_ingest import seed_tile_release_config_from_env
+                seed_tile_release_config_from_env(conn)
+            except Exception:
+                log.exception("mc_ingest: seed_tile_release_config_from_env failed -- config may be unseeded")
     finally:
         conn.close()
 
