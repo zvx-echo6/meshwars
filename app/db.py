@@ -437,6 +437,34 @@ CREATE TABLE IF NOT EXISTS player_cell_repeater_credit (
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_repeater_credit_seen ON player_cell_repeater_credit(seen_at);
 
+-- Backs the per-player cell-claim rate cap (settings.mc_cell_claim_cap,
+-- app/mc_ingest.py) -- one row per (player, protocol, cell) the FIRST
+-- time that player ever lands an accepted, repeater-bearing ping there.
+-- Two jobs, both load-bearing:
+--   1. Existence check: a row already present means this cell is
+--      "owned" by this player for cap purposes -- any further ping here
+--      is a re-claim, never gated by the cap, no matter its rate.
+--   2. Rate window: `claimed_at` is the SERVER's own received_at at the
+--      moment of the claim, never the ping's own client timestamp --
+--      the whole point of this table is a rate limit a crafted ts
+--      cannot be used to defeat, so its one time column must be a value
+--      the client never controls.
+-- Deliberately NOT covered by app/mc_ingest.py's housekeeping retention
+-- sweep (unlike player_cell_ping/player_cell_repeater_credit, which are
+-- pruned after mc_ping_retention_hours): pruning a row here would make
+-- an already-claimed cell look "new" again after the retention window,
+-- both re-opening it to the rate cap AND letting a stale re-ping earn a
+-- second look as a "first" claim. This table is meant to grow at the
+-- same modest pace real claimed territory grows, and never shrink.
+CREATE TABLE IF NOT EXISTS player_cell_claim (
+    player_id    INTEGER NOT NULL,
+    protocol     TEXT NOT NULL,
+    cell_id      TEXT NOT NULL,
+    claimed_at   INTEGER NOT NULL,
+    PRIMARY KEY (player_id, protocol, cell_id)
+);
+CREATE INDEX IF NOT EXISTS idx_player_cell_claim_window ON player_cell_claim(player_id, protocol, claimed_at);
+
 -- Per-player per-day counters, so we can tell a player why they are not
 -- scoring.
 CREATE TABLE IF NOT EXISTS player_ingest_stat (
@@ -472,6 +500,27 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     -- protocol='mt': app/ingest.py's packets carry no `type` field of
     -- this kind at all.
     pings_unknown_type INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only (app/mc_ingest.py's _clamp_scoring_clock()): a ping
+    -- whose client timestamp fell outside settings.mc_clock_clamp_seconds
+    -- of received_at and had its SCORING clock clamped to that boundary.
+    -- Not a rejection -- the ping is still accepted, still recorded with
+    -- its real original timestamp everywhere history is kept -- this is
+    -- purely observability for how often stale/skewed clocks show up in
+    -- real traffic. Always 0 for protocol='mt': app/ingest.py has no
+    -- clamp of this kind (it has no MeshCore-style offline-upload path
+    -- to accommodate in the first place).
+    pings_clock_clamped INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only (app/mc_ingest.py's per-player cell-claim rate cap,
+    -- settings.mc_cell_claim_cap): a ping that named a genuinely NEW
+    -- cell for this player (see app/db.py's player_cell_claim) arrived
+    -- after the player had already claimed settings.mc_cell_claim_cap
+    -- distinct new cells within settings.mc_cell_claim_cap_window_seconds.
+    -- The ping is still accepted (still recorded, still updates
+    -- player_last_fix) -- only its SCORING is skipped, the same way a
+    -- cooldown or no_signal outcome skips scoring without rejecting the
+    -- ping outright. Always 0 for protocol='mt': Meshtastic has no
+    -- per-player cell-claim cap.
+    pings_cell_cap_exceeded INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player_id, protocol, day)
 );
 
@@ -3375,6 +3424,15 @@ MIGRATIONS = [
     "ALTER TABLE discord_config ADD COLUMN leaderboard_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE discord_config ADD COLUMN leaderboard_interval_seconds INTEGER NOT NULL DEFAULT 600",
     "ALTER TABLE discord_config ADD COLUMN leaderboard_top_n INTEGER NOT NULL DEFAULT 5",
+    # pings_clock_clamped / pings_cell_cap_exceeded added after
+    # player_ingest_stat already shipped -- see those columns' own
+    # comments on the CREATE TABLE above for what each counts (the
+    # MeshCore scoring-clock clamp and the per-player cell-claim rate
+    # cap, both added together, see app/mc_ingest.py). ADD COLUMN ...
+    # DEFAULT 0 backfills every existing row correctly: nothing before
+    # either guard existed could have tripped either one.
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_clock_clamped INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_cell_cap_exceeded INTEGER NOT NULL DEFAULT 0",
 ]
 
 PRAGMAS = [

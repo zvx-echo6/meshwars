@@ -69,15 +69,40 @@ _RATE_LIMIT_MAX_TRACKED = 10000
 # could carry an enormous string and burn CPU parsing it.
 _MAX_PARSED_REPEATERS = 64
 
-# Upper bound on a speed that can still be read as an aircraft. Above
-# this (roughly 900 mph) a "speed" between two fixes is a GPS jump, not
-# a vehicle -- a stale fix, a cold start, or a phone resolving its
-# position from a cell tower in the next county. Marking those by_air
-# would quietly disqualify a legitimate remote claim from the very
-# awards it should win, so anything this fast is treated as a bad fix
-# and left unmarked. settings.mc_max_speed_mps is the LOWER edge of the
-# aircraft band; this is the upper one.
-_GLITCH_SPEED_MPS = 400.0
+def _clamp_scoring_clock(ts: int, received_at: int) -> int:
+    """The value that drives every scoring-relevant clock in
+    _process_one_ping below -- decay, the defense window, the
+    repeater-credit cooldown, mc_tile.last_report_ts,
+    mc_tile_capture.captured_at, player_last_fix, and the Places Worth
+    Going weekly window -- clamped to within settings.mc_clock_clamp_seconds
+    of the SERVER's own receipt time, `received_at`.
+
+    This is deliberately NOT the value written to player_cell_ping (the
+    dedup/history row) or to repeater_observation's first_seen/last_seen
+    (coverage evidence) -- those still use the ping's own, unclamped
+    `ts` exactly as before, because MeshMapper's offline-upload feature
+    legitimately forwards a real, possibly stale, original timestamp and
+    that must keep working. What this function closes off is a stale or
+    future client timestamp acting RETROACTIVELY (or pre-emptively) on
+    game state that other players' outcomes depend on -- winning a
+    defense-window race that was already over, or resetting a decay
+    clock, by simply claiming to be from a different moment than the
+    ping actually arrived.
+
+    Returns `ts` unchanged when settings.mc_clock_clamp_enabled is off,
+    restoring the pre-clamp behavior exactly (an explicit escape hatch,
+    not a default).
+    """
+    if not settings.mc_clock_clamp_enabled:
+        return ts
+    allowance = settings.mc_clock_clamp_seconds
+    lo = received_at - allowance
+    hi = received_at + allowance
+    if ts < lo:
+        return lo
+    if ts > hi:
+        return hi
+    return ts
 
 
 @dataclass(frozen=True)
@@ -710,6 +735,9 @@ class McIngestor:
             "pings_out_of_area": 0,
             "pings_no_repeaters": 0,
             "pings_unknown_type": 0,
+            "pings_implausible_speed": 0,
+            "pings_clock_clamped": 0,
+            "pings_cell_cap_exceeded": 0,
         }
         conn = connect()
         try:
@@ -745,8 +773,9 @@ class McIngestor:
                 "INSERT INTO player_ingest_stat("
                 "  player_id, protocol, day, batches, pings_accepted, "
                 "  pings_no_contact, pings_wrong_owner, pings_duplicate, pings_bad_coord, "
-                "  pings_out_of_area, pings_no_repeaters, pings_unknown_type) "
-                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "  pings_out_of_area, pings_no_repeaters, pings_unknown_type, "
+                "  pings_implausible_speed, pings_clock_clamped, pings_cell_cap_exceeded) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(player_id, protocol, day) DO UPDATE SET "
                 "  batches = batches + 1, "
                 "  pings_accepted = pings_accepted + excluded.pings_accepted, "
@@ -756,13 +785,18 @@ class McIngestor:
                 "  pings_bad_coord = pings_bad_coord + excluded.pings_bad_coord, "
                 "  pings_out_of_area = pings_out_of_area + excluded.pings_out_of_area, "
                 "  pings_no_repeaters = pings_no_repeaters + excluded.pings_no_repeaters, "
-                "  pings_unknown_type = pings_unknown_type + excluded.pings_unknown_type",
+                "  pings_unknown_type = pings_unknown_type + excluded.pings_unknown_type, "
+                "  pings_implausible_speed = pings_implausible_speed + excluded.pings_implausible_speed, "
+                "  pings_clock_clamped = pings_clock_clamped + excluded.pings_clock_clamped, "
+                "  pings_cell_cap_exceeded = pings_cell_cap_exceeded + excluded.pings_cell_cap_exceeded",
                 (
                     player_id, PROTOCOL, day,
                     counters["pings_accepted"], counters["pings_no_contact"],
                     counters["pings_wrong_owner"], counters["pings_duplicate"],
                     counters["pings_bad_coord"], counters["pings_out_of_area"],
                     counters["pings_no_repeaters"], counters["pings_unknown_type"],
+                    counters["pings_implausible_speed"], counters["pings_clock_clamped"],
+                    counters["pings_cell_cap_exceeded"],
                 ),
             )
 
@@ -781,11 +815,13 @@ class McIngestor:
         log.info(
             "mc ingest: player=%d batch processed accepted=%d no_contact=%d "
             "wrong_owner=%d duplicate=%d bad_coord=%d out_of_area=%d no_repeaters=%d "
-            "unknown_type=%d",
+            "unknown_type=%d implausible_speed=%d clock_clamped=%d cell_cap_exceeded=%d",
             player_id, counters["pings_accepted"], counters["pings_no_contact"],
             counters["pings_wrong_owner"], counters["pings_duplicate"],
             counters["pings_bad_coord"], counters["pings_out_of_area"],
             counters["pings_no_repeaters"], counters["pings_unknown_type"],
+            counters["pings_implausible_speed"], counters["pings_clock_clamped"],
+            counters["pings_cell_cap_exceeded"],
         )
 
     def _process_one_ping(self, conn, player_id, ping, received_at, counters, season_id, team) -> None:
@@ -825,7 +861,104 @@ class McIngestor:
             counters["pings_bad_coord"] += 1
             return
 
-        # 2. Contact key -- "Include Contact Key" toggle off in MeshMapper
+        # 2. Scoring clock (settings.mc_clock_clamp_seconds -- see
+        # _clamp_scoring_clock's own docstring). `ts` above is, and
+        # remains, the ping's real client timestamp -- it is what gets
+        # written to player_cell_ping and repeater_observation below,
+        # unchanged. `now_ts` is the value every scoring-relevant clock
+        # from here on actually reads: the speed gate's elapsed time,
+        # apply_paint's decay/defense-window/cooldown math, and
+        # player_last_fix. Keeping the two separate is exactly what lets
+        # MeshMapper's offline-upload feature keep forwarding a real,
+        # stale timestamp (still accepted, still recorded accurately)
+        # without that same stale value acting retroactively on state
+        # other players' outcomes depend on.
+        now_ts = _clamp_scoring_clock(ts, received_at)
+        if now_ts != ts:
+            counters["pings_clock_clamped"] += 1
+
+        skew = abs(ts - received_at)
+        if skew > settings.mc_max_clock_skew_seconds:
+            log.warning(
+                "mc ingest: clock skew for player %d: %ds (ping ts=%d, server=%d)",
+                player_id, skew, ts, received_at,
+            )
+
+        # 3. Cell. Raw lat/lon are never written to the database anywhere;
+        # they are discarded right here, after being reduced to a cell
+        # id. Resolved earlier than the pipeline used to (this used to be
+        # step 4, after binding) because the speed gate just below needs
+        # it and must itself run before binding -- see that step's own
+        # comment for why.
+        cell = cell_id(lat, lon)
+        del lat, lon
+
+        # 4. Speed gate (settings.mc_glitch_speed_mps, formerly the
+        # module constant _GLITCH_SPEED_MPS). Moved ahead of the contact
+        # key check and binding (old steps 2-3) so a physically
+        # impossible ping is dropped before it can register a radio,
+        # write a player_cell_ping/repeater_observation row, or reach
+        # scoring -- the same "reject before any side effect" shape
+        # pings_bad_coord/pings_out_of_area already have above. Reading
+        # player_last_fix needs only `player_id` (already known -- this
+        # is the authenticated submitter, not anything derived from the
+        # contact/binding check below) and `cell` (just resolved above),
+        # neither of which depends on binding at all.
+        #
+        # `elapsed` is computed from now_ts -- the CLAMPED clock -- on
+        # BOTH sides of the subtraction: this ping's own now_ts, and
+        # last_fix.ts, which step 10 below now also stores as now_ts
+        # rather than the raw client ts. Using the raw ts on either side
+        # would let a crafted timestamp inflate elapsed arbitrarily
+        # (either by claiming this ping is from far in the future, or by
+        # having previously stashed a far-past/far-future value into
+        # last_fix.ts) and shrink the implied speed below any threshold,
+        # defeating the gate entirely.
+        #
+        # Degenerate cases: last_fix is None on a player's first-ever
+        # ping (or first since housekeeping pruned it), so this whole
+        # block is skipped -- a first fix can never be speed-rejected.
+        # now_ts <= last_fix["ts"] (clock moved backward or stood still
+        # under the clamped clock) also skips it, guarding zero/negative
+        # elapsed. Identical coordinates land in the same cell, so
+        # distance_m is 0 and speed is 0 -- never trips either threshold.
+        by_air = False
+        last_fix = conn.execute(
+            "SELECT cell_id, ts FROM player_last_fix WHERE player_id = ? AND protocol = ?",
+            (player_id, PROTOCOL),
+        ).fetchone()
+
+        if last_fix is not None and now_ts > last_fix["ts"]:
+            elapsed = now_ts - last_fix["ts"]
+            prev_lat, prev_lon = cell_center(last_fix["cell_id"])
+            cur_lat, cur_lon = cell_center(cell)
+            speed = distance_m(prev_lat, prev_lon, cur_lat, cur_lon) / elapsed
+            if speed > settings.mc_glitch_speed_mps and settings.mc_speed_reject_enabled:
+                counters["pings_implausible_speed"] += 1
+                log.warning(
+                    "mc ingest: rejecting player %d: implausible speed %.1f m/s "
+                    "over %ds (cell %s -> %s)",
+                    player_id, speed, elapsed, last_fix["cell_id"], cell,
+                )
+                return
+            # The 45-400 m/s band (settings.mc_max_speed_mps up to
+            # mc_glitch_speed_mps) is deliberately left exactly as it
+            # always was: still scores territory, still marked by_air,
+            # still excluded from exploration credit -- see
+            # mc_max_speed_mps's own comment in app/config.py for why
+            # that band is a game-policy decision, not a data-integrity
+            # one. When mc_speed_reject_enabled is off, a speed above
+            # the glitch threshold falls through to here too, matching
+            # this gate's pre-Change-2 behavior exactly (log only, mark
+            # by_air only when still at or under the glitch threshold).
+            if speed > settings.mc_max_speed_mps:
+                by_air = speed <= settings.mc_glitch_speed_mps
+                log.warning(
+                    "mc ingest: implausible speed for player %d: %.1f m/s over %ds (by_air=%s)",
+                    player_id, speed, elapsed, by_air,
+                )
+
+        # 5. Contact key -- "Include Contact Key" toggle off in MeshMapper
         # is a common user setup problem, not an attack; log at debug.
         contact = ping.get("contact")
         if not contact or not isinstance(contact, str) or not _CONTACT_RE.match(contact):
@@ -844,7 +977,7 @@ class McIngestor:
         # mismatch check -- sees the normalized value.
         contact = contact.lower()
 
-        # 3. Binding: this IS registration for the radio, there is no
+        # 6. Binding: this IS registration for the radio, there is no
         # separate flow.
         row = conn.execute(
             "SELECT player_id FROM player_node WHERE protocol = ? AND node_ref = ?",
@@ -866,12 +999,11 @@ class McIngestor:
             )
             return
 
-        # 4. Cell. Raw lat/lon are never written to the database anywhere;
-        # they are discarded right here, after being reduced to a cell id.
-        cell = cell_id(lat, lon)
-        del lat, lon
-
-        # 5. Duplicate check
+        # 7. Duplicate check. `ts` here is deliberately the ORIGINAL
+        # client timestamp, not now_ts -- the dedup primary key
+        # (player_id, protocol, cell_id, ts) must not change shape or
+        # meaning, and this row is this ping's permanent historical
+        # record.
         cur = conn.execute(
             "INSERT OR IGNORE INTO player_cell_ping"
             "(player_id, protocol, cell_id, ts, seen_at) VALUES (?, ?, ?, ?, ?)",
@@ -881,87 +1013,68 @@ class McIngestor:
             counters["pings_duplicate"] += 1
             return
 
-        # 5b. Parse the repeater fields once here -- both the observation
-        # evidence recorded immediately below and the score computed in
-        # step 9 come from this same parse, so they can never drift apart.
+        # 8. Parse the repeater fields once here -- both the observation
+        # evidence recorded immediately below and the score computed
+        # further down come from this same parse, so they can never
+        # drift apart.
         #
         # Recorded for every ping that reaches this line, i.e. every ping
         # that has passed coordinate validation, the play-area check, the
-        # contact-key check, and the duplicate check above -- INCLUDING a
-        # ping whose repeaters mc_scoring.apply_paint() (step 10, below)
-        # will go on to reject for the cooldown (every repeater it named
-        # already credited to this player on this cell, or the visit cap
-        # already reached). A cooldown blocks scoring, not what this
-        # square can actually hear -- that's still real evidence, so it
-        # is recorded before scoring even runs, and regardless of what
-        # scoring later decides.
+        # speed gate, the contact-key check, and the duplicate check
+        # above -- INCLUDING a ping whose repeaters mc_scoring.apply_paint()
+        # (further down) will go on to reject for the cooldown (every
+        # repeater it named already credited to this player on this
+        # cell, or the visit cap already reached). A cooldown blocks
+        # scoring, not what this square can actually hear -- that's
+        # still real evidence, so it is recorded before scoring even
+        # runs, and regardless of what scoring later decides. `ts` here
+        # is also the ORIGINAL client timestamp, same reasoning as step
+        # 7: this is coverage HISTORY (when was this repeater actually
+        # audible from this cell), not a scoring decision, so it keeps
+        # exactly the value MeshMapper reported.
         entries = parse_repeaters(ping)
         record_repeater_observations(conn, PROTOCOL, cell, entries, ts)
 
-        # 5c. Unknown ping type -- observability only, never a rejection.
+        # 9. Unknown ping type -- observability only, never a rejection.
         # A `type` that is present but not one of the four parse_repeaters()
         # recognizes (e.g. "DEFER") falls through to an empty repeater
         # list exactly like a legitimate "heard nothing" ping does, so
         # without this it is invisible, silently indistinguishable from
-        # real no-coverage evidence in pings_no_repeaters (step 9, below)
-        # -- which it still also increments, since parse_repeaters()
-        # still returns []. is_unknown_ping_type() deliberately does NOT
-        # flag a missing/None `type`; see its own docstring.
+        # real no-coverage evidence in pings_no_repeaters (below) -- which
+        # it still also increments, since parse_repeaters() still
+        # returns []. is_unknown_ping_type() deliberately does NOT flag a
+        # missing/None `type`; see its own docstring.
         if is_unknown_ping_type(ping):
             counters["pings_unknown_type"] += 1
 
-        # 6. Sanity gates -- these still never REJECT a ping. The speed
-        # between consecutive fixes now also decides by_air, which the
-        # exploration awards read; it changes nothing about scoring or
-        # ownership. See settings.mc_max_speed_mps and _GLITCH_SPEED_MPS.
-        by_air = False
-        last_fix = conn.execute(
-            "SELECT cell_id, ts FROM player_last_fix WHERE player_id = ? AND protocol = ?",
-            (player_id, PROTOCOL),
-        ).fetchone()
-
-        if last_fix is not None and ts > last_fix["ts"]:
-            elapsed = ts - last_fix["ts"]
-            prev_lat, prev_lon = cell_center(last_fix["cell_id"])
-            cur_lat, cur_lon = cell_center(cell)
-            speed = distance_m(prev_lat, prev_lon, cur_lat, cur_lon) / elapsed
-            if speed > settings.mc_max_speed_mps:
-                by_air = speed <= _GLITCH_SPEED_MPS
-                log.warning(
-                    "mc ingest: implausible speed for player %d: %.1f m/s over %ds (by_air=%s)",
-                    player_id, speed, elapsed, by_air,
-                )
-
-        skew = abs(ts - received_at)
-        if skew > settings.mc_max_clock_skew_seconds:
-            log.warning(
-                "mc ingest: clock skew for player %d: %ds (ping ts=%d, server=%d)",
-                player_id, skew, ts, received_at,
-            )
-
-        # 7. Update last fix, only if this timestamp is at or after the
-        # stored one.
+        # 10. Update last fix, only if this (clamped) timestamp is at or
+        # after the stored one. Stores now_ts, not ts -- see step 4's own
+        # comment for why: this row is read back as the OTHER side of
+        # the next ping's elapsed-time computation, so it has to be the
+        # same trustworthy clock, or a crafted ts stashed here now would
+        # just move the vulnerability from "this ping" to "the next
+        # one".
         if last_fix is None:
             conn.execute(
                 "INSERT INTO player_last_fix(player_id, protocol, cell_id, ts) "
                 "VALUES (?, ?, ?, ?)",
-                (player_id, PROTOCOL, cell, ts),
+                (player_id, PROTOCOL, cell, now_ts),
             )
-        elif ts >= last_fix["ts"]:
+        elif now_ts >= last_fix["ts"]:
             conn.execute(
                 "UPDATE player_last_fix SET cell_id = ?, ts = ? "
                 " WHERE player_id = ? AND protocol = ?",
-                (cell, ts, player_id, PROTOCOL),
+                (cell, now_ts, player_id, PROTOCOL),
             )
 
-        # 8. Accepted
+        # 11. Accepted
         counters["pings_accepted"] += 1
 
-        # 9. Repeaters heard -> candidate scoring input. A ping that
+        # 12. Repeaters heard -> candidate scoring input. A ping that
         # named zero repeaters reached no one -- it is still counted
         # above as accepted (it was a valid ping) but flagged here
         # separately so a player can be told why it isn't scoring.
-        # `entries` was already parsed in step 5b (and its observations
+        # `entries` was already parsed in step 8 (and its observations
         # already recorded there); the repeater ids used for scoring are
         # derived from that same list, never a second parse of the ping.
         # Which of these actually earn points -- some may already be
@@ -971,15 +1084,71 @@ class McIngestor:
         if not repeater_ids:
             counters["pings_no_repeaters"] += 1
 
-        # 10. MeshCore scoring, inside the same write transaction as the
+        # 13. MeshCore scoring, inside the same write transaction as the
         # rest of this batch. A scoring failure must not lose the
         # counters already recorded above or abort the rest of the
-        # batch -- log it and keep going.
+        # batch -- log it and keep going. `now_ts` (the clamped clock)
+        # drives apply_paint's decay, defense-window, and repeater-credit
+        # cooldown math, mc_tile.last_report_ts, mc_tile_capture.captured_at,
+        # and (via credit_places) the Places Worth Going weekly window --
+        # every one of these is a scoring decision other players'
+        # standing depends on, exactly what step 2 above exists to
+        # protect from a crafted client clock.
         if team is not None:
+            # 13a. Per-player cell-claim rate cap (settings.mc_cell_claim_cap
+            # -- see app/db.py's player_cell_claim). Only relevant when
+            # this ping could possibly score (repeater_ids non-empty) --
+            # a no_signal ping never reaches apply_paint's scoring path
+            # regardless, so there is nothing here worth gating and no
+            # reason to pay for the extra query. `cell` is checked
+            # against player_cell_claim first: a cell already claimed by
+            # this player is NEVER subject to the cap, at any rate, and
+            # is always processed -- the cap exists to bound how fast
+            # NEW territory can be claimed, not to throttle revisiting
+            # ground already held.
+            cap_exceeded = False
+            if repeater_ids and settings.mc_cell_claim_cap_enabled:
+                already_claimed = conn.execute(
+                    "SELECT 1 FROM player_cell_claim"
+                    " WHERE player_id = ? AND protocol = ? AND cell_id = ?",
+                    (player_id, PROTOCOL, cell),
+                ).fetchone()
+                if already_claimed is None:
+                    window_start = received_at - settings.mc_cell_claim_cap_window_seconds
+                    recent_claims = conn.execute(
+                        "SELECT COUNT(*) FROM player_cell_claim"
+                        " WHERE player_id = ? AND protocol = ? AND claimed_at >= ?",
+                        (player_id, PROTOCOL, window_start),
+                    ).fetchone()[0]
+                    if recent_claims >= settings.mc_cell_claim_cap:
+                        cap_exceeded = True
+                        counters["pings_cell_cap_exceeded"] += 1
+                        log.warning(
+                            "mc ingest: cell-claim cap exceeded for player %d: "
+                            "%d new cells already claimed in the last %ds (cell %s dropped)",
+                            player_id, recent_claims,
+                            settings.mc_cell_claim_cap_window_seconds, cell,
+                        )
+                    else:
+                        # claimed_at is received_at -- the server's own
+                        # clock -- never `ts`/now_ts, so this window
+                        # cannot be defeated by a crafted client
+                        # timestamp spreading claims across many
+                        # apparent windows that all land in the same
+                        # real moment.
+                        conn.execute(
+                            "INSERT INTO player_cell_claim"
+                            "(player_id, protocol, cell_id, claimed_at) VALUES (?, ?, ?, ?)",
+                            (player_id, PROTOCOL, cell, received_at),
+                        )
+
+            if cap_exceeded:
+                return
+
             paint_result = None
             try:
                 paint_result = mc_scoring.apply_paint(
-                    conn, season_id, player_id, team, cell, ts, repeater_ids,
+                    conn, season_id, player_id, team, cell, now_ts, repeater_ids,
                     settings.mc_points_per_repeater, settings.mc_max_points_per_ping,
                     PROTOCOL, received_at, by_air,
                 )
@@ -997,10 +1166,15 @@ class McIngestor:
             # square-scoring "cooldown" ping still credits a place. If
             # apply_paint itself raised above, paint_result is still
             # None -- there is no outcome to gate on, so this is skipped
-            # rather than guessed at.
+            # rather than guessed at. `now_ts` (clamped), not `ts`: the
+            # weekly cap and rotation this function's own docstring
+            # describes are both week-scoped by this very timestamp
+            # (app/place_scoring.py's week_start_for_ts) -- a crafted ts
+            # could otherwise claim a place credit against a week that
+            # already closed, or one that hasn't started rotating yet.
             if paint_result is not None:
                 try:
-                    credit_places(conn, player_id, cell, ts, paint_result.outcome, by_air, PROTOCOL)
+                    credit_places(conn, player_id, cell, now_ts, paint_result.outcome, by_air, PROTOCOL)
                 except Exception:
                     log.exception(
                         "place scoring: credit_places failed for player %d cell %s",

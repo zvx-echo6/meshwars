@@ -1071,7 +1071,7 @@ async def admin_player_delete(request: Request):
     a square this player last painted; with that row no longer deleted,
     neither is ever touched here again.)
 
-    This also used to hard-delete only four of the eleven tables
+    This also used to hard-delete only four of the tables
     _PLAYER_SCOPED_TABLES now covers (player_ingest_stat,
     player_cell_ping, player_node, api_key), while deleting the
     `player` row itself out from under the rest -- player_last_fix,
