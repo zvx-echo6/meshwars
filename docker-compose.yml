@@ -92,6 +92,20 @@ x-meshwars-environment: &meshwars-environment
   # a preview box can turn it on from its own (gitignored) .env
   # instead of hand-editing this file, where a deploy would wipe it.
   RESULTS_PREVIEW_CURRENT_MONTH: "${RESULTS_PREVIEW_CURRENT_MONTH:-false}"
+  # Secure flag on the session cookie. True is correct for every
+  # deployment reached over https, which is every real one -- leave it
+  # alone there. Named here for the same reason as
+  # RESULTS_PREVIEW_CURRENT_MONTH above: a preview box needs to turn it
+  # off from its own (gitignored) .env, and without a passthrough here
+  # the container never sees the value at all (the image COPYs only
+  # requirements.txt, app/ and frontend/, so pydantic's env_file=".env"
+  # resolves to nothing inside it). Preview's /admin is 404'd on its
+  # public host by design and is reached over the tailnet on plain
+  # http, where a browser silently DISCARDS a Secure cookie -- you can
+  # sign in, get a valid session, and still arrive logged out, with no
+  # error anywhere. The session still rides WireGuard, so it is not
+  # travelling in the clear. Defaults true: a normal deploy is unchanged.
+  ACCOUNT_SESSION_COOKIE_SECURE: "${ACCOUNT_SESSION_COOKIE_SECURE:-true}"
   MC_RAW_LOG_ENABLED: "${MC_RAW_LOG_ENABLED:-false}"
   MC_RAW_LOG_PATH: "${MC_RAW_LOG_PATH:-/data/mc_raw.log}"
   MT_POINTS_PER_FEEDER: "${MT_POINTS_PER_FEEDER:-0.1}"
