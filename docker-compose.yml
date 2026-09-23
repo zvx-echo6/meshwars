@@ -137,6 +137,32 @@ x-meshwars-environment: &meshwars-environment
   MC_CELL_CLAIM_CAP_ENABLED: "${MC_CELL_CLAIM_CAP_ENABLED:-true}"
   MC_CELL_CLAIM_CAP: "${MC_CELL_CLAIM_CAP:-500}"
   MC_CELL_CLAIM_CAP_WINDOW_SECONDS: "${MC_CELL_CLAIM_CAP_WINDOW_SECONDS:-3600}"
+  # wire_tag replay/impersonation check (app/mc_ingest.py's
+  # check_wire_tag()): defaults ON. Gates only the REJECT action for a
+  # DIFFERENT player presenting a tag already claimed by someone else --
+  # detection/storage/counting always run regardless. Retention MUST
+  # stay longer than MC_INGEST_IDENTITY_RETENTION_DAYS below -- see
+  # app/config.py's mc_wire_tag_retention_days for why.
+  MC_WIRE_TAG_REJECT_ENABLED: "${MC_WIRE_TAG_REJECT_ENABLED:-true}"
+  MC_WIRE_TAG_RETENTION_DAYS: "${MC_WIRE_TAG_RETENTION_DAYS:-365}"
+  # Durable per-batch request identity capture (app/mc_ingest.py's
+  # record_ingest_identity()): defaults ON, pure observation, never
+  # rejects or alters a ping. PRIVACY-SAFE BY DESIGN -- stores a salted
+  # ip_hash, a coarse ip_class, and a coarse client_family, never the
+  # raw source IP or User-Agent. See app/config.py's
+  # mc_ingest_identity_enabled for the investigation gap this closes,
+  # and app/db.py's mc_ingest_request_log for the full privacy shape.
+  # MC_INGEST_SALT left empty (the default) auto-generates and persists
+  # its own stable salt on first use -- see mc_ingest_salt's own comment
+  # in app/config.py before ever setting this by hand.
+  MC_INGEST_IDENTITY_ENABLED: "${MC_INGEST_IDENTITY_ENABLED:-true}"
+  MC_INGEST_IDENTITY_RETENTION_DAYS: "${MC_INGEST_IDENTITY_RETENTION_DAYS:-90}"
+  MC_INGEST_SALT: "${MC_INGEST_SALT:-}"
+  # Ban-evasion record (app/account_api.py's _capture_evasion_record()):
+  # defaults ON. Fires only for a player already disabled by an operator
+  # BEFORE their account is deleted -- an ordinary player is unaffected.
+  # See app/config.py's mc_evasion_record_enabled for the full policy.
+  MC_EVASION_RECORD_ENABLED: "${MC_EVASION_RECORD_ENABLED:-true}"
   # Automatic release of long-abandoned territory (app/mc_ingest.py's
   # hourly sweep, app/mc_scoring.py's find_expired_tiles()/
   # release_tile()). Defaults OFF (MC_TILE_RELEASE_ENABLED=false) and,

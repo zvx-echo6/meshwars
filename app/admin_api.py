@@ -96,6 +96,7 @@ from . import discord_bot
 from .account_api import (
     _ACCOUNT_SCOPED_TABLES,
     _PLAYER_SCOPED_TABLES,
+    _capture_evasion_record,
     _door_counts,
     _has_password,
     _notify_security,
@@ -1238,7 +1239,7 @@ async def admin_player_delete(request: Request):
     now = int(time.time())
     async with WriteSession() as conn:
         row = conn.execute(
-            "SELECT display_name, account_id FROM player WHERE player_id = ?",
+            "SELECT display_name, account_id, disabled_at FROM player WHERE player_id = ?",
             (player_id,),
         ).fetchone()
         if row is None:
@@ -1273,7 +1274,13 @@ async def admin_player_delete(request: Request):
         # See this module's "account deletion" section comment in
         # app/account_api.py for why each table below is here and why
         # `player` survives, tombstoned, instead of being deleted too.
+        # _capture_evasion_record() -- see its own docstring -- must run
+        # BEFORE the loop below deletes mc_ingest_request_log/
+        # player_node out from under it, using `row["disabled_at"]` as
+        # read above, BEFORE this route's own tombstoning UPDATE further
+        # down overwrites it, as the adverse-finding trigger.
         counts: dict[str, int] = {}
+        _capture_evasion_record(conn, player_id, row["disabled_at"], now)
         for table in _PLAYER_SCOPED_TABLES:
             c = conn.execute(
                 f"DELETE FROM {table} WHERE player_id = ?", (player_id,)
@@ -1864,7 +1871,7 @@ async def admin_account_delete(request: Request):
             return JSONResponse({"error": "account not found"}, status_code=404)
 
         player_row = conn.execute(
-            "SELECT player_id, display_name FROM player WHERE account_id = ?",
+            "SELECT player_id, display_name, disabled_at FROM player WHERE account_id = ?",
             (account_id,),
         ).fetchone()
 
@@ -1908,6 +1915,12 @@ async def admin_account_delete(request: Request):
         display_name = player_row["display_name"] if player_row is not None else None
 
         if player_id is not None:
+            # _capture_evasion_record() -- see its own docstring -- must
+            # run BEFORE the loop below deletes mc_ingest_request_log/
+            # player_node out from under it, using player_row's own
+            # disabled_at as read above, BEFORE the tombstoning UPDATE
+            # just below overwrites it, as the adverse-finding trigger.
+            _capture_evasion_record(conn, player_id, player_row["disabled_at"], now)
             for table in _PLAYER_SCOPED_TABLES:
                 c = conn.execute(
                     f"DELETE FROM {table} WHERE player_id = ?", (player_id,)

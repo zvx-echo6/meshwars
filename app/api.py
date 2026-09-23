@@ -751,7 +751,27 @@ async def mc_ingest(request: Request) -> JSONResponse:
     if not data or len(data) > settings.mc_max_batch_pings:
         return JSONResponse({"error": "bad request"}, status_code=400)
 
-    accepted = await ingestor.submit(principal.player_id, key_hash, data, int(time.time()))
+    received_at = int(time.time())
+
+    # Durable per-batch request identity capture (settings.
+    # mc_ingest_identity_enabled, see that setting's own comment in
+    # app/config.py) -- one row per accepted batch recording who
+    # actually sent it, in a privacy-safe shape (salted ip_hash, coarse
+    # ip_class/client_family -- never the raw address or User-Agent; see
+    # app/db.py's mc_ingest_request_log SCHEMA comment). get_client_ip()
+    # resolves the real caller behind Caddy (never Caddy's own address)
+    # only once settings.trusted_proxies actually names this
+    # deployment's reverse proxy -- see that module's own docstring.
+    # Independent of submit() below and its outcome: this is pure
+    # observation of who called, not a consequence of whether the batch
+    # itself was queued, and it never rejects or alters a ping.
+    await ingestor.record_ingest_identity(
+        principal.player_id, key_hash,
+        get_client_ip(request), request.headers.get("user-agent"),
+        data, received_at,
+    )
+
+    accepted = await ingestor.submit(principal.player_id, key_hash, data, received_at)
     if not accepted:
         return JSONResponse({"error": "queue full"}, status_code=503)
 

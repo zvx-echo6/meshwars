@@ -9,6 +9,7 @@ import asyncio
 import collections
 import logging
 import os
+import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -521,6 +522,27 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     -- ping outright. Always 0 for protocol='mt': Meshtastic has no
     -- per-player cell-claim cap.
     pings_cell_cap_exceeded INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only (app/mc_ingest.py's check_wire_tag()): the SAME
+    -- player re-presenting a wire_tag already on file for them --
+    -- almost certainly a legitimately re-uploaded MeshMapper offline
+    -- session. Always accepted, never a rejection; counted purely for
+    -- observability. Always 0 for protocol='mt': Meshtastic position
+    -- packets carry no wire_tag field.
+    pings_wire_tag_resubmit INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only: a DIFFERENT player presenting a wire_tag already
+    -- claimed by someone else -- the harvest-someone-else's-proof
+    -- attack. Rejected (ping dropped before binding/dedup/scoring)
+    -- whenever settings.mc_wire_tag_reject_enabled is on; counted here
+    -- either way, same "detection always runs, only the reject action
+    -- is gated" shape settings.mc_speed_reject_enabled already uses.
+    -- Always 0 for protocol='mt'.
+    pings_wire_tag_conflict INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only: a wire_tag field was present but did not match the
+    -- expected "MM:" + 10 base64url character shape. Never a rejection
+    -- reason on its own (MeshMapper could change the format) -- purely
+    -- observability so a format drift is visible before it is mistaken
+    -- for an attack. Always 0 for protocol='mt'.
+    pings_wire_tag_malformed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player_id, protocol, day)
 );
 
@@ -581,6 +603,171 @@ CREATE TABLE IF NOT EXISTS mc_ingest_queue (
 -- AND attempts < ? ORDER BY id) and, indirectly, submit()'s COUNT(*)
 -- capacity check.
 CREATE INDEX IF NOT EXISTS idx_mc_ingest_queue_claim ON mc_ingest_queue(claimed_at, attempts, id);
+
+-- One row per BATCH accepted by POST /api/mc/ingest (app/mc_ingest.py's
+-- record_ingest_identity(), settings.mc_ingest_identity_enabled -- see
+-- that setting's own comment in app/config.py). NOT one row per ping:
+-- a batch of fifty pings still only needs one row here.
+--
+-- PRIVACY-SAFE SHAPE, DELIBERATELY -- this table replaces an earlier
+-- draft of this feature (branch feat/ingest-identity-capture, commit
+-- 45eadb2) that stored the raw source_ip and raw user_agent verbatim. A
+-- privacy review rejected that: frontend/privacy.html tells players
+-- outright that MeshWars "does not store your IP address: that column
+-- has been dropped from the database entirely," and
+-- _migrate_session_privacy() below already physically dropped
+-- account_session's own `ip` column and reduced its raw User-Agent to a
+-- coarse device label for the exact same reason. A second table quietly
+-- storing the same two raw identifiers, one layer down, would have
+-- broken that promise. This table never holds either raw value, in any
+-- column, at any point -- see ip_hash/ip_class/client_family below --
+-- following app/traffic.py's own "never the raw IP, never the raw
+-- User-Agent, ever" contract for its site_visitor table, which this
+-- table deliberately mirrors:
+--
+--   ip_hash -- sha256(salt + source_ip), truncated to 16 hex characters,
+--   via the SAME persisted-salt mechanism app/traffic.py's _get_salt()
+--   uses (get_or_create_persistent_salt() below, which _get_salt() and
+--   this table's own writer both call) -- a DIFFERENT salt
+--   (settings.mc_ingest_salt, cursor key "mc_ingest_salt") than
+--   traffic's own, so this feature's hash space is never coupled to an
+--   unrelated one, but the identical stable-across-restarts,
+--   never-rotated, generate-once-and-persist-in-`cursor` shape. Two
+--   ip_hash values are equal if and only if the underlying address was
+--   the same (for the life of this salt), which is exactly what makes
+--   this useful for spotting a batch of pings all coming from the same
+--   source without ever recovering what that source actually was.
+--
+--   ip_class -- a coarse 'datacenter' | 'unknown' label (see
+--   app/ip_class.py's classify_ip()), computed IN-PROCESS at write time
+--   against a small bundled prefix list for major hosting providers.
+--   Deliberately never a reverse-DNS or any other outbound lookup --
+--   see that module's own docstring for why, and for the one incident
+--   ('unknown' is the honest default; ip_class.py is never asked to
+--   guess).
+--
+--   client_family -- a coarse client label (see app/client_family.py's
+--   client_family_from_user_agent()) derived FROM the User-Agent but
+--   never storing it -- e.g. 'meshmapper-dart', 'unrecognized-python' --
+--   enough to answer "does this look like the genuine client", which is
+--   all this feature needs a User-Agent for at all.
+--
+-- type_counts is a small JSON object of ping `type` -> count (e.g.
+-- {"TX": 40, "RX": 10}), cheap to compute since a batch is already
+-- capped at settings.mc_max_batch_pings entries.
+--
+-- Pure observation -- nothing here ever rejects or alters a ping; see
+-- record_ingest_identity()'s own docstring. Pruned by the existing
+-- hourly housekeeping sweep (settings.mc_ingest_identity_retention_days,
+-- default 90 days).
+CREATE TABLE IF NOT EXISTS mc_ingest_request_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at      INTEGER NOT NULL,
+    player_id        INTEGER NOT NULL,
+    key_hash_prefix  TEXT NOT NULL,
+    ip_hash          TEXT NOT NULL,
+    ip_class         TEXT NOT NULL DEFAULT 'unknown',
+    client_family    TEXT NOT NULL DEFAULT 'unrecognized-other',
+    ping_count       INTEGER NOT NULL,
+    type_counts      TEXT NOT NULL DEFAULT '{}'
+);
+-- Drives both the player-scoped lookup an investigation actually wants
+-- (player_id, newest first), the housekeeping prune's own DELETE ...
+-- WHERE received_at < ?, and a future "who else used this address"
+-- lookup keyed on ip_hash (e.g. app/account_api.py's evasion-record
+-- capture at deletion time -- see mc_evasion_record below).
+CREATE INDEX IF NOT EXISTS idx_mc_ingest_request_log_player ON mc_ingest_request_log(player_id, received_at);
+CREATE INDEX IF NOT EXISTS idx_mc_ingest_request_log_received_at ON mc_ingest_request_log(received_at);
+CREATE INDEX IF NOT EXISTS idx_mc_ingest_request_log_ip_hash ON mc_ingest_request_log(ip_hash);
+
+-- One row per distinct MeshCore wire_tag ever seen (app/mc_ingest.py's
+-- check_wire_tag(), settings.mc_wire_tag_reject_enabled). wire_tag
+-- arrives on effectively 100% of TX pings (measured 2026-09-23: 7,260
+-- of 7,260 distinct, zero duplicates, format "MM:" + 10 base64url
+-- characters) and is otherwise-unused per-transmission proof a radio
+-- attaches to a ping. `wire_tag` is the PRIMARY KEY, not merely a
+-- unique index, specifically so uniqueness is enforced by SQLite
+-- itself: an INSERT OR IGNORE that reports rowcount=0 back to the
+-- caller IS the detection of a tag already on file, with no separate
+-- SELECT-then-INSERT race to get wrong. player_id records who first
+-- presented it; first_seen_at is the server's own received_at, never
+-- the ping's own client timestamp, same reasoning every rate/replay
+-- table in this file already uses a server clock for.
+--
+-- The same player re-presenting their own tag (a legitimately
+-- re-uploaded offline MeshMapper session) is always accepted -- see
+-- check_wire_tag()'s own docstring -- and is not a reason to touch this
+-- row; only the FIRST sighting of a tag ever writes one.
+--
+-- Retention (settings.mc_wire_tag_retention_days, default 365 days)
+-- MUST stay longer than settings.mc_ingest_identity_retention_days
+-- above, and in general as long as this deployment ever wants the
+-- cross-player check to mean anything: pruning a row here does not
+-- just delete history, it UN-CLAIMS that tag and re-opens it to being
+-- replayed by a different player with nothing left on file to catch
+-- it. See mc_wire_tag_retention_days' own comment in app/config.py --
+-- this is the same "one retention must outlive another" shape this
+-- codebase already hit once with checkin_seen_message vs
+-- mqtt_message_buffer.
+CREATE TABLE IF NOT EXISTS mc_wire_tag (
+    wire_tag       TEXT PRIMARY KEY,
+    player_id      INTEGER NOT NULL,
+    first_seen_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mc_wire_tag_first_seen ON mc_wire_tag(first_seen_at);
+
+-- A DELIBERATE, NARROW exception to "account deletion means gone" --
+-- see app/account_api.py's "account deletion" section comment for the
+-- full policy this table exists to implement, and _PLAYER_SCOPED_TABLES
+-- there for what an ordinary deletion still purges completely
+-- (mc_ingest_request_log and mc_wire_tag above included -- this table
+-- is the ONLY thing that survives). Written ONLY when the player being
+-- deleted already had an ADVERSE FINDING on file BEFORE this deletion
+-- request arrived -- concretely, player.disabled_at was already set by
+-- a prior, separate, explicit operator action (POST
+-- /api/admin/player/disable) -- never inferred from a raw counter
+-- (pings_wire_tag_conflict, an ingest rate, or anything else a player
+-- could rack up just by playing normally). See
+-- app/account_api.py's _capture_evasion_record() for exactly when this
+-- fires and app/config.py's mc_evasion_record_enabled for the flag
+-- that gates it entirely.
+--
+-- Holds only what is needed to MATCH a returning player, never a full
+-- history and never their tombstoned name: `kind` is 'ip_hash' (copied
+-- from this player's own mc_ingest_request_log rows, read BEFORE that
+-- table's own rows are purged) or 'node_ref' (copied from player_node,
+-- "protocol:node_ref" -- a returning cheater reusing the same physical
+-- radio is the strongest signal available, per this feature's own
+-- design brief). `reason` is a short, fixed, non-free-text string
+-- (never an admin's typed notes); `former_player_id` is kept for an
+-- operator's own reference but is NOT a live foreign key -- the
+-- `player` row it names has already been tombstoned by the time this
+-- table is ever read back.
+--
+-- Never pruned by the hourly housekeeping sweep, unlike every other
+-- retention-bearing table in this file -- an automatic expiry here
+-- would undo the entire point of the exception: the operator's whole
+-- reason for keeping this is that it must still be there whenever the
+-- same person tries to come back, on whatever timeline that happens to
+-- be. Manual operator cleanup (e.g. once a ban is reconsidered) is
+-- future admin-UI work, explicitly out of scope for this change -- see
+-- this feature's own design brief.
+CREATE TABLE IF NOT EXISTS mc_evasion_record (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    former_player_id  INTEGER NOT NULL,
+    kind              TEXT NOT NULL,     -- 'ip_hash' | 'node_ref'
+    value             TEXT NOT NULL,
+    reason            TEXT NOT NULL,
+    recorded_at       INTEGER NOT NULL
+);
+-- The lookup this table exists to answer: "has this ip_hash/node_ref
+-- been seen on an evasion record before" -- checked against a NEW
+-- registration's own ip_hash/node_ref, not implemented by this change
+-- (the admin UI to surface a match is separate later work) but the
+-- index this table is worthless without is added now, on the same
+-- migration that creates the table, rather than bolted on later.
+CREATE INDEX IF NOT EXISTS idx_mc_evasion_record_value ON mc_evasion_record(kind, value);
+CREATE INDEX IF NOT EXISTS idx_mc_evasion_record_former_player ON mc_evasion_record(former_player_id);
 
 -- One row per FreqMapper coverage event ever processed
 -- (app/freqmapper_ingest.py). verification_id is that event's whole
@@ -3513,6 +3700,15 @@ MIGRATIONS = [
     # this migration only has to guarantee the row EXISTS, not what it
     # holds.
     "INSERT OR IGNORE INTO tile_release_config(id) VALUES (1)",
+    # pings_wire_tag_resubmit/pings_wire_tag_conflict/pings_wire_tag_malformed
+    # added after player_ingest_stat already shipped -- see those
+    # columns' own comments on the CREATE TABLE above for what each
+    # counts (app/mc_ingest.py's check_wire_tag()). ADD COLUMN ...
+    # DEFAULT 0 backfills every existing row correctly: nothing before
+    # wire_tag storage existed could have tripped any of the three.
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_wire_tag_resubmit INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_wire_tag_conflict INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_wire_tag_malformed INTEGER NOT NULL DEFAULT 0",
 ]
 
 PRAGMAS = [
@@ -4399,3 +4595,66 @@ def set_cursor(conn: sqlite3.Connection, k: str, v: str) -> None:
         "ON CONFLICT(k) DO UPDATE SET v = excluded.v",
         (k, v),
     )
+
+
+def get_or_create_persistent_salt(conn: sqlite3.Connection, cursor_key: str, override: str = "") -> str:
+    """Resolve a salt that must stay STABLE across restarts and deploys
+    -- shared primitive behind every "hash an identifier, never store it
+    raw" feature in this codebase. app/traffic.py's own _get_salt()
+    (site_visitor.visitor_hash) is the original use of this exact shape
+    and now calls this function directly rather than duplicating it;
+    app/mc_ingest.py's own ip_hash salt (mc_ingest_request_log) is the
+    second caller. Each caller passes its OWN `cursor_key` and its own
+    settings override, so the two features never share a hash space --
+    only the persistence mechanism is shared, not the salt value itself.
+
+    `override`, when non-empty (an operator explicitly set the
+    corresponding settings.* field), wins outright and this function
+    never touches the database. Left empty -- the default, and what a
+    fresh install has -- this generates a random 256-bit value ONCE and
+    persists it in the generic `cursor` key-value table (the same table
+    app/ingest.py's own polling cursor already uses for "one durable
+    string this app needs to remember across restarts"), so every
+    process, on every future boot, resolves the exact same value again.
+    That stability is the entire point: if this salt ever rotated, every
+    previously-stored hash would silently stop matching anything, and
+    the whole correlation value a hash-based feature exists for (traffic
+    counting a returning visitor, ingest identity correlating a batch to
+    an address without ever storing it) would be lost with no error and
+    no way to recover it. This function is therefore never called with
+    the deliberate intent of producing a new value for an existing
+    `cursor_key` -- see each caller's own module-level cache
+    (traffic.py's `_salt_cache`, mc_ingest.py's own) for why a resolved
+    value, once read, is cached in-process rather than re-read from the
+    database on every call.
+
+    Race-safe against two workers/processes starting at once against a
+    fresh database: the INSERT below is `ON CONFLICT(k) DO NOTHING`, so
+    if two processes both generate a candidate and both try to write it,
+    exactly one write wins and the loser's own candidate is simply
+    discarded -- the immediately following read-back returns whichever
+    value actually landed, which is the same value every process will
+    keep seeing from then on, regardless of whose candidate it was.
+
+    On a FRESH install (no `cursor` row for this key yet, and no
+    settings override configured): the very first call, from whichever
+    process reaches it first, generates and persists the value that
+    every process -- including this one -- uses from that moment
+    forward. There is no window where hashing happens with "no salt";
+    the value is always resolved (existing, override, or freshly
+    generated-and-persisted) before the first hash of a caller's process
+    lifetime is ever computed.
+    """
+    if override:
+        return override
+
+    existing = get_cursor(conn, cursor_key, "")
+    if existing:
+        return existing
+
+    candidate = secrets.token_hex(32)
+    conn.execute(
+        "INSERT INTO cursor(k, v) VALUES (?, ?) ON CONFLICT(k) DO NOTHING",
+        (cursor_key, candidate),
+    )
+    return get_cursor(conn, cursor_key, candidate)
