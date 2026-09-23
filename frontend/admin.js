@@ -12,7 +12,11 @@
 // is decided server-side, on every single request, by app/admin_api.py's
 // _role_guard() -- this file's own gating (checkAccess() below) is a
 // UX nicety (don't show empty panels to someone who will just get 401s),
-// never the actual security boundary.
+// never the actual security boundary. The one exception is
+// settings.admin_require_auth being off (see checkAccess()'s own
+// comment) -- there, the server-side boundary IS "none," and this
+// file's job shifts to making that state impossible to miss rather
+// than hiding a panel nothing is protecting anyway.
 //
 // Everything below is plain DOM. No templating and no innerHTML with
 // data in it: player names and labels are operator-supplied and
@@ -20,7 +24,7 @@
 // into running anything.
 // =====================================================================
 
-let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/account
+let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/account, or synthetic 'operator' when admin_require_auth is off (see checkAccess())
 let allPlayers = [];
 let expanded = new Set();   // player ids left open across a refresh
 let allAccounts = [];       // GET /api/admin/accounts -- every account, not just linked ones
@@ -2945,7 +2949,45 @@ async function showApp() {
 // GET /api/account already carries `totp.enabled` (the same field the
 // account page's own TOTP panel reads), so this is known before a
 // single admin route is ever called.
+//
+// ---- settings.admin_require_auth: the one case this whole gate is
+// skipped -------------------------------------------------------------
+//
+// GET /config carries that flag (app/api.py) -- checked FIRST, before
+// GET /api/account. When it is false, app/admin_api.py's _role_guard()
+// itself already lets every /api/admin/* call through with no session,
+// role, or TOTP at all (see that flag's own comment in app/config.py),
+// so gating the PANEL on a session here would be a UI lie: someone with
+// no account whatsoever can already reach every route this page calls.
+// The panel is shown directly -- no sign-in check -- with a persistent
+// banner (showAuthOpenBanner() below) so nobody mistakes an open admin
+// surface for a signed-in one. This never applies to a real deployment:
+// the flag defaults true and must stay true anywhere reachable from the
+// internet.
 async function checkAccess() {
+  let authRequired = true;
+  try {
+    const cfgRes = await fetch('/config');
+    if (cfgRes.ok) {
+      const cfg = await cfgRes.json();
+      authRequired = cfg.admin_require_auth !== false;
+    }
+    // A failed/unreachable /config falls through with authRequired still
+    // true -- the normal, session-gated path below -- rather than ever
+    // guessing the surface is open because a request happened to fail.
+  } catch (e) {
+    // Same reasoning as above: leave authRequired true and let the
+    // ordinary GET /api/account attempt below report the real problem.
+  }
+
+  if (!authRequired) {
+    myRole = 'operator'; // matches the synthetic principal _role_guard() hands the backend, see its own comment
+    showAuthOpenBanner();
+    await showApp();
+    return;
+  }
+  hideAuthOpenBanner();
+
   let res;
   try {
     res = await fetch('/api/account');
@@ -2968,6 +3010,20 @@ async function checkAccess() {
   }
   myRole = data.role;
   await showApp();
+}
+
+// Persistent banner, shown for the entire visit whenever
+// settings.admin_require_auth is false (see checkAccess() above) --
+// never auto-hidden by anything except a re-run of checkAccess() that
+// finds auth required again (a flag flip, or simply /config answering
+// correctly on a retry after a transient failure).
+function showAuthOpenBanner() {
+  const b = document.getElementById('auth-open-banner');
+  if (b) b.hidden = false;
+}
+function hideAuthOpenBanner() {
+  const b = document.getElementById('auth-open-banner');
+  if (b) b.hidden = true;
 }
 
 document.getElementById('refresh-btn').addEventListener('click', function () {

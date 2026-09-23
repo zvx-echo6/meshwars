@@ -70,6 +70,17 @@ page now (a button, shown only to a role-holding account -- see
 frontend/account.js) rather than a token box on this page; the page
 itself is unauthenticated the same "reachable, but nothing behind it
 without a role" way a login page always is.
+
+---- settings.admin_require_auth: turning the whole door off -------------
+
+Everything above describes the normal, TRUE state. When that flag is
+false, _role_guard() (below) returns "allowed" to every caller before it
+ever looks at a session, a role, or TOTP -- see the flag's own comment in
+app/config.py and _role_guard()'s own docstring for the full reasoning
+and the one deployment shape (an isolated, disposable preview box) this
+is acceptable on. This is not a weaker version of the roles model; it is
+that model switched off entirely, for a box where network isolation is
+already doing the job accounts/roles/TOTP do everywhere else.
 """
 from __future__ import annotations
 
@@ -240,6 +251,18 @@ async def _role_guard(
     secret must never become the thing standing between an account and
     anything it can otherwise reach, including the admin surface.
 
+    ---- settings.admin_require_auth: the one way ALL of the above gets
+    skipped ---------------------------------------------------------------
+
+    When that flag is false (see its own comment in app/config.py --
+    default true, only correct on an isolated preview/dev box), this
+    function returns "allowed" right after the _admin_surface_enabled()
+    404 check above, before ever looking at a session, a role, or TOTP.
+    There is no real caller to build a SessionPrincipal from in that
+    case, so it hands back a synthetic one (account_id=0) instead --
+    see that branch's own comment for why 0 is safe to log actions
+    under.
+
     `need` is "admin" (the default -- every route below the roles
     section itself) or "operator" (the three roles routes: grant,
     revoke, and the roster listing). optional_session(), not
@@ -271,6 +294,33 @@ async def _role_guard(
     try:
         if not _admin_surface_enabled(conn):
             return JSONResponse({"error": "not found"}, status_code=404)
+
+        if not settings.admin_require_auth:
+            # Preview/dev escape hatch -- see settings.admin_require_auth's
+            # own comment in app/config.py for the full reasoning and the
+            # one deployment shape this is acceptable on. Skips the
+            # session lookup, the role check, AND the TOTP check below --
+            # on a freshly re-cloned preview database there is no session,
+            # no role, and no TOTP row to check, so there is nothing left
+            # here to gate. Still behind the _admin_surface_enabled() 404
+            # above: an install with no admin_token and no role holder
+            # keeps 404ing even with this flag off, same as before.
+            #
+            # Returns the same "allowed" shape a real caller gets on
+            # success (see this function's own docstring), built from a
+            # synthetic principal instead of a real session. account_id=0
+            # never collides with a real account (AUTOINCREMENT starts at
+            # 1) and admin_action_log.actor_account_id is a bare column,
+            # never a foreign key (see that table's own comment in
+            # app/db.py) -- so every action taken while this is off still
+            # shows up in the log as account_id=0, visibly not a real
+            # operator, rather than silently attributed to whichever
+            # account happened to log in first. role="operator" so the
+            # `need="operator"` call sites (the roles roster and
+            # grant/revoke routes) work too -- with auth open there is no
+            # rank left to enforce.
+            principal = SessionPrincipal(account_id=0, player_id=None, token_hash="")
+            return (principal, "operator") if return_role else principal
 
         session = await optional_session(request)
         if session is None:

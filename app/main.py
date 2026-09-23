@@ -44,6 +44,20 @@ async def lifespan(app: FastAPI):
         "startup: meshview=%s db=%s run_background_tasks=%s",
         settings.meshview_url, settings.db_path, settings.run_background_tasks,
     )
+    if not settings.admin_require_auth:
+        # Loud on purpose, at the loudest point in startup: an operator
+        # must never discover this state by accident. See
+        # settings.admin_require_auth's own comment in app/config.py for
+        # the full reasoning and the one deployment shape (an isolated,
+        # disposable preview box) this is correct on -- everywhere else,
+        # this line appearing in the logs means the admin surface is
+        # sitting wide open.
+        log.warning(
+            "ADMIN SURFACE IS OPEN -- admin_require_auth=false: every "
+            "/api/admin/* route is reachable with no session, role, or "
+            "two-factor authentication at all. This must never be true on "
+            "a deployment reachable from the internet."
+        )
     init_db()
 
     # Which upstream source paints the Meshtastic board -- DB-backed now

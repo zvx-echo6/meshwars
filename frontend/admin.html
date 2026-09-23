@@ -26,7 +26,7 @@
        admin.css (admin.css's own layout now shifts down by nav.css's
        --mw-nav-h). -->
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260916-1" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260923-1" />
 </head>
 <body>
 
@@ -85,6 +85,17 @@
       <span class="adm-topbar-status" id="status"></span>
       <button type="button" id="refresh-btn" class="adm-btn adm-btn-quiet">Refresh</button>
     </header>
+
+    <!-- Shown only when app/config.py's admin_require_auth is false --
+         see admin.js's checkAccess()/showAuthOpenBanner() for when this
+         is toggled. Persistent (not dismissible): this deployment's
+         admin surface has no lock on it at all for as long as it is
+         visible, and that is not something a viewer should be able to
+         make themselves forget. -->
+    <div id="auth-open-banner" class="adm-auth-open-banner" hidden>
+      <strong>Admin authentication is disabled on this deployment.</strong>
+      Every /api/admin/* route is open to anyone who can reach it &mdash; no sign-in, role, or two-factor authentication required. This should only ever be true on an isolated preview/dev box.
+    </div>
 
     <div class="adm-body">
       <!-- .adm-side wraps the section nav and the traffic block as ONE
@@ -634,7 +645,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260917-1"></script>
+  <script src="/static/admin.js?v=20260923-1"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

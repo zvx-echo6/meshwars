@@ -547,6 +547,26 @@ class Settings(BaseSettings):
     # what stays reachable once this is blank again).
     admin_token: str = ""
 
+    # Whether _role_guard() (app/admin_api.py) requires ANY of session,
+    # role, or two-factor authentication before letting a request
+    # through -- not "require TOTP," the entire door. Defaults TRUE and
+    # MUST remain true on any deployment reachable from the internet:
+    # turning it off makes every route this file and app/admin_ops.py
+    # protect -- delete a player, revoke a key, edit a net, everything
+    # -- open to anyone who can reach the port, with no credential of
+    # any kind. There is exactly one situation where that is
+    # acceptable: a network-isolated preview/dev box (reachable only
+    # over the tailnet, with /admin and /api/admin/* already 404'd at
+    # its public host) whose database is periodically re-cloned from
+    # production -- which wipes every account, session, and
+    # account_totp row on every clone -- so a hand-built credential
+    # would have to be re-provisioned after every single re-clone just
+    # to look at the panel. The isolation IS the access control there,
+    # the same "local dev gets an escape hatch" reasoning
+    # account_session_cookie_secure above already leans on, just sized
+    # for a bigger surface.
+    admin_require_auth: bool = True
+
     # Address-keyed rate limit on POST /api/admin/roles/claim -- same
     # "without one this is a token-guessing oracle" reasoning
     # account_link_key_rate_limit_attempts/window_seconds gives for its
