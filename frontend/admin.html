@@ -137,6 +137,7 @@
           <button type="button" class="adm-nav-item" data-section="nets">Nets</button>
           <button type="button" class="adm-nav-item" data-section="observation">Observation</button>
           <button type="button" class="adm-nav-item" data-section="paint">Paint</button>
+          <button type="button" class="adm-nav-item" data-section="tile_release">Tile release</button>
           <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
           <button type="button" class="adm-nav-item" data-section="months">Months</button>
           <button type="button" class="adm-nav-item" data-section="places">Places</button>
@@ -454,6 +455,42 @@
             <button type="button" id="pt-clear-cursor" class="adm-btn adm-btn-quiet">Clear cursor</button>
           </div>
           <div id="pt-clear-result" class="adm-result"></div>
+        </section>
+
+        <section class="adm-section" data-section="tile_release" hidden>
+          <h2 class="adm-h2">Tile release</h2>
+          <details class="adm-about">
+            <summary>About tile release</summary>
+            <p class="adm-hint">Releases a cell once its owning team's score has decayed to exactly 0 and stayed there longer than the window below &mdash; there is no neutral/zero-owner state, so the tile is deleted and becomes recapturable by anyone. Dry run only logs what a sweep would release each cycle; nothing is actually deleted until it's off. The window has a 168-hour (7-day) floor enforced on the server no matter what is typed below.</p>
+          </details>
+
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="tr-enabled" class="adm-check" /> Enabled &mdash; sweep runs at all</label>
+          </div>
+          <div class="adm-form">
+            <label class="adm-field-label">Abandonment window (hours)
+              <input type="number" id="tr-zero-hours" min="168" step="1" />
+            </label>
+            <label class="adm-field-label">Max releases per sweep
+              <input type="number" id="tr-max-per-sweep" min="1" step="1" />
+            </label>
+          </div>
+          <div class="adm-form">
+            <label class="adm-check-label"><input type="checkbox" id="tr-dry-run" class="adm-check" checked /> Dry run &mdash; log what would release, change nothing</label>
+          </div>
+          <p class="adm-hint" id="tr-dry-run-hint" hidden>Turning dry run off is what makes the sweep start deleting rows. Saving with it off asks you to confirm the exact count shown in the projection below.</p>
+
+          <h3 class="adm-h3">Projection</h3>
+          <p class="adm-hint">What the window above would release right now, and each team's share of its own board &mdash; read-only. Refresh after changing the window or after time passes.</p>
+          <div class="adm-form">
+            <button type="button" id="tr-preview" class="adm-btn adm-btn-quiet">Preview</button>
+          </div>
+          <div id="tr-projection"></div>
+
+          <div class="adm-form">
+            <button type="button" id="tr-save" class="adm-btn">Save</button>
+          </div>
+          <div id="tr-result" class="adm-result"></div>
         </section>
 
         <section class="adm-section" data-section="seasons" hidden>

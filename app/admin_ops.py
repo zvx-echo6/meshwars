@@ -37,7 +37,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import discord_bot, discord_leaderboard, discord_notify, mc_api, results
+from . import discord_bot, discord_leaderboard, discord_notify, mc_api, mc_scoring, results
 from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
     checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
@@ -51,7 +51,7 @@ from .freqmapper_ingest import (
     COMBINED_CURSOR_KEY as FREQMAPPER_CURSOR_KEY,
     load_freqmapper_config,
 )
-from .mc_ingest import PROTOCOL as MC_PROTOCOL
+from .mc_ingest import PROTOCOL as MC_PROTOCOL, load_tile_release_config
 from .node_ref import normalize_sender_name
 from .place_rotation import preview_week, week_start_for_date, week_start_for_ts
 
@@ -1953,6 +1953,276 @@ async def admin_paint_clear_cursor(request: Request):
         conn.close()
     log.info("admin: cleared freqmapper cursor")
     return JSONResponse({"cleared": True})
+
+
+# ---- tile release (app/db.py's tile_release_config) ----------------------
+#
+# Automatic release of long-abandoned MeshCore territory -- see
+# app/mc_scoring.py's "automatic release of long-abandoned territory"
+# section and app/mc_ingest.py's load_tile_release_config/
+# McIngestor._release_expired_tiles_sync for the feature itself. These
+# three routes are its admin panel surface: GET the current knobs, POST
+# a read-only projection of what a candidate zero_hours would release
+# right now (so an operator sees the number before committing to it),
+# and POST to actually save. See admin_tile_release_config_update's own
+# docstring for the confirmation gate on the one destructive transition
+# (dry_run True -> False).
+
+
+@router.get("/api/admin/tile_release/config")
+async def admin_tile_release_config(request: Request):
+    """Current tile_release_config singleton, read fresh -- same
+    "whole singleton, one GET" shape GET /api/admin/checkin/config uses
+    for its own config. Includes the server-side floor/ceiling
+    (app/mc_scoring.py's TILE_RELEASE_ZERO_HOURS_FLOOR/
+    TILE_RELEASE_MAX_PER_SWEEP_*) so the panel can show/enforce them
+    client-side too without hardcoding a second copy that could drift
+    from the numbers actually enforced in admin_tile_release_config_update
+    below -- the client-side copy is a courtesy, never the guard; the
+    server validates every save regardless of what the UI sends.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    conn = connect()
+    try:
+        cfg = load_tile_release_config(conn)
+    finally:
+        conn.close()
+    return JSONResponse({
+        **cfg,
+        "zero_hours_floor": mc_scoring.TILE_RELEASE_ZERO_HOURS_FLOOR,
+        "max_per_sweep_floor": mc_scoring.TILE_RELEASE_MAX_PER_SWEEP_FLOOR,
+        "max_per_sweep_ceiling": mc_scoring.TILE_RELEASE_MAX_PER_SWEEP_CEILING,
+    })
+
+
+@router.post("/api/admin/tile_release/projection")
+async def admin_tile_release_projection(request: Request):
+    """Read-only preview: how many cells a candidate zero_hours would
+    release RIGHT NOW, plus a per-team breakdown against each team's
+    current total -- reuses mc_scoring.find_expired_tiles()'s own decay
+    math rather than re-deriving it, so this number can never drift
+    from what a real sweep would actually do with the same zero_hours.
+    This is what admin_tile_release_config_update's confirmation gate
+    (below) re-checks a caller's confirm_release_count against, and
+    what the admin panel calls live as an operator adjusts the zero_hours
+    field, before ever saving anything.
+
+    Never mutates anything -- no BEGIN IMMEDIATE, no write of any kind
+    -- callable as often as the panel likes. Deliberately accepts a
+    candidate BELOW the server-side floor (app/mc_scoring.py's
+    TILE_RELEASE_ZERO_HOURS_FLOOR): the floor is enforced only where it
+    matters, on the save route below, so an operator can see exactly
+    why the floor exists (a low candidate's own inflated percentage)
+    rather than being blocked from even looking.
+
+    No active MeshCore season returns an all-zero projection rather
+    than an error -- there is genuinely nothing to release, the same
+    "nothing to log" case _release_expired_tiles_sync treats as a
+    no-op.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    zero_hours = body.get("zero_hours")
+    if isinstance(zero_hours, bool) or not isinstance(zero_hours, (int, float)) or zero_hours <= 0:
+        return JSONResponse({"error": "zero_hours must be a positive number"}, status_code=400)
+    zero_hours = int(zero_hours)
+
+    now_ts = int(time.time())
+    conn = connect()
+    try:
+        season = conn.execute(
+            "SELECT id FROM mc_season WHERE protocol = ? AND status = 'active' "
+            "ORDER BY id DESC LIMIT 1",
+            (MC_PROTOCOL,),
+        ).fetchone()
+        if season is None:
+            return JSONResponse({
+                "season_id": None, "zero_hours": zero_hours, "count": 0,
+                "board_total": 0, "board_pct": 0.0, "by_team": [],
+            })
+        season_id = season["id"]
+        expired = mc_scoring.find_expired_tiles(conn, season_id, now_ts, zero_hours, limit=None)
+        totals = mc_scoring.team_tile_counts(conn, season_id)
+    finally:
+        conn.close()
+
+    by_team_counts: dict[str, int] = {}
+    for e in expired:
+        by_team_counts[e.team] = by_team_counts.get(e.team, 0) + 1
+    board_total = sum(totals.values())
+    by_team = [
+        {
+            "team": team,
+            "count": n,
+            "team_total": totals.get(team, 0),
+            "pct": round(100.0 * n / totals[team], 1) if totals.get(team) else 0.0,
+        }
+        for team, n in sorted(by_team_counts.items())
+    ]
+    return JSONResponse({
+        "season_id": season_id,
+        "zero_hours": zero_hours,
+        "count": len(expired),
+        "board_total": board_total,
+        "board_pct": round(100.0 * len(expired) / board_total, 1) if board_total else 0.0,
+        "by_team": by_team,
+    })
+
+
+@router.post("/api/admin/tile_release/config")
+async def admin_tile_release_config_update(request: Request):
+    """Update the tile_release_config singleton -- whether the sweep
+    runs at all, the abandonment window (zero_hours), dry_run, and the
+    per-sweep ceiling (max_per_sweep). Takes effect on the very next
+    housekeeping sweep, no restart: app/mc_ingest.py's
+    _release_expired_tiles_sync reads this table fresh every cycle (see
+    load_tile_release_config).
+
+    zero_hours is rejected below mc_scoring.TILE_RELEASE_ZERO_HOURS_FLOOR
+    with 400 -- that floor is NOT itself operator-editable, see that
+    constant's own comment for the measured board-wipe numbers behind
+    it. max_per_sweep is bounded to
+    [TILE_RELEASE_MAX_PER_SWEEP_FLOOR, ..._CEILING], same treatment.
+
+    Turning dry_run OFF -- and only that transition; off-to-off,
+    on-to-on, or turning it back ON all pass straight through with no
+    extra gate -- is the moment the sweep starts actually deleting
+    rows, so it requires confirm_release_count: the caller's own copy
+    of what POST .../projection just told them THIS zero_hours would
+    release, right now. That number is re-checked here against a FRESH
+    call to the same find_expired_tiles() math, inside this route's own
+    write transaction, and rejected with 409 on any mismatch -- stale
+    (the panel's number is out of date, e.g. the board moved since it
+    was fetched) or simply never supplied. Same "matching value checked
+    server-side against a fresh read, 409 on mismatch" shape
+    app/admin_api.py's radio-remove/player-delete/reissue routes use
+    for their own irreversible actions (see e.g. the display_name check
+    in the radio-remove route around app/admin_api.py:914-924) --
+    matched here against a computed release count instead of a typed
+    display_name, because a stale projection is the actual danger for
+    this action, not a stale identity.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+
+    enabled = bool(body.get("enabled"))
+    dry_run = bool(body.get("dry_run"))
+
+    zero_hours_raw = body.get("zero_hours")
+    if isinstance(zero_hours_raw, bool) or not isinstance(zero_hours_raw, (int, float)):
+        return JSONResponse({"error": "zero_hours is required and must be a number"}, status_code=400)
+    zero_hours = int(zero_hours_raw)
+    if zero_hours < mc_scoring.TILE_RELEASE_ZERO_HOURS_FLOOR:
+        return JSONResponse(
+            {"error": f"zero_hours must be at least {mc_scoring.TILE_RELEASE_ZERO_HOURS_FLOOR} "
+                      f"hours ({mc_scoring.TILE_RELEASE_ZERO_HOURS_FLOOR // 24} days)"},
+            status_code=400,
+        )
+
+    max_per_sweep_raw = body.get("max_per_sweep")
+    if isinstance(max_per_sweep_raw, bool) or not isinstance(max_per_sweep_raw, (int, float)):
+        return JSONResponse({"error": "max_per_sweep is required and must be a number"}, status_code=400)
+    max_per_sweep = int(max_per_sweep_raw)
+    if not (mc_scoring.TILE_RELEASE_MAX_PER_SWEEP_FLOOR <= max_per_sweep
+            <= mc_scoring.TILE_RELEASE_MAX_PER_SWEEP_CEILING):
+        return JSONResponse(
+            {"error": f"max_per_sweep must be between {mc_scoring.TILE_RELEASE_MAX_PER_SWEEP_FLOOR} "
+                      f"and {mc_scoring.TILE_RELEASE_MAX_PER_SWEEP_CEILING}"},
+            status_code=400,
+        )
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT enabled, zero_hours, dry_run, max_per_sweep FROM tile_release_config WHERE id = 1"
+        ).fetchone()
+        before = dict(existing) if existing is not None else {
+            "enabled": 0, "zero_hours": zero_hours, "dry_run": 1, "max_per_sweep": max_per_sweep,
+        }
+        was_dry_run = bool(before["dry_run"])
+
+        if was_dry_run and not dry_run:
+            confirm = body.get("confirm_release_count")
+            if isinstance(confirm, bool) or not isinstance(confirm, int):
+                conn.execute("ROLLBACK")
+                return JSONResponse(
+                    {"error": "confirm_release_count is required to turn dry_run off -- "
+                              "fetch the current projection and pass its count back"},
+                    status_code=409,
+                )
+            season = conn.execute(
+                "SELECT id FROM mc_season WHERE protocol = ? AND status = 'active' "
+                "ORDER BY id DESC LIMIT 1",
+                (MC_PROTOCOL,),
+            ).fetchone()
+            fresh_count = 0
+            if season is not None:
+                fresh_count = len(mc_scoring.find_expired_tiles(
+                    conn, season["id"], now, zero_hours, limit=None))
+            if confirm != fresh_count:
+                conn.execute("ROLLBACK")
+                return JSONResponse(
+                    {"error": f"projected release count has changed (now {fresh_count}) -- "
+                              "refresh the projection and confirm again"},
+                    status_code=409,
+                )
+
+        conn.execute(
+            "INSERT INTO tile_release_config(id, enabled, zero_hours, dry_run, max_per_sweep, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "  enabled = excluded.enabled, zero_hours = excluded.zero_hours, "
+            "  dry_run = excluded.dry_run, max_per_sweep = excluded.max_per_sweep, "
+            "  updated_at = excluded.updated_at",
+            (int(enabled), zero_hours, int(dry_run), max_per_sweep, now),
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="tile_release_config_update",
+            detail=(
+                f"enabled {bool(before['enabled'])}->{enabled} "
+                f"zero_hours {before['zero_hours']}->{zero_hours} "
+                f"dry_run {was_dry_run}->{dry_run} "
+                f"max_per_sweep {before['max_per_sweep']}->{max_per_sweep}"
+            ),
+            now=now,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    log.info(
+        "admin: tile release config updated (enabled=%s zero_hours=%s dry_run=%s max_per_sweep=%s)",
+        enabled, zero_hours, dry_run, max_per_sweep,
+    )
+    return JSONResponse({
+        "enabled": enabled, "zero_hours": zero_hours, "dry_run": dry_run,
+        "max_per_sweep": max_per_sweep, "updated_at": now,
+    })
 
 
 @router.get("/api/admin/notice")

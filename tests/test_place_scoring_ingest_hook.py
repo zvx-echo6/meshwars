@@ -29,7 +29,6 @@ tests call.
 from __future__ import annotations
 
 import sqlite3
-import time
 
 import pytest
 
@@ -39,7 +38,21 @@ from app.grid import cell_id as grid_cell_id
 from app.mc_ingest import McIngestor
 from app.place_rotation import week_start_for_ts
 
-NOW = int(time.time())
+# Pinned, not wall-clock -- same fix, same reasoning, and the same
+# pinned instant as tests/test_place_scoring.py (see that file's own
+# comment and commit ebbecd1): the Places week rolls over at local
+# midnight Wednesday, America/Boise (week_start_for_ts() in
+# app/place_rotation.py). A live time.time() NOW would put NOW and
+# every NOW + offset used below in DIFFERENT weeks for a stretch of
+# every Tuesday night, failing this file's same-week assertions
+# (test_real_ingest_batch_does_not_double_award_same_place_same_week,
+# test_real_ingest_batch_stops_at_weekly_cap) spuriously, on a schedule
+# that has nothing to do with whether the application code is correct.
+# 2026-01-10 12:00:00 America/Boise is a Saturday noon -- days away
+# from the Wednesday-midnight boundary in either direction -- so every
+# offset this file uses (currently up to +120s) stays inside the same
+# week regardless of what day or hour the suite actually runs.
+NOW = 1768071600
 WEEK = week_start_for_ts(NOW)
 
 # Well within the default play area (settings.play_area_*).
@@ -208,9 +221,23 @@ def test_real_ingest_batch_stops_at_weekly_cap(db_path):
     for i, (lat, lon) in enumerate(coords, start=200):
         _seed_place(db_path, place_id=i, points=25, lat=lat, lon=lon, active=1, rotates=0)
 
+    # Five separate batches, 30s apart -- NOT `NOW + i` (i.e. one second
+    # apart): a 0.01deg (~1.1km) jump between adjacent places in 1s
+    # implies >1000 m/s, which app/mc_ingest.py's own implausible-speed
+    # gate (settings.mc_glitch_speed_mps) now correctly rejects
+    # outright. 30s keeps the implied speed (~37 m/s) safely under
+    # settings.mc_max_speed_mps (45) too -- at or above that, by_air
+    # would be marked and credit_places() would refuse to credit
+    # anything at all (see its own docstring), which is a second, less
+    # obvious way too-fast timestamps would break this test. Kept
+    # deliberately short (5 batches x 30s = 2 minutes total) rather than
+    # minutes apart, to keep this test's real-world span far from any
+    # risk of accidentally straddling the Wednesday week boundary
+    # week_start_for_ts() buckets on.
     ingestor = McIngestor()
     for i, (lat, lon) in enumerate(coords, start=200):
-        ingestor._process_batch_sync(1, "keyhash-1", [_ping(lat, lon, NOW + i)], NOW + i)
+        ts = NOW + (i - 200) * 30
+        ingestor._process_batch_sync(1, "keyhash-1", [_ping(lat, lon, ts)], ts)
 
     rows = _activations(db_path, player_id=1)
     total = sum(r["points"] for r in rows)

@@ -437,6 +437,34 @@ CREATE TABLE IF NOT EXISTS player_cell_repeater_credit (
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_repeater_credit_seen ON player_cell_repeater_credit(seen_at);
 
+-- Backs the per-player cell-claim rate cap (settings.mc_cell_claim_cap,
+-- app/mc_ingest.py) -- one row per (player, protocol, cell) the FIRST
+-- time that player ever lands an accepted, repeater-bearing ping there.
+-- Two jobs, both load-bearing:
+--   1. Existence check: a row already present means this cell is
+--      "owned" by this player for cap purposes -- any further ping here
+--      is a re-claim, never gated by the cap, no matter its rate.
+--   2. Rate window: `claimed_at` is the SERVER's own received_at at the
+--      moment of the claim, never the ping's own client timestamp --
+--      the whole point of this table is a rate limit a crafted ts
+--      cannot be used to defeat, so its one time column must be a value
+--      the client never controls.
+-- Deliberately NOT covered by app/mc_ingest.py's housekeeping retention
+-- sweep (unlike player_cell_ping/player_cell_repeater_credit, which are
+-- pruned after mc_ping_retention_hours): pruning a row here would make
+-- an already-claimed cell look "new" again after the retention window,
+-- both re-opening it to the rate cap AND letting a stale re-ping earn a
+-- second look as a "first" claim. This table is meant to grow at the
+-- same modest pace real claimed territory grows, and never shrink.
+CREATE TABLE IF NOT EXISTS player_cell_claim (
+    player_id    INTEGER NOT NULL,
+    protocol     TEXT NOT NULL,
+    cell_id      TEXT NOT NULL,
+    claimed_at   INTEGER NOT NULL,
+    PRIMARY KEY (player_id, protocol, cell_id)
+);
+CREATE INDEX IF NOT EXISTS idx_player_cell_claim_window ON player_cell_claim(player_id, protocol, claimed_at);
+
 -- Per-player per-day counters, so we can tell a player why they are not
 -- scoring.
 CREATE TABLE IF NOT EXISTS player_ingest_stat (
@@ -472,6 +500,27 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     -- protocol='mt': app/ingest.py's packets carry no `type` field of
     -- this kind at all.
     pings_unknown_type INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only (app/mc_ingest.py's _clamp_scoring_clock()): a ping
+    -- whose client timestamp fell outside settings.mc_clock_clamp_seconds
+    -- of received_at and had its SCORING clock clamped to that boundary.
+    -- Not a rejection -- the ping is still accepted, still recorded with
+    -- its real original timestamp everywhere history is kept -- this is
+    -- purely observability for how often stale/skewed clocks show up in
+    -- real traffic. Always 0 for protocol='mt': app/ingest.py has no
+    -- clamp of this kind (it has no MeshCore-style offline-upload path
+    -- to accommodate in the first place).
+    pings_clock_clamped INTEGER NOT NULL DEFAULT 0,
+    -- MeshCore-only (app/mc_ingest.py's per-player cell-claim rate cap,
+    -- settings.mc_cell_claim_cap): a ping that named a genuinely NEW
+    -- cell for this player (see app/db.py's player_cell_claim) arrived
+    -- after the player had already claimed settings.mc_cell_claim_cap
+    -- distinct new cells within settings.mc_cell_claim_cap_window_seconds.
+    -- The ping is still accepted (still recorded, still updates
+    -- player_last_fix) -- only its SCORING is skipped, the same way a
+    -- cooldown or no_signal outcome skips scoring without rejecting the
+    -- ping outright. Always 0 for protocol='mt': Meshtastic has no
+    -- per-player cell-claim cap.
+    pings_cell_cap_exceeded INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (player_id, protocol, day)
 );
 
@@ -800,17 +849,73 @@ CREATE TABLE IF NOT EXISTS mc_tile_capture (
 );
 
 -- Capture audit log: every flip, who did it, and who it was taken from.
+-- by_player_id/by_team are nullable and event_type exists (both added
+-- 2026-09-23 for automatic territory release, app/mc_ingest.py's
+-- _release_expired_tiles_sync()) because a release has no actor: nobody
+-- claimed anything, a cell just stopped having an owner. event_type
+-- distinguishes that ('release') from every row written before it
+-- existed and every row apply_paint() still writes today (default
+-- 'capture', covers both a fresh capture and a flip -- this table has
+-- never distinguished those two from each other, and release is the
+-- first event this log needs to tell apart from "someone painted this
+-- cell"). See app/results.py's ownership_at(), the sole source of truth
+-- for month standings: it reads event_type to treat a release as "no
+-- owner" for that cell from its ts on. On an existing deployed database,
+-- see db.py's _migrate_mc_tile_capture_log_nullable_actor() below for
+-- how by_player_id/by_team are relaxed to nullable (a table rebuild --
+-- this table is order 10^4-10^5 rows, not one of the large ones in this
+-- schema, so that is cheap) -- the event_type column itself is a plain
+-- MIGRATIONS ALTER (see MIGRATIONS below), a default-valued ADD COLUMN
+-- is metadata-only regardless of table size.
 CREATE TABLE IF NOT EXISTS mc_tile_capture_log (
     season_id    INTEGER NOT NULL,
     cell_id      TEXT NOT NULL,
     ts           INTEGER NOT NULL,
-    by_player_id INTEGER NOT NULL,
-    by_team      TEXT NOT NULL,
+    by_player_id INTEGER,
+    by_team      TEXT,
     from_team    TEXT,
     by_air       INTEGER NOT NULL DEFAULT 0,  -- claimed while moving at aircraft speed (see app/mc_ingest.py)
+    event_type   TEXT NOT NULL DEFAULT 'capture',  -- 'capture' (paint, first or flip) | 'release' (abandonment, app/mc_scoring.py's release_tile())
     PRIMARY KEY (season_id, cell_id, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_mc_capture_log_cell ON mc_tile_capture_log(season_id, cell_id);
+
+-- Singleton, same upsert-by-fixed-id shape as `checkin_config`/
+-- `freqmapper_config`/`discord_config` above -- read FRESH by
+-- app/mc_ingest.py's McIngestor._release_expired_tiles_sync on every
+-- housekeeping sweep (never cached in the process -- see that
+-- module's load_tile_release_config), which is the whole point: an
+-- admin panel edit (app/admin_ops.py's admin_tile_release_config_update)
+-- takes effect on the very next sweep, no restart.
+--
+-- Moves app/config.py's mc_tile_release_* env settings (enabled,
+-- zero_hours, dry_run, max_per_sweep -- see that feature's own
+-- comment there for what each means) onto the admin panel;
+-- seed_tile_release_config_from_env (app/mc_ingest.py, called from
+-- init_db() below) bootstraps this row from those settings the first
+-- time it is ever read, the same one-time "settings.py is the seed,
+-- the database is the source of truth forever after" shape
+-- app/checkin.py's seed_nets_from_env uses for checkin_config.
+--
+-- zero_hours/max_per_sweep are NOT bounded by a CHECK constraint here
+-- -- the server-side floor/ceiling (app/mc_scoring.py's
+-- TILE_RELEASE_ZERO_HOURS_FLOOR/TILE_RELEASE_MAX_PER_SWEEP_*) are
+-- enforced in Python, at the one write route that can ever change
+-- this row (app/admin_ops.py's admin_tile_release_config_update,
+-- rejected with 400 below the floor) and again, defensively, by the
+-- sweep itself against whatever this row actually holds -- see that
+-- function's own comment for why a SQLite CHECK was not used instead
+-- (every other numeric column in this schema follows the same
+-- Python-side-validation convention, e.g. checkin_config's points/
+-- streak_bonus above).
+CREATE TABLE IF NOT EXISTS tile_release_config (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    zero_hours      INTEGER NOT NULL DEFAULT 720,
+    dry_run         INTEGER NOT NULL DEFAULT 1,
+    max_per_sweep   INTEGER NOT NULL DEFAULT 200,
+    updated_at      INTEGER NOT NULL DEFAULT 0
+);
 
 -- ---------------------------------------------------------------------
 -- Repeater observation evidence. Purely data collection for now -- future
@@ -3375,6 +3480,39 @@ MIGRATIONS = [
     "ALTER TABLE discord_config ADD COLUMN leaderboard_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE discord_config ADD COLUMN leaderboard_interval_seconds INTEGER NOT NULL DEFAULT 600",
     "ALTER TABLE discord_config ADD COLUMN leaderboard_top_n INTEGER NOT NULL DEFAULT 5",
+    # pings_clock_clamped / pings_cell_cap_exceeded added after
+    # player_ingest_stat already shipped -- see those columns' own
+    # comments on the CREATE TABLE above for what each counts (the
+    # MeshCore scoring-clock clamp and the per-player cell-claim rate
+    # cap, both added together, see app/mc_ingest.py). ADD COLUMN ...
+    # DEFAULT 0 backfills every existing row correctly: nothing before
+    # either guard existed could have tripped either one.
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_clock_clamped INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE player_ingest_stat ADD COLUMN pings_cell_cap_exceeded INTEGER NOT NULL DEFAULT 0",
+    # event_type (see mc_tile_capture_log's own SCHEMA comment above):
+    # a constant DEFAULT ADD COLUMN is a metadata-only change in SQLite
+    # (no rewrite of existing rows), so this is cheap regardless of the
+    # table's size. Every row written before this column existed was a
+    # capture or a flip -- release is brand new -- so 'capture' is not a
+    # guess, it is the only value any of them could have. The other half
+    # of this table's release-support migration (relaxing by_player_id/
+    # by_team to nullable) is NOT here -- see
+    # _migrate_mc_tile_capture_log_nullable_actor() below for why that
+    # one needs its own function rather than a plain ALTER.
+    "ALTER TABLE mc_tile_capture_log ADD COLUMN event_type TEXT NOT NULL DEFAULT 'capture'",
+    # Seed the tile_release_config singleton with the defaults every
+    # fresh column above already carries, so the row exists
+    # unconditionally from the first boot after this migration runs --
+    # same reasoning as checkin_config's/freqmapper_config's own
+    # "INSERT OR IGNORE...VALUES (1)" migrations above: app/mc_ingest.py's
+    # release sweep and app/admin_ops.py's tile-release admin routes
+    # both assume it is always there. INSERT OR IGNORE:
+    # seed_tile_release_config_from_env() (app/mc_ingest.py, called from
+    # init_db() below) is what actually populates this row from
+    # settings.mc_tile_release_* on a truly fresh or upgrading install;
+    # this migration only has to guarantee the row EXISTS, not what it
+    # holds.
+    "INSERT OR IGNORE INTO tile_release_config(id) VALUES (1)",
 ]
 
 PRAGMAS = [
@@ -3843,6 +3981,151 @@ def _migrate_freqmapper_verification_verification_id(conn: sqlite3.Connection) -
     log.info("freqmapper_verification migration: revert complete")
 
 
+def _migrate_mc_tile_capture_log_nullable_actor(conn: sqlite3.Connection) -> None:
+    """One-time migration: relax mc_tile_capture_log.by_player_id and
+    .by_team from NOT NULL to nullable, so a territory-release event
+    (app/mc_scoring.py's release_tile(), event_type='release') can be
+    logged with no actor -- a release has no player and no capturing
+    team to name; see that function's own docstring. Called from
+    init_db() itself, same reason _migrate_session_privacy() above is:
+    not a plain SQL statement the MIGRATIONS loop can run unguarded.
+
+    Gate: PRAGMA table_info's own `notnull` flag says directly whether
+    this database still has the old constraint. A fresh install never
+    does (SCHEMA above already declares both columns nullable), and a
+    previously-migrated one doesn't either, so every later boot after
+    the first migrated one is a true no-op.
+
+    SQLite's ALTER TABLE has no ALTER COLUMN / DROP CONSTRAINT verb
+    (https://www.sqlite.org/lang_altertable.html) -- relaxing a column
+    constraint means the standard 4-step rebuild: create a new table
+    with the desired shape, copy every row into it, drop the old table,
+    rename the new one into place. mc_tile_capture_log is not large by
+    this codebase's standards (order 10^4-10^5 rows on prod as of
+    2026-09-23, not the multi-GB tables elsewhere in this schema), so
+    that copy is genuinely cheap -- a few seconds, not a real cost to
+    budget around. Earlier drafts of this migration used SQLite's
+    writable_schema escape hatch to edit the stored CREATE TABLE text
+    directly instead of rebuilding, reasoning (correctly) that a pure
+    constraint relaxation can never invalidate an existing row. That
+    reasoning was sound but the trade was wrong: writable_schema is the
+    one pragma SQLite's own documentation calls out as able to corrupt
+    the database if misused, and spending that risk to avoid copying a
+    small table was backwards. The rebuild below is the boring,
+    reviewable, standard tool instead -- see
+    https://www.sqlite.org/lang_altertable.html#otheralter for the
+    documented pattern this follows.
+
+    Every row copied over in one INSERT...SELECT, and every explicit
+    index on the table recreated from `sqlite_master.sql` captured
+    BEFORE the drop (not hand-typed from memory -- this table has
+    already drifted from its own SCHEMA constant's aligned formatting
+    once, when the by_air column was added via a later ALTER TABLE ADD
+    COLUMN: sqlite_master.sql for a table that has been ALTERed no
+    longer matches the original CREATE TABLE text verbatim, which is
+    exactly the trap a hand-assumed index list could fall into).
+    sql IS NOT NULL excludes the PRIMARY KEY's own automatic
+    sqlite_autoindex_* entry, which carries no CREATE INDEX text of its
+    own and is recreated automatically by the PRIMARY KEY clause in the
+    new table below.
+
+    event_type is NOT filled in here: the MIGRATIONS loop above already
+    ran its own plain "ADD COLUMN event_type ... DEFAULT 'capture'" ALTER
+    (a metadata-only op, before this function is ever reached), so every
+    row already has a real event_type value by the time this SELECT
+    copies it -- both the historical rows PRAGMA gate's constant DEFAULT
+    just backfilled and any row this process itself wrote earlier today.
+
+    Wrapped in one explicit BEGIN IMMEDIATE/COMMIT (app/db.py's
+    connections run autocommit, isolation_level=None -- see
+    _make_real_connection()) so a failure at any step rolls the whole
+    rebuild back: the original table is never dropped until the new one
+    has been populated and row-counted equal to it, and a ROLLBACK on
+    any exception (including a row-count or index mismatch this
+    function raises itself) restores the pre-migration table exactly,
+    old constraint and all, for the next boot to retry cleanly.
+    """
+    cols = {row["name"]: row for row in conn.execute("PRAGMA table_info(mc_tile_capture_log)")}
+    if cols["by_player_id"]["notnull"] == 0 and cols["by_team"]["notnull"] == 0:
+        return  # already relaxed -- fresh install, or already migrated
+
+    log.info("mc_tile_capture_log migration: rebuilding table to relax by_player_id/by_team to nullable")
+
+    before_count = conn.execute("SELECT COUNT(*) FROM mc_tile_capture_log").fetchone()[0]
+    index_rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master "
+        " WHERE type = 'index' AND tbl_name = 'mc_tile_capture_log' AND sql IS NOT NULL"
+    ).fetchall()
+    expected_indexes = {r["name"] for r in index_rows}
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Defensive: a prior run that crashed AFTER commit-time cleanup
+        # but somehow left this staging table behind (should not happen
+        # -- it only ever exists mid-transaction, and a crash before
+        # COMMIT rolls the whole thing away) must not block a retry.
+        conn.execute("DROP TABLE IF EXISTS mc_tile_capture_log_new")
+        conn.execute(
+            "CREATE TABLE mc_tile_capture_log_new ("
+            "    season_id    INTEGER NOT NULL,"
+            "    cell_id      TEXT NOT NULL,"
+            "    ts           INTEGER NOT NULL,"
+            "    by_player_id INTEGER,"
+            "    by_team      TEXT,"
+            "    from_team    TEXT,"
+            "    by_air       INTEGER NOT NULL DEFAULT 0,"
+            "    event_type   TEXT NOT NULL DEFAULT 'capture',"
+            "    PRIMARY KEY (season_id, cell_id, ts)"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO mc_tile_capture_log_new"
+            "(season_id, cell_id, ts, by_player_id, by_team, from_team, by_air, event_type) "
+            "SELECT season_id, cell_id, ts, by_player_id, by_team, from_team, by_air, event_type "
+            "  FROM mc_tile_capture_log"
+        )
+
+        after_count = conn.execute("SELECT COUNT(*) FROM mc_tile_capture_log_new").fetchone()[0]
+        if after_count != before_count:
+            raise RuntimeError(
+                f"mc_tile_capture_log migration: row count mismatch after copy "
+                f"({before_count} -> {after_count}) -- refusing to proceed"
+            )
+
+        conn.execute("DROP TABLE mc_tile_capture_log")
+        conn.execute("ALTER TABLE mc_tile_capture_log_new RENAME TO mc_tile_capture_log")
+
+        # Recreated verbatim: by the time these run, the table has
+        # already been renamed back to mc_tile_capture_log, so each
+        # captured "CREATE INDEX ... ON mc_tile_capture_log(...)"
+        # statement binds to the new table exactly as it bound to the
+        # old one -- no text rewriting needed.
+        for row in index_rows:
+            conn.execute(row["sql"])
+
+        rebuilt_indexes = {
+            r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master "
+                " WHERE type = 'index' AND tbl_name = 'mc_tile_capture_log' AND sql IS NOT NULL"
+            )
+        }
+        if rebuilt_indexes != expected_indexes:
+            raise RuntimeError(
+                "mc_tile_capture_log migration: index mismatch after rebuild -- "
+                f"expected {sorted(expected_indexes)}, got {sorted(rebuilt_indexes)}"
+            )
+
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    log.info(
+        "mc_tile_capture_log migration: complete (%d rows, %d index(es) recreated: %s)",
+        after_count, len(expected_indexes), ", ".join(sorted(expected_indexes)) or "none",
+    )
+
+
 def init_db() -> None:
     """Create schema and apply pragmas. Idempotent."""
     _ensure_parent_dir(settings.db_path)
@@ -3900,9 +4183,19 @@ def init_db() -> None:
         # than let the app start up against a half-migrated table.
         _migrate_freqmapper_verification_verification_id(conn)
 
+        # mc_tile_capture_log.by_player_id/by_team -> nullable (release
+        # events, see that function's own docstring for the full story:
+        # a standard create/copy/drop/rename table rebuild, wrapped in
+        # its own transaction) -- unguarded by try/except for the same
+        # reason as the two migrations just above: a
+        # failure here must stop boot loudly, not let the app start up
+        # still carrying the old constraint app/mc_scoring.py's
+        # release_tile() now assumes is gone.
+        _migrate_mc_tile_capture_log_nullable_actor(conn)
+
         # Startup WRITES -- gated on settings.run_background_tasks
         # (app/config.py). Schema creation and the MIGRATIONS loop and
-        # the two migration functions above are NOT in this block: every
+        # the three migration functions above are NOT in this block: every
         # process needs a fully migrated schema before it can serve a
         # single request, and that DDL is idempotent, so every process
         # running it redundantly is free. Everything below is different:
@@ -4018,6 +4311,21 @@ def init_db() -> None:
                 seed_discord_config_from_env(conn)
             except Exception:
                 log.exception("discord: seed_discord_config_from_env failed -- config may be unseeded")
+
+            # Automatic tile release (app/mc_ingest.py): the same
+            # one-time bootstrap shape as seed_discord_config_from_env
+            # just above, migrating settings.py's mc_tile_release_*
+            # values onto the tile_release_config singleton so an
+            # operator can edit them through app/admin_ops.py's
+            # tile-release admin routes without a restart or an
+            # env-var edit. Local import, same circular-import reason
+            # as discord_notify.py's own import just above
+            # (mc_ingest.py imports WriteSession from this module).
+            try:
+                from .mc_ingest import seed_tile_release_config_from_env
+                seed_tile_release_config_from_env(conn)
+            except Exception:
+                log.exception("mc_ingest: seed_tile_release_config_from_env failed -- config may be unseeded")
     finally:
         conn.close()
 

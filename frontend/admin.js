@@ -1812,6 +1812,164 @@ async function clearPaintCursor(b) {
   b.disabled = false;
 }
 
+// ---- tile release: app/db.py's tile_release_config ---------------------
+//
+// Same "whole singleton, one POST" shape the Nets/Paint sections above
+// use for their own config. The one field that gets its own
+// confirmation before that POST goes out is dry_run switching from
+// true to false -- see saveTileRelease below -- the same "type a value
+// to confirm" shape savePaint/clearPaintCursor/the delete buttons all
+// use elsewhere in this file, except what has to be typed here is the
+// exact projected release count, not a fixed word, so an operator has
+// to actually look at the number before confirming it.
+
+// The dry_run the form was last loaded/saved WITH -- compared against
+// the checkbox's current value at save time so the confirmation only
+// fires on an actual true->false switch, not on saving zero_hours/
+// max_per_sweep/enabled changes while dry_run stays wherever it
+// already was.
+let loadedTileReleaseDryRun = true;
+let tileReleaseBounds = { zero_hours_floor: 168, max_per_sweep_floor: 1, max_per_sweep_ceiling: 2000 };
+
+function renderTileReleaseForm(cfg) {
+  document.getElementById('tr-enabled').checked = !!cfg.enabled;
+  document.getElementById('tr-zero-hours').value = cfg.zero_hours;
+  document.getElementById('tr-zero-hours').min = cfg.zero_hours_floor;
+  document.getElementById('tr-max-per-sweep').value = cfg.max_per_sweep;
+  document.getElementById('tr-max-per-sweep').min = cfg.max_per_sweep_floor;
+  document.getElementById('tr-max-per-sweep').max = cfg.max_per_sweep_ceiling;
+  document.getElementById('tr-dry-run').checked = !!cfg.dry_run;
+  document.getElementById('tr-dry-run-hint').hidden = !!cfg.dry_run;
+  loadedTileReleaseDryRun = !!cfg.dry_run;
+  tileReleaseBounds = {
+    zero_hours_floor: cfg.zero_hours_floor,
+    max_per_sweep_floor: cfg.max_per_sweep_floor,
+    max_per_sweep_ceiling: cfg.max_per_sweep_ceiling,
+  };
+}
+
+async function loadTileRelease() {
+  try {
+    const cfg = await api('/api/admin/tile_release/config');
+    renderTileReleaseForm(cfg);
+  } catch (e) {
+    setStatus('Tile release config load failed: ' + e.message, true);
+  }
+}
+
+function renderTileReleaseProjection(p) {
+  const host = document.getElementById('tr-projection');
+  host.replaceChildren();
+  if (p.season_id === null) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No active MeshCore season -- nothing to project.' }));
+    return;
+  }
+  const tiles = el('div', { className: 'adm-tiles' });
+  tiles.appendChild(tile(p.count, 'would release at ' + p.zero_hours + 'h'));
+  tiles.appendChild(tile(p.board_pct.toFixed(1) + '%', 'of the whole board', p.board_pct >= 25 ? 'bad' : (p.board_pct >= 10 ? 'warn' : null)));
+  host.appendChild(tiles);
+  if (p.by_team.length) {
+    const list = el('div', { className: 'adm-hint' });
+    list.appendChild(el('span', {
+      text: p.by_team.map((t) => t.team + ': ' + t.count + ' of ' + t.team_total + ' (' + t.pct.toFixed(1) + '%)').join('  |  '),
+    }));
+    host.appendChild(list);
+  }
+}
+
+let lastTileReleaseProjection = null;
+
+async function previewTileRelease(b) {
+  const out = document.getElementById('tr-result');
+  out.replaceChildren();
+  const zeroHours = parseInt(document.getElementById('tr-zero-hours').value, 10);
+  if (!Number.isFinite(zeroHours) || zeroHours <= 0) {
+    out.textContent = 'Enter a positive number of hours first.';
+    return;
+  }
+  b.disabled = true;
+  try {
+    const p = await post('/api/admin/tile_release/projection', { zero_hours: zeroHours });
+    lastTileReleaseProjection = p;
+    renderTileReleaseProjection(p);
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function saveTileRelease(b) {
+  const out = document.getElementById('tr-result');
+  out.replaceChildren();
+
+  const enabled = document.getElementById('tr-enabled').checked;
+  const zeroHours = parseInt(document.getElementById('tr-zero-hours').value, 10);
+  const maxPerSweep = parseInt(document.getElementById('tr-max-per-sweep').value, 10);
+  const dryRun = document.getElementById('tr-dry-run').checked;
+
+  if (!Number.isFinite(zeroHours) || zeroHours < tileReleaseBounds.zero_hours_floor) {
+    out.textContent = 'Abandonment window must be at least ' + tileReleaseBounds.zero_hours_floor + ' hours.';
+    return;
+  }
+  if (!Number.isFinite(maxPerSweep) || maxPerSweep < tileReleaseBounds.max_per_sweep_floor
+      || maxPerSweep > tileReleaseBounds.max_per_sweep_ceiling) {
+    out.textContent = 'Max releases per sweep must be between ' + tileReleaseBounds.max_per_sweep_floor
+      + ' and ' + tileReleaseBounds.max_per_sweep_ceiling + '.';
+    return;
+  }
+
+  const payload = { enabled, zero_hours: zeroHours, dry_run: dryRun, max_per_sweep: maxPerSweep };
+
+  if (loadedTileReleaseDryRun && !dryRun) {
+    // The destructive transition -- fetch the freshest possible
+    // projection for the window about to be saved (not whatever is
+    // sitting in the panel from an earlier click, which may be stale)
+    // and require it be typed back before this goes out. The server
+    // re-checks this exact number itself, fresh, inside its own write
+    // transaction, and 409s on any mismatch -- this client-side check
+    // only saves a round trip for the common case of an operator who
+    // simply never looked.
+    let fresh;
+    try {
+      fresh = await post('/api/admin/tile_release/projection', { zero_hours: zeroHours });
+    } catch (e) {
+      out.textContent = 'Could not fetch a fresh projection: ' + e.message;
+      return;
+    }
+    lastTileReleaseProjection = fresh;
+    renderTileReleaseProjection(fresh);
+    const typed = window.prompt(
+      'Turning dry run off starts deleting abandoned tiles on the next sweep.\n\n' +
+      'At ' + fresh.zero_hours + 'h this releases ' + fresh.count + ' cells (' + fresh.board_pct.toFixed(1) + '% of the board) right now.\n\n' +
+      'Type ' + fresh.count + ' to confirm.'
+    );
+    if (typed === null) {
+      out.textContent = '';
+      return;
+    }
+    if (parseInt(typed, 10) !== fresh.count || String(parseInt(typed, 10)) !== typed.trim()) {
+      out.textContent = 'Not confirmed -- no change made.';
+      return;
+    }
+    payload.confirm_release_count = fresh.count;
+  }
+
+  b.disabled = true;
+  try {
+    const cfg = await post('/api/admin/tile_release/config', payload);
+    // The save response carries the four saved fields, not the
+    // floor/ceiling GET /api/admin/tile_release/config also returns --
+    // reuse tileReleaseBounds (unchanged by a save) rather than a
+    // second round trip just to redraw the same form.
+    renderTileReleaseForm(Object.assign({}, cfg, tileReleaseBounds));
+    out.textContent = 'Saved.';
+    setStatus('Tile release config saved', false);
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 function updateNetFormKind() {
   const kind = document.getElementById('nf-kind').value;
   document.getElementById('nf-channel-row').hidden = !netKindHasChannel(kind);
@@ -2911,7 +3069,7 @@ function badge(id, value, bad) {
 async function refreshAll() {
   const loads = [
     loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadSources(),
-    loadPaint(), loadDiscord(), loadTraffic(), loadCheckinAwards(),
+    loadPaint(), loadTileRelease(), loadDiscord(), loadTraffic(), loadCheckinAwards(),
   ];
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
@@ -3068,6 +3226,11 @@ document.getElementById('ci-award').addEventListener('click', function () { awar
 document.getElementById('nc-save').addEventListener('click', function () { saveConfig(this); });
 document.getElementById('pt-save').addEventListener('click', function () { savePaint(this); });
 document.getElementById('pt-clear-cursor').addEventListener('click', function () { clearPaintCursor(this); });
+document.getElementById('tr-preview').addEventListener('click', function () { previewTileRelease(this); });
+document.getElementById('tr-save').addEventListener('click', function () { saveTileRelease(this); });
+document.getElementById('tr-dry-run').addEventListener('change', function () {
+  document.getElementById('tr-dry-run-hint').hidden = this.checked;
+});
 document.getElementById('nf-kind').addEventListener('change', updateNetFormKind);
 document.getElementById('nf-load-channels').addEventListener('click', function () { loadNetChannels(this); });
 document.getElementById('nf-channel-select').addEventListener('change', function () {

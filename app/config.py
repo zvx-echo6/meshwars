@@ -224,6 +224,126 @@ class Settings(BaseSettings):
     mc_ping_retention_hours: int = 48
     mc_stat_retention_days: int = 30
 
+    # Scoring-clock clamp (app/mc_ingest.py's _clamp_scoring_clock()): a
+    # ping's own client-supplied timestamp is still ACCEPTED and still
+    # preserved verbatim in player_cell_ping and repeater_observation --
+    # MeshMapper's offline-upload feature legitimately forwards a real,
+    # possibly stale, original timestamp, and that must keep working.
+    # What changes is which value drives the CLOCK that scoring itself
+    # reads: decay, the defense window, the repeater-credit cooldown,
+    # mc_tile.last_report_ts, mc_tile_capture.captured_at, and
+    # player_last_fix are all keyed off a value clamped to within
+    # mc_clock_clamp_seconds of the SERVER's own receipt time
+    # (received_at), never off the raw client value directly -- a
+    # ping claiming to be from last year (or next year) can no longer
+    # retroactively (or pre-emptively) win a defense-window race or
+    # reset a decay clock it was never actually present for. Defaults to
+    # mc_max_clock_skew_seconds's own value (3600s) so the two settings
+    # start out meaning the same "how far off is too far" threshold, but
+    # each is independently tunable from here on: mc_max_clock_skew_seconds
+    # only ever controlled the WARNING log, this controls what the clock
+    # actually clamps to.
+    mc_clock_clamp_enabled: bool = True
+    mc_clock_clamp_seconds: int = 3600
+
+    # Physically-impossible-speed rejection (app/mc_ingest.py's ping
+    # loop): promoted from the old _GLITCH_SPEED_MPS module constant.
+    # Above this implied speed (roughly 900 mph) a "jump" between two
+    # fixes is not a fast vehicle, it is a bad GPS fix -- a stale
+    # position, a cold start, or a phone resolving from a cell tower in
+    # the next county -- and the ping is dropped outright rather than
+    # scored. This is a materially higher bar than mc_max_speed_mps
+    # above: the 45-400 m/s band between the two settings is left alone
+    # by this gate entirely (still scores territory, still marked
+    # by_air, still excluded from exploration credit) -- see
+    # mc_max_speed_mps's own comment for why that band exists and is
+    # deliberately not a rejection.
+    mc_speed_reject_enabled: bool = True
+    mc_glitch_speed_mps: float = 400.0
+
+    # Per-player cell-claim rate cap (app/mc_ingest.py): a backstop, not
+    # a throttle, against one player claiming an implausible number of
+    # DISTINCT NEW cells in a short window -- there was no cap at all
+    # before this. "New" means a cell this player has never before had
+    # an accepted, repeater-bearing ping land in (see
+    # app/db.py's player_cell_claim) -- a re-ping of a cell the player
+    # already claimed is never gated by this cap, at any rate, and is
+    # always processed. The window is measured off received_at (the
+    # server's own receipt clock), never off a ping's own client
+    # timestamp, specifically so this cannot be defeated by crafting
+    # ts values to spread claims across many apparent "windows" that
+    # all land in the same real-world minute.
+    #
+    # Default derived from live prod measurement (CT119/edge3 game.db,
+    # 2026-09-23): the busiest real player-hour in the last 48h of
+    # player_cell_ping (distinct cell_id per player per server-received
+    # hour -- itself an OVER-count relative to "new cells only", since it
+    # includes re-visits) was 259, p99 was ~231, p50 was ~32, across 36
+    # distinct MeshCore players. 500 is comfortably above the observed
+    # max with room to spare for a faster driver than anyone measured,
+    # so it cannot fire for any real play seen so far -- it exists to
+    # catch a scripted/bulk claim far outside anything a real wardriving
+    # session produces, not to slow an unusually fast real one down.
+    mc_cell_claim_cap_enabled: bool = True
+    mc_cell_claim_cap: int = 500
+    mc_cell_claim_cap_window_seconds: int = 3600
+
+    # Automatic release of long-abandoned territory (app/mc_ingest.py's
+    # _release_expired_tiles_sync(), hooked into the existing hourly
+    # _maybe_housekeeping()): a cell whose OWNING team's score has
+    # decayed to exactly 0 (mc_scoring.decayed_score() floors at 0) and
+    # stayed there for longer than mc_tile_release_zero_hours becomes
+    # unclaimed -- the mc_tile row is deleted, since a cell has no
+    # neutral/zero-owner state (see app/mc_scoring.py's module
+    # docstring). Driven off the existing decay clock rather than a new
+    # presence record on purpose: a real visit that hears even one
+    # repeater scores and pushes last_update forward, so only a cell
+    # that has genuinely heard nothing from its owning team for the
+    # whole window is affected. mc_scoring.find_expired_tiles() computes
+    # each candidate's exact zero_ts (the instant its score reached 0)
+    # from the stored (score, last_update) pair -- the same inputs
+    # decayed_score() reads -- rather than needing a live poll.
+    #
+    # Defaults OFF: this feature deletes rows, and shipping the code
+    # must never start releasing territory on its own. It is meant to
+    # be turned on deliberately, after mc_tile_release_dry_run has run
+    # for a while and its logged counts have been reviewed against what
+    # an operator actually expects.
+    mc_tile_release_enabled: bool = False
+
+    # 720h = 30 days. A cell has to sit at EXACTLY zero -- not merely
+    # low -- for this long, with no scoring paint landing for the
+    # owning team from anyone, before it releases.
+    mc_tile_release_zero_hours: int = 720
+
+    # Default ON, independent of mc_tile_release_enabled above (dry-run
+    # can be turned back on later without also disabling the feature
+    # outright, and vice versa -- the sweep only ever does anything,
+    # dry-run reporting or a real release, when mc_tile_release_enabled
+    # is also True). While True, each sweep computes and logs exactly
+    # what it WOULD release -- a per-team count and a small sample of
+    # cell ids -- and changes nothing: no DELETE, no mc_tile_capture_log
+    # row. Meant to run for a real stretch of time (days, against real
+    # traffic) before mc_tile_release_enabled is ever flipped on, so an
+    # operator can see the real numbers first rather than trust the
+    # math blind.
+    mc_tile_release_dry_run: bool = True
+
+    # Safety ceiling: at most this many cells are released in one sweep
+    # (housekeeping runs at most once an hour, _HOUSEKEEPING_INTERVAL_S),
+    # however many qualify. Caps the blast radius of a bad query or a
+    # clock problem to 200 cells rather than the whole board in one
+    # shot, while still being generous enough to drain a real backlog
+    # quickly: the Phase 3 dry-run projection against the frozen preview
+    # snapshot (2026-09-23, see the rollout notes) found roughly 1-3% of
+    # the live board sitting at zero past the 30-day threshold, on a
+    # board with tens of thousands of cells -- comfortably more than 200
+    # in absolute terms, but oldest-zero-first (find_expired_tiles()
+    # sorts by zero_ts ascending) means the first several sweeps after
+    # this is enabled work through that backlog a bite at a time rather
+    # than releasing it all in one transaction.
+    mc_tile_release_max_per_sweep: int = 200
+
     # Per-key rate limit on the ingest endpoint. The endpoint is public
     # and keys are handed out to players, so nothing else stops a key
     # from being replayed as fast as the caller likes. A wardriving

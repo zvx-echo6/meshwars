@@ -207,12 +207,23 @@ def _captures(conn: sqlite3.Connection, protocol: str) -> list[sqlite3.Row]:
     square BEFORE the month began to tell a retake from an ordinary
     attack, so the window is applied after the previous-owner lookup
     below, never in this query.
+
+    event_type != 'release' excludes app/mc_scoring.py's release_tile()
+    rows: a release is not a capture (by_player_id/by_team are NULL --
+    nobody claimed anything), and every caller of this function treats
+    each row it gets back as one. Safe to drop entirely rather than
+    thread through as some kind of null event: the cell's mc_tile row
+    is deleted on release, so whatever captures it NEXT is necessarily a
+    fresh first-paint with from_team NULL (see apply_paint()'s "tile is
+    None" branch), never a flip that would need to read a release row's
+    from_team as the prior owner. Nothing downstream loses information
+    by not seeing the release row itself.
     """
     return conn.execute(
         "SELECT l.cell_id, l.ts, l.by_player_id, l.by_team, l.from_team, l.by_air "
         "  FROM mc_tile_capture_log l "
         "  JOIN mc_season s ON s.id = l.season_id "
-        " WHERE s.protocol = ? "
+        " WHERE s.protocol = ? AND l.event_type != 'release' "
         " ORDER BY l.cell_id, l.ts",
         (protocol,),
     ).fetchall()
@@ -270,6 +281,17 @@ def ownership_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> list[sq
     the per-player numbers add up to the team's own), Longest Road (the
     cell ids themselves), and the weekly recap's own placement-changes
     section, cross-module, as above.
+
+    A released cell (app/mc_scoring.py's release_tile(), logged with
+    event_type='release') has no owner: the innermost query below still
+    has to see release rows to know a cell's TRUE newest event as of
+    at_ts might be one (an older capture must not win just because the
+    release row itself is filtered out before ranking), but once ranked,
+    a cell whose newest event is a release is dropped from the result
+    entirely here -- same as a cell that was never captured at all,
+    which is exactly what "released" means. This is the one place that
+    matters: every caller above already treats "this cell isn't in the
+    result" as "nobody owns it," so nothing downstream needed to change.
     """
     season = conn.execute(
         "SELECT id FROM mc_season "
@@ -281,12 +303,12 @@ def ownership_at(conn: sqlite3.Connection, protocol: str, at_ts: int) -> list[sq
         return []
     return conn.execute(
         "SELECT cell_id, by_team AS team, by_player_id AS player_id FROM ("
-        "  SELECT cell_id, by_team, by_player_id,"
+        "  SELECT cell_id, by_team, by_player_id, event_type,"
         "         ROW_NUMBER() OVER (PARTITION BY cell_id"
         "                            ORDER BY ts DESC, rowid DESC) AS rn"
         "    FROM mc_tile_capture_log"
         "   WHERE season_id = ? AND ts <= ?"
-        ") WHERE rn = 1",
+        ") WHERE rn = 1 AND event_type != 'release'",
         (season["id"], at_ts),
     ).fetchall()
 

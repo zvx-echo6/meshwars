@@ -1780,6 +1780,12 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
         # paint, which never writes evidence fields at all. Those must
         # still come back as a capture line, just with NULL evidence --
         # never dropped for lacking a join match.
+        #
+        # event_type != 'release' excludes app/mc_scoring.py's
+        # release_tile() rows: a release is not a capture -- by_team is
+        # NULL, there is no painter to LEFT JOIN a display_name for --
+        # and showing one here would read as "captured by nobody" in a
+        # list whose whole point is naming who captured a square.
         log_rows = conn.execute(
             "SELECT l.ts, l.by_team, l.from_team, p.display_name, "
             "       pcp.evidence_type, pcp.watcher_count, "
@@ -1790,7 +1796,7 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
             "  LEFT JOIN player_cell_ping pcp "
             "    ON pcp.player_id = l.by_player_id AND pcp.protocol = ? "
             "   AND pcp.cell_id = l.cell_id AND pcp.ts = l.ts "
-            " WHERE l.season_id = ? AND l.cell_id = ? "
+            " WHERE l.season_id = ? AND l.cell_id = ? AND l.event_type != 'release' "
             " ORDER BY l.ts DESC LIMIT 5",
             (protocol, season["id"], cell_id),
         ).fetchall()

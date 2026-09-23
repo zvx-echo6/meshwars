@@ -1573,11 +1573,13 @@ async def use_identity_email_as_contact(
 # HARD-DELETED (player-scoped -- _PLAYER_SCOPED_TABLES below):
 #   api_key, player_node, checkin_node_name, mc_checkin_binding,
 #   mc_node_confirmation, mt_node_confirmation, player_last_fix,
-#   player_cell_ping, player_cell_repeater_credit, player_ingest_stat,
-#   join_token. Every one of these is keyed on player_id alone, holds
-#   nothing anyone but this player could be affected by losing (a
-#   radio binding, a credential, a raw location/timing trail kept for
-#   anti-cheat and diagnostics), and none of it is read by anything
+#   player_cell_ping, player_cell_repeater_credit, player_cell_claim,
+#   player_ingest_stat, join_token. Every one of these is keyed on
+#   player_id alone, holds nothing anyone but this player could be
+#   affected by losing (a radio binding, a credential, a raw
+#   location/timing trail kept for anti-cheat and diagnostics, or -- for
+#   player_cell_claim -- a rate-limit bookkeeping row), and none of it
+#   is read by anything
 #   that produces a number someone ELSE'S standing depends on.
 #
 # TOMBSTONED, not deleted: `player` itself. display_name is overwritten
@@ -1678,6 +1680,7 @@ _PLAYER_SCOPED_TABLES = (
     "player_last_fix",
     "player_cell_ping",
     "player_cell_repeater_credit",
+    "player_cell_claim",
     "player_ingest_stat",
     "join_token",
 )

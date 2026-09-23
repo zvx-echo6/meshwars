@@ -239,6 +239,22 @@ def _full_player_scoped_data(db_path: str, player_id: int) -> None:
         "VALUES (?, 'mc', 'cell1', 'rep1', ?, ?)",
         (player_id, now, now),
     )
+    # Per-player cell-claim rate-cap bookkeeping (app/db.py's
+    # player_cell_claim, app/mc_ingest.py's cell-claim cap) -- added to
+    # _PLAYER_SCOPED_TABLES by the ingest-plausibility-guards commit,
+    # which never updated this helper to match, leaving
+    # test_full_delete_clears_every_player_scoped_table below asserting
+    # a seeded-and-deleted count of 1 against a table nothing ever
+    # seeded. The generic per-table DELETE loop in app/account_api.py
+    # (and app/admin_api.py's own copy for the operator path) was never
+    # missing this table -- it deletes whatever _PLAYER_SCOPED_TABLES
+    # lists, data-driven, no per-table code to have forgotten -- so this
+    # was purely a stale test fixture, not a deletion bug.
+    conn.execute(
+        "INSERT INTO player_cell_claim(player_id, protocol, cell_id, claimed_at) "
+        "VALUES (?, 'mc', 'cell1', ?)",
+        (player_id, now),
+    )
     conn.execute(
         "INSERT INTO player_ingest_stat(player_id, protocol, day) VALUES (?, 'mc', 20260101)",
         (player_id,),
