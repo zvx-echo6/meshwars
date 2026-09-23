@@ -123,6 +123,30 @@ x-meshwars-environment: &meshwars-environment
   ACCOUNT_SESSION_COOKIE_SECURE: "${ACCOUNT_SESSION_COOKIE_SECURE:-true}"
   MC_RAW_LOG_ENABLED: "${MC_RAW_LOG_ENABLED:-false}"
   MC_RAW_LOG_PATH: "${MC_RAW_LOG_PATH:-/data/mc_raw.log}"
+  # MeshCore ingest plausibility guards (app/mc_ingest.py): all three
+  # default ON in code, but without a passthrough line here they can
+  # never be turned OFF from .env either -- same known trap as every
+  # other setting in this file (compose does not pass .env through
+  # wholesale; see ADMIN_REQUIRE_AUTH's own comment above for the full
+  # mechanism). See each setting's own comment in app/config.py for
+  # exactly what it guards.
+  MC_CLOCK_CLAMP_ENABLED: "${MC_CLOCK_CLAMP_ENABLED:-true}"
+  MC_CLOCK_CLAMP_SECONDS: "${MC_CLOCK_CLAMP_SECONDS:-3600}"
+  MC_SPEED_REJECT_ENABLED: "${MC_SPEED_REJECT_ENABLED:-true}"
+  MC_GLITCH_SPEED_MPS: "${MC_GLITCH_SPEED_MPS:-400.0}"
+  MC_CELL_CLAIM_CAP_ENABLED: "${MC_CELL_CLAIM_CAP_ENABLED:-true}"
+  MC_CELL_CLAIM_CAP: "${MC_CELL_CLAIM_CAP:-500}"
+  MC_CELL_CLAIM_CAP_WINDOW_SECONDS: "${MC_CELL_CLAIM_CAP_WINDOW_SECONDS:-3600}"
+  # Automatic release of long-abandoned territory (app/mc_ingest.py's
+  # hourly sweep, app/mc_scoring.py's find_expired_tiles()/
+  # release_tile()). Defaults OFF (MC_TILE_RELEASE_ENABLED=false) and,
+  # independently, dry-run ON (MC_TILE_RELEASE_DRY_RUN=true) -- see each
+  # setting's own comment in app/config.py. Same passthrough
+  # requirement as every other setting in this file.
+  MC_TILE_RELEASE_ENABLED: "${MC_TILE_RELEASE_ENABLED:-false}"
+  MC_TILE_RELEASE_DRY_RUN: "${MC_TILE_RELEASE_DRY_RUN:-true}"
+  MC_TILE_RELEASE_ZERO_HOURS: "${MC_TILE_RELEASE_ZERO_HOURS:-720}"
+  MC_TILE_RELEASE_MAX_PER_SWEEP: "${MC_TILE_RELEASE_MAX_PER_SWEEP:-200}"
   MT_POINTS_PER_FEEDER: "${MT_POINTS_PER_FEEDER:-0.1}"
   MT_MAX_POINTS_PER_PING: "${MT_MAX_POINTS_PER_PING:-1.0}"
   CHECKIN_ENABLED: "${CHECKIN_ENABLED:-false}"
