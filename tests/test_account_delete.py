@@ -226,6 +226,18 @@ def _full_player_scoped_data(db_path: str, player_id: int) -> None:
         "VALUES (?, 'mc', 'cell1', 'rep1', ?, ?)",
         (player_id, now, now),
     )
+    # Per-player cell-claim rate-cap bookkeeping (app/db.py's
+    # player_cell_claim) -- added to _PLAYER_SCOPED_TABLES by the
+    # ingest-plausibility-guards commit; this helper's docstring says
+    # "every table _PLAYER_SCOPED_TABLES deletes," so it belongs here
+    # too, kept in lockstep with tests/test_admin_player_delete.py's
+    # own copy of this helper (see that file's own comment on this same
+    # INSERT for why it was missing).
+    conn.execute(
+        "INSERT INTO player_cell_claim(player_id, protocol, cell_id, claimed_at) "
+        "VALUES (?, 'mc', 'cell1', ?)",
+        (player_id, now),
+    )
     conn.execute(
         "INSERT INTO player_ingest_stat(player_id, protocol, day) VALUES (?, 'mc', 20260101)",
         (player_id,),
