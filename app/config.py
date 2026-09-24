@@ -288,6 +288,45 @@ class Settings(BaseSettings):
     mc_cell_claim_cap: int = 500
     mc_cell_claim_cap_window_seconds: int = 3600
 
+    # wire_tag replay/impersonation check (app/mc_ingest.py's
+    # check_wire_tag(), app/db.py's mc_wire_tag). wire_tag arrives on
+    # effectively 100% of TX pings (measured 2026-09-23: 7,260 of 7,260
+    # distinct, zero duplicates, format "MM:" + 10 base64url characters)
+    # and is stored one row per tag, keyed on the tag itself as PRIMARY
+    # KEY -- a second player presenting a tag already on file for
+    # someone else is the harvest-someone-else's-proof attack, the one
+    # place in this file a hard block is justified because the measured
+    # false-positive rate against real traffic is zero. The SAME player
+    # re-presenting their own already-seen tag (a legitimate
+    # re-uploaded offline session) is always accepted -- app/db.py's
+    # player_cell_ping PK already prevents that from double-scoring, so
+    # there is nothing here to gate.
+    #
+    # This flag gates only the REJECT action, the same way
+    # mc_speed_reject_enabled above gates only its own rejection: tag
+    # storage and mismatch detection/counting always run regardless
+    # (cheap -- one indexed PRIMARY KEY lookup, one insert), so turning
+    # this off only stops a detected cross-player mismatch from
+    # dropping the ping, matching the exact behavior before this
+    # feature existed.
+    mc_wire_tag_reject_enabled: bool = True
+    # Rows in mc_wire_tag are pruned after this long -- MUST stay
+    # LONGER than mc_ingest_identity_retention_days below, and in
+    # general as long as this deployment ever wants the cross-player
+    # check to mean anything: this table's whole job is remembering a
+    # tag has already been claimed, so pruning a row here is not
+    # cleanup, it is UN-CLAIMING that tag and re-opening it to exactly
+    # the replay this feature exists to catch -- the same shape this
+    # codebase already hit once with checkin_seen_message vs
+    # mqtt_message_buffer (see checkin_seen_retention_hours' own
+    # comment above: one retention window has to outlive the other, or
+    # the shorter one quietly defeats the feature built on top of it).
+    # Default 365 days: measured TX ping volume is only ~2,200/day, so
+    # a year of tags is still a small table. Shortening this weakens
+    # the cross-player check for exactly as long as the difference --
+    # do not shorten it without shortening what it protects against.
+    mc_wire_tag_retention_days: int = 365
+
     # Automatic release of long-abandoned territory (app/mc_ingest.py's
     # _release_expired_tiles_sync(), hooked into the existing hourly
     # _maybe_housekeeping()): a cell whose OWNING team's score has
@@ -364,6 +403,102 @@ class Settings(BaseSettings):
     mc_raw_log_path: str = "/data/mc_raw.log"  # where the raw batch log is written
     mc_raw_log_max_bytes: int = 10_000_000     # rotate after this many bytes
     mc_raw_log_backups: int = 3                # rotated files kept, beyond the active one
+
+    # Durable per-batch request identity capture (app/mc_ingest.py's
+    # record_ingest_identity(), called from POST /api/mc/ingest in
+    # app/api.py): one row per accepted batch in app/db.py's
+    # mc_ingest_request_log. PRIVACY-SAFE BY DESIGN -- see that table's
+    # own SCHEMA comment in app/db.py for the full history (an earlier
+    # draft of this feature stored the raw source IP and raw User-Agent
+    # verbatim; a privacy review rejected that as inconsistent with
+    # frontend/privacy.html's own promises). What is actually stored is
+    # the server's own received_at, player_id, key_hash_prefix, a
+    # salted one-way ip_hash (never the address itself), a coarse
+    # ip_class ('datacenter'/'unknown', app/ip_class.py, computed
+    # in-process against a bundled hosting-provider prefix list -- NO
+    # outbound DNS or network call, ever), a coarse client_family
+    # (app/client_family.py, derived from the User-Agent but never
+    # storing it), ping count, and a small per-ping-type count summary.
+    # Pure observation -- never rejects or alters a ping, only records
+    # who sent it. Exists because every past investigation into a
+    # suspect batch has died on the gap between mc_raw_log's ~3.3-day
+    # rotation (10MB x 4 files) and Caddy's own access log (~6.4 days
+    # retention on edge3, has IP/UA, but nothing joins it to player_id)
+    # -- an ingest-scoped, privacy-preserving record closes that gap
+    # without recreating what those two already (and more
+    # identifiably) hold.
+    mc_ingest_identity_enabled: bool = True
+    # Default 90 days -- deliberately far past both Caddy's own ~6.4-day
+    # retention and mc_raw_log's ~3.3-day rotation window, so a batch's
+    # (hashed/classified, never raw) identity is still on record long
+    # after both of those have aged out. MUST stay shorter than
+    # mc_wire_tag_retention_days above -- see that setting's own
+    # comment for why one retention here has to outlive the other, not
+    # this one.
+    mc_ingest_identity_retention_days: int = 90
+    # Optional operator override for the salt mc_ingest_request_log.ip_hash
+    # is computed with (app/mc_ingest.py, via app/db.py's
+    # get_or_create_persistent_salt()) -- same "empty means generate and
+    # remember one, not off" contract traffic_salt below already uses,
+    # and see that setting's own comment for the fuller reasoning this
+    # one shares. Deliberately a SEPARATE salt from traffic_salt, not
+    # the same value reused: this feature's hash space (source
+    # addresses hitting the MeshCore ingest endpoint) has nothing to do
+    # with traffic_salt's (site visitors browsing the public website),
+    # and coupling the two would mean a future change to one salt's
+    # policy silently also changes the other's. Left empty (the
+    # default), a fresh install generates and persists its own random
+    # value in the `cursor` table under key "mc_ingest_salt" the first
+    # time it is needed; that value never rotates on its own, for the
+    # same reason traffic_salt's own comment gives: an ip_hash is only
+    # useful for spotting a repeated source over time, and a rotating
+    # salt would silently break every historical hash it ever produced.
+    mc_ingest_salt: str = ""
+
+    # Ban-evasion record (app/account_api.py's _capture_evasion_record(),
+    # app/db.py's mc_evasion_record): a DELIBERATE, NARROW exception to
+    # "account deletion means gone" -- see mc_evasion_record's own SCHEMA
+    # comment in app/db.py, and _PLAYER_SCOPED_TABLES' own section
+    # comment in app/account_api.py, for the full policy this
+    # implements. Fires on deletion (self-service DELETE /api/account,
+    # or either operator delete route) ONLY when the player matches one
+    # of three independent, server-evaluated trigger paths -- see
+    # app/account_api.py's _capture_evasion_record() for exactly which
+    # three (a prior operator disable; a prior, separate, explicit
+    # "mark for evasion tracking"; or at least one wire_tag conflict
+    # already on file) and why an unrecognized client_family is
+    # deliberately NOT a fourth. An ordinary player who matches none of
+    # the three is completely unaffected and is purged exactly as
+    # before, honoring frontend/privacy.html's existing full-deletion
+    # guarantee. When it does fire, only a minimal record survives:
+    # this player's ip_hash values (from mc_ingest_request_log, read
+    # before that table's own rows are purged) and bound radio
+    # identities (player_node.node_ref) -- not their name (already
+    # tombstoned by the existing deletion flow) and not their full
+    # request history.
+    #
+    # Default on: an operator/system that has already taken one of the
+    # three trigger actions is presumed to want evasion evidence kept,
+    # matching how mc_wire_tag_reject_enabled/mc_cell_claim_cap_enabled/
+    # etc. above all default to the safer, more-protective behavior.
+    # Turning this off reverts deletion to the unconditional full-purge
+    # behavior for every player, regardless of any trigger -- the same
+    # "off means fully reverted" contract every other feature flag in
+    # this file uses.
+    mc_evasion_record_enabled: bool = True
+    # How long a mc_evasion_record row survives before the hourly
+    # housekeeping sweep prunes it (app/mc_ingest.py's
+    # _housekeeping_sync()) -- same retention-cutoff shape every other
+    # *_retention_days setting in this file already uses. Default ~18
+    # months (548 days): an UNBOUNDED version of this table is a
+    # permanent record of every person this deployment ever disabled or
+    # flagged, by construction -- a rap sheet, not evidence with a
+    # shelf life -- and the operator does not want that. 18 months was
+    # chosen specifically because it spans more than one full MeshCore
+    # season (mc_season_days below), which is the longest timescale
+    # this game already reasons in; a shorter window could let a
+    # returning player wait out exactly one season and come back clean.
+    mc_evasion_record_retention_days: int = 548
 
     # Team roster: shared by both boards now that Meshtastic runs on the
     # same player model as MeshCore, keyed on flat grid cells and players

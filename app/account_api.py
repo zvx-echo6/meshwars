@@ -1574,13 +1574,30 @@ async def use_identity_email_as_contact(
 #   api_key, player_node, checkin_node_name, mc_checkin_binding,
 #   mc_node_confirmation, mt_node_confirmation, player_last_fix,
 #   player_cell_ping, player_cell_repeater_credit, player_cell_claim,
-#   player_ingest_stat, join_token. Every one of these is keyed on
-#   player_id alone, holds nothing anyone but this player could be
-#   affected by losing (a radio binding, a credential, a raw
-#   location/timing trail kept for anti-cheat and diagnostics, or -- for
-#   player_cell_claim -- a rate-limit bookkeeping row), and none of it
-#   is read by anything
-#   that produces a number someone ELSE'S standing depends on.
+#   player_ingest_stat, join_token, mc_ingest_request_log, mc_wire_tag.
+#   Every one of these is keyed on player_id alone, holds nothing anyone
+#   but this player could be affected by losing (a radio binding, a
+#   credential, a raw location/timing trail kept for anti-cheat and
+#   diagnostics, a rate-limit bookkeeping row, or -- for
+#   mc_ingest_request_log/mc_wire_tag -- a hashed/classified request
+#   identity or a claimed wire_tag), and none of it is read by anything
+#   that produces a number someone ELSE'S standing depends on. This is
+#   the DEFAULT for both of the new tables: an ordinary player who was
+#   never disabled by an operator is purged completely, exactly like
+#   everything else in this list, honoring frontend/privacy.html's
+#   existing "account deletion means gone" promise.
+#
+#   NARROW, DELIBERATE EXCEPTION -- see _capture_evasion_record() below
+#   and mc_evasion_record's own SCHEMA comment in app/db.py for the full
+#   policy: when the player being deleted already had an ADVERSE FINDING
+#   on file (player.disabled_at already set by a prior, separate,
+#   explicit operator action, BEFORE this deletion request arrived), a
+#   minimal record of their ip_hash values and bound radio identities is
+#   copied into mc_evasion_record -- a table this list does NOT include
+#   and that no account-deletion cascade ever touches -- before the two
+#   tables above are purged as normal. This is an operator decision
+#   about catching a returning banned player, not a change to what
+#   happens to anyone who simply quits.
 #
 # TOMBSTONED, not deleted: `player` itself. display_name is overwritten
 # with a value that cannot collide and cannot be mistaken for a real
@@ -1683,6 +1700,8 @@ _PLAYER_SCOPED_TABLES = (
     "player_cell_claim",
     "player_ingest_stat",
     "join_token",
+    "mc_ingest_request_log",
+    "mc_wire_tag",
 )
 
 # Fixed confirmation phrase for the one shape this route has no
@@ -1724,6 +1743,159 @@ def _tombstone_display_name(player_id: int) -> str:
     for a given player_id, forever.
     """
     return f"Deleted player — account removed (#{player_id})"
+
+
+# Fixed, non-free-text reason strings _capture_evasion_record() below
+# ever writes to mc_evasion_record.reason -- never an admin's typed
+# notes, never anything built from request input. Kept as named
+# constants rather than inlined so the handful of values this column
+# can ever hold are visible in one place. One per trigger path -- see
+# _capture_evasion_record()'s own docstring for exactly what each one
+# means.
+_EVASION_REASON_PRIOR_DISABLE = "player was operator-disabled before account deletion"
+_EVASION_REASON_MARKED_FOR_TRACKING = "player was marked for evasion tracking before account deletion"
+_EVASION_REASON_WIRE_TAG_CONFLICT = "player had at least one wire_tag conflict on file before account deletion"
+
+
+def _capture_evasion_record(
+    conn, player_id: int, *, pre_existing_disabled_at, pre_existing_evasion_marked_at, now: int,
+) -> int:
+    """Copy a minimal ban-evasion record into app/db.py's
+    mc_evasion_record for `player_id`, IF this deletion qualifies -- see
+    that table's own SCHEMA comment in app/db.py, and this module's
+    "account deletion" section comment above, for the full policy this
+    implements. Called from both DELETE /api/account (this module) and
+    both POST /api/admin/player/delete and POST /api/admin/account/delete
+    (app/admin_api.py) -- one definition of when and what to keep, used
+    by every deletion door, the same "not redefined per caller"
+    reasoning _PLAYER_SCOPED_TABLES/_ACCOUNT_SCOPED_TABLES/
+    _tombstone_display_name already follow.
+
+    MUST be called BEFORE the caller's own loop over _PLAYER_SCOPED_TABLES
+    deletes mc_ingest_request_log/player_node out from under this
+    function -- it reads both to build the record it writes. Returns the
+    number of mc_evasion_record rows written (0 when this deletion did
+    not qualify, or the feature is off), purely for the caller's own
+    logging -- nothing currently reads this return value for behavior.
+
+    ---- the three trigger paths, exactly ------------------------------
+
+    Proportionate by design: capturing on EVERY deletion would make this
+    a permanent record of everyone who ever quit, not just people worth
+    tracking. Three paths, each independently sufficient, all evaluated
+    server-side against data already on file -- never a caller-supplied
+    flag, never free text:
+
+    1. `pre_existing_disabled_at` -- the CALLER's own responsibility to
+       have captured, specifically player.disabled_at as read BEFORE
+       this same request's own tombstoning UPDATE (which unconditionally
+       sets disabled_at = now on every deletion, banned or not) ever
+       runs. Non-None means an operator took the separate, deliberate,
+       explicit step of disabling this player (POST
+       /api/admin/player/disable) at some point BEFORE this deletion
+       request arrived.
+
+    2. `pre_existing_evasion_marked_at` -- same "captured by the caller
+       before this request's own writes touch it" shape as #1, but for
+       player.evasion_marked_at (POST /api/admin/player/mark-evasion).
+       This is the fix for the gap #1 alone leaves open: a player under
+       investigation who is not YET disabled -- and might delete their
+       own account first, before anyone gets to disable them -- can
+       still be marked, non-punitively, ahead of that race.
+
+    3. Not caller-supplied at all: this function itself sums
+       player_ingest_stat.pings_wire_tag_conflict across every row still
+       on file for this player_id (whatever player_ingest_stat's own
+       retention -- settings.mc_stat_retention_days -- has not already
+       pruned; "within the retained window" has no separate meaning
+       beyond "still in the table"). Presenting a DIFFERENT player's
+       wire_tag is the harvest-someone-else's-proof attack
+       (check_wire_tag(), app/mc_ingest.py) -- measured against real
+       traffic at zero false positives (7,260 of 7,260 tags distinct,
+       60 bits of entropy per tag), the firmest automatic signal this
+       codebase has. Deliberately NOT included here: an unrecognized
+       client_family. One legitimate player runs a non-standard client
+       with this operator's own explicit blessing, and nothing in this
+       schema yet distinguishes "unrecognized because unauthorized" from
+       "unrecognized because it's HIM" -- adding that trigger today
+       would capture a known-good player. Add it only once a
+       sanctioned-exception marker exists to gate it.
+
+    A player who deletes their own account matching NONE of the three is
+    completely unaffected by this function, regardless of what their own
+    counters otherwise look like.
+
+    Passing `now` (the tombstoning UPDATE's own timestamp, not
+    disabled_at/evasion_marked_at) as this row's recorded_at,
+    deliberately: those columns already answer "when did the triggering
+    action happen" wherever an operator still needs that, this table
+    only needs to answer "when was this evidence preserved".
+
+    ---- what is kept, and why exactly this much -----------------------
+
+    - ip_hash values: every DISTINCT value already sitting in this
+      player's own mc_ingest_request_log rows, read here BEFORE the
+      caller's own loop deletes them. The address itself was never
+      recoverable from this hash to begin with (see that table's own
+      SCHEMA comment) -- copying the hash forward loses nothing further
+      and is exactly the value a future "does this new registration's
+      ip_hash match a known evader" check would need.
+    - node_ref values: every row in this player's own player_node,
+      as "protocol:node_ref" -- a returning cheater reusing the same
+      physical radio is, per this feature's own design brief, the
+      strongest signal available, stronger than any address (an
+      address changes with a new SIM or a new house; a radio's node_ref
+      does not change on its own).
+    - Nothing else. Not the full mc_ingest_request_log history (ip_class,
+      client_family, ping counts, timestamps), not this player's
+      tombstoned display name (already handled by the existing
+      deletion flow), not an admin's free-text notes -- `reason` is one
+      of the fixed constants above, never request input.
+    """
+    if not settings.mc_evasion_record_enabled:
+        return 0
+
+    if pre_existing_disabled_at is not None:
+        reason = _EVASION_REASON_PRIOR_DISABLE
+    elif pre_existing_evasion_marked_at is not None:
+        reason = _EVASION_REASON_MARKED_FOR_TRACKING
+    else:
+        # Trigger #3: not caller-supplied -- see this function's own
+        # docstring for why a wire_tag conflict is the one COUNTER-based
+        # signal proportionate enough to act on automatically here, and
+        # why an unrecognized client_family deliberately is not.
+        conflict_total = conn.execute(
+            "SELECT COALESCE(SUM(pings_wire_tag_conflict), 0) FROM player_ingest_stat "
+            "WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()[0]
+        if conflict_total <= 0:
+            return 0
+        reason = _EVASION_REASON_WIRE_TAG_CONFLICT
+
+    values: list[tuple[str, str]] = []  # (kind, value)
+
+    for row in conn.execute(
+        "SELECT DISTINCT ip_hash FROM mc_ingest_request_log WHERE player_id = ?",
+        (player_id,),
+    ).fetchall():
+        values.append(("ip_hash", row["ip_hash"]))
+
+    for row in conn.execute(
+        "SELECT protocol, node_ref FROM player_node WHERE player_id = ?",
+        (player_id,),
+    ).fetchall():
+        values.append(("node_ref", f"{row['protocol']}:{row['node_ref']}"))
+
+    for kind, value in values:
+        conn.execute(
+            "INSERT INTO mc_evasion_record"
+            "(former_player_id, kind, value, reason, recorded_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (player_id, kind, value, reason, now),
+        )
+
+    return len(values)
 
 
 @router.delete("/api/account")
@@ -1861,7 +2033,7 @@ async def delete_account(
         player_row = None
         if session.player_id is not None:
             player_row = conn.execute(
-                "SELECT player_id, display_name FROM player WHERE player_id = ?",
+                "SELECT player_id, display_name, disabled_at, evasion_marked_at FROM player WHERE player_id = ?",
                 (session.player_id,),
             ).fetchone()
 
@@ -1924,6 +2096,18 @@ async def delete_account(
 
         if player_row is not None:
             player_id = player_row["player_id"]
+            # See _capture_evasion_record()'s own docstring: must run
+            # BEFORE the loop just below deletes mc_ingest_request_log/
+            # player_node out from under it, and reads player_row's own
+            # disabled_at -- captured above, before this request's own
+            # tombstoning UPDATE further down overwrites it -- as the
+            # ADVERSE-FINDING trigger.
+            _capture_evasion_record(
+                conn, player_id,
+                pre_existing_disabled_at=player_row["disabled_at"],
+                pre_existing_evasion_marked_at=player_row["evasion_marked_at"],
+                now=now,
+            )
             for table in _PLAYER_SCOPED_TABLES:
                 c = conn.execute(
                     f"DELETE FROM {table} WHERE player_id = ?", (player_id,)

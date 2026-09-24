@@ -62,7 +62,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -73,7 +72,7 @@ from starlette.responses import Response
 
 from .client_ip import get_client_ip
 from .config import settings
-from .db import WriteSession, get_cursor
+from .db import WriteSession, get_or_create_persistent_salt
 
 log = logging.getLogger("traffic")
 
@@ -178,36 +177,23 @@ def _get_salt(conn) -> str:
     app/config.py for why empty means "generate and remember," not
     "off."
 
-    Race-safe against two workers/processes starting at once against a
-    fresh database: the INSERT below is `ON CONFLICT(k) DO NOTHING`, so
-    if two processes both generate a candidate salt and both try to
-    write it, exactly one write wins and the loser's own candidate is
-    simply discarded -- the immediately following read-back returns
-    whichever value actually landed, which is the same value every
-    process will keep seeing from then on, regardless of whose
-    candidate it was.
+    The actual resolve-or-generate-and-persist mechanism now lives in
+    app/db.py's get_or_create_persistent_salt() -- this module was its
+    original, only use, before app/mc_ingest.py's own ip_hash salt
+    (mc_ingest_request_log) needed the exact same shape under a
+    DIFFERENT cursor key and settings field. See that function's own
+    docstring for the full reasoning (stability across restarts, the
+    race-safety argument, why this is never called intending to mint a
+    fresh value for a key that already has one). This wrapper exists
+    purely for the module-level cache below -- resolving a salt is a
+    database read/write on a cold cache, and every request after the
+    first should not pay for it again.
     """
     global _salt_cache
     if _salt_cache is not None:
         return _salt_cache
-
-    if settings.traffic_salt:
-        _salt_cache = settings.traffic_salt
-        return _salt_cache
-
-    existing = get_cursor(conn, _SALT_CURSOR_KEY, "")
-    if existing:
-        _salt_cache = existing
-        return _salt_cache
-
-    candidate = secrets.token_hex(32)
-    conn.execute(
-        "INSERT INTO cursor(k, v) VALUES (?, ?) ON CONFLICT(k) DO NOTHING",
-        (_SALT_CURSOR_KEY, candidate),
-    )
-    resolved = get_cursor(conn, _SALT_CURSOR_KEY, candidate)
-    _salt_cache = resolved
-    return resolved
+    _salt_cache = get_or_create_persistent_salt(conn, _SALT_CURSOR_KEY, settings.traffic_salt)
+    return _salt_cache
 
 
 def _normalize_referrer(raw_referer: str, own_host: str | None) -> str | None:

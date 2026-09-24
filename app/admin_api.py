@@ -96,6 +96,7 @@ from . import discord_bot
 from .account_api import (
     _ACCOUNT_SCOPED_TABLES,
     _PLAYER_SCOPED_TABLES,
+    _capture_evasion_record,
     _door_counts,
     _has_password,
     _notify_security,
@@ -1037,6 +1038,155 @@ async def admin_player_enable(request: Request):
     return await _set_player_disabled(request, disable=False)
 
 
+async def _set_player_evasion_marked(request: Request, mark: bool):
+    """Sets or clears player.evasion_marked_at -- see that column's own
+    SCHEMA comment in app/db.py for the full reasoning. Deliberately
+    SEPARATE from _set_player_disabled() above: marking is a quiet,
+    non-punitive step ("this player is under investigation") that must
+    not interrupt play or read to anyone, including the player
+    themselves, as a decision already made -- unlike disable, there is
+    no security notice sent here and the ingestor's key-auth cache is
+    left alone, because nothing about whether this player can play has
+    changed. Its only current effect is on deletion (see
+    app/account_api.py's _capture_evasion_record(), one of its three
+    trigger paths): it closes the race a disable-only trigger leaves
+    open, where a player under suspicion deletes their own account
+    before anyone gets around to disabling them.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    player_id = body.get("player_id") if isinstance(body, dict) else None
+    if not isinstance(player_id, int) or isinstance(player_id, bool):
+        return JSONResponse({"error": "player_id is required"}, status_code=400)
+
+    now = int(time.time()) if mark else None
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT player_id FROM player WHERE player_id = ?", (player_id,)
+        ).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "player not found"}, status_code=404)
+        conn.execute(
+            "UPDATE player SET evasion_marked_at = ? WHERE player_id = ?", (now, player_id)
+        )
+        _log_admin_action(
+            conn, actor_account_id=session.account_id,
+            action="player_mark_evasion" if mark else "player_unmark_evasion",
+            detail=f"player_id={player_id}",
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    log.info("admin: player %d %s for evasion tracking", player_id, "marked" if mark else "unmarked")
+    return {"player_id": player_id, "evasion_marked": mark, "evasion_marked_at": now}
+
+
+@router.post("/api/admin/player/mark-evasion")
+async def admin_player_mark_evasion(request: Request):
+    return await _set_player_evasion_marked(request, mark=True)
+
+
+@router.post("/api/admin/player/unmark-evasion")
+async def admin_player_unmark_evasion(request: Request):
+    return await _set_player_evasion_marked(request, mark=False)
+
+
+# ---- ban-evasion records -------------------------------------------------
+#
+# Minimal review surface for app/db.py's mc_evasion_record -- see that
+# table's own SCHEMA comment for what writes to it and why. An operator
+# can see what is kept and remove a single entry (e.g. once they
+# conclude a flagged match was innocent); there is no edit route, since
+# nothing here is meant to be corrected in place, only removed.
+
+
+@router.get("/api/admin/evasion-records")
+async def admin_evasion_records(request: Request):
+    """Every mc_evasion_record row, newest first. Never returns `value`
+    itself -- managing this table (is this entry still worth keeping)
+    never requires reading the hash or node_ref back out, only knowing
+    one exists and why."""
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, former_player_id, kind, reason, recorded_at "
+            "  FROM mc_evasion_record ORDER BY recorded_at DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return JSONResponse([{
+        "id": r["id"],
+        "former_player_id": r["former_player_id"],
+        "kind": r["kind"],
+        "reason": r["reason"],
+        "recorded_at": r["recorded_at"],
+    } for r in rows])
+
+
+@router.post("/api/admin/evasion-records/delete")
+async def admin_evasion_record_delete(request: Request):
+    """Removes one mc_evasion_record row by id."""
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    record_id = body.get("id") if isinstance(body, dict) else None
+    if not isinstance(record_id, int) or isinstance(record_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT former_player_id, kind FROM mc_evasion_record WHERE id = ?",
+            (record_id,),
+        ).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "record not found"}, status_code=404)
+        conn.execute("DELETE FROM mc_evasion_record WHERE id = ?", (record_id,))
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="evasion_record_delete",
+            detail=f"id={record_id} former_player_id={row['former_player_id']} kind={row['kind']}",
+            now=now,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    log.info("admin: deleted evasion record %d (former player %d, %s)",
+              record_id, row["former_player_id"], row["kind"])
+    return {"id": record_id, "deleted": True}
+
+
 @router.post("/api/admin/player/delete")
 async def admin_player_delete(request: Request):
     """Permanently remove a player -- the operator counterpart to
@@ -1238,7 +1388,7 @@ async def admin_player_delete(request: Request):
     now = int(time.time())
     async with WriteSession() as conn:
         row = conn.execute(
-            "SELECT display_name, account_id FROM player WHERE player_id = ?",
+            "SELECT display_name, account_id, disabled_at, evasion_marked_at FROM player WHERE player_id = ?",
             (player_id,),
         ).fetchone()
         if row is None:
@@ -1273,7 +1423,18 @@ async def admin_player_delete(request: Request):
         # See this module's "account deletion" section comment in
         # app/account_api.py for why each table below is here and why
         # `player` survives, tombstoned, instead of being deleted too.
+        # _capture_evasion_record() -- see its own docstring -- must run
+        # BEFORE the loop below deletes mc_ingest_request_log/
+        # player_node out from under it, using `row["disabled_at"]` as
+        # read above, BEFORE this route's own tombstoning UPDATE further
+        # down overwrites it, as the adverse-finding trigger.
         counts: dict[str, int] = {}
+        _capture_evasion_record(
+            conn, player_id,
+            pre_existing_disabled_at=row["disabled_at"],
+            pre_existing_evasion_marked_at=row["evasion_marked_at"],
+            now=now,
+        )
         for table in _PLAYER_SCOPED_TABLES:
             c = conn.execute(
                 f"DELETE FROM {table} WHERE player_id = ?", (player_id,)
@@ -1864,7 +2025,7 @@ async def admin_account_delete(request: Request):
             return JSONResponse({"error": "account not found"}, status_code=404)
 
         player_row = conn.execute(
-            "SELECT player_id, display_name FROM player WHERE account_id = ?",
+            "SELECT player_id, display_name, disabled_at, evasion_marked_at FROM player WHERE account_id = ?",
             (account_id,),
         ).fetchone()
 
@@ -1908,6 +2069,17 @@ async def admin_account_delete(request: Request):
         display_name = player_row["display_name"] if player_row is not None else None
 
         if player_id is not None:
+            # _capture_evasion_record() -- see its own docstring -- must
+            # run BEFORE the loop below deletes mc_ingest_request_log/
+            # player_node out from under it, using player_row's own
+            # disabled_at as read above, BEFORE the tombstoning UPDATE
+            # just below overwrites it, as the adverse-finding trigger.
+            _capture_evasion_record(
+                conn, player_id,
+                pre_existing_disabled_at=player_row["disabled_at"],
+                pre_existing_evasion_marked_at=player_row["evasion_marked_at"],
+                now=now,
+            )
             for table in _PLAYER_SCOPED_TABLES:
                 c = conn.execute(
                     f"DELETE FROM {table} WHERE player_id = ?", (player_id,)

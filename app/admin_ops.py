@@ -252,6 +252,139 @@ def _attention(conn, directory: list[dict]) -> list[dict]:
     return out
 
 
+# ---- worth a look -------------------------------------------------------
+#
+# DELIBERATELY SEPARATE from _attention() above, not a "kind" folded
+# into that list. _attention() means "this player is broken, here is
+# the fix" -- misconfigured, cannot score, stopped playing -- and every
+# entry there carries a filled severity dot; admin.js's own nav badge
+# turns red the moment ANY entry is severity "bad". An anti-cheat
+# OBSERVATION is not a fixable fault, and putting one in that list
+# inherits its accusation vocabulary by construction -- exactly the
+# mistake already live in this same function above, where
+# pings_wrong_owner renders as "using someone else's radio" at severity
+# "bad", permanently, long after whatever incident triggered it ended.
+# This block exists so a signal that is worth a human's attention, but
+# is not evidence of anything on its own, has somewhere to go that does
+# not borrow that vocabulary: no severity field at all, a hollow dot in
+# the UI (never adm-dot-bad/warn/info), and its own count that the nav
+# badge never sees (app/admin_ops.py's admin_overview() returns this as
+# a separate `worth_a_look` key, never merged into `attention`).
+#
+# Currently has exactly one occupant -- the mc_evasion_record match this
+# feature's own design brief asked for -- but is written to hold more
+# than one signal later without changing shape.
+
+
+def _worth_a_look(conn) -> list[dict]:
+    """Live observations worth a human's attention that are NOT fixable
+    faults -- see this section's own comment above for why this is not
+    part of _attention(). Each entry: player_id, player, team, signal
+    (a short, stable id -- e.g. "evasion_ip_hash" -- used as half of the
+    dismissal key below, never shown to the operator), title (describes
+    DATA, never a person -- "shares a network address with...", never
+    "ban evader"), and detail, one paragraph in a fixed order:
+    observation, then its innocent explanation (with the denominator
+    where one is cheaply available -- the cheapest de-escalation this
+    function has), then the consequence ("nothing to do unless...").
+
+    Filters out anything already dismissed via POST
+    /api/admin/worth-a-look/dismiss (admin_worth_a_look_dismissal,
+    app/db.py) -- an operator who has already looked and moved on does
+    not see the same item again on the next Overview load.
+    """
+    out: list[dict] = []
+
+    players = {r["player_id"]: r for r in conn.execute(
+        "SELECT player_id, display_name, team FROM player WHERE disabled_at IS NULL")}
+
+    dismissed = {
+        (r["player_id"], r["signal"])
+        for r in conn.execute("SELECT player_id, signal FROM admin_worth_a_look_dismissal")
+    }
+
+    def add(player, signal, title, detail):
+        if (player["player_id"], signal) in dismissed:
+            return
+        out.append({
+            "player_id": player["player_id"], "player": player["display_name"],
+            "team": player["team"], "signal": signal, "title": title, "detail": detail,
+        })
+
+    # ---- ban-evasion match, MeshCore only ------------------------------
+    # app/db.py's mc_evasion_record holds a minimal ip_hash/node_ref
+    # trail left behind ONLY by a player who matched one of
+    # app/account_api.py's _capture_evasion_record() own three trigger
+    # paths at deletion time -- see that table's own SCHEMA comment for
+    # the full policy. This is the READ side that table exists for: a
+    # CURRENTLY ACTIVE player whose own ip_hash or bound node_ref
+    # matches one of those records. Computed live, from bulk queries,
+    # same style _attention() above uses for have_radio/have_key/stats --
+    # never a value cached from whenever the ingest path first observed
+    # it (app/mc_ingest.py's own hot-path log-only checks exist so the
+    # match is on record even if this panel is never opened, not to feed
+    # this computation).
+    evasion_ip_hashes = {
+        r["value"] for r in conn.execute(
+            "SELECT value FROM mc_evasion_record WHERE kind = 'ip_hash'"
+        )
+    }
+    evasion_node_refs = {
+        r["value"] for r in conn.execute(
+            "SELECT value FROM mc_evasion_record WHERE kind = 'node_ref'"
+        )
+    }
+    if evasion_ip_hashes or evasion_node_refs:
+        # Reverse index (hash -> every active player currently showing
+        # it) doubles as the denominator below: "N other active players
+        # currently show this same address" is the cheapest, most
+        # honest de-escalation available -- a widely-shared address
+        # reads very differently from a one-to-one match.
+        ip_hash_to_players: dict[str, set[int]] = {}
+        for r in conn.execute("SELECT DISTINCT player_id, ip_hash FROM mc_ingest_request_log"):
+            ip_hash_to_players.setdefault(r["ip_hash"], set()).add(r["player_id"])
+
+        player_node_refs: dict[int, set[str]] = {}
+        for r in conn.execute("SELECT player_id, protocol, node_ref FROM player_node"):
+            player_node_refs.setdefault(r["player_id"], set()).add(
+                f"{r['protocol']}:{r['node_ref']}"
+            )
+
+        for pid, p in players.items():
+            matched_hashes = evasion_ip_hashes & ip_hash_to_players.keys()
+            matched_hashes = {h for h in matched_hashes if pid in ip_hash_to_players.get(h, set())}
+            if matched_hashes:
+                # Other ACTIVE players (excluding this one) who also
+                # show any of the matched address(es) -- a real,
+                # already-computed, honest count, not an estimate.
+                others = set()
+                for h in matched_hashes:
+                    others |= ip_hash_to_players[h]
+                others.discard(pid)
+                if others:
+                    denominator = (
+                        f" This address is also currently used by {len(others)} other "
+                        f"active player{'s' if len(others) != 1 else ''}."
+                    )
+                else:
+                    denominator = ""
+                add(p, "evasion_ip_hash",
+                    "shares a network address with a previously disabled player",
+                    "This player's address was also used by a player disabled "
+                    "earlier." + denominator + " Likely a shared household or "
+                    "carrier-NAT connection, or simple coincidence. Nothing to "
+                    "do unless other signals point the same way.")
+
+            if evasion_node_refs & player_node_refs.get(pid, set()):
+                add(p, "evasion_node_ref",
+                    "this radio was previously bound to a player who was later disabled",
+                    "This player's radio was bound to a player disabled earlier. "
+                    "Likely bought or given away secondhand. Nothing to do "
+                    "unless other signals point the same way.")
+
+    return out
+
+
 def _health(conn) -> dict:
     """Is the machine doing its job. Every figure here answers a question
     that was previously only answerable by reading logs."""
@@ -354,9 +487,53 @@ async def admin_overview(request: Request):
             "boards": boards,
             "directory_size": len(directory),
             "attention": _attention(conn, directory),
+            "worth_a_look": _worth_a_look(conn),
         })
     finally:
         conn.close()
+
+
+@router.post("/api/admin/worth-a-look/dismiss")
+async def admin_worth_a_look_dismiss(request: Request):
+    """Marks one "Worth a look" item (player_id, signal) as looked at,
+    so _worth_a_look() stops surfacing it -- see that function's own
+    docstring. Deliberately the ONE write route on this whole page with
+    no confirmation and no typed-name gate: every other confirmation in
+    this admin surface guards an action that takes something away from
+    someone (disable, delete, revoke); this one is the safe direction --
+    an operator saying "I looked, this is fine" -- and friction belongs
+    on the accusatory path, not this one. Not logged to
+    admin_action_log for the same reason: this is not a moderation
+    action against the player, it is an operator clearing their own
+    to-do list.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    player_id = body.get("player_id") if isinstance(body, dict) else None
+    signal = body.get("signal") if isinstance(body, dict) else None
+    if not isinstance(player_id, int) or isinstance(player_id, bool):
+        return JSONResponse({"error": "player_id is required"}, status_code=400)
+    if not isinstance(signal, str) or not signal:
+        return JSONResponse({"error": "signal is required"}, status_code=400)
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO admin_worth_a_look_dismissal(player_id, signal, dismissed_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(player_id, signal) DO UPDATE SET dismissed_at = excluded.dismissed_at",
+            (player_id, signal, now),
+        )
+    finally:
+        conn.close()
+    return {"player_id": player_id, "signal": signal, "dismissed": True}
 
 
 @router.get("/api/admin/places/preview")

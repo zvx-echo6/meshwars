@@ -39,9 +39,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from . import mc_scoring, results
+from .client_family import client_family_from_user_agent
 from .config import settings
-from .db import _WRITE_LOCK, WriteSession, connect
+from .db import _WRITE_LOCK, WriteSession, connect, get_or_create_persistent_salt
 from .grid import cell_center, cell_id, distance_m, in_play_area, valid_coord
+from .ip_class import classify_ip
 from .place_scoring import credit_places
 
 log = logging.getLogger("mc_ingest")
@@ -68,6 +70,36 @@ _RATE_LIMIT_MAX_TRACKED = 10000
 # input from the public internet; without a cap, a single crafted batch
 # could carry an enormous string and burn CPU parsing it.
 _MAX_PARSED_REPEATERS = 64
+
+# record_ingest_identity()'s per-type ping-count summary: bounds how
+# many DISTINCT `type` values one batch's summary can track -- `type`
+# is attacker-controlled and a batch could otherwise carry many
+# distinct junk values to bloat the stored JSON. A real batch has at
+# most four recognized types (TX/RX/DISC/TRACE) plus, rarely, one
+# unrecognized one; this leaves ample room for that without being
+# unbounded.
+_MAX_TYPE_SUMMARY_KEYS = 16
+
+# The key record_ingest_identity()'s own salt (mc_ingest_request_log.
+# ip_hash) is persisted under in the generic `cursor` key-value table
+# (app/db.py) -- see get_or_create_persistent_salt()'s own docstring
+# there, and settings.mc_ingest_salt's own comment in app/config.py,
+# for the full reasoning. Deliberately a DIFFERENT key from
+# app/traffic.py's own "traffic_salt": these are two independent hash
+# spaces that happen to share the same persistence mechanism, not one
+# salt reused for two purposes.
+_INGEST_SALT_CURSOR_KEY = "mc_ingest_salt"
+
+# Resolved once per process and cached here, same "every request after
+# the first reuses this instead of touching the database again" shape
+# app/traffic.py's own _salt_cache uses for the identical reason.
+_ingest_salt_cache: str | None = None
+
+# wire_tag's documented shape (measured against real MeshMapper traffic
+# 2026-09-23: 7,260 of 7,260 TX pings carried a distinct tag in exactly
+# this form) -- see check_wire_tag()'s own docstring for what happens
+# when a tag does not match this.
+_WIRE_TAG_RE = re.compile(r"^MM:[A-Za-z0-9_-]{10}$")
 
 def _clamp_scoring_clock(ts: int, received_at: int) -> int:
     """The value that drives every scoring-relevant clock in
@@ -375,6 +407,127 @@ def record_repeater_observations(
             )
 
 
+# Outcomes check_wire_tag() can record -- see its own docstring.
+_WIRE_TAG_NONE = "none"            # no wire_tag field on this ping at all
+_WIRE_TAG_MALFORMED = "malformed"  # present but not "MM:" + 10 base64url chars
+_WIRE_TAG_FIRST_SEEN = "first_seen"  # a genuinely new tag, stored
+_WIRE_TAG_RESUBMIT = "resubmit"    # same player re-presenting their own tag
+_WIRE_TAG_CONFLICT = "conflict"    # a DIFFERENT player presenting someone else's tag
+
+
+def check_wire_tag(conn, player_id: int, ping: dict, received_at: int) -> str:
+    """Classify and, where appropriate, durably record `ping`'s wire_tag
+    against app/db.py's mc_wire_tag table (settings.mc_wire_tag_reject_enabled
+    -- see that setting's own comment in app/config.py for the full
+    reasoning). Returns one of the _WIRE_TAG_* constants above; never
+    raises on attacker-controlled input.
+
+    The rule, exactly:
+      - No wire_tag field at all -> _WIRE_TAG_NONE. Not every ping type
+        carries one (measured against real TX traffic only), so a
+        missing field is not evidence of anything and is never counted.
+      - Present but not "MM:" + 10 base64url characters -> _WIRE_TAG_MALFORMED.
+        Never itself a reason to reject the ping -- MeshMapper could
+        change the format tomorrow -- purely observability. The tag is
+        NOT looked up or stored in this case: storing an unconfirmed
+        shape risks a garbage value (an empty string, "None", two
+        different malformed tags that happen to collide) colliding with
+        a real one and causing a false cross-player rejection later.
+      - A well-formed tag never seen before -> INSERT it (player_id,
+        first_seen_at = received_at) and return _WIRE_TAG_FIRST_SEEN.
+        The PRIMARY KEY on wire_tag is the actual uniqueness
+        enforcement here: this INSERT OR IGNORE either succeeds (new
+        tag) or is silently ignored (already on file) -- there is no
+        separate existence check to race against it.
+      - A well-formed tag already on file for THIS SAME player ->
+        _WIRE_TAG_RESUBMIT. Almost certainly a legitimately re-uploaded
+        MeshMapper offline session -- always accepted. app/db.py's
+        player_cell_ping PRIMARY KEY (player_id, protocol, cell_id, ts)
+        already prevents the underlying ping from being double-scored,
+        so there is nothing left for this check to gate; it exists
+        purely to distinguish this case from the one below.
+      - A well-formed tag already on file for a DIFFERENT player ->
+        _WIRE_TAG_CONFLICT, logged at WARNING with both player ids. A
+        legitimate player never transmits another player's tag -- this
+        is the harvest-someone-else's-proof attack, and (per the
+        measured zero false-positive rate against real traffic) the one
+        place in this module a hard block is justified. The CALLER
+        decides whether to actually reject the ping on this outcome
+        (gated on settings.mc_wire_tag_reject_enabled, mirroring
+        settings.mc_speed_reject_enabled's own "detection always runs,
+        only the reject action is gated" shape) -- this function only
+        classifies and records, it never itself drops a ping.
+
+    Counter increments (player_ingest_stat's pings_wire_tag_resubmit/
+    pings_wire_tag_conflict/pings_wire_tag_malformed) are the CALLER's
+    responsibility, same as every other counter in _process_one_ping --
+    this function has no access to that batch's shared `counters` dict
+    and does not need one to do its own job.
+    """
+    wire_tag = ping.get("wire_tag") if isinstance(ping, dict) else None
+    if not isinstance(wire_tag, str) or not wire_tag:
+        return _WIRE_TAG_NONE
+
+    if not _WIRE_TAG_RE.match(wire_tag):
+        return _WIRE_TAG_MALFORMED
+
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO mc_wire_tag(wire_tag, player_id, first_seen_at) "
+        "VALUES (?, ?, ?)",
+        (wire_tag, player_id, received_at),
+    )
+    if cur.rowcount != 0:
+        return _WIRE_TAG_FIRST_SEEN
+
+    owner = conn.execute(
+        "SELECT player_id FROM mc_wire_tag WHERE wire_tag = ?", (wire_tag,)
+    ).fetchone()["player_id"]
+    if owner == player_id:
+        return _WIRE_TAG_RESUBMIT
+
+    log.warning(
+        "mc ingest: wire_tag %s already claimed by player %d, presented again by "
+        "player %d -- possible tag harvesting/replay",
+        wire_tag, owner, player_id,
+    )
+    return _WIRE_TAG_CONFLICT
+
+
+def _get_ingest_salt(conn) -> str:
+    """Resolve the salt record_ingest_identity() hashes a batch's source
+    address with (mc_ingest_request_log.ip_hash) -- settings.mc_ingest_salt
+    if an operator set one, otherwise a value generated once and
+    persisted in the `cursor` table, via the same shared mechanism
+    app/traffic.py's own _get_salt() uses (app/db.py's
+    get_or_create_persistent_salt() -- see that function's own
+    docstring for the full stability/race-safety reasoning). A
+    different cursor key and settings field than traffic's own, so this
+    feature's hash space is never coupled to an unrelated one.
+    """
+    global _ingest_salt_cache
+    if _ingest_salt_cache is not None:
+        return _ingest_salt_cache
+    _ingest_salt_cache = get_or_create_persistent_salt(
+        conn, _INGEST_SALT_CURSOR_KEY, settings.mc_ingest_salt
+    )
+    return _ingest_salt_cache
+
+
+def _hash_source_ip(salt: str, source_ip: str) -> str:
+    """sha256(salt + source_ip), truncated to 16 hex characters -- the
+    exact same construction app/traffic.py's own _hash_visitor() uses
+    for the identical reason (see that function's own docstring): this
+    is a correlation key for an anti-spoofing log, not a security
+    credential, and 64 bits of a cryptographic digest is astronomically
+    collision-safe for any volume this endpoint will ever see. The raw
+    `source_ip` passed in is used only to compute this digest -- it is
+    never itself returned, logged, or stored by this function or any
+    caller of it.
+    """
+    digest = hashlib.sha256(f"{salt}{source_ip}".encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
 def hash_secret(raw: str) -> str:
     """SHA-256 hex digest of a raw API key, for storage/lookup by hash."""
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -651,6 +804,143 @@ class McIngestor:
             )
         return True
 
+    # ---- request identity capture -----------------------------------
+
+    async def record_ingest_identity(
+        self,
+        player_id: int,
+        key_hash: str,
+        source_ip: str,
+        user_agent: str | None,
+        pings: list,
+        received_at: int,
+    ) -> None:
+        """Durably record who sent this batch: one row per BATCH (not
+        per ping -- a source address/User-Agent are per-REQUEST) in
+        app/db.py's mc_ingest_request_log, so a suspect batch can later
+        be traced back to a repeated source without ever recovering a
+        real address or client string from what is stored -- closing
+        the gap every past investigation has died on (mc_raw_log's own
+        ~3.3-day rotation carried no source identity at all before this,
+        and Caddy's own access log has both IP and UA but nothing joins
+        it to player_id -- see settings.mc_ingest_identity_enabled's own
+        comment in app/config.py).
+
+        PRIVACY-SAFE BY DESIGN -- see mc_ingest_request_log's own SCHEMA
+        comment in app/db.py for the full history of why this shape
+        replaced an earlier draft that stored source_ip/user_agent
+        verbatim. `source_ip` and `user_agent` are used ONLY to compute
+        the three derived values actually written -- ip_hash (a salted
+        one-way hash, via _hash_source_ip()/_get_ingest_salt() above),
+        ip_class (app/ip_class.py's classify_ip(), an in-process
+        hosting-provider prefix match, never a network lookup), and
+        client_family (app/client_family.py's
+        client_family_from_user_agent()) -- and are never themselves
+        written to a column, a log line, or an exception message by
+        this method or anything it calls. If either input is malformed,
+        empty, or missing, the derived values simply resolve to their
+        own honest defaults (ip_hash still gets computed -- hashing
+        never fails on a string -- ip_class falls back to "unknown",
+        client_family falls back to "unrecognized-other"); nothing here
+        ever raises on attacker-controlled input.
+
+        Off entirely when settings.mc_ingest_identity_enabled is False
+        -- returns before acquiring the write lock or touching the
+        database at all, same "off costs nothing" contract
+        settings.mc_raw_log_enabled already uses for log_raw_batch()
+        below.
+
+        Called directly from app/api.py's POST /api/mc/ingest handler,
+        independent of submit() above and regardless of its outcome
+        (accepted or "queue full") -- this is pure observation of who
+        called, not a consequence of whether the batch itself was
+        durably queued, so a queue-full moment (arguably the most
+        interesting one to have identity for) must not silently lose
+        it. Never raises into the request path: a logging failure here
+        must not fail a real player's batch, the same contract
+        log_raw_batch() already uses for the exact same reason.
+
+        `source_ip` is expected to already be the caller's real address
+        (app/client_ip.py's get_client_ip(request), resolved through
+        Caddy's X-Forwarded-For only when settings.trusted_proxies
+        actually trusts the peer) -- this method does no resolution of
+        its own.
+        """
+        if not settings.mc_ingest_identity_enabled:
+            return
+        try:
+            ip_hash = None
+            ip_class = None
+            client_family = None
+
+            type_counts: dict[str, int] = {}
+            for ping in pings:
+                if not isinstance(ping, dict):
+                    continue
+                ping_type = ping.get("type")
+                if ping_type is None:
+                    continue
+                key = str(ping_type)[:32]
+                if key not in type_counts and len(type_counts) >= _MAX_TYPE_SUMMARY_KEYS:
+                    key = "_other"
+                type_counts[key] = type_counts.get(key, 0) + 1
+
+            async with WriteSession() as conn:
+                salt = _get_ingest_salt(conn)
+                ip_hash = _hash_source_ip(salt, source_ip)
+                ip_class = classify_ip(source_ip)
+                client_family = client_family_from_user_agent(user_agent)
+                conn.execute(
+                    "INSERT INTO mc_ingest_request_log"
+                    "(received_at, player_id, key_hash_prefix, ip_hash, ip_class, "
+                    " client_family, ping_count, type_counts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        received_at, player_id,
+                        # Only the first 8 characters of the key hash are
+                        # stored -- never the raw API key, and never the
+                        # full hash -- same convention log_raw_batch()
+                        # already uses below.
+                        key_hash[:8],
+                        ip_hash, ip_class, client_family,
+                        len(pings), json.dumps(type_counts),
+                    ),
+                )
+
+                # Ban-evasion match check (settings.
+                # mc_evasion_record_enabled -- see app/db.py's
+                # mc_evasion_record SCHEMA comment for the full design).
+                # One extra indexed lookup on the SAME connection/
+                # transaction as the INSERT just above, against
+                # idx_mc_evasion_record_value (kind, value) -- negligible
+                # cost, same order of magnitude as check_wire_tag()'s own
+                # PRIMARY KEY lookup elsewhere in this module. Runs on
+                # EVERY accepted batch, not just a player's first: an
+                # evasion record can be written well after this player's
+                # first batch (an operator disabling someone days later),
+                # and re-checking every time is the only way not to miss
+                # that. FLAGS only, via this log line -- never blocks,
+                # never alters `pings` or this batch's own accepted/
+                # queue-full outcome. The operator-facing surface is
+                # app/admin_ops.py's _worth_a_look(), which re-checks this
+                # same table live rather than trusting anything cached
+                # from this one moment; this log line exists purely so
+                # the match is on record even if nobody opens that panel.
+                if settings.mc_evasion_record_enabled:
+                    match = conn.execute(
+                        "SELECT former_player_id FROM mc_evasion_record "
+                        "WHERE kind = 'ip_hash' AND value = ? LIMIT 1",
+                        (ip_hash,),
+                    ).fetchone()
+                    if match is not None:
+                        log.warning(
+                            "mc ingest: player %d's ip_hash matches a ban-evasion "
+                            "record from former player %d -- flagged for operator "
+                            "review in the admin panel, not blocked",
+                            player_id, match["former_player_id"],
+                        )
+        except Exception:
+            log.warning("mc ingest: request identity capture failed", exc_info=True)
+
     # ---- worker ---------------------------------------------------
 
     async def _run_worker(self) -> None:
@@ -823,6 +1113,9 @@ class McIngestor:
             "pings_implausible_speed": 0,
             "pings_clock_clamped": 0,
             "pings_cell_cap_exceeded": 0,
+            "pings_wire_tag_resubmit": 0,
+            "pings_wire_tag_conflict": 0,
+            "pings_wire_tag_malformed": 0,
         }
         conn = connect()
         try:
@@ -859,8 +1152,9 @@ class McIngestor:
                 "  player_id, protocol, day, batches, pings_accepted, "
                 "  pings_no_contact, pings_wrong_owner, pings_duplicate, pings_bad_coord, "
                 "  pings_out_of_area, pings_no_repeaters, pings_unknown_type, "
-                "  pings_implausible_speed, pings_clock_clamped, pings_cell_cap_exceeded) "
-                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "  pings_implausible_speed, pings_clock_clamped, pings_cell_cap_exceeded, "
+                "  pings_wire_tag_resubmit, pings_wire_tag_conflict, pings_wire_tag_malformed) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(player_id, protocol, day) DO UPDATE SET "
                 "  batches = batches + 1, "
                 "  pings_accepted = pings_accepted + excluded.pings_accepted, "
@@ -873,7 +1167,10 @@ class McIngestor:
                 "  pings_unknown_type = pings_unknown_type + excluded.pings_unknown_type, "
                 "  pings_implausible_speed = pings_implausible_speed + excluded.pings_implausible_speed, "
                 "  pings_clock_clamped = pings_clock_clamped + excluded.pings_clock_clamped, "
-                "  pings_cell_cap_exceeded = pings_cell_cap_exceeded + excluded.pings_cell_cap_exceeded",
+                "  pings_cell_cap_exceeded = pings_cell_cap_exceeded + excluded.pings_cell_cap_exceeded, "
+                "  pings_wire_tag_resubmit = pings_wire_tag_resubmit + excluded.pings_wire_tag_resubmit, "
+                "  pings_wire_tag_conflict = pings_wire_tag_conflict + excluded.pings_wire_tag_conflict, "
+                "  pings_wire_tag_malformed = pings_wire_tag_malformed + excluded.pings_wire_tag_malformed",
                 (
                     player_id, PROTOCOL, day,
                     counters["pings_accepted"], counters["pings_no_contact"],
@@ -882,6 +1179,8 @@ class McIngestor:
                     counters["pings_no_repeaters"], counters["pings_unknown_type"],
                     counters["pings_implausible_speed"], counters["pings_clock_clamped"],
                     counters["pings_cell_cap_exceeded"],
+                    counters["pings_wire_tag_resubmit"], counters["pings_wire_tag_conflict"],
+                    counters["pings_wire_tag_malformed"],
                 ),
             )
 
@@ -900,13 +1199,16 @@ class McIngestor:
         log.info(
             "mc ingest: player=%d batch processed accepted=%d no_contact=%d "
             "wrong_owner=%d duplicate=%d bad_coord=%d out_of_area=%d no_repeaters=%d "
-            "unknown_type=%d implausible_speed=%d clock_clamped=%d cell_cap_exceeded=%d",
+            "unknown_type=%d implausible_speed=%d clock_clamped=%d cell_cap_exceeded=%d "
+            "wire_tag_resubmit=%d wire_tag_conflict=%d wire_tag_malformed=%d",
             player_id, counters["pings_accepted"], counters["pings_no_contact"],
             counters["pings_wrong_owner"], counters["pings_duplicate"],
             counters["pings_bad_coord"], counters["pings_out_of_area"],
             counters["pings_no_repeaters"], counters["pings_unknown_type"],
             counters["pings_implausible_speed"], counters["pings_clock_clamped"],
             counters["pings_cell_cap_exceeded"],
+            counters["pings_wire_tag_resubmit"], counters["pings_wire_tag_conflict"],
+            counters["pings_wire_tag_malformed"],
         )
 
     def _process_one_ping(self, conn, player_id, ping, received_at, counters, season_id, team) -> None:
@@ -1075,6 +1377,33 @@ class McIngestor:
                 (PROTOCOL, contact, player_id, received_at),
             )
             log.info("mc ingest: bound contact %s to player %d", contact, player_id)
+
+            # Ban-evasion match check (settings.mc_evasion_record_enabled
+            # -- see app/db.py's mc_evasion_record SCHEMA comment for the
+            # full design), mirroring record_ingest_identity()'s own
+            # ip_hash check above but for node_ref. Runs only on a
+            # BRAND-NEW binding (this branch), never on every ping this
+            # radio ever sends -- a bound radio's own node_ref cannot
+            # change out from under it, so re-checking an already-bound
+            # radio on every subsequent ping would be pure repeated cost
+            # for an answer that can never change. One indexed lookup on
+            # the same idx_mc_evasion_record_value index the ip_hash
+            # check above uses. FLAGS only, via this log line -- never
+            # rejects the binding or the ping; app/admin_ops.py's
+            # _worth_a_look() is the operator-facing surface, checked live.
+            if settings.mc_evasion_record_enabled:
+                node_match = conn.execute(
+                    "SELECT former_player_id FROM mc_evasion_record "
+                    "WHERE kind = 'node_ref' AND value = ? LIMIT 1",
+                    (f"{PROTOCOL}:{contact}",),
+                ).fetchone()
+                if node_match is not None:
+                    log.warning(
+                        "mc ingest: player %d just bound radio %s, which matches a "
+                        "ban-evasion record from former player %d -- flagged for "
+                        "operator review in the admin panel, not blocked",
+                        player_id, contact, node_match["former_player_id"],
+                    )
         elif row["player_id"] != player_id:
             counters["pings_wrong_owner"] += 1
             log.warning(
@@ -1083,6 +1412,26 @@ class McIngestor:
                 contact, row["player_id"], player_id,
             )
             return
+
+        # 6.5. wire_tag replay/impersonation check (check_wire_tag() --
+        # settings.mc_wire_tag_reject_enabled, see that setting's own
+        # comment in app/config.py). Runs after binding (so a
+        # wrong-owner ping never reaches here at all) and before the
+        # duplicate check below, so a rejected cross-player replay never
+        # touches player_cell_ping, repeater_observation, or scoring.
+        wire_tag_outcome = check_wire_tag(conn, player_id, ping, received_at)
+        if wire_tag_outcome == _WIRE_TAG_MALFORMED:
+            counters["pings_wire_tag_malformed"] += 1
+        elif wire_tag_outcome == _WIRE_TAG_RESUBMIT:
+            counters["pings_wire_tag_resubmit"] += 1
+        elif wire_tag_outcome == _WIRE_TAG_CONFLICT:
+            counters["pings_wire_tag_conflict"] += 1
+            if settings.mc_wire_tag_reject_enabled:
+                return
+            # Disabled: matches this gate's pre-existence behavior
+            # exactly (detected and counted, but never dropped) -- same
+            # "off means fully reverted" contract mc_speed_reject_enabled
+            # already uses for its own reject flag.
 
         # 7. Duplicate check. `ts` here is deliberately the ORIGINAL
         # client timestamp, not now_ts -- the dedup primary key
@@ -1274,11 +1623,17 @@ class McIngestor:
             return
         self._last_housekeeping = now
         async with _WRITE_LOCK:
-            removed_pings, removed_stats, removed_credits = await asyncio.to_thread(self._housekeeping_sync)
+            (
+                removed_pings, removed_stats, removed_credits,
+                removed_identity, removed_wire_tags, removed_evasion,
+            ) = await asyncio.to_thread(self._housekeeping_sync)
         log.info(
             "mc ingest housekeeping: removed %d stale player_cell_ping rows, "
-            "%d stale player_ingest_stat rows, %d stale player_cell_repeater_credit rows",
+            "%d stale player_ingest_stat rows, %d stale player_cell_repeater_credit rows, "
+            "%d stale mc_ingest_request_log rows, %d stale mc_wire_tag rows, "
+            "%d stale mc_evasion_record rows",
             removed_pings, removed_stats, removed_credits,
+            removed_identity, removed_wire_tags, removed_evasion,
         )
         # Territory release sweep: its own transaction, separate from the
         # retention deletes above -- "one transaction per sweep" means
@@ -1320,13 +1675,54 @@ class McIngestor:
                 "DELETE FROM player_cell_repeater_credit WHERE seen_at < ?", (ping_cutoff,)
             )
             removed_credits = cur3.rowcount
+            # Request identity capture (settings.mc_ingest_identity_enabled
+            # -- see that setting's own comment in app/config.py for why
+            # 90 days, well past both mc_raw_log's rotation window and
+            # Caddy's own access-log retention).
+            identity_cutoff = now_ts - settings.mc_ingest_identity_retention_days * 86400
+            cur4 = conn.execute(
+                "DELETE FROM mc_ingest_request_log WHERE received_at < ?", (identity_cutoff,)
+            )
+            removed_identity = cur4.rowcount
+            # wire_tag replay/impersonation check (settings.
+            # mc_wire_tag_retention_days -- see that setting's own
+            # comment in app/config.py). MUST stay longer than
+            # mc_ingest_identity_retention_days above: pruning a row
+            # here does not just delete history, it UN-CLAIMS that tag
+            # and re-opens it to being replayed by a different player --
+            # the same "one retention must outlive another" shape this
+            # codebase already hit once with checkin_seen_message vs
+            # mqtt_message_buffer.
+            wire_tag_cutoff = now_ts - settings.mc_wire_tag_retention_days * 86400
+            cur5 = conn.execute(
+                "DELETE FROM mc_wire_tag WHERE first_seen_at < ?", (wire_tag_cutoff,)
+            )
+            removed_wire_tags = cur5.rowcount
+            # Ban-evasion record (settings.mc_evasion_record_retention_days
+            # -- see that setting's own comment in app/config.py for why
+            # this is time-bounded at all: an unbounded version of this
+            # table is a permanent record of everyone this deployment
+            # ever disabled or flagged, by construction, which is not
+            # what the operator wants). Unlike mc_wire_tag above, there
+            # is no "un-claims and re-opens to replay" concern here --
+            # pruning an evasion record just means the operator has
+            # decided (via this retention window, not a per-row choice)
+            # that evidence this old is no longer worth keeping.
+            evasion_cutoff = now_ts - settings.mc_evasion_record_retention_days * 86400
+            cur6 = conn.execute(
+                "DELETE FROM mc_evasion_record WHERE recorded_at < ?", (evasion_cutoff,)
+            )
+            removed_evasion = cur6.rowcount
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
         finally:
             conn.close()
-        return removed_pings, removed_stats, removed_credits
+        return (
+            removed_pings, removed_stats, removed_credits,
+            removed_identity, removed_wire_tags, removed_evasion,
+        )
 
     def _release_expired_tiles_sync(self) -> dict | None:
         """One release sweep: find every cell in the active MeshCore

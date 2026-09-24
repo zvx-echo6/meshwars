@@ -330,11 +330,69 @@ function renderAttention(list) {
   });
 }
 
+// "Worth a look" -- DELIBERATELY separate from renderAttention() above,
+// not another `kind` folded into that list: see app/admin_ops.py's own
+// _worth_a_look() docstring for the full reasoning. No severity here at
+// all (a hollow dot, never adm-dot-bad/warn/info) and its own count,
+// which nav-attention's own badge (computed from d.attention alone,
+// see renderAttention()'s `list.some((a) => a.severity === 'bad')`
+// above) never sees -- this function does not touch that badge in any
+// way. Each item's `detail` string is the whole observation, innocent
+// reading, and consequence in one paragraph already (see the server's
+// own copy) -- rendered in full, never behind an expand/collapse the
+// way renderAttention()'s own groups are, since hiding the innocent
+// reading behind a click is exactly the friction this block exists to
+// avoid.
+function renderWorthALook(list) {
+  const host = document.getElementById('worth-a-look');
+  const count = document.getElementById('worth-a-look-count');
+  host.replaceChildren();
+
+  if (!list.length) {
+    count.textContent = '';
+    host.appendChild(el('p', { className: 'adm-hint', text: 'Nothing worth a second look right now.' }));
+    return;
+  }
+
+  count.textContent = String(list.length);
+
+  list.forEach((w) => {
+    const wrap = el('div', { className: 'adm-row' });
+    const info = el('div', { className: 'adm-row-info' });
+    info.appendChild(el('span', { className: 'adm-dot adm-dot-hollow' }));
+    info.appendChild(el('strong', { text: w.player }));
+    info.appendChild(el('span', { text: w.title }));
+    wrap.appendChild(info);
+
+    const actions = el('div', { className: 'adm-row-actions' });
+    // No confirmation dialog, no typed-name gate -- see POST
+    // /api/admin/worth-a-look/dismiss's own docstring: every other
+    // confirmation in this admin surface guards an action that takes
+    // something away from someone; this is the safe direction, an
+    // operator saying "I looked, this is fine".
+    actions.appendChild(btn('Looks fine', 'adm-btn-quiet', () => dismissWorthALook(w.player_id, w.signal)));
+    wrap.appendChild(actions);
+    host.appendChild(wrap);
+
+    host.appendChild(el('p', { className: 'adm-hint', text: w.detail }));
+  });
+}
+
+async function dismissWorthALook(playerId, signal) {
+  try {
+    await post('/api/admin/worth-a-look/dismiss', { player_id: playerId, signal: signal });
+    await loadOverview();
+  } catch (e) {
+    setStatus('Dismiss failed: ' + e.message, true);
+  }
+}
+
 async function loadOverview() {
   try {
     const d = await api('/api/admin/overview');
     renderHealth(d.health, d.boards);
     renderAttention(d.attention);
+    renderWorthALook(d.worth_a_look);
     renderSeasons(d.boards);
   } catch (e) {
     setStatus('Overview failed: ' + e.message, true);
