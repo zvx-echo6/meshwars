@@ -159,10 +159,13 @@ x-meshwars-environment: &meshwars-environment
   MC_INGEST_IDENTITY_RETENTION_DAYS: "${MC_INGEST_IDENTITY_RETENTION_DAYS:-90}"
   MC_INGEST_SALT: "${MC_INGEST_SALT:-}"
   # Ban-evasion record (app/account_api.py's _capture_evasion_record()):
-  # defaults ON. Fires only for a player already disabled by an operator
-  # BEFORE their account is deleted -- an ordinary player is unaffected.
-  # See app/config.py's mc_evasion_record_enabled for the full policy.
+  # defaults ON. Fires on one of three trigger paths (prior disable,
+  # prior evasion-tracking mark, or an on-file wire_tag conflict) --
+  # see app/config.py's mc_evasion_record_enabled for the full policy.
+  # Pruned after MC_EVASION_RECORD_RETENTION_DAYS (default ~18 months)
+  # by the existing hourly housekeeping sweep.
   MC_EVASION_RECORD_ENABLED: "${MC_EVASION_RECORD_ENABLED:-true}"
+  MC_EVASION_RECORD_RETENTION_DAYS: "${MC_EVASION_RECORD_RETENTION_DAYS:-548}"
   # Automatic release of long-abandoned territory (app/mc_ingest.py's
   # hourly sweep, app/mc_scoring.py's find_expired_tiles()/
   # release_tile()). Defaults OFF (MC_TILE_RELEASE_ENABLED=false) and,

@@ -198,12 +198,24 @@ CREATE TABLE IF NOT EXISTS processed_packet (
 -- ---------------------------------------------------------------------
 
 -- One row per registered person.
+--
+-- evasion_marked_at (app/admin_api.py's POST /api/admin/player/mark-
+-- evasion / unmark-evasion): an explicit, non-punitive operator flag,
+-- deliberately SEPARATE from disabled_at -- a player still under
+-- investigation, not yet disabled, can be marked without their play
+-- being interrupted. Its only current effect is on account/admin
+-- deletion (app/account_api.py's _capture_evasion_record(), one of
+-- that function's three independent trigger paths -- see its own
+-- docstring): it closes the race disabled_at alone leaves open, where
+-- a player under suspicion deletes their own account before anyone
+-- gets to disable them and would otherwise leave nothing behind.
 CREATE TABLE IF NOT EXISTS player (
-    player_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    display_name  TEXT NOT NULL,
-    team          TEXT NOT NULL,           -- 'RED' | 'BLUE'
-    created_at    INTEGER NOT NULL,
-    disabled_at   INTEGER
+    player_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_name       TEXT NOT NULL,
+    team               TEXT NOT NULL,           -- 'RED' | 'BLUE'
+    created_at         INTEGER NOT NULL,
+    disabled_at        INTEGER,
+    evasion_marked_at  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_player_team ON player(team);
 
@@ -724,15 +736,12 @@ CREATE INDEX IF NOT EXISTS idx_mc_wire_tag_first_seen ON mc_wire_tag(first_seen_
 -- there for what an ordinary deletion still purges completely
 -- (mc_ingest_request_log and mc_wire_tag above included -- this table
 -- is the ONLY thing that survives). Written ONLY when the player being
--- deleted already had an ADVERSE FINDING on file BEFORE this deletion
--- request arrived -- concretely, player.disabled_at was already set by
--- a prior, separate, explicit operator action (POST
--- /api/admin/player/disable) -- never inferred from a raw counter
--- (pings_wire_tag_conflict, an ingest rate, or anything else a player
--- could rack up just by playing normally). See
--- app/account_api.py's _capture_evasion_record() for exactly when this
--- fires and app/config.py's mc_evasion_record_enabled for the flag
--- that gates it entirely.
+-- deleted matched one of three independent trigger paths -- see
+-- app/account_api.py's _capture_evasion_record() for exactly which
+-- three and why, and app/config.py's mc_evasion_record_enabled for the
+-- flag that gates all of them at once. Not a rap sheet on everyone who
+-- ever quit: an ordinary player who deletes their own account without
+-- ever tripping one of those three paths leaves nothing here.
 --
 -- Holds only what is needed to MATCH a returning player, never a full
 -- history and never their tombstoned name: `kind` is 'ip_hash' (copied
@@ -746,14 +755,40 @@ CREATE INDEX IF NOT EXISTS idx_mc_wire_tag_first_seen ON mc_wire_tag(first_seen_
 -- `player` row it names has already been tombstoned by the time this
 -- table is ever read back.
 --
--- Never pruned by the hourly housekeeping sweep, unlike every other
--- retention-bearing table in this file -- an automatic expiry here
--- would undo the entire point of the exception: the operator's whole
--- reason for keeping this is that it must still be there whenever the
--- same person tries to come back, on whatever timeline that happens to
--- be. Manual operator cleanup (e.g. once a ban is reconsidered) is
--- future admin-UI work, explicitly out of scope for this change -- see
--- this feature's own design brief.
+-- READ SIDE (app/admin_ops.py's _worth_a_look()): the entire reason
+-- this table exists is to be checked against, not merely written --
+-- every currently-active player's own ip_hash values
+-- (mc_ingest_request_log) and bound node_refs (player_node) are
+-- compared against every row here, live, on each admin overview load,
+-- via idx_mc_evasion_record_value below. A match FLAGS the player in
+-- Overview's own "Worth a look" block -- DELIBERATELY NOT the "Needs
+-- attention" list just above (_attention()): that list means "this
+-- player is broken, here is the fix" and its severity dot can turn the
+-- nav badge red; an anti-cheat observation with common innocent
+-- explanations is not a fixable fault and must not inherit that
+-- vocabulary. "Worth a look" never blocks anything at the ingest
+-- layer either way, and a match is also logged server-side the moment
+-- it is first observed on the ingest path itself
+-- (app/mc_ingest.py's record_ingest_identity() for ip_hash, the
+-- binding step in _process_one_ping() for node_ref), so the match
+-- exists in the log even if no operator ever opens the panel.
+--
+-- REVIEW SURFACE (app/admin_api.py): GET /api/admin/evasion-records
+-- lists former_player_id/kind/reason/recorded_at for every row --
+-- deliberately NEVER `value` itself, since managing this table (is
+-- this record still worth keeping) never requires reading the hash or
+-- node_ref back out, only knowing that one exists. POST
+-- /api/admin/evasion-records/delete removes a single row by id, logged
+-- to admin_action_log like every other operator write.
+--
+-- RETENTION: pruned in the same hourly housekeeping sweep as every
+-- other retention-bearing table in this file
+-- (settings.mc_evasion_record_retention_days, default ~18 months) --
+-- see that setting's own comment in app/config.py for why this is
+-- time-bounded at all (an unbounded version of this table is a
+-- permanent record of everyone this deployment ever disabled, by
+-- construction, which the operator does not want) and why 18 months
+-- specifically.
 CREATE TABLE IF NOT EXISTS mc_evasion_record (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     former_player_id  INTEGER NOT NULL,
@@ -763,13 +798,14 @@ CREATE TABLE IF NOT EXISTS mc_evasion_record (
     recorded_at       INTEGER NOT NULL
 );
 -- The lookup this table exists to answer: "has this ip_hash/node_ref
--- been seen on an evasion record before" -- checked against a NEW
--- registration's own ip_hash/node_ref, not implemented by this change
--- (the admin UI to surface a match is separate later work) but the
--- index this table is worthless without is added now, on the same
--- migration that creates the table, rather than bolted on later.
+-- been seen on an evasion record before" -- checked against every
+-- active player's own current ip_hash/node_ref values, both by
+-- app/admin_ops.py's _worth_a_look() (live, on each overview load) and
+-- by the ingest-path log-only checks in app/mc_ingest.py (see this
+-- table's own "READ SIDE" comment above).
 CREATE INDEX IF NOT EXISTS idx_mc_evasion_record_value ON mc_evasion_record(kind, value);
 CREATE INDEX IF NOT EXISTS idx_mc_evasion_record_former_player ON mc_evasion_record(former_player_id);
+CREATE INDEX IF NOT EXISTS idx_mc_evasion_record_recorded_at ON mc_evasion_record(recorded_at);
 
 -- One row per FreqMapper coverage event ever processed
 -- (app/freqmapper_ingest.py). verification_id is that event's whole
@@ -2319,6 +2355,34 @@ CREATE TABLE IF NOT EXISTS admin_action_log (
 );
 CREATE INDEX IF NOT EXISTS idx_admin_action_log_actor ON admin_action_log(actor_account_id, created_at);
 
+-- "I looked, this is fine" -- app/admin_ops.py's POST
+-- /api/admin/worth-a-look/dismiss, the ONE write route in the whole
+-- admin surface with no confirmation and no admin_action_log row (see
+-- that route's own docstring for why: this is an operator clearing
+-- their own to-do list, not a moderation action against the player).
+-- One row per (player_id, signal) an operator has already reviewed and
+-- decided needs no action -- `signal` is a short, stable id
+-- (e.g. "evasion_ip_hash") naming WHICH observation this dismisses,
+-- never shown to the operator itself, just app/admin_ops.py's own
+-- _worth_a_look()'s internal vocabulary. `dismissed_at` is overwritten
+-- (ON CONFLICT DO UPDATE, not IGNORE) on a re-dismiss of the same pair,
+-- so it always reads as "most recently dismissed", though nothing
+-- currently re-surfaces an item once dismissed to make that distinction
+-- matter yet.
+--
+-- Deliberately keyed on (player_id, signal), NOT on the specific
+-- matched value (e.g. a particular former_player_id/ip_hash pair): an
+-- operator who has decided a given kind of observation about THIS
+-- player needs no action does not want to re-litigate it the next time
+-- a different mc_evasion_record row happens to also match the same
+-- address.
+CREATE TABLE IF NOT EXISTS admin_worth_a_look_dismissal (
+    player_id      INTEGER NOT NULL,
+    signal         TEXT NOT NULL,
+    dismissed_at   INTEGER NOT NULL,
+    PRIMARY KEY (player_id, signal)
+);
+
 -- OAuth provider sign-in (app/oauth.py, app/oauth_api.py): a brand-new
 -- provider identity that does not yet belong to any account, waiting
 -- for a person to choose what happens to it. This is case 4 of
@@ -3711,6 +3775,12 @@ MIGRATIONS = [
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_wire_tag_resubmit INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_wire_tag_conflict INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE player_ingest_stat ADD COLUMN pings_wire_tag_malformed INTEGER NOT NULL DEFAULT 0",
+    # evasion_marked_at (see player's own SCHEMA comment above) added
+    # after `player` already shipped -- a plain nullable ADD COLUMN,
+    # same shape every other after-the-fact player column in this file
+    # uses; every existing row correctly backfills to NULL (never
+    # marked), since the column did not exist for anything to have set.
+    "ALTER TABLE player ADD COLUMN evasion_marked_at INTEGER",
 ]
 
 PRAGMAS = [

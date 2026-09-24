@@ -905,6 +905,39 @@ class McIngestor:
                         len(pings), json.dumps(type_counts),
                     ),
                 )
+
+                # Ban-evasion match check (settings.
+                # mc_evasion_record_enabled -- see app/db.py's
+                # mc_evasion_record SCHEMA comment for the full design).
+                # One extra indexed lookup on the SAME connection/
+                # transaction as the INSERT just above, against
+                # idx_mc_evasion_record_value (kind, value) -- negligible
+                # cost, same order of magnitude as check_wire_tag()'s own
+                # PRIMARY KEY lookup elsewhere in this module. Runs on
+                # EVERY accepted batch, not just a player's first: an
+                # evasion record can be written well after this player's
+                # first batch (an operator disabling someone days later),
+                # and re-checking every time is the only way not to miss
+                # that. FLAGS only, via this log line -- never blocks,
+                # never alters `pings` or this batch's own accepted/
+                # queue-full outcome. The operator-facing surface is
+                # app/admin_ops.py's _worth_a_look(), which re-checks this
+                # same table live rather than trusting anything cached
+                # from this one moment; this log line exists purely so
+                # the match is on record even if nobody opens that panel.
+                if settings.mc_evasion_record_enabled:
+                    match = conn.execute(
+                        "SELECT former_player_id FROM mc_evasion_record "
+                        "WHERE kind = 'ip_hash' AND value = ? LIMIT 1",
+                        (ip_hash,),
+                    ).fetchone()
+                    if match is not None:
+                        log.warning(
+                            "mc ingest: player %d's ip_hash matches a ban-evasion "
+                            "record from former player %d -- flagged for operator "
+                            "review in the admin panel, not blocked",
+                            player_id, match["former_player_id"],
+                        )
         except Exception:
             log.warning("mc ingest: request identity capture failed", exc_info=True)
 
@@ -1344,6 +1377,33 @@ class McIngestor:
                 (PROTOCOL, contact, player_id, received_at),
             )
             log.info("mc ingest: bound contact %s to player %d", contact, player_id)
+
+            # Ban-evasion match check (settings.mc_evasion_record_enabled
+            # -- see app/db.py's mc_evasion_record SCHEMA comment for the
+            # full design), mirroring record_ingest_identity()'s own
+            # ip_hash check above but for node_ref. Runs only on a
+            # BRAND-NEW binding (this branch), never on every ping this
+            # radio ever sends -- a bound radio's own node_ref cannot
+            # change out from under it, so re-checking an already-bound
+            # radio on every subsequent ping would be pure repeated cost
+            # for an answer that can never change. One indexed lookup on
+            # the same idx_mc_evasion_record_value index the ip_hash
+            # check above uses. FLAGS only, via this log line -- never
+            # rejects the binding or the ping; app/admin_ops.py's
+            # _worth_a_look() is the operator-facing surface, checked live.
+            if settings.mc_evasion_record_enabled:
+                node_match = conn.execute(
+                    "SELECT former_player_id FROM mc_evasion_record "
+                    "WHERE kind = 'node_ref' AND value = ? LIMIT 1",
+                    (f"{PROTOCOL}:{contact}",),
+                ).fetchone()
+                if node_match is not None:
+                    log.warning(
+                        "mc ingest: player %d just bound radio %s, which matches a "
+                        "ban-evasion record from former player %d -- flagged for "
+                        "operator review in the admin panel, not blocked",
+                        player_id, contact, node_match["former_player_id"],
+                    )
         elif row["player_id"] != player_id:
             counters["pings_wrong_owner"] += 1
             log.warning(
@@ -1565,14 +1625,15 @@ class McIngestor:
         async with _WRITE_LOCK:
             (
                 removed_pings, removed_stats, removed_credits,
-                removed_identity, removed_wire_tags,
+                removed_identity, removed_wire_tags, removed_evasion,
             ) = await asyncio.to_thread(self._housekeeping_sync)
         log.info(
             "mc ingest housekeeping: removed %d stale player_cell_ping rows, "
             "%d stale player_ingest_stat rows, %d stale player_cell_repeater_credit rows, "
-            "%d stale mc_ingest_request_log rows, %d stale mc_wire_tag rows",
+            "%d stale mc_ingest_request_log rows, %d stale mc_wire_tag rows, "
+            "%d stale mc_evasion_record rows",
             removed_pings, removed_stats, removed_credits,
-            removed_identity, removed_wire_tags,
+            removed_identity, removed_wire_tags, removed_evasion,
         )
         # Territory release sweep: its own transaction, separate from the
         # retention deletes above -- "one transaction per sweep" means
@@ -1637,13 +1698,31 @@ class McIngestor:
                 "DELETE FROM mc_wire_tag WHERE first_seen_at < ?", (wire_tag_cutoff,)
             )
             removed_wire_tags = cur5.rowcount
+            # Ban-evasion record (settings.mc_evasion_record_retention_days
+            # -- see that setting's own comment in app/config.py for why
+            # this is time-bounded at all: an unbounded version of this
+            # table is a permanent record of everyone this deployment
+            # ever disabled or flagged, by construction, which is not
+            # what the operator wants). Unlike mc_wire_tag above, there
+            # is no "un-claims and re-opens to replay" concern here --
+            # pruning an evasion record just means the operator has
+            # decided (via this retention window, not a per-row choice)
+            # that evidence this old is no longer worth keeping.
+            evasion_cutoff = now_ts - settings.mc_evasion_record_retention_days * 86400
+            cur6 = conn.execute(
+                "DELETE FROM mc_evasion_record WHERE recorded_at < ?", (evasion_cutoff,)
+            )
+            removed_evasion = cur6.rowcount
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
         finally:
             conn.close()
-        return removed_pings, removed_stats, removed_credits, removed_identity, removed_wire_tags
+        return (
+            removed_pings, removed_stats, removed_credits,
+            removed_identity, removed_wire_tags, removed_evasion,
+        )
 
     def _release_expired_tiles_sync(self) -> dict | None:
         """One release sweep: find every cell in the active MeshCore

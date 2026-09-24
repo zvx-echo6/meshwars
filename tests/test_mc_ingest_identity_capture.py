@@ -564,6 +564,112 @@ def test_record_ingest_identity_disabled_never_touches_db(db_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------
+# Ban-evasion match check, hot path -- flags (via a log line), never
+# blocks. app/admin_ops.py's _attention() is the operator-facing
+# surface, covered separately in tests/test_mc_evasion_record.py; these
+# tests cover only the ingest-path log-only checks in app/mc_ingest.py
+# themselves.
+# ---------------------------------------------------------------------
+
+def _seed_evasion_record(db_path, kind, value, former_player_id=99):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO mc_evasion_record(former_player_id, kind, value, reason, recorded_at) "
+        "VALUES (?, ?, ?, 'test', ?)",
+        (former_player_id, kind, value, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_ip_hash_match_is_logged_but_batch_still_accepted(db_path, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "mc_ingest_salt", "test-salt")
+    matching_ip = "198.51.100.1"
+    _seed_evasion_record(db_path, "ip_hash", _hash_source_ip("test-salt", matching_ip), former_player_id=99)
+    _seed_player(db_path, player_id=1)
+    _seed_api_key(db_path, "raw-key-1", player_id=1)
+    app, _ = _build_app(db_path)
+
+    caplog.set_level(logging.WARNING, logger="mc_ingest")
+    resp = _direct_post_mc_ingest(
+        app, matching_ip,
+        {"X-API-Key": "raw-key-1", "content-type": "application/json"},
+        {"data": [_ping()]},
+    )
+    # FLAGS, never blocks: the batch is accepted exactly as it would be
+    # with no evasion record on file at all.
+    assert resp.status_code == 202
+    assert len(_identity_rows(db_path)) == 1
+
+    assert any(
+        "ip_hash matches a ban-evasion record" in r.getMessage() and "99" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_ip_hash_non_match_logs_nothing(db_path, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "mc_ingest_salt", "test-salt")
+    _seed_evasion_record(db_path, "ip_hash", _hash_source_ip("test-salt", "203.0.113.9"), former_player_id=99)
+    ingestor = McIngestor()
+
+    caplog.set_level(logging.WARNING, logger="mc_ingest")
+    _run(ingestor.record_ingest_identity(1, "keyhash", "198.51.100.1", "ua", [_ping()], NOW))
+
+    assert not any("ban-evasion record" in r.getMessage() for r in caplog.records)
+
+
+def test_node_ref_match_is_logged_on_new_binding_but_ping_still_accepted(db_path, caplog):
+    """The node_ref check runs on a BRAND-NEW binding only -- see
+    app/mc_ingest.py's own comment on why re-checking an already-bound
+    radio on every subsequent ping would be pure repeated cost."""
+    _seed_evasion_record(db_path, "node_ref", "mc:deadbeef", former_player_id=42)
+    _seed_player(db_path, player_id=1)
+
+    caplog.set_level(logging.WARNING, logger="mc_ingest")
+    ingestor = McIngestor()
+    ingestor._process_batch_sync(1, "keyhash-1", [_ping(contact="deadbeef")], NOW)
+
+    stats = _run_ingest_stat_sum(db_path, player_id=1)
+    assert stats["pings_accepted"] == 1  # never blocked
+
+    assert any(
+        "matches a ban-evasion record from former player 42" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def _run_ingest_stat_sum(db_path, player_id):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM player_ingest_stat WHERE player_id = ?", (player_id,)
+    )]
+    conn.close()
+    totals: dict[str, int] = {}
+    for r in rows:
+        for k, v in r.items():
+            if isinstance(v, int) and k not in ("player_id", "day"):
+                totals[k] = totals.get(k, 0) + v
+    return totals
+
+
+def test_evasion_check_disabled_skips_both_checks(db_path, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "mc_evasion_record_enabled", False)
+    monkeypatch.setattr(settings, "mc_ingest_salt", "test-salt")
+    matching_ip = "198.51.100.1"
+    _seed_evasion_record(db_path, "ip_hash", _hash_source_ip("test-salt", matching_ip), former_player_id=99)
+    _seed_evasion_record(db_path, "node_ref", "mc:deadbeef", former_player_id=99)
+    _seed_player(db_path, player_id=1)
+
+    caplog.set_level(logging.WARNING, logger="mc_ingest")
+    ingestor = McIngestor()
+    _run(ingestor.record_ingest_identity(1, "keyhash", matching_ip, "ua", [_ping()], NOW))
+    ingestor._process_batch_sync(1, "keyhash-1", [_ping(contact="deadbeef")], NOW)
+
+    assert not any("ban-evasion record" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------
 # Retention pruning
 # ---------------------------------------------------------------------
 
@@ -601,7 +707,7 @@ def test_housekeeping_prunes_old_identity_rows_keeps_recent(db_path, monkeypatch
     ingestor = McIngestor()
     (
         _removed_pings, _removed_stats, _removed_credits,
-        removed_identity, _removed_wire_tags,
+        removed_identity, _removed_wire_tags, _removed_evasion,
     ) = ingestor._housekeeping_sync()
 
     assert removed_identity == 1
@@ -621,7 +727,7 @@ def test_housekeeping_prunes_old_wire_tag_rows_keeps_recent(db_path, monkeypatch
     ingestor = McIngestor()
     (
         _removed_pings, _removed_stats, _removed_credits,
-        _removed_identity, removed_wire_tags,
+        _removed_identity, removed_wire_tags, _removed_evasion,
     ) = ingestor._housekeeping_sync()
 
     assert removed_wire_tags == 1
@@ -629,3 +735,35 @@ def test_housekeeping_prunes_old_wire_tag_rows_keeps_recent(db_path, monkeypatch
     remaining = [r[0] for r in conn.execute("SELECT wire_tag FROM mc_wire_tag")]
     conn.close()
     assert remaining == ["MM:0000000002"]
+
+
+def _seed_evasion_record_row(db_path, recorded_at, former_player_id=1, kind="ip_hash", value="somehash"):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO mc_evasion_record(former_player_id, kind, value, reason, recorded_at) "
+        "VALUES (?, ?, ?, 'test', ?)",
+        (former_player_id, kind, value, recorded_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_housekeeping_prunes_old_evasion_records_keeps_recent(db_path, monkeypatch):
+    monkeypatch.setattr(settings, "mc_evasion_record_retention_days", 548)
+    now_ts = int(time.time())
+    old_ts = now_ts - (549 * 86400)
+    recent_ts = now_ts - (10 * 86400)
+    _seed_evasion_record_row(db_path, old_ts, value="old-hash")
+    _seed_evasion_record_row(db_path, recent_ts, value="recent-hash")
+
+    ingestor = McIngestor()
+    (
+        _removed_pings, _removed_stats, _removed_credits,
+        _removed_identity, _removed_wire_tags, removed_evasion,
+    ) = ingestor._housekeeping_sync()
+
+    assert removed_evasion == 1
+    conn = sqlite3.connect(db_path)
+    remaining = [r[0] for r in conn.execute("SELECT value FROM mc_evasion_record")]
+    conn.close()
+    assert remaining == ["recent-hash"]

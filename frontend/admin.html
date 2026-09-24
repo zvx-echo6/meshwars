@@ -173,6 +173,17 @@
           <p class="adm-hint" id="health-line"></p>
           <h3 class="adm-h3">Needs attention <span class="adm-count" id="attention-count"></span></h3>
           <div id="attention"></div>
+
+          <!-- DELIBERATELY a separate block from "Needs attention" above,
+               not another kind folded into that list -- see admin.js's
+               renderWorthALook() and app/admin_ops.py's _worth_a_look()
+               for the full reasoning. "Needs attention" means a broken
+               setup with a fix; this means an observation with a common
+               innocent explanation. Its own count, never counted into
+               nav-attention's badge (that badge is computed from
+               attention-count's own list alone -- see renderAttention()). -->
+          <h3 class="adm-h3">Worth a look <span class="adm-count" id="worth-a-look-count"></span></h3>
+          <div id="worth-a-look"></div>
         </section>
 
         <section class="adm-section" data-section="players" hidden>

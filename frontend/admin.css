@@ -775,6 +775,18 @@ body {
 .adm-dot-warn { background: var(--adm-attn); }
 .adm-dot-info { background: var(--mw-text-6); }
 
+/* "Worth a look" (renderWorthALook() below) uses this INSTEAD of
+   adm-dot-bad/warn/info, never alongside them -- a hollow ring rather
+   than a filled dot is the whole visual point: this block is an
+   observation, not a fault with a severity, and must not read as one
+   at a glance the way a filled dot (this file's own vocabulary for
+   "something is wrong, here is how wrong") would. */
+.adm-dot-hollow {
+  background: transparent;
+  border: 1.5px solid var(--mw-text-6);
+  box-sizing: border-box;
+}
+
 
 
 /* ---- players --------------------------------------------------------- */

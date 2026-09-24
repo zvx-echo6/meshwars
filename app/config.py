@@ -460,29 +460,45 @@ class Settings(BaseSettings):
     # "account deletion means gone" -- see mc_evasion_record's own SCHEMA
     # comment in app/db.py, and _PLAYER_SCOPED_TABLES' own section
     # comment in app/account_api.py, for the full policy this
-    # implements. Fires ONLY when the player being deleted (self-service
-    # DELETE /api/account, or operator POST /api/admin/player/delete)
-    # already had player.disabled_at set by a PRIOR, separate, explicit
-    # operator action (POST /api/admin/player/disable) before this
-    # deletion request arrived -- an ordinary player who was never
-    # disabled and deletes their own account is completely unaffected
-    # and is purged exactly as before, honoring frontend/privacy.html's
-    # existing full-deletion guarantee. When it does fire, only a
-    # minimal record survives: this player's ip_hash values (from
-    # mc_ingest_request_log, read before that table's own rows are
-    # purged) and bound radio identities (player_node.node_ref) -- not
-    # their name (already tombstoned by the existing deletion flow) and
-    # not their full request history.
+    # implements. Fires on deletion (self-service DELETE /api/account,
+    # or either operator delete route) ONLY when the player matches one
+    # of three independent, server-evaluated trigger paths -- see
+    # app/account_api.py's _capture_evasion_record() for exactly which
+    # three (a prior operator disable; a prior, separate, explicit
+    # "mark for evasion tracking"; or at least one wire_tag conflict
+    # already on file) and why an unrecognized client_family is
+    # deliberately NOT a fourth. An ordinary player who matches none of
+    # the three is completely unaffected and is purged exactly as
+    # before, honoring frontend/privacy.html's existing full-deletion
+    # guarantee. When it does fire, only a minimal record survives:
+    # this player's ip_hash values (from mc_ingest_request_log, read
+    # before that table's own rows are purged) and bound radio
+    # identities (player_node.node_ref) -- not their name (already
+    # tombstoned by the existing deletion flow) and not their full
+    # request history.
     #
-    # Default on: an operator who has already taken the separate,
-    # deliberate step of disabling a player is presumed to want evasion
-    # evidence kept, matching how mc_wire_tag_reject_enabled/
-    # mc_cell_claim_cap_enabled/etc. above all default to the safer,
-    # more-protective behavior. Turning this off reverts deletion to the
-    # unconditional full-purge behavior for every player, disabled or
-    # not -- the same "off means fully reverted" contract every other
-    # feature flag in this file uses.
+    # Default on: an operator/system that has already taken one of the
+    # three trigger actions is presumed to want evasion evidence kept,
+    # matching how mc_wire_tag_reject_enabled/mc_cell_claim_cap_enabled/
+    # etc. above all default to the safer, more-protective behavior.
+    # Turning this off reverts deletion to the unconditional full-purge
+    # behavior for every player, regardless of any trigger -- the same
+    # "off means fully reverted" contract every other feature flag in
+    # this file uses.
     mc_evasion_record_enabled: bool = True
+    # How long a mc_evasion_record row survives before the hourly
+    # housekeeping sweep prunes it (app/mc_ingest.py's
+    # _housekeeping_sync()) -- same retention-cutoff shape every other
+    # *_retention_days setting in this file already uses. Default ~18
+    # months (548 days): an UNBOUNDED version of this table is a
+    # permanent record of every person this deployment ever disabled or
+    # flagged, by construction -- a rap sheet, not evidence with a
+    # shelf life -- and the operator does not want that. 18 months was
+    # chosen specifically because it spans more than one full MeshCore
+    # season (mc_season_days below), which is the longest timescale
+    # this game already reasons in; a shorter window could let a
+    # returning player wait out exactly one season and come back clean.
+    mc_evasion_record_retention_days: int = 548
 
     # Team roster: shared by both boards now that Meshtastic runs on the
     # same player model as MeshCore, keyed on flat grid cells and players

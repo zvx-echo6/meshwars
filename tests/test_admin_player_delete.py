@@ -856,6 +856,115 @@ def test_evasion_record_not_written_for_an_ordinary_never_disabled_player(client
     assert _count(db_path, "mc_evasion_record", "former_player_id", player_id) == 0
 
 
+def _mark_player_row_for_evasion(db_path: str, player_id: int, marked_at: int) -> None:
+    """Directly sets player.evasion_marked_at -- the same column POST
+    /api/admin/player/mark-evasion sets, done here without driving that
+    route's own HTTP call, since these tests only need the RESULT
+    already on file before deletion runs."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE player SET evasion_marked_at = ? WHERE player_id = ?", (marked_at, player_id))
+    conn.commit()
+    conn.close()
+
+
+def test_evasion_record_survives_deletion_of_a_marked_but_not_disabled_player(client, db_path):
+    """Trigger path #2: an explicit, separate "mark for evasion
+    tracking" (POST /api/admin/player/mark-evasion), NOT a disable --
+    closes the race a disable-only trigger leaves open, where a player
+    under investigation deletes their own account before anyone gets to
+    disable them.
+    """
+    _login_as(client, db_path, role="admin")
+    player_id = _make_player(db_path, display_name="RealName")
+    _full_player_scoped_data(db_path, player_id)
+    _mark_player_row_for_evasion(db_path, player_id, int(time.time()) - 3600)
+    assert _row(db_path, "SELECT disabled_at FROM player WHERE player_id = ?", (player_id,))["disabled_at"] is None
+
+    resp = client.post(
+        "/api/admin/player/delete",
+        json={"player_id": player_id, "display_name": "RealName"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    evasion_rows = _row(
+        db_path,
+        "SELECT reason FROM mc_evasion_record WHERE former_player_id = ? LIMIT 1",
+        (player_id,),
+    )
+    assert evasion_rows is not None
+    assert evasion_rows["reason"] == "player was marked for evasion tracking before account deletion"
+
+
+def _seed_wire_tag_conflict_stat(db_path: str, player_id: int, day: int = 20260102) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO player_ingest_stat(player_id, protocol, day, pings_wire_tag_conflict) "
+        "VALUES (?, 'mc', ?, 1)",
+        (player_id, day),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_evasion_record_survives_deletion_of_a_player_with_a_wire_tag_conflict(client, db_path):
+    """Trigger path #3: at least one pings_wire_tag_conflict already on
+    file -- per measurement (7,260 observed tags, zero collisions, 60
+    bits of entropy), the firmest automatic signal available, and
+    presenting another player's transmission token has few innocent
+    explanations. Never disabled, never marked -- this trigger alone is
+    sufficient.
+    """
+    _login_as(client, db_path, role="admin")
+    player_id = _make_player(db_path, display_name="RealName")
+    _full_player_scoped_data(db_path, player_id)
+    _seed_wire_tag_conflict_stat(db_path, player_id)
+
+    resp = client.post(
+        "/api/admin/player/delete",
+        json={"player_id": player_id, "display_name": "RealName"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    evasion_rows = _row(
+        db_path,
+        "SELECT reason FROM mc_evasion_record WHERE former_player_id = ? LIMIT 1",
+        (player_id,),
+    )
+    assert evasion_rows is not None
+    assert evasion_rows["reason"] == "player had at least one wire_tag conflict on file before account deletion"
+
+
+def test_unrecognized_client_family_alone_is_not_a_trigger(client, db_path):
+    """Explicitly NOT a trigger: one legitimate player runs a
+    non-standard client with the operator's own blessing, and this
+    schema has no sanctioned-exception marker yet -- adding this as a
+    trigger today would capture a known-good player. A player whose
+    ONLY signal is an 'unrecognized-other'/'unrecognized-python'
+    client_family, with no disable, no mark, and no wire_tag conflict,
+    must leave nothing in mc_evasion_record.
+    """
+    _login_as(client, db_path, role="admin")
+    player_id = _make_player(db_path, display_name="RealName")
+    now = int(time.time())
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO mc_ingest_request_log"
+        "(received_at, player_id, key_hash_prefix, ip_hash, ip_class, "
+        " client_family, ping_count, type_counts) "
+        "VALUES (?, ?, 'deadbeef', 'ip-hash-1', 'unknown', 'unrecognized-python', 1, '{}')",
+        (now, player_id),
+    )
+    conn.commit()
+    conn.close()
+
+    resp = client.post(
+        "/api/admin/player/delete",
+        json={"player_id": player_id, "display_name": "RealName"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert _count(db_path, "mc_evasion_record", "former_player_id", player_id) == 0
+
+
 def test_evasion_record_disable_flag_reverts_to_full_purge(client, db_path, monkeypatch):
     """settings.mc_evasion_record_enabled=False reverts deletion to the
     unconditional full-purge behavior for EVERY player, disabled or

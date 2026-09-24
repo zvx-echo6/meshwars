@@ -1749,20 +1749,27 @@ def _tombstone_display_name(player_id: int) -> str:
 # ever writes to mc_evasion_record.reason -- never an admin's typed
 # notes, never anything built from request input. Kept as named
 # constants rather than inlined so the handful of values this column
-# can ever hold are visible in one place.
+# can ever hold are visible in one place. One per trigger path -- see
+# _capture_evasion_record()'s own docstring for exactly what each one
+# means.
 _EVASION_REASON_PRIOR_DISABLE = "player was operator-disabled before account deletion"
+_EVASION_REASON_MARKED_FOR_TRACKING = "player was marked for evasion tracking before account deletion"
+_EVASION_REASON_WIRE_TAG_CONFLICT = "player had at least one wire_tag conflict on file before account deletion"
 
 
-def _capture_evasion_record(conn, player_id: int, pre_existing_disabled_at, now: int) -> int:
+def _capture_evasion_record(
+    conn, player_id: int, *, pre_existing_disabled_at, pre_existing_evasion_marked_at, now: int,
+) -> int:
     """Copy a minimal ban-evasion record into app/db.py's
     mc_evasion_record for `player_id`, IF this deletion qualifies -- see
     that table's own SCHEMA comment in app/db.py, and this module's
     "account deletion" section comment above, for the full policy this
     implements. Called from both DELETE /api/account (this module) and
-    POST /api/admin/player/delete (app/admin_api.py) -- one definition
-    of when and what to keep, used by both deletion doors, the same
-    "not redefined per caller" reasoning _PLAYER_SCOPED_TABLES/
-    _ACCOUNT_SCOPED_TABLES/_tombstone_display_name already follow.
+    both POST /api/admin/player/delete and POST /api/admin/account/delete
+    (app/admin_api.py) -- one definition of when and what to keep, used
+    by every deletion door, the same "not redefined per caller"
+    reasoning _PLAYER_SCOPED_TABLES/_ACCOUNT_SCOPED_TABLES/
+    _tombstone_display_name already follow.
 
     MUST be called BEFORE the caller's own loop over _PLAYER_SCOPED_TABLES
     deletes mc_ingest_request_log/player_node out from under this
@@ -1771,29 +1778,58 @@ def _capture_evasion_record(conn, player_id: int, pre_existing_disabled_at, now:
     not qualify, or the feature is off), purely for the caller's own
     logging -- nothing currently reads this return value for behavior.
 
-    ---- the trigger, exactly ------------------------------------------
+    ---- the three trigger paths, exactly ------------------------------
 
-    `pre_existing_disabled_at` is the CALLER's own responsibility to
-    have captured -- specifically, player.disabled_at as read BEFORE
-    this same request's own tombstoning UPDATE (which unconditionally
-    sets disabled_at = now on every deletion, banned or not) ever runs.
-    This function fires ONLY when that pre-existing value is not None:
-    an operator took the separate, deliberate, explicit step of
-    disabling this player (POST /api/admin/player/disable) at some
-    point BEFORE this deletion request arrived. That is the entire
-    "adverse finding" this feature acts on -- never inferred from a raw
-    counter (pings_wire_tag_conflict, an ingest rate, anything a player
-    could rack up just by playing normally), always a prior, distinct,
-    operator-authored action already sitting in admin_action_log. A
-    player who deletes their own account without ever having been
-    disabled is completely unaffected by this function, regardless of
-    what their own counters look like.
+    Proportionate by design: capturing on EVERY deletion would make this
+    a permanent record of everyone who ever quit, not just people worth
+    tracking. Three paths, each independently sufficient, all evaluated
+    server-side against data already on file -- never a caller-supplied
+    flag, never free text:
+
+    1. `pre_existing_disabled_at` -- the CALLER's own responsibility to
+       have captured, specifically player.disabled_at as read BEFORE
+       this same request's own tombstoning UPDATE (which unconditionally
+       sets disabled_at = now on every deletion, banned or not) ever
+       runs. Non-None means an operator took the separate, deliberate,
+       explicit step of disabling this player (POST
+       /api/admin/player/disable) at some point BEFORE this deletion
+       request arrived.
+
+    2. `pre_existing_evasion_marked_at` -- same "captured by the caller
+       before this request's own writes touch it" shape as #1, but for
+       player.evasion_marked_at (POST /api/admin/player/mark-evasion).
+       This is the fix for the gap #1 alone leaves open: a player under
+       investigation who is not YET disabled -- and might delete their
+       own account first, before anyone gets to disable them -- can
+       still be marked, non-punitively, ahead of that race.
+
+    3. Not caller-supplied at all: this function itself sums
+       player_ingest_stat.pings_wire_tag_conflict across every row still
+       on file for this player_id (whatever player_ingest_stat's own
+       retention -- settings.mc_stat_retention_days -- has not already
+       pruned; "within the retained window" has no separate meaning
+       beyond "still in the table"). Presenting a DIFFERENT player's
+       wire_tag is the harvest-someone-else's-proof attack
+       (check_wire_tag(), app/mc_ingest.py) -- measured against real
+       traffic at zero false positives (7,260 of 7,260 tags distinct,
+       60 bits of entropy per tag), the firmest automatic signal this
+       codebase has. Deliberately NOT included here: an unrecognized
+       client_family. One legitimate player runs a non-standard client
+       with this operator's own explicit blessing, and nothing in this
+       schema yet distinguishes "unrecognized because unauthorized" from
+       "unrecognized because it's HIM" -- adding that trigger today
+       would capture a known-good player. Add it only once a
+       sanctioned-exception marker exists to gate it.
+
+    A player who deletes their own account matching NONE of the three is
+    completely unaffected by this function, regardless of what their own
+    counters otherwise look like.
 
     Passing `now` (the tombstoning UPDATE's own timestamp, not
-    disabled_at) as this row's recorded_at, deliberately: disabled_at
-    already answers "when was this player disabled" wherever an
-    operator still needs that, this table only needs to answer "when
-    was this evidence preserved".
+    disabled_at/evasion_marked_at) as this row's recorded_at,
+    deliberately: those columns already answer "when did the triggering
+    action happen" wherever an operator still needs that, this table
+    only needs to answer "when was this evidence preserved".
 
     ---- what is kept, and why exactly this much -----------------------
 
@@ -1818,8 +1854,24 @@ def _capture_evasion_record(conn, player_id: int, pre_existing_disabled_at, now:
     """
     if not settings.mc_evasion_record_enabled:
         return 0
-    if pre_existing_disabled_at is None:
-        return 0
+
+    if pre_existing_disabled_at is not None:
+        reason = _EVASION_REASON_PRIOR_DISABLE
+    elif pre_existing_evasion_marked_at is not None:
+        reason = _EVASION_REASON_MARKED_FOR_TRACKING
+    else:
+        # Trigger #3: not caller-supplied -- see this function's own
+        # docstring for why a wire_tag conflict is the one COUNTER-based
+        # signal proportionate enough to act on automatically here, and
+        # why an unrecognized client_family deliberately is not.
+        conflict_total = conn.execute(
+            "SELECT COALESCE(SUM(pings_wire_tag_conflict), 0) FROM player_ingest_stat "
+            "WHERE player_id = ?",
+            (player_id,),
+        ).fetchone()[0]
+        if conflict_total <= 0:
+            return 0
+        reason = _EVASION_REASON_WIRE_TAG_CONFLICT
 
     values: list[tuple[str, str]] = []  # (kind, value)
 
@@ -1840,7 +1892,7 @@ def _capture_evasion_record(conn, player_id: int, pre_existing_disabled_at, now:
             "INSERT INTO mc_evasion_record"
             "(former_player_id, kind, value, reason, recorded_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (player_id, kind, value, _EVASION_REASON_PRIOR_DISABLE, now),
+            (player_id, kind, value, reason, now),
         )
 
     return len(values)
@@ -1981,7 +2033,7 @@ async def delete_account(
         player_row = None
         if session.player_id is not None:
             player_row = conn.execute(
-                "SELECT player_id, display_name, disabled_at FROM player WHERE player_id = ?",
+                "SELECT player_id, display_name, disabled_at, evasion_marked_at FROM player WHERE player_id = ?",
                 (session.player_id,),
             ).fetchone()
 
@@ -2050,7 +2102,12 @@ async def delete_account(
             # disabled_at -- captured above, before this request's own
             # tombstoning UPDATE further down overwrites it -- as the
             # ADVERSE-FINDING trigger.
-            _capture_evasion_record(conn, player_id, player_row["disabled_at"], now)
+            _capture_evasion_record(
+                conn, player_id,
+                pre_existing_disabled_at=player_row["disabled_at"],
+                pre_existing_evasion_marked_at=player_row["evasion_marked_at"],
+                now=now,
+            )
             for table in _PLAYER_SCOPED_TABLES:
                 c = conn.execute(
                     f"DELETE FROM {table} WHERE player_id = ?", (player_id,)
