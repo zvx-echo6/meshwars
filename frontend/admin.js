@@ -1595,8 +1595,16 @@ function netHealthText(n) {
 // pairs the same shape the static admin.html markup already uses
 // (.adm-field-label / .adm-check-label), just assembled with el()
 // instead of written out as HTML.
-function fieldLabel(text, input, wide) {
-  const label = el('label', { className: 'adm-field-label' + (wide ? ' adm-field-label-wide' : ''), text: text });
+function fieldLabel(text, input, variant) {
+  // variant: undefined (default 9rem), 'wide' (or `true`, existing
+  // call sites) for a fixed 20rem field, 'half' for a field that
+  // shares its row 50/50 with one sibling (see .adm-field-label-half
+  // in admin.css -- Where it's played's Name/Link pair), or 'full' for
+  // a field (e.g. a textarea) that takes the entire row on its own.
+  const MODIFIER_CLASSES = { half: 'adm-field-label-half', full: 'adm-field-label-full' };
+  const modifierClass = MODIFIER_CLASSES[variant] ? ' ' + MODIFIER_CLASSES[variant]
+    : variant ? ' adm-field-label-wide' : '';
+  const label = el('label', { className: 'adm-field-label' + modifierClass, text: text });
   label.appendChild(input);
   return label;
 }
@@ -1719,9 +1727,17 @@ const TZ_SHORT_NAMES = {
 // From/To dropdowns in renderConnectionDetail below.
 function compactNetSummary(row) {
   const weekday = row.weekday != null ? row.weekday : 0;
+  const tz = TZ_SHORT_NAMES[row.timezone] || row.timezone;
+  // start_hour 0 through end_hour 23 never closes within the day at
+  // all -- "12am-midnight" is a literally correct but misleading way
+  // to say that (reads like a one-minute window, not an all-day one),
+  // same "all day" special case net_window_text already carries for
+  // the public about page (app/checkin.py).
+  if (row.start_hour === 0 && row.end_hour === 23) {
+    return 'Net: ' + WEEKDAY_ABBR[weekday] + ' all day ' + tz;
+  }
   const fromLabel = CLOCK_HOUR_LABELS[row.start_hour] || '?';
   const toLabel = row.end_hour === 23 ? 'midnight' : (CLOCK_HOUR_LABELS[(row.end_hour + 1) % 24] || '?');
-  const tz = TZ_SHORT_NAMES[row.timezone] || row.timezone;
   return 'Net: ' + WEEKDAY_ABBR[weekday] + ' ' + fromLabel + '-' + toLabel + ' ' + tz;
 }
 
@@ -1832,9 +1848,9 @@ function renderConnectionDetail(row, isDraft) {
 
   // -- Label --
   const labelInput = el('input', { value: row.label || '' });
-  labelInput.placeholder = 'label, e.g. Wednesday Net';
+  labelInput.placeholder = 'e.g. Wednesday Net';
   const labelRow = el('div', { className: 'adm-form' });
-  labelRow.appendChild(labelInput);
+  labelRow.appendChild(fieldLabel('Label', labelInput, 'wide'));
   d.appendChild(labelRow);
 
   // -- Connector --
@@ -1850,7 +1866,7 @@ function renderConnectionDetail(row, isDraft) {
 
   const connectorInput = el('input', { value: row.connector_url || '' });
   const connectorRow = el('div', { className: 'adm-form' });
-  connectorRow.appendChild(connectorInput);
+  connectorRow.appendChild(fieldLabel('Server URL', connectorInput, 'wide'));
   d.appendChild(connectorRow);
 
   const officialHint = el('p', { className: 'adm-hint', text: 'Uses the official Meshtastic broker at mqtt.meshtastic.org.' });
@@ -1860,7 +1876,7 @@ function renderConnectionDetail(row, isDraft) {
   // mqtt and the official broker) -- not tucked into the net-schedule
   // area the way it used to be.
   const topicRootInput = el('input', { value: row.topic_root || '' });
-  topicRootInput.placeholder = 'topic root, e.g. msh/US (blank = subscribe broadly)';
+  topicRootInput.placeholder = 'e.g. msh/US (blank = subscribe broadly)';
   const topicRootRow = el('div', { className: 'adm-form' });
   topicRootRow.appendChild(fieldLabel('Topic root', topicRootInput, true));
   d.appendChild(topicRootRow);
@@ -1870,7 +1886,7 @@ function renderConnectionDetail(row, isDraft) {
   // own constants and are not this operator's to set (see
   // app/admin_ops.py's _validate_connector_url).
   const brokerUsernameInput = el('input', { value: row.broker_username || '' });
-  brokerUsernameInput.placeholder = 'broker username (optional)';
+  brokerUsernameInput.placeholder = 'optional';
   const brokerUsernameRow = el('div', { className: 'adm-form' });
   brokerUsernameRow.appendChild(fieldLabel('Broker username', brokerUsernameInput, true));
   d.appendChild(brokerUsernameRow);
@@ -1909,7 +1925,6 @@ function renderConnectionDetail(row, isDraft) {
   // free-typed optional display name with no upstream list, so it gets
   // the input without the "Load channels" button/select).
   const channelInput = el('input', { value: row.channel || '' });
-  channelInput.placeholder = 'channel';
   const channelSelect = el('select');
   channelSelect.hidden = true;
   const channelOut = el('span', { className: 'adm-hint' });
@@ -1920,7 +1935,7 @@ function renderConnectionDetail(row, isDraft) {
   });
   channelSelect.addEventListener('change', () => { channelInput.value = channelSelect.value; });
   const channelRow = el('div', { className: 'adm-form' });
-  channelRow.appendChild(channelInput);
+  channelRow.appendChild(fieldLabel('Channel', channelInput));
   channelRow.appendChild(loadChannelsBtn);
   channelRow.appendChild(channelSelect);
   d.appendChild(channelRow);
@@ -1968,9 +1983,9 @@ function renderConnectionDetail(row, isDraft) {
   // Meshtastic kinds -- never in Connector (channel already covers
   // that), never for MeshCore (no hashtag column at all).
   const hashtagInput = el('input', { value: row.hashtag || '' });
-  hashtagInput.placeholder = 'hashtag, e.g. #freq51';
+  hashtagInput.placeholder = 'e.g. #Freq51';
   const hashtagRow = el('div', { className: 'adm-form' });
-  hashtagRow.appendChild(hashtagInput);
+  hashtagRow.appendChild(fieldLabel('Hashtag', hashtagInput));
   scheduleGroup.appendChild(hashtagRow);
 
   const startDateInput = el('input', { type: 'date' });
@@ -1993,7 +2008,7 @@ function renderConnectionDetail(row, isDraft) {
     connectorRow.hidden = isOfficialMqtt;
     officialHint.hidden = !isOfficialMqtt;
     const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
-    connectorInput.placeholder = 'connector URL, e.g. ' + example;
+    connectorInput.placeholder = 'e.g. ' + example;
 
     topicRootRow.hidden = !isMqtt;
     brokerUsernameRow.hidden = kind !== 'mqtt';
@@ -2005,6 +2020,7 @@ function renderConnectionDetail(row, isDraft) {
       channelSelect.hidden = true;
       channelSelect.replaceChildren();
     }
+    channelInput.placeholder = isMeshCore ? 'e.g. #weekly-net' : 'e.g. LongFast';
 
     const scoresNet = scoresNetCheck.checked;
     scheduleGroup.hidden = !scoresNet;
@@ -2030,25 +2046,25 @@ function renderConnectionDetail(row, isDraft) {
 
   const whereGroup = el('div');
   const whereNameInput = el('input', { value: linkedCommunity ? linkedCommunity.name : '' });
-  whereNameInput.placeholder = 'community name';
+  whereNameInput.placeholder = 'e.g. FREQ51 — Intermountain Mesh';
   const whereLinkInput = el('input', { value: linkedCommunity ? (linkedCommunity.url || '') : '' });
-  whereLinkInput.placeholder = 'https://example.com';
+  whereLinkInput.placeholder = 'e.g. https://freq51.net';
   const whereRow1 = el('div', { className: 'adm-form' });
-  whereRow1.appendChild(fieldLabel('Name', whereNameInput));
-  whereRow1.appendChild(fieldLabel('Link', whereLinkInput, true));
+  whereRow1.appendChild(fieldLabel('Name', whereNameInput, 'half'));
+  whereRow1.appendChild(fieldLabel('Link', whereLinkInput, 'half'));
   whereGroup.appendChild(whereRow1);
 
   const whereBlurbInput = el('textarea', { className: 'adm-textarea' });
   whereBlurbInput.value = linkedCommunity ? (linkedCommunity.blurb || '') : '';
-  whereBlurbInput.placeholder = 'blurb, shown on the public about page';
+  whereBlurbInput.placeholder = 'shown under the name on the About page';
   const whereRow2 = el('div', { className: 'adm-form' });
-  whereRow2.appendChild(whereBlurbInput);
+  whereRow2.appendChild(fieldLabel('Description', whereBlurbInput, 'full'));
   whereGroup.appendChild(whereRow2);
 
   const whereOrderInput = el('input', { type: 'number' });
   whereOrderInput.value = linkedCommunity && linkedCommunity.display_order != null ? linkedCommunity.display_order : 0;
   const whereRow3 = el('div', { className: 'adm-form' });
-  whereRow3.appendChild(fieldLabel('Display order', whereOrderInput));
+  whereRow3.appendChild(fieldLabel('About page order', whereOrderInput));
   whereGroup.appendChild(whereRow3);
   d.appendChild(whereGroup);
 
@@ -2227,10 +2243,11 @@ function renderConnectionDetail(row, isDraft) {
             (row.last_checkin_net_date ? ' (' + row.last_checkin_net_date + ')' : ''),
         }));
         if (row.unresolved_count > 0 && row.unresolved_senders && row.unresolved_senders.length) {
+          d.appendChild(el('div', { className: 'adm-sub-title', text: 'Senders not matched to a player' }));
           const table = el('table', { className: 'adm-table' });
           const thead = el('thead');
           const headRow = el('tr');
-          ['Sender', 'Unresolved messages'].forEach((h) => headRow.appendChild(el('th', { text: h })));
+          ['Sender', 'Unmatched messages'].forEach((h) => headRow.appendChild(el('th', { text: h })));
           thead.appendChild(headRow);
           table.appendChild(thead);
           const tbody = el('tbody');
