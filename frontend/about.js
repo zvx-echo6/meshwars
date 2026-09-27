@@ -119,3 +119,102 @@
   loadScores();
   loadPlayers();
 })();
+
+// ---- "Where it's played" community list ------------------------------
+//
+// GET /api/about/communities (public, unauthenticated -- see
+// app/admin_api.py's own docstring on that route) replaces what used
+// to be seven hand-typed <li> entries under #where with a live-fetched
+// list built the same way: one <li> per community, a link (or a plain
+// name when the community has no url, matching Central Oregon's
+// existing no-link style) followed by one .landing-link-desc span per
+// protocol the community has any enabled net or source on, plus the
+// community's own blurb as an additional span when it has one.
+//
+// Same "enhancement only" contract the stats band above documents --
+// a fetch failure or an empty response just leaves #community-list
+// empty; this never throws, and the rest of the page is unaffected.
+//
+// SECURITY: every field on a community (name, region, blurb, url,
+// contact_url, and each net's channel/window_text) comes from the
+// server and is untrusted -- every element below is built with
+// document.createElement + .textContent, never innerHTML/
+// insertAdjacentHTML, same as the rest of this file.
+(function () {
+  const PROTOCOL_TEMPLATES = {
+    mc: {
+      withNet: (windowText, channel) =>
+        'MeshCore: net check-in runs ' + windowText + ', in the ' + channel + ' channel.',
+      withoutNet: () =>
+        "MeshCore: net check-in isn't set up yet — time and channel to follow once they're decided.",
+    },
+    mt: {
+      withNet: (windowText, channel) =>
+        'Meshtastic: net check-in runs ' + windowText + ', your message must include ' + channel + ' to count.',
+      withoutNet: () =>
+        "Meshtastic: net check-in isn't set up yet — time and hashtag to follow once they're decided.",
+    },
+  };
+
+  function protocolDescText(community, protocol) {
+    const templates = PROTOCOL_TEMPLATES[protocol];
+    if (!templates) return null;
+    const nets = Array.isArray(community.nets) ? community.nets : [];
+    const net = nets.find((n) => n.protocol === protocol);
+    return net ? templates.withNet(net.window_text, net.channel) : templates.withoutNet();
+  }
+
+  function buildCommunityItem(community) {
+    const li = document.createElement('li');
+
+    if (community.url) {
+      const a = document.createElement('a');
+      a.href = community.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = community.name;
+      li.appendChild(a);
+    } else {
+      const span = document.createElement('span');
+      span.className = 'landing-link-name';
+      span.textContent = community.name;
+      li.appendChild(span);
+    }
+
+    const protocols = Array.isArray(community.protocols) ? community.protocols : [];
+    protocols.forEach((protocol) => {
+      const text = protocolDescText(community, protocol);
+      if (!text) return;
+      const desc = document.createElement('span');
+      desc.className = 'landing-link-desc';
+      desc.textContent = text;
+      li.appendChild(desc);
+    });
+
+    if (community.blurb) {
+      const blurb = document.createElement('span');
+      blurb.className = 'landing-link-desc';
+      blurb.textContent = community.blurb;
+      li.appendChild(blurb);
+    }
+
+    return li;
+  }
+
+  async function loadCommunities() {
+    const host = document.getElementById('community-list');
+    if (!host) return;
+    try {
+      const res = await fetch('/api/about/communities');
+      if (!res.ok) return;
+      const communities = await res.json();
+      if (!Array.isArray(communities)) return;
+      communities.forEach((community) => host.appendChild(buildCommunityItem(community)));
+    } catch {
+      // Enhancement only -- leave the list empty rather than showing a
+      // broken page, same contract as loadScores()/loadPlayers() above.
+    }
+  }
+
+  loadCommunities();
+})();
