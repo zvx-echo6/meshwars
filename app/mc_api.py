@@ -1098,6 +1098,81 @@ async def mc_players() -> list[dict]:
     return result if result is not None else []
 
 
+@router.get("/api/about/communities")
+async def about_communities() -> list[dict]:
+    """Public, unauthenticated feed for frontend/about.html's "Where
+    it's played" section (see frontend/about.js) -- one entry per
+    community row with shown_on_about=1, ordered by display_order then
+    name (matching the hand-typed order the original about.html list
+    used before this replaced it).
+
+    Each entry carries only what the public page renders: name, region,
+    blurb, url, contact_url, its ENABLED linked checkin_net rows as
+    {protocol, window_text, channel} (channel being whichever of
+    channel/hashtag that net's kind actually uses -- see app/db.py's
+    checkin_net comment), and `protocols`, the set of protocols used by
+    ANY enabled connection (net or observation source) linked to this
+    community -- so a community with an observation source but no net
+    yet (e.g. a community still wardriving, with node confirmation
+    live but no check-in schedule decided) still tells the page which
+    protocol section to render a "Net check-in isn't set up yet" line
+    under.
+
+    Deliberately NEVER exposes connector_url, credentials
+    (broker_password/channel_key/broker_username), topic_root, kind, or
+    any net/source id -- none of that is this table's business to leak
+    to an anonymous visitor (see checkin_net/observation_source's own
+    SECRET comments in app/db.py). Local import of net_window_text/kind
+    constants (not a module-level one) to avoid a circular import: app/
+    checkin.py itself imports app.mc_api.active_season.
+    """
+    from .checkin import KIND_BEACON, KIND_CORESCOPE, net_window_text
+
+    def run(conn):
+        communities = [dict(r) for r in conn.execute(
+            "SELECT id, name, region, blurb, url, contact_url FROM community "
+            " WHERE shown_on_about = 1 ORDER BY display_order, name"
+        ).fetchall()]
+        if not communities:
+            return []
+
+        nets_by_community: dict[int, list[dict]] = {}
+        protocols_by_community: dict[int, set[str]] = {}
+
+        for r in conn.execute(
+            "SELECT community_id, protocol, kind, channel, hashtag, weekday, start_hour, "
+            " end_hour, timezone FROM checkin_net WHERE enabled = 1 AND community_id IS NOT NULL"
+        ).fetchall():
+            cid = r["community_id"]
+            tag = r["channel"] if r["kind"] in (KIND_CORESCOPE, KIND_BEACON) else r["hashtag"]
+            nets_by_community.setdefault(cid, []).append({
+                "protocol": r["protocol"],
+                "window_text": net_window_text(dict(r)),
+                "channel": tag,
+            })
+            protocols_by_community.setdefault(cid, set()).add(r["protocol"])
+
+        for r in conn.execute(
+            "SELECT community_id, protocol FROM observation_source "
+            " WHERE enabled = 1 AND community_id IS NOT NULL"
+        ).fetchall():
+            protocols_by_community.setdefault(r["community_id"], set()).add(r["protocol"])
+
+        out = []
+        for c in communities:
+            cid = c["id"]
+            out.append({
+                "name": c["name"], "region": c["region"], "blurb": c["blurb"],
+                "url": c["url"], "contact_url": c["contact_url"],
+                "nets": nets_by_community.get(cid, []),
+                "protocols": sorted(protocols_by_community.get(cid, set())),
+            })
+        return out
+
+    result = _safe_query(run)
+    return result if result is not None else []
+
+
 def history_for(protocol: str) -> list[dict]:
     """Closed seasons for `protocol`, newest first, each with its final
     per-team tile tally.

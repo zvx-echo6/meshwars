@@ -40,7 +40,7 @@ from fastapi.responses import JSONResponse
 from . import discord_bot, discord_leaderboard, discord_notify, mc_api, mc_scoring, results
 from .admin_api import _log_admin_action, _role_guard
 from .checkin import (
-    checkin_streak, load_checkin_config, net_id_for_protocol_weekday, streak_points,
+    checkin_streak, load_checkin_config, net_id_for_protocol_weekday, net_window_text, streak_points,
     MC_PROTOCOL as CHK_MC,
     KIND_CORESCOPE, KIND_BEACON, KIND_MESHVIEW, KIND_MQTT, KIND_MQTT_MESHTASTIC, KIND_PROTOCOL,
     OFFICIAL_MESHTASTIC_MQTT_URL, OFFICIAL_MESHTASTIC_MQTT_USERNAME, OFFICIAL_MESHTASTIC_MQTT_PASSWORD,
@@ -844,6 +844,26 @@ def _validate_label(body) -> tuple[str, JSONResponse | None]:
     return label, None
 
 
+def _validate_community_id(body, conn) -> tuple[int | None, JSONResponse | None]:
+    """community_id -- shared by nets and observation sources: either
+    null (unlinked, the default for every row created before this
+    field existed) or the id of an EXISTING community row. Validated
+    against the database rather than just "is an int" so a stale or
+    mistyped id can never silently create a dangling reference -- the
+    same "prove it exists" discipline _validate_net_fields' timezone
+    check applies to ZoneInfo names.
+    """
+    community_id = body.get("community_id")
+    if community_id is None:
+        return None, None
+    if not isinstance(community_id, int) or isinstance(community_id, bool):
+        return None, JSONResponse({"error": "community_id must be an integer or null"}, status_code=400)
+    row = conn.execute("SELECT 1 FROM community WHERE id = ?", (community_id,)).fetchone()
+    if row is None:
+        return None, JSONResponse({"error": "community not found"}, status_code=400)
+    return community_id, None
+
+
 def _validate_kind_and_protocol(body) -> tuple[str, str, JSONResponse | None]:
     """`kind` is the admin's actual choice -- which connector
     implementation a row's connector_url speaks (see app/checkin.py's
@@ -994,7 +1014,7 @@ def _validate_mqtt_fields(body, kind: str, current: dict | None, noun: str) -> t
     }, None
 
 
-def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONResponse | None]:
+def _validate_net_fields(body, conn, current: dict | None = None) -> tuple[dict, JSONResponse | None]:
     """Validate and normalize a net's editable fields, shared by
     create and update below -- the same shape both routes need, so the
     rules can only ever say one thing about what a valid net looks
@@ -1005,6 +1025,9 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
     creating -- it is consulted ONLY for the two mqtt secret fields
     (broker_password/channel_key): see _validate_mqtt_fields for why
     those need the existing row and every other field does not.
+
+    `conn` is needed only to prove a submitted community_id actually
+    exists -- see _validate_community_id.
 
     Returns (fields, None) on success, where `fields` is ready to bind
     straight into an INSERT/UPDATE; on the first thing wrong, returns
@@ -1022,6 +1045,10 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
         return {}, err
 
     connector_url, err = _validate_connector_url(body, kind, "net")
+    if err is not None:
+        return {}, err
+
+    community_id, err = _validate_community_id(body, conn)
     if err is not None:
         return {}, err
 
@@ -1106,7 +1133,7 @@ def _validate_net_fields(body, current: dict | None = None) -> tuple[dict, JSONR
         "label": label, "kind": kind, "protocol": protocol, "connector_url": connector_url,
         "channel": channel, "hashtag": hashtag, "weekday": weekday,
         "start_hour": start_hour, "end_hour": end_hour, "timezone": timezone,
-        "start_date": start_date, "enabled": int(enabled),
+        "start_date": start_date, "enabled": int(enabled), "community_id": community_id,
         **mqtt_fields,
     }, None
 
@@ -1226,6 +1253,7 @@ async def admin_checkin_nets(request: Request):
             "SELECT * FROM checkin_net ORDER BY id").fetchall()]
         for n in nets:
             n["enabled"] = bool(n["enabled"])
+            n["window_text"] = net_window_text(n)
         unresolved = _unresolved_by_net(conn)
         checkin_counts = _checkin_counts_by_net(conn)
         for n in nets:
@@ -1263,21 +1291,22 @@ async def admin_checkin_net_create(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad request"}, status_code=400)
-    fields, err = _validate_net_fields(body)
-    if err is not None:
-        return err
 
     now = int(time.time())
     conn = connect()
     try:
+        fields, err = _validate_net_fields(body, conn)
+        if err is not None:
+            return err
+
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "INSERT INTO checkin_net(label, kind, protocol, connector_url, channel, hashtag, "
             " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at, "
-            " broker_username, broker_password, channel_key, topic_root) "
+            " broker_username, broker_password, channel_key, topic_root, community_id) "
             "VALUES (:label, :kind, :protocol, :connector_url, :channel, :hashtag, :weekday, "
             " :start_hour, :end_hour, :timezone, :start_date, :enabled, :created_at, "
-            " :broker_username, :broker_password, :channel_key, :topic_root)",
+            " :broker_username, :broker_password, :channel_key, :topic_root, :community_id)",
             {**fields, "created_at": now},
         )
         net_id = cur.lastrowid
@@ -1293,7 +1322,10 @@ async def admin_checkin_net_create(request: Request):
         conn.close()
     log.info("admin: created checkin net %d (%s, %s, %s)",
               net_id, fields["label"], fields["kind"], fields["connector_url"])
-    return JSONResponse(_scrub_secrets({"id": net_id, "created_at": now, **fields}), status_code=201)
+    return JSONResponse(
+        _scrub_secrets({"id": net_id, "created_at": now, "window_text": net_window_text(fields), **fields}),
+        status_code=201,
+    )
 
 
 @router.post("/api/admin/checkin/nets/update")
@@ -1330,14 +1362,14 @@ async def admin_checkin_net_update(request: Request):
         if existing is None:
             return JSONResponse({"error": "net not found"}, status_code=404)
 
-        fields, err = _validate_net_fields(body, current=dict(existing))
+        fields, err = _validate_net_fields(body, conn, current=dict(existing))
         if err is not None:
             return err
 
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "UPDATE checkin_net SET label=:label, kind=:kind, protocol=:protocol, "
-            " connector_url=:connector_url, channel=:channel, hashtag=:hashtag, "
+            " connector_url=:connector_url, channel=:channel, hashtag=:hashtag, community_id=:community_id, "
             " weekday=:weekday, start_hour=:start_hour, end_hour=:end_hour, "
             " timezone=:timezone, start_date=:start_date, enabled=:enabled, "
             " broker_username=:broker_username, broker_password=:broker_password, "
@@ -1356,7 +1388,7 @@ async def admin_checkin_net_update(request: Request):
     if not cur.rowcount:
         return JSONResponse({"error": "net not found"}, status_code=404)
     log.info("admin: updated checkin net %d", net_id)
-    return JSONResponse(_scrub_secrets({"id": net_id, **fields}))
+    return JSONResponse(_scrub_secrets({"id": net_id, "window_text": net_window_text(fields), **fields}))
 
 
 @router.post("/api/admin/checkin/nets/delete")
@@ -1619,7 +1651,7 @@ async def admin_checkin_channels(request: Request):
 # at all, only enabled/disabled.
 
 
-def _validate_source_fields(body, current: dict | None = None) -> tuple[dict, JSONResponse | None]:
+def _validate_source_fields(body, conn, current: dict | None = None) -> tuple[dict, JSONResponse | None]:
     """Validate and normalize an observation source's editable fields --
     modeled closely on _validate_net_fields above (same _NET_KINDS/
     KIND_PROTOCOL vocabulary, same connector_url and mqtt-secret
@@ -1653,6 +1685,10 @@ def _validate_source_fields(body, current: dict | None = None) -> tuple[dict, JS
         return {}, err
 
     connector_url, err = _validate_connector_url(body, kind, "source")
+    if err is not None:
+        return {}, err
+
+    community_id, err = _validate_community_id(body, conn)
     if err is not None:
         return {}, err
 
@@ -1699,7 +1735,7 @@ def _validate_source_fields(body, current: dict | None = None) -> tuple[dict, JS
 
     return {
         "label": label, "kind": kind, "protocol": protocol, "connector_url": connector_url,
-        "channel": channel, "enabled": int(enabled),
+        "channel": channel, "enabled": int(enabled), "community_id": community_id,
         **mqtt_fields,
     }, None
 
@@ -1746,19 +1782,20 @@ async def admin_observation_source_create(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "bad request"}, status_code=400)
-    fields, err = _validate_source_fields(body)
-    if err is not None:
-        return err
 
     now = int(time.time())
     conn = connect()
     try:
+        fields, err = _validate_source_fields(body, conn)
+        if err is not None:
+            return err
+
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "INSERT INTO observation_source(label, kind, protocol, connector_url, channel, "
-            " broker_username, broker_password, channel_key, topic_root, enabled, created_at) "
+            " broker_username, broker_password, channel_key, topic_root, enabled, created_at, community_id) "
             "VALUES (:label, :kind, :protocol, :connector_url, :channel, "
-            " :broker_username, :broker_password, :channel_key, :topic_root, :enabled, :created_at)",
+            " :broker_username, :broker_password, :channel_key, :topic_root, :enabled, :created_at, :community_id)",
             {**fields, "created_at": now},
         )
         source_id = cur.lastrowid
@@ -1815,14 +1852,14 @@ async def admin_observation_source_update(request: Request):
         if existing is None:
             return JSONResponse({"error": "source not found"}, status_code=404)
 
-        fields, err = _validate_source_fields(body, current=dict(existing))
+        fields, err = _validate_source_fields(body, conn, current=dict(existing))
         if err is not None:
             return err
 
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "UPDATE observation_source SET label=:label, kind=:kind, protocol=:protocol, "
-            " connector_url=:connector_url, channel=:channel, "
+            " connector_url=:connector_url, channel=:channel, community_id=:community_id, "
             " broker_username=:broker_username, broker_password=:broker_password, "
             " channel_key=:channel_key, topic_root=:topic_root, enabled=:enabled "
             " WHERE id=:id",
@@ -1889,6 +1926,369 @@ async def admin_observation_source_delete(request: Request):
         conn.close()
     log.info("admin: deleted observation source %d (%s)", source_id, label)
     return JSONResponse({"id": source_id, "deleted": True})
+
+
+# ---- conversion: net <-> observation source -----------------------------
+#
+# A connector's shape (kind/protocol/connector_url/channel/broker
+# credentials/enabled/community_id) is identical on both tables -- see
+# observation_source's own comment in app/db.py -- so switching whether
+# a row scores a net or not never needs the operator to re-type any of
+# that, only to add or drop the schedule fields. Both directions run as
+# ONE transaction (delete the old row, insert the new one, log the
+# action) so a caller never observes a state with neither row or both.
+#
+# History safety: app/admin_ops.py's admin_checkin_net_delete documents
+# that deleting a checkin_net row cannot destroy or orphan a player's
+# earned history, because mc_checkin_award's PRIMARY KEY is
+# (season_id, player_id, net_date) and its net_id column (see that
+# table's own comment in app/db.py) is a nullable, non-foreign-key
+# informational tag -- a row whose net_id pointed at a since-deleted
+# net simply keeps that now-dangling id forever, exactly as it already
+# would after a plain delete. Converting a net to a source deletes the
+# checkin_net row the same way admin_checkin_net_delete does (no new
+# behavior), so it carries the identical, already-accepted risk
+# profile and nothing more. observation_source has no history table
+# that references it at all -- app/checkin.py's _distinct_connectors
+# (the only reader of BOTH tables together) matches by (kind,
+# connector_url), never by id -- so converting a source to a net cannot
+# orphan anything on that side either.
+
+
+@router.post("/api/admin/checkin/nets/convert-to-source")
+async def admin_checkin_net_convert_to_source(request: Request):
+    """Convert an existing net into an observation source: same label,
+    kind, connector fields, credentials, enabled, and community_id;
+    the net's schedule (weekday/start_hour/end_hour/timezone/
+    start_date/hashtag) is dropped, since observation_source has no
+    such columns at all (see that table's comment in app/db.py). The
+    net row is deleted and a new source row is created in the same
+    transaction -- see the module comment above for why this carries
+    no more history risk than a plain net delete already does.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    net_id = body.get("id") if isinstance(body, dict) else None
+    if not isinstance(net_id, int) or isinstance(net_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    conn = connect()
+    try:
+        existing = conn.execute("SELECT * FROM checkin_net WHERE id = ?", (net_id,)).fetchone()
+        if existing is None:
+            return JSONResponse({"error": "net not found"}, status_code=404)
+        existing = dict(existing)
+
+        source_body = {
+            "label": existing["label"], "kind": existing["kind"], "protocol": existing["protocol"],
+            "connector_url": existing["connector_url"], "channel": existing["channel"],
+            "broker_username": existing["broker_username"], "broker_password": existing["broker_password"],
+            "channel_key": existing["channel_key"], "topic_root": existing["topic_root"],
+            "enabled": bool(existing["enabled"]), "community_id": existing["community_id"],
+        }
+        fields, err = _validate_source_fields(source_body, conn)
+        if err is not None:
+            return err
+
+        now = int(time.time())
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM checkin_net WHERE id = ?", (net_id,))
+        cur = conn.execute(
+            "INSERT INTO observation_source(label, kind, protocol, connector_url, channel, "
+            " broker_username, broker_password, channel_key, topic_root, enabled, created_at, community_id) "
+            "VALUES (:label, :kind, :protocol, :connector_url, :channel, "
+            " :broker_username, :broker_password, :channel_key, :topic_root, :enabled, :created_at, :community_id)",
+            {**fields, "created_at": now},
+        )
+        source_id = cur.lastrowid
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="checkin_net_convert_to_source",
+            detail=f"net_id={net_id} -> source_id={source_id} label={fields['label']!r}", now=now,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    log.info("admin: converted checkin net %d to observation source %d", net_id, source_id)
+    return JSONResponse(_scrub_secrets({"id": source_id, "created_at": now, **fields}), status_code=201)
+
+
+@router.post("/api/admin/observation/sources/convert-to-net")
+async def admin_observation_source_convert_to_net(request: Request):
+    """Convert an existing observation source into a net: same label,
+    kind, connector fields, credentials, enabled, and community_id,
+    plus the schedule fields REQUIRED to make it scoreable
+    (weekday/start_hour/end_hour/timezone/start_date, and hashtag where
+    the kind needs one -- see _validate_net_fields). The source row is
+    deleted and a new net row is created in the same transaction -- see
+    the module comment above for why this is safe.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    source_id = body.get("id")
+    if not isinstance(source_id, int) or isinstance(source_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    conn = connect()
+    try:
+        existing = conn.execute(
+            "SELECT * FROM observation_source WHERE id = ?", (source_id,)).fetchone()
+        if existing is None:
+            return JSONResponse({"error": "source not found"}, status_code=404)
+        existing = dict(existing)
+
+        net_body = {
+            "label": existing["label"], "kind": existing["kind"], "protocol": existing["protocol"],
+            "connector_url": existing["connector_url"], "channel": existing["channel"],
+            "hashtag": body.get("hashtag"),
+            "broker_username": existing["broker_username"], "broker_password": existing["broker_password"],
+            "channel_key": existing["channel_key"], "topic_root": existing["topic_root"],
+            "enabled": bool(existing["enabled"]), "community_id": existing["community_id"],
+            "weekday": body.get("weekday"), "start_hour": body.get("start_hour"),
+            "end_hour": body.get("end_hour"), "timezone": body.get("timezone"),
+            "start_date": body.get("start_date"),
+        }
+        fields, err = _validate_net_fields(net_body, conn)
+        if err is not None:
+            return err
+
+        now = int(time.time())
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM observation_source WHERE id = ?", (source_id,))
+        cur = conn.execute(
+            "INSERT INTO checkin_net(label, kind, protocol, connector_url, channel, hashtag, "
+            " weekday, start_hour, end_hour, timezone, start_date, enabled, created_at, "
+            " broker_username, broker_password, channel_key, topic_root, community_id) "
+            "VALUES (:label, :kind, :protocol, :connector_url, :channel, :hashtag, :weekday, "
+            " :start_hour, :end_hour, :timezone, :start_date, :enabled, :created_at, "
+            " :broker_username, :broker_password, :channel_key, :topic_root, :community_id)",
+            {**fields, "created_at": now},
+        )
+        net_id = cur.lastrowid
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="observation_source_convert_to_net",
+            detail=f"source_id={source_id} -> net_id={net_id} label={fields['label']!r}", now=now,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    log.info("admin: converted observation source %d to checkin net %d", source_id, net_id)
+    return JSONResponse(
+        _scrub_secrets({"id": net_id, "created_at": now, "window_text": net_window_text(fields), **fields}),
+        status_code=201,
+    )
+
+
+# ---- communities: presentational grouping for the public "Where it's
+# played" page (app/db.py's community table, GET /api/about/communities
+# in app/mc_api.py). CRUD here mirrors the nets/sources routes above --
+# same _role_guard, same label-confirmation delete, same admin_action_log
+# convention.
+
+
+def _validate_community_fields(body) -> tuple[dict, JSONResponse | None]:
+    """name is the only required field -- everything else is optional
+    descriptive text/links or display controls, defaulted the same way
+    the `community` table itself defaults them (see app/db.py).
+    """
+    if not isinstance(body, dict):
+        return {}, JSONResponse({"error": "bad request"}, status_code=400)
+    name = (body.get("name") or "").strip()
+    if not name:
+        return {}, JSONResponse({"error": "name is required"}, status_code=400)
+
+    region = (body.get("region") or "").strip()
+    blurb = (body.get("blurb") or "").strip()
+    url = (body.get("url") or "").strip()
+    contact_url = (body.get("contact_url") or "").strip()
+
+    display_order = body.get("display_order", 0)
+    if not isinstance(display_order, int) or isinstance(display_order, bool):
+        return {}, JSONResponse({"error": "display_order must be an integer"}, status_code=400)
+
+    shown_on_about = bool(body.get("shown_on_about", True))
+
+    return {
+        "name": name, "region": region, "blurb": blurb, "url": url, "contact_url": contact_url,
+        "display_order": display_order, "shown_on_about": int(shown_on_about),
+    }, None
+
+
+@router.get("/api/admin/communities")
+async def admin_communities(request: Request):
+    """Every community row, for the admin panel's Communities sub-list
+    inside the merged Connections section.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    conn = connect()
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM community ORDER BY display_order, name").fetchall()]
+        for r in rows:
+            r["shown_on_about"] = bool(r["shown_on_about"])
+    finally:
+        conn.close()
+    return JSONResponse({"communities": rows})
+
+
+@router.post("/api/admin/communities/create")
+async def admin_community_create(request: Request):
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    fields, err = _validate_community_fields(body)
+    if err is not None:
+        return err
+
+    now = int(time.time())
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "INSERT INTO community(name, region, blurb, url, contact_url, display_order, "
+            " shown_on_about, created_at) "
+            "VALUES (:name, :region, :blurb, :url, :contact_url, :display_order, "
+            " :shown_on_about, :created_at)",
+            {**fields, "created_at": now},
+        )
+        community_id = cur.lastrowid
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="community_create",
+            detail=f"community_id={community_id} name={fields['name']!r}", now=now,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    log.info("admin: created community %d (%s)", community_id, fields["name"])
+    return JSONResponse({"id": community_id, "created_at": now, **fields}, status_code=201)
+
+
+@router.post("/api/admin/communities/update")
+async def admin_community_update(request: Request):
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    community_id = body.get("id")
+    if not isinstance(community_id, int) or isinstance(community_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    fields, err = _validate_community_fields(body)
+    if err is not None:
+        return err
+
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE community SET name=:name, region=:region, blurb=:blurb, url=:url, "
+            " contact_url=:contact_url, display_order=:display_order, shown_on_about=:shown_on_about "
+            " WHERE id=:id",
+            {**fields, "id": community_id},
+        )
+        if cur.rowcount:
+            _log_admin_action(
+                conn, actor_account_id=session.account_id, action="community_update",
+                detail=f"community_id={community_id} name={fields['name']!r}",
+            )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    if not cur.rowcount:
+        return JSONResponse({"error": "community not found"}, status_code=404)
+    log.info("admin: updated community %d", community_id)
+    return JSONResponse({"id": community_id, **fields})
+
+
+@router.post("/api/admin/communities/delete")
+async def admin_community_delete(request: Request):
+    """Remove a community. The caller must supply its exact `name` as
+    confirmation, same guard as every other delete route above.
+
+    Deleting a community does NOT delete or disable any net/source
+    linked to it -- their community_id is set to NULL (unlinked),
+    exactly as if the operator had cleared the field on each one by
+    hand. Returns how many of each were unlinked.
+    """
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad request"}, status_code=400)
+    community_id = body.get("id") if isinstance(body, dict) else None
+    name = body.get("name") if isinstance(body, dict) else None
+    if not isinstance(community_id, int) or isinstance(community_id, bool):
+        return JSONResponse({"error": "id is required"}, status_code=400)
+    if not isinstance(name, str) or not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT name FROM community WHERE id = ?", (community_id,)).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "community not found"}, status_code=404)
+        if row["name"] != name:
+            conn.execute("ROLLBACK")
+            return JSONResponse({"error": "name does not match"}, status_code=409)
+        nets_cur = conn.execute(
+            "UPDATE checkin_net SET community_id = NULL WHERE community_id = ?", (community_id,))
+        sources_cur = conn.execute(
+            "UPDATE observation_source SET community_id = NULL WHERE community_id = ?", (community_id,))
+        conn.execute("DELETE FROM community WHERE id = ?", (community_id,))
+        _log_admin_action(
+            conn, actor_account_id=session.account_id, action="community_delete",
+            detail=f"community_id={community_id} name={name!r} "
+                   f"unlinked_nets={nets_cur.rowcount} unlinked_sources={sources_cur.rowcount}",
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    log.info("admin: deleted community %d (%s), unlinked %d nets and %d sources",
+              community_id, name, nets_cur.rowcount, sources_cur.rowcount)
+    return JSONResponse({
+        "id": community_id, "deleted": True,
+        "unlinked_nets": nets_cur.rowcount, "unlinked_sources": sources_cur.rowcount,
+    })
 
 
 # ---- paint source: meshview vs FreqMapper (app/db.py's freqmapper_config,

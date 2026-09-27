@@ -264,6 +264,93 @@ KIND_PROTOCOL = {
     KIND_MQTT_MESHTASTIC: MT_PROTOCOL,
 }
 
+# ---- public schedule wording (frontend/about.html's "Where it's
+# played" section, via GET /api/about/communities in app/mc_api.py) ----
+#
+# Python's datetime.weekday(): 0=Monday .. 6=Sunday -- the same
+# convention checkin_net.weekday itself already uses (see that column's
+# comment in app/db.py) and _award_checkin's own window check above
+# reads directly, so there is never a second day-numbering scheme to
+# keep in sync with this one.
+_WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+)
+_WEEKDAY_PLURALS = (
+    "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays",
+)
+
+# Friendly region names for the timezones MeshWars communities actually
+# use today -- anything else falls back to its own IANA name (see
+# net_window_text below) rather than guessing at a US region label for
+# a zone nobody has configured yet.
+_TZ_DISPLAY_NAMES = {
+    "America/Boise": "Mountain",
+    "America/Denver": "Mountain",
+    "America/Los_Angeles": "Pacific",
+    "America/Chicago": "Central",
+    "America/New_York": "Eastern",
+}
+
+
+def _format_hour_12(hour: int) -> str:
+    """0-23 -> "12:00am".."11:00pm", on the hour -- every net window
+    boundary is a whole hour (see checkin_net.start_hour/end_hour, both
+    INTEGER 0-23), so there is never a minutes component to render.
+    """
+    period = "am" if hour < 12 else "pm"
+    h = hour % 12
+    if h == 0:
+        h = 12
+    return f"{h}:00{period}"
+
+
+def net_window_text(net: dict) -> str:
+    """The public wording for one net's schedule -- "Wednesdays, 5:00pm
+    to midnight Mountain time" or, for an all-day window, "all day
+    Thursday, Mountain time". `net` is a checkin_net row (a dict or
+    sqlite3.Row) carrying at least weekday/start_hour/end_hour/timezone.
+
+    end_hour is INCLUSIVE THROUGH :59:59 (see _award_checkin's own
+    window check above, `start_hour <= local.hour <= end_hour`, and
+    checkin_net.end_hour's comment in app/db.py) -- so a window's true
+    end instant is end_hour+1:00, not end_hour:00. end_hour=23 is
+    therefore worded as "midnight" (hour 24 of the same day), not
+    "11:00pm", and a window with end_hour=11 is worded "to noon", not
+    "to 11:00pm" -- both computed from end_hour+1, never end_hour
+    itself.
+
+    start_hour=0 AND end_hour=23 together mean the window never closes
+    within the day at all, so this is worded as "all day <Weekday>"
+    instead of the misleading "12:00am to midnight" a literal reading
+    of the two hours would produce -- matching how the existing
+    Colorado Mesh and Central Oregon entries on about.html already
+    describe their own all-day nets.
+
+    Every OTHER window is worded "<Weekdays>, <start> to <end> <tz>
+    time" -- the plural weekday form (see how "Wednesdays" reads more
+    naturally than "Wednesday" for a recurring weekly window), the
+    exact pattern the FREQ51/Mountain West Mesh/NTX Mesh entries on
+    about.html already use, word for word.
+    """
+    weekday = int(net["weekday"])
+    start_hour = int(net["start_hour"])
+    end_hour = int(net["end_hour"])
+    timezone = net["timezone"]
+    tz_name = _TZ_DISPLAY_NAMES.get(timezone, timezone)
+
+    if start_hour == 0 and end_hour == 23:
+        return f"all day {_WEEKDAY_NAMES[weekday]}, {tz_name} time"
+
+    end_display_hour = end_hour + 1
+    if end_display_hour == 24:
+        end_str = "midnight"
+    elif end_display_hour == 12:
+        end_str = "noon"
+    else:
+        end_str = _format_hour_12(end_display_hour % 24)
+    start_str = _format_hour_12(start_hour)
+    return f"{_WEEKDAY_PLURALS[weekday]}, {start_str} to {end_str} {tz_name} time"
+
 
 def _distinct_connectors(conn, kinds: tuple[str, ...]) -> list[dict]:
     """DISTINCT (kind, connector_url) pairs, of any of `kinds`, across
