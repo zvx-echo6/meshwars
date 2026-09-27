@@ -167,18 +167,27 @@
     const blurb = community.blurb || '';
 
     let lead = prefix;
-    if (blurb) lead += blurb + ' ';
+    // "Net check-in..." is capitalized only when it starts a NEW
+    // sentence after a completed blurb (e.g. "...check-ins. Net check-in
+    // runs..."); with no blurb, it continues directly after the
+    // "Protocol: " prefix as one sentence ("MeshCore: net check-in
+    // runs...", lowercase) -- matches production's own inconsistent-
+    // looking but grammatically correct capitalization exactly (compare
+    // NTX Mesh, no blurb, lowercase "net" vs FREQ51/Colorado/Mountain
+    // West, all with a blurb, capital "Net").
+    let netWord = 'net';
+    if (blurb) { lead += blurb + ' '; netWord = 'Net'; }
 
     if (protocol === 'mc') {
       if (net && net.channel) {
-        desc.appendChild(document.createTextNode(lead + 'Net check-in runs ' + net.window_text + ', in the '));
+        desc.appendChild(document.createTextNode(lead + netWord + ' check-in runs ' + net.window_text + ', in the '));
         const strong = document.createElement('strong');
         strong.textContent = net.channel;
         desc.appendChild(strong);
         desc.appendChild(document.createTextNode(' channel.'));
       } else {
         desc.appendChild(document.createTextNode(
-          lead + "Net check-in isn't set up yet — time and channel to follow once they're decided."));
+          lead + netWord + " check-in isn't set up yet — time and channel to follow once they're decided."));
       }
       return true;
     }
@@ -186,13 +195,13 @@
     // protocol === 'mt'
     if (net && net.hashtag) {
       if (net.channel) {
-        desc.appendChild(document.createTextNode(lead + 'Net check-in runs ' + net.window_text + ', in the '));
+        desc.appendChild(document.createTextNode(lead + netWord + ' check-in runs ' + net.window_text + ', in the '));
         const channelStrong = document.createElement('strong');
         channelStrong.textContent = net.channel;
         desc.appendChild(channelStrong);
         desc.appendChild(document.createTextNode(' channel — your message must include '));
       } else {
-        desc.appendChild(document.createTextNode(lead + 'Net check-in runs ' + net.window_text + ' — your message must include '));
+        desc.appendChild(document.createTextNode(lead + netWord + ' check-in runs ' + net.window_text + ' — your message must include '));
       }
       const hashtagStrong = document.createElement('strong');
       hashtagStrong.textContent = net.hashtag;
@@ -200,7 +209,7 @@
       desc.appendChild(document.createTextNode(' to count.'));
     } else {
       desc.appendChild(document.createTextNode(
-        lead + "Net check-in isn't set up yet — time and hashtag to follow once they're decided."));
+        lead + netWord + " check-in isn't set up yet — time and hashtag to follow once they're decided."));
     }
     return true;
   }
