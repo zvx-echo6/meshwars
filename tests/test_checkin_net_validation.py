@@ -126,8 +126,20 @@ def test_meshview_without_hashtag_is_400():
     assert err.status_code == 400
 
 
-def test_meshview_forces_channel_to_empty_string():
-    fields, err = _validate_net_fields(_meshview_net(channel="some-channel-that-should-be-dropped"), None)
+def test_meshview_channel_is_kept_not_forced_blank():
+    # Changed behavior (Connections feature): a meshview net's channel
+    # is no longer discarded -- it's optional, purely-display config
+    # (the public about-page wording reads it straight off this column,
+    # see GET /api/about/communities in app/mc_api.py). Matching still
+    # happens by hashtag alone -- this must never change.
+    fields, err = _validate_net_fields(_meshview_net(channel="Freq51"), None)
+    assert err is None
+    assert fields["channel"] == "Freq51"
+    assert fields["hashtag"] == "#freq51"
+
+
+def test_meshview_blank_channel_still_accepted():
+    fields, err = _validate_net_fields(_meshview_net(channel=""), None)
     assert err is None
     assert fields["channel"] == ""
 

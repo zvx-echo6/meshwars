@@ -444,7 +444,7 @@ def test_about_communities_shape_and_ordering(client):
     assert len(alpha["nets"]) == 1
     assert alpha["nets"][0] == {
         "protocol": "mc", "window_text": "Wednesdays, 5:00pm to midnight Mountain time",
-        "channel": "general",
+        "channel": "general", "hashtag": "",
     }
 
     zeta = data[1]

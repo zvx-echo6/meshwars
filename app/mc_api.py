@@ -1108,25 +1108,30 @@ async def about_communities() -> list[dict]:
 
     Each entry carries only what the public page renders: name, region,
     blurb, url, contact_url, its ENABLED linked checkin_net rows as
-    {protocol, window_text, channel} (channel being whichever of
-    channel/hashtag that net's kind actually uses -- see app/db.py's
-    checkin_net comment), and `protocols`, the set of protocols used by
-    ANY enabled connection (net or observation source) linked to this
-    community -- so a community with an observation source but no net
-    yet (e.g. a community still wardriving, with node confirmation
-    live but no check-in schedule decided) still tells the page which
-    protocol section to render a "Net check-in isn't set up yet" line
-    under.
+    {protocol, window_text, channel, hashtag} -- BOTH raw columns, not
+    merged into one, since a Meshtastic net can now carry a human
+    channel NAME (e.g. "Freq51") alongside the hashtag that actually
+    drives matching (see _validate_net_fields in app/admin_ops.py --
+    channel is no longer forced blank for a meshview net); channel is
+    always '' for a MeshCore net's hashtag column and vice versa (see
+    checkin_net's own comment in app/db.py), so a caller can always
+    tell which one is real for a given protocol without needing `kind`.
+    Also carries `protocols`, the set of protocols used by ANY enabled
+    connection (net or observation source) linked to this community --
+    so a community with an observation source but no net yet (e.g. a
+    community still wardriving, with node confirmation live but no
+    check-in schedule decided) still tells the page which protocol
+    section to render a "Net check-in isn't set up yet" line under.
 
     Deliberately NEVER exposes connector_url, credentials
     (broker_password/channel_key/broker_username), topic_root, kind, or
     any net/source id -- none of that is this table's business to leak
     to an anonymous visitor (see checkin_net/observation_source's own
-    SECRET comments in app/db.py). Local import of net_window_text/kind
-    constants (not a module-level one) to avoid a circular import: app/
-    checkin.py itself imports app.mc_api.active_season.
+    SECRET comments in app/db.py). Local import of net_window_text (not
+    a module-level one) to avoid a circular import: app/checkin.py
+    itself imports app.mc_api.active_season.
     """
-    from .checkin import KIND_BEACON, KIND_CORESCOPE, net_window_text
+    from .checkin import net_window_text
 
     def run(conn):
         communities = [dict(r) for r in conn.execute(
@@ -1144,11 +1149,11 @@ async def about_communities() -> list[dict]:
             " end_hour, timezone FROM checkin_net WHERE enabled = 1 AND community_id IS NOT NULL"
         ).fetchall():
             cid = r["community_id"]
-            tag = r["channel"] if r["kind"] in (KIND_CORESCOPE, KIND_BEACON) else r["hashtag"]
             nets_by_community.setdefault(cid, []).append({
                 "protocol": r["protocol"],
                 "window_text": net_window_text(dict(r)),
-                "channel": tag,
+                "channel": r["channel"],
+                "hashtag": r["hashtag"],
             })
             protocols_by_community.setdefault(cid, set()).add(r["protocol"])
 

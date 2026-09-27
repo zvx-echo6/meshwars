@@ -1113,7 +1113,16 @@ def _validate_net_fields(body, conn, current: dict | None = None) -> tuple[dict,
         if not hashtag:
             return {}, JSONResponse(
                 {"error": "hashtag is required for a Meshtastic net"}, status_code=400)
-        channel = ""
+        # channel is OPTIONAL and no longer forced blank here: matching
+        # stays by hashtag alone (see app/checkin.py's _process_mt_packet
+        # -- unchanged), but the admin panel now lets an operator record
+        # the human channel NAME a meshview net's check-ins are actually
+        # posted in (e.g. "Freq51"), purely for display -- GET
+        # /api/about/communities reads it straight off this column for
+        # the public "in the X channel" wording (see app/mc_api.py).
+        # Stored as submitted if given; blank stays blank, same as
+        # before, for a net with nothing worth naming.
+        pass
     else:
         # kind in (KIND_MQTT, KIND_MQTT_MESHTASTIC)
         if not hashtag:
