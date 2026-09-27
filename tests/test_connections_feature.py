@@ -418,20 +418,15 @@ def test_convert_round_trip_does_not_touch_award_history(client, db_path):
 # ---------------------------------------------------------------------
 
 def test_about_communities_shape_and_ordering(client):
-    c1 = client.post(
+    client.post(
         "/api/admin/communities/create",
         json={"name": "Zeta Mesh", "region": "OR", "blurb": "Wardriving live.",
               "url": "https://zeta.example", "contact_url": "https://zeta.example/contact",
               "display_order": 2},
-    ).json()["id"]
-    c2 = client.post(
+    )
+    client.post(
         "/api/admin/communities/create",
         json={"name": "Alpha Mesh", "display_order": 1},
-    ).json()["id"]
-
-    client.post(
-        "/api/admin/checkin/nets/create",
-        json=_corescope_net(label="Alpha Net", community_id=c2),
     )
 
     resp = client.get("/api/about/communities")
@@ -439,18 +434,13 @@ def test_about_communities_shape_and_ordering(client):
     data = resp.json()
     assert [c["name"] for c in data] == ["Alpha Mesh", "Zeta Mesh"]  # display_order first
 
-    alpha = data[0]
-    assert alpha["protocols"] == ["mc"]
-    assert len(alpha["nets"]) == 1
-    assert alpha["nets"][0] == {
-        "protocol": "mc", "window_text": "Wednesdays, 5:00pm to midnight Mountain time",
-        "channel": "general", "hashtag": "",
-    }
-
+    # Exactly these 4 fields -- Matt's call: every entry's wording is
+    # hand-written (blurb/Description), nothing assembled from net data.
     zeta = data[1]
-    assert zeta["blurb"] == "Wardriving live."
-    assert zeta["nets"] == []
-    assert zeta["protocols"] == []
+    assert zeta == {
+        "name": "Zeta Mesh", "url": "https://zeta.example", "blurb": "Wardriving live.",
+        "display_order": 2,
+    }
 
 
 def test_about_communities_excludes_shown_on_about_false(client):
@@ -462,27 +452,10 @@ def test_about_communities_excludes_shown_on_about_false(client):
     assert resp.json() == []
 
 
-def test_about_communities_excludes_disabled_nets_and_sources(client):
+def test_about_communities_never_exposes_region_contact_or_connector_fields(client):
     community_id = client.post(
-        "/api/admin/communities/create", json={"name": "Quiet Mesh"}
-    ).json()["id"]
-    client.post(
-        "/api/admin/checkin/nets/create",
-        json=_corescope_net(community_id=community_id, enabled=False),
-    )
-    client.post(
-        "/api/admin/observation/sources/create",
-        json=_meshview_source(community_id=community_id, enabled=False),
-    )
-    resp = client.get("/api/about/communities")
-    data = resp.json()
-    assert data[0]["nets"] == []
-    assert data[0]["protocols"] == []
-
-
-def test_about_communities_never_exposes_secrets_or_connector_fields(client):
-    community_id = client.post(
-        "/api/admin/communities/create", json={"name": "Secret Mesh"}
+        "/api/admin/communities/create",
+        json={"name": "Secret Mesh", "region": "Secretville", "contact_url": "mailto:ops@example.com"},
     ).json()["id"]
     client.post(
         "/api/admin/checkin/nets/create",
@@ -502,6 +475,7 @@ def test_about_communities_never_exposes_secrets_or_connector_fields(client):
     for forbidden in (
         "s3cret", "brokeruser", "broker_password", "broker_username", "channel_key",
         "topic_root", "connector_url", "https://secret.example", "mqtt://broker.private",
-        "\"id\":", "\"kind\":",
+        "\"id\":", "\"kind\":", "region", "Secretville", "contact_url", "ops@example.com",
+        "protocol", "window_text", "hashtag", "channel", "nets",
     ):
         assert forbidden not in raw, f"leaked forbidden field/value: {forbidden!r}"

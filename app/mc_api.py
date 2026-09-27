@@ -1106,73 +1106,25 @@ async def about_communities() -> list[dict]:
     name (matching the hand-typed order the original about.html list
     used before this replaced it).
 
-    Each entry carries only what the public page renders: name, region,
-    blurb, url, contact_url, its ENABLED linked checkin_net rows as
-    {protocol, window_text, channel, hashtag} -- BOTH raw columns, not
-    merged into one, since a Meshtastic net can now carry a human
-    channel NAME (e.g. "Freq51") alongside the hashtag that actually
-    drives matching (see _validate_net_fields in app/admin_ops.py --
-    channel is no longer forced blank for a meshview net); channel is
-    always '' for a MeshCore net's hashtag column and vice versa (see
-    checkin_net's own comment in app/db.py), so a caller can always
-    tell which one is real for a given protocol without needing `kind`.
-    Also carries `protocols`, the set of protocols used by ANY enabled
-    connection (net or observation source) linked to this community --
-    so a community with an observation source but no net yet (e.g. a
-    community still wardriving, with node confirmation live but no
-    check-in schedule decided) still tells the page which protocol
-    section to render a "Net check-in isn't set up yet" line under.
-
-    Deliberately NEVER exposes connector_url, credentials
-    (broker_password/channel_key/broker_username), topic_root, kind, or
-    any net/source id -- none of that is this table's business to leak
-    to an anonymous visitor (see checkin_net/observation_source's own
-    SECRET comments in app/db.py). Local import of net_window_text (not
-    a module-level one) to avoid a circular import: app/checkin.py
-    itself imports app.mc_api.active_season.
+    Matt's call: every entry's wording is entirely his to write by hand
+    (the `blurb`/Description field, edited from the admin panel's
+    Connections section) -- nothing here is assembled from net/source
+    data anymore. This used to also return each community's enabled
+    checkin_net rows and the set of protocols in use, so frontend/
+    about.js could generate a schedule sentence itself; that generation
+    is gone (see about.js's own comment), so the checkin_net/
+    observation_source queries that fed it are gone too. Returns only
+    name, url, blurb, and display_order for a shown-on-about community
+    -- never region, contact_url, or any net/source/connector data.
     """
-    from .checkin import net_window_text
-
     def run(conn):
-        communities = [dict(r) for r in conn.execute(
-            "SELECT id, name, region, blurb, url, contact_url FROM community "
-            " WHERE shown_on_about = 1 ORDER BY display_order, name"
-        ).fetchall()]
-        if not communities:
-            return []
-
-        nets_by_community: dict[int, list[dict]] = {}
-        protocols_by_community: dict[int, set[str]] = {}
-
-        for r in conn.execute(
-            "SELECT community_id, protocol, kind, channel, hashtag, weekday, start_hour, "
-            " end_hour, timezone FROM checkin_net WHERE enabled = 1 AND community_id IS NOT NULL"
-        ).fetchall():
-            cid = r["community_id"]
-            nets_by_community.setdefault(cid, []).append({
-                "protocol": r["protocol"],
-                "window_text": net_window_text(dict(r)),
-                "channel": r["channel"],
-                "hashtag": r["hashtag"],
-            })
-            protocols_by_community.setdefault(cid, set()).add(r["protocol"])
-
-        for r in conn.execute(
-            "SELECT community_id, protocol FROM observation_source "
-            " WHERE enabled = 1 AND community_id IS NOT NULL"
-        ).fetchall():
-            protocols_by_community.setdefault(r["community_id"], set()).add(r["protocol"])
-
-        out = []
-        for c in communities:
-            cid = c["id"]
-            out.append({
-                "name": c["name"], "region": c["region"], "blurb": c["blurb"],
-                "url": c["url"], "contact_url": c["contact_url"],
-                "nets": nets_by_community.get(cid, []),
-                "protocols": sorted(protocols_by_community.get(cid, set())),
-            })
-        return out
+        return [
+            {"name": r["name"], "url": r["url"], "blurb": r["blurb"], "display_order": r["display_order"]}
+            for r in conn.execute(
+                "SELECT name, url, blurb, display_order FROM community "
+                " WHERE shown_on_about = 1 ORDER BY display_order, name"
+            ).fetchall()
+        ]
 
     result = _safe_query(run)
     return result if result is not None else []

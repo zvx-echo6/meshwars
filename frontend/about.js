@@ -123,97 +123,32 @@
 // ---- "Where it's played" community list ------------------------------
 //
 // GET /api/about/communities (public, unauthenticated -- see
-// app/admin_api.py's own docstring on that route) replaces what used
-// to be seven hand-typed <li> entries under #where with a live-fetched
-// list built the same way: one <li> per community, a link (or a plain
-// name when the community has no url, matching Central Oregon's
-// existing no-link style) followed by exactly ONE .landing-link-desc
-// span combining the protocol prefix, the community's own blurb, and
-// the net sentence -- matching production's own single-desc-line shape
-// (verified against a live curl of this page's markup; see each
-// template string below).
+// app/mc_api.py's own docstring on that route) replaces what used to be
+// seven hand-typed <li> entries under #where with a live-fetched list
+// built the same way: one <li> per community, a link (or a plain name
+// when the community has no url, matching Central Oregon's existing
+// no-link style) followed by its Description exactly as an operator
+// typed it in the admin panel.
+//
+// Matt's call: every entry's wording is entirely his to write by hand.
+// This file used to also assemble a protocol prefix, a net/schedule
+// sentence, and an "isn't set up yet" fallback from checkin_net/
+// observation_source data -- none of that exists anymore, on either
+// side: the server no longer even returns net/protocol data (see
+// app/mc_api.py), and this file no longer has any code that would
+// build a sentence from it. A community's `blurb` (admin panel:
+// "Description") is rendered verbatim, plain text, nothing added.
 //
 // Same "enhancement only" contract the stats band above documents --
 // a fetch failure or an empty response just leaves #community-list
 // empty; this never throws, and the rest of the page is unaffected.
 //
-// SECURITY: every field on a community (name, region, blurb, url,
-// contact_url, and each net's channel/hashtag/window_text) comes from
+// SECURITY: every field on a community (name, url, blurb) comes from
 // the server and is untrusted -- every element below is built with
 // document.createElement + .textContent, never innerHTML/
-// insertAdjacentHTML, same as the rest of this file. channel/hashtag
-// specifically go in via .textContent on a real <strong> element (never
-// interpolated into an HTML string), so the <strong> wrapping the
-// public page shows around them is genuine DOM, not string-built markup.
+// insertAdjacentHTML, same as the rest of this file. No bolding, no
+// markup of any kind inside a community's own text.
 (function () {
-  // One prefix per protocol, used at most once per community (Part E's
-  // own note: a community carrying both 'mc' and 'mt' doesn't exist in
-  // today's data -- if it ever does, only the first protocol found is
-  // used, deliberately not engineered further than that).
-  const PROTOCOL_PREFIX = { mc: 'MeshCore: ', mt: 'Meshtastic: ' };
-
-  // Builds the single .landing-link-desc span's contents (text nodes and
-  // real <strong> elements) for one community, appending them straight
-  // onto `desc`. Returns false if there is nothing to show at all
-  // (defensive only -- real seed data always has at least a protocol).
-  function appendDescContent(desc, community) {
-    const protocols = Array.isArray(community.protocols) ? community.protocols : [];
-    const protocol = protocols[0];
-    const prefix = PROTOCOL_PREFIX[protocol];
-    if (!prefix) return false;
-
-    const nets = Array.isArray(community.nets) ? community.nets : [];
-    const net = nets.find((n) => n.protocol === protocol);
-    const blurb = community.blurb || '';
-
-    let lead = prefix;
-    // "Net check-in..." is capitalized only when it starts a NEW
-    // sentence after a completed blurb (e.g. "...check-ins. Net check-in
-    // runs..."); with no blurb, it continues directly after the
-    // "Protocol: " prefix as one sentence ("MeshCore: net check-in
-    // runs...", lowercase) -- matches production's own inconsistent-
-    // looking but grammatically correct capitalization exactly (compare
-    // NTX Mesh, no blurb, lowercase "net" vs FREQ51/Colorado/Mountain
-    // West, all with a blurb, capital "Net").
-    let netWord = 'net';
-    if (blurb) { lead += blurb + ' '; netWord = 'Net'; }
-
-    if (protocol === 'mc') {
-      if (net && net.channel) {
-        desc.appendChild(document.createTextNode(lead + netWord + ' check-in runs ' + net.window_text + ', in the '));
-        const strong = document.createElement('strong');
-        strong.textContent = net.channel;
-        desc.appendChild(strong);
-        desc.appendChild(document.createTextNode(' channel.'));
-      } else {
-        desc.appendChild(document.createTextNode(
-          lead + netWord + " check-in isn't set up yet — time and channel to follow once they're decided."));
-      }
-      return true;
-    }
-
-    // protocol === 'mt'
-    if (net && net.hashtag) {
-      if (net.channel) {
-        desc.appendChild(document.createTextNode(lead + netWord + ' check-in runs ' + net.window_text + ', in the '));
-        const channelStrong = document.createElement('strong');
-        channelStrong.textContent = net.channel;
-        desc.appendChild(channelStrong);
-        desc.appendChild(document.createTextNode(' channel — your message must include '));
-      } else {
-        desc.appendChild(document.createTextNode(lead + netWord + ' check-in runs ' + net.window_text + ' — your message must include '));
-      }
-      const hashtagStrong = document.createElement('strong');
-      hashtagStrong.textContent = net.hashtag;
-      desc.appendChild(hashtagStrong);
-      desc.appendChild(document.createTextNode(' to count.'));
-    } else {
-      desc.appendChild(document.createTextNode(
-        lead + netWord + " check-in isn't set up yet — time and hashtag to follow once they're decided."));
-    }
-    return true;
-  }
-
   function buildCommunityItem(community) {
     const li = document.createElement('li');
 
@@ -231,9 +166,12 @@
       li.appendChild(span);
     }
 
-    const desc = document.createElement('span');
-    desc.className = 'landing-link-desc';
-    if (appendDescContent(desc, community)) li.appendChild(desc);
+    if (community.blurb) {
+      const desc = document.createElement('span');
+      desc.className = 'landing-link-desc';
+      desc.textContent = community.blurb;
+      li.appendChild(desc);
+    }
 
     return li;
   }
