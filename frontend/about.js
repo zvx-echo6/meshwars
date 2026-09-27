@@ -127,41 +127,82 @@
 // to be seven hand-typed <li> entries under #where with a live-fetched
 // list built the same way: one <li> per community, a link (or a plain
 // name when the community has no url, matching Central Oregon's
-// existing no-link style) followed by one .landing-link-desc span per
-// protocol the community has any enabled net or source on, plus the
-// community's own blurb as an additional span when it has one.
+// existing no-link style) followed by exactly ONE .landing-link-desc
+// span combining the protocol prefix, the community's own blurb, and
+// the net sentence -- matching production's own single-desc-line shape
+// (verified against a live curl of this page's markup; see each
+// template string below).
 //
 // Same "enhancement only" contract the stats band above documents --
 // a fetch failure or an empty response just leaves #community-list
 // empty; this never throws, and the rest of the page is unaffected.
 //
 // SECURITY: every field on a community (name, region, blurb, url,
-// contact_url, and each net's channel/window_text) comes from the
-// server and is untrusted -- every element below is built with
+// contact_url, and each net's channel/hashtag/window_text) comes from
+// the server and is untrusted -- every element below is built with
 // document.createElement + .textContent, never innerHTML/
-// insertAdjacentHTML, same as the rest of this file.
+// insertAdjacentHTML, same as the rest of this file. channel/hashtag
+// specifically go in via .textContent on a real <strong> element (never
+// interpolated into an HTML string), so the <strong> wrapping the
+// public page shows around them is genuine DOM, not string-built markup.
 (function () {
-  const PROTOCOL_TEMPLATES = {
-    mc: {
-      withNet: (windowText, channel) =>
-        'MeshCore: net check-in runs ' + windowText + ', in the ' + channel + ' channel.',
-      withoutNet: () =>
-        "MeshCore: net check-in isn't set up yet — time and channel to follow once they're decided.",
-    },
-    mt: {
-      withNet: (windowText, channel) =>
-        'Meshtastic: net check-in runs ' + windowText + ', your message must include ' + channel + ' to count.',
-      withoutNet: () =>
-        "Meshtastic: net check-in isn't set up yet — time and hashtag to follow once they're decided.",
-    },
-  };
+  // One prefix per protocol, used at most once per community (Part E's
+  // own note: a community carrying both 'mc' and 'mt' doesn't exist in
+  // today's data -- if it ever does, only the first protocol found is
+  // used, deliberately not engineered further than that).
+  const PROTOCOL_PREFIX = { mc: 'MeshCore: ', mt: 'Meshtastic: ' };
 
-  function protocolDescText(community, protocol) {
-    const templates = PROTOCOL_TEMPLATES[protocol];
-    if (!templates) return null;
+  // Builds the single .landing-link-desc span's contents (text nodes and
+  // real <strong> elements) for one community, appending them straight
+  // onto `desc`. Returns false if there is nothing to show at all
+  // (defensive only -- real seed data always has at least a protocol).
+  function appendDescContent(desc, community) {
+    const protocols = Array.isArray(community.protocols) ? community.protocols : [];
+    const protocol = protocols[0];
+    const prefix = PROTOCOL_PREFIX[protocol];
+    if (!prefix) return false;
+
     const nets = Array.isArray(community.nets) ? community.nets : [];
     const net = nets.find((n) => n.protocol === protocol);
-    return net ? templates.withNet(net.window_text, net.channel) : templates.withoutNet();
+    const blurb = community.blurb || '';
+
+    let lead = prefix;
+    if (blurb) lead += blurb + ' ';
+
+    if (protocol === 'mc') {
+      if (net && net.channel) {
+        desc.appendChild(document.createTextNode(lead + 'Net check-in runs ' + net.window_text + ', in the '));
+        const strong = document.createElement('strong');
+        strong.textContent = net.channel;
+        desc.appendChild(strong);
+        desc.appendChild(document.createTextNode(' channel.'));
+      } else {
+        desc.appendChild(document.createTextNode(
+          lead + "Net check-in isn't set up yet — time and channel to follow once they're decided."));
+      }
+      return true;
+    }
+
+    // protocol === 'mt'
+    if (net && net.hashtag) {
+      if (net.channel) {
+        desc.appendChild(document.createTextNode(lead + 'Net check-in runs ' + net.window_text + ', in the '));
+        const channelStrong = document.createElement('strong');
+        channelStrong.textContent = net.channel;
+        desc.appendChild(channelStrong);
+        desc.appendChild(document.createTextNode(' channel — your message must include '));
+      } else {
+        desc.appendChild(document.createTextNode(lead + 'Net check-in runs ' + net.window_text + ' — your message must include '));
+      }
+      const hashtagStrong = document.createElement('strong');
+      hashtagStrong.textContent = net.hashtag;
+      desc.appendChild(hashtagStrong);
+      desc.appendChild(document.createTextNode(' to count.'));
+    } else {
+      desc.appendChild(document.createTextNode(
+        lead + "Net check-in isn't set up yet — time and hashtag to follow once they're decided."));
+    }
+    return true;
   }
 
   function buildCommunityItem(community) {
@@ -181,22 +222,9 @@
       li.appendChild(span);
     }
 
-    const protocols = Array.isArray(community.protocols) ? community.protocols : [];
-    protocols.forEach((protocol) => {
-      const text = protocolDescText(community, protocol);
-      if (!text) return;
-      const desc = document.createElement('span');
-      desc.className = 'landing-link-desc';
-      desc.textContent = text;
-      li.appendChild(desc);
-    });
-
-    if (community.blurb) {
-      const blurb = document.createElement('span');
-      blurb.className = 'landing-link-desc';
-      blurb.textContent = community.blurb;
-      li.appendChild(blurb);
-    }
+    const desc = document.createElement('span');
+    desc.className = 'landing-link-desc';
+    if (appendDescContent(desc, community)) li.appendChild(desc);
 
     return li;
   }
