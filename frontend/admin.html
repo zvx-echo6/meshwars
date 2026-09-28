@@ -26,7 +26,7 @@
        admin.css (admin.css's own layout now shifts down by nav.css's
        --mw-nav-h). -->
   <link rel="stylesheet" href="/static/nav.css?v=20260904-2" />
-  <link rel="stylesheet" href="/static/admin.css?v=20260923-1" />
+  <link rel="stylesheet" href="/static/admin.css?v=20260928-3" />
 </head>
 <body>
 
@@ -134,8 +134,7 @@
             Accounts <span class="adm-nav-badge" id="nav-accounts"></span>
           </button>
           <button type="button" class="adm-nav-item" data-section="checkins">Check-ins</button>
-          <button type="button" class="adm-nav-item" data-section="nets">Nets</button>
-          <button type="button" class="adm-nav-item" data-section="observation">Observation</button>
+          <button type="button" class="adm-nav-item" data-section="connections">Connections</button>
           <button type="button" class="adm-nav-item" data-section="paint">Paint</button>
           <button type="button" class="adm-nav-item" data-section="tile_release">Tile release</button>
           <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
@@ -230,11 +229,11 @@
           <div id="ci-result" class="adm-result"></div>
         </section>
 
-        <section class="adm-section" data-section="nets" hidden>
-          <h2 class="adm-h2">Nets</h2>
+        <section class="adm-section" data-section="connections" hidden>
+          <h2 class="adm-h2">Connections</h2>
           <details class="adm-about">
-            <summary>About nets</summary>
-            <p class="adm-hint">Every weekly net the poller watches, on either board, plus the settings that apply to all of them at once. Nets are found differently depending on their connector kind &mdash; a MeshCore net (CoreScope or Beacon) is scoped to one channel on its connector, a Meshtastic net (Meshview or MQTT) is found by its hashtag appearing in a message on any channel &mdash; so the form below shows different fields per connector kind rather than one merged form. MQTT is a live broker subscription rather than a poll, so a broker outage shows up here as a poll error just like any other connector.</p>
+            <summary>About connections</summary>
+            <p class="adm-hint">Every connector the poller watches, on either board, plus the settings that apply to every check-in net at once. A connection either scores a net (a scoring window, found by channel for a MeshCore connector or by hashtag for a Meshtastic one) or is observation-only (node discovery and confirmation, never scoring) &mdash; the "Net check-in" checkbox on each connection picks which. MQTT is a live broker subscription rather than a poll, so a broker outage shows up here as a poll error just like any other connector.</p>
             <p class="adm-hint">Settings below apply to every net at once, read fresh on the poller's next cycle &mdash; no restart.</p>
           </details>
 
@@ -257,149 +256,12 @@
           </div>
           <div id="nc-result" class="adm-result"></div>
 
-          <h3 class="adm-h3">Configured nets <span class="adm-count" id="nets-count"></span></h3>
-          <div id="nets"></div>
+          <div class="adm-form">
+            <button type="button" id="conn-new" class="adm-btn">New connection</button>
+          </div>
 
-          <h3 class="adm-h3" id="net-form-title">Add a net</h3>
-          <div class="adm-form" id="nf-kind-row">
-            <label class="adm-field-label">Connector
-              <select id="nf-kind">
-                <option value="corescope">MC: CoreScope</option>
-                <option value="beacon">MC: Beacon</option>
-                <option value="meshview">MT: Meshview</option>
-                <option value="mqtt">MT: MQTT</option>
-                <option value="mqtt_meshtastic">MT: Official Meshtastic broker</option>
-              </select>
-            </label>
-            <input type="text" id="nf-label" autocomplete="off" placeholder="label, e.g. Wednesday Net" />
-          </div>
-          <div class="adm-form" id="nf-connector-row">
-            <input type="text" id="nf-connector" autocomplete="off" placeholder="connector URL, e.g. https://live.mwmesh.com" />
-          </div>
-          <p class="adm-hint" id="nf-official-broker-hint" hidden>Uses the official Meshtastic broker at mqtt.meshtastic.org.</p>
-          <div class="adm-form" id="nf-channel-row">
-            <input type="text" id="nf-channel" autocomplete="off" placeholder="channel" />
-            <button type="button" id="nf-load-channels" class="adm-btn adm-btn-quiet">Load channels</button>
-            <select id="nf-channel-select" hidden></select>
-          </div>
-          <div class="adm-form" id="nf-hashtag-row" hidden>
-            <input type="text" id="nf-hashtag" autocomplete="off" placeholder="hashtag, e.g. #freq51" />
-          </div>
-          <div class="adm-form" id="nf-mqtt-row-1" hidden>
-            <input type="text" id="nf-topic-root" autocomplete="off" placeholder="topic root, e.g. msh/US (blank = subscribe broadly)" />
-            <input type="text" id="nf-broker-username" autocomplete="off" placeholder="broker username (optional)" />
-          </div>
-          <p class="adm-hint" id="nf-mqtt-meshtastic-hint" hidden>Topic root and channel are both REQUIRED for the official Meshtastic broker &mdash; e.g. topic root <code>msh/US</code>, channel <code>LongFast</code>.</p>
-          <div class="adm-form" id="nf-mqtt-row-2" hidden>
-            <label class="adm-field-label adm-field-label-wide">Broker password
-              <input type="password" id="nf-broker-password" autocomplete="off" placeholder="leave blank to keep current" />
-            </label>
-            <label class="adm-check-label"><input type="checkbox" id="nf-clear-broker-password" class="adm-check" /> Clear</label>
-            <span class="adm-hint" id="nf-broker-password-hint"></span>
-          </div>
-          <div class="adm-form" id="nf-mqtt-row-3" hidden>
-            <label class="adm-field-label adm-field-label-wide">Channel key
-              <input type="password" id="nf-channel-key" autocomplete="off" placeholder="base64 PSK, blank = Meshtastic default" />
-            </label>
-            <label class="adm-check-label"><input type="checkbox" id="nf-clear-channel-key" class="adm-check" /> Clear</label>
-            <span class="adm-hint" id="nf-channel-key-hint"></span>
-          </div>
-          <div class="adm-form">
-            <label class="adm-field-label">Weekday
-              <select id="nf-weekday">
-                <option value="0">Monday</option>
-                <option value="1">Tuesday</option>
-                <option value="2" selected>Wednesday</option>
-                <option value="3">Thursday</option>
-                <option value="4">Friday</option>
-                <option value="5">Saturday</option>
-                <option value="6">Sunday</option>
-              </select>
-            </label>
-            <label class="adm-field-label">Start hour<input type="number" id="nf-start-hour" min="0" max="23" value="17" /></label>
-            <label class="adm-field-label">End hour<input type="number" id="nf-end-hour" min="0" max="23" value="23" /></label>
-            <label class="adm-field-label adm-field-label-wide">Timezone
-              <select id="nf-timezone">
-                <option value="America/Los_Angeles">Pacific - America/Los_Angeles</option>
-                <option value="America/Denver">Mountain - America/Denver</option>
-                <option value="America/Phoenix">Arizona, no DST - America/Phoenix</option>
-                <option value="America/Boise" selected>Mountain (Idaho) - America/Boise</option>
-                <option value="America/Chicago">Central - America/Chicago</option>
-                <option value="America/New_York">Eastern - America/New_York</option>
-                <option value="America/Anchorage">Alaska - America/Anchorage</option>
-                <option value="Pacific/Honolulu">Hawaii - Pacific/Honolulu</option>
-                <option value="UTC">UTC</option>
-              </select>
-            </label>
-          </div>
-          <div class="adm-form">
-            <label class="adm-field-label">Start date<input type="date" id="nf-start-date" /></label>
-            <label class="adm-check-label"><input type="checkbox" id="nf-enabled" class="adm-check" checked /> Enabled</label>
-          </div>
-          <p class="adm-hint">An empty start date blocks every award for this net. Adding a brand-new connector: set this to today, or the poller can retroactively award the roughly 100 messages already sitting in that connector's backlog.</p>
-          <div class="adm-form">
-            <button type="button" id="nf-save" class="adm-btn">Add net</button>
-            <button type="button" id="nf-cancel" class="adm-btn adm-btn-quiet" hidden>Cancel edit</button>
-          </div>
-          <div id="nf-result" class="adm-result"></div>
-        </section>
-
-        <section class="adm-section" data-section="observation" hidden>
-          <h2 class="adm-h2">Observation sources</h2>
-          <p class="adm-hint">A connector watched for node discovery and node confirmation only &mdash; it can never award check-in points. Use a check-in net above instead if you want scoring.</p>
-
-          <h3 class="adm-h3">Configured sources <span class="adm-count" id="sources-count"></span></h3>
-          <div id="sources"></div>
-
-          <h3 class="adm-h3" id="source-form-title">Add a source</h3>
-          <div class="adm-form" id="sf-kind-row">
-            <label class="adm-field-label">Connector
-              <select id="sf-kind">
-                <option value="corescope">MC: CoreScope</option>
-                <option value="beacon">MC: Beacon</option>
-                <option value="meshview">MT: Meshview</option>
-                <option value="mqtt">MT: MQTT</option>
-                <option value="mqtt_meshtastic">MT: Official Meshtastic broker</option>
-              </select>
-            </label>
-            <input type="text" id="sf-label" autocomplete="off" placeholder="label, e.g. Boise discovery" />
-          </div>
-          <div class="adm-form" id="sf-connector-row">
-            <input type="text" id="sf-connector" autocomplete="off" placeholder="connector URL, e.g. https://live.mwmesh.com" />
-          </div>
-          <p class="adm-hint" id="sf-official-broker-hint" hidden>Uses the official Meshtastic broker at mqtt.meshtastic.org.</p>
-          <div class="adm-form" id="sf-channel-row">
-            <input type="text" id="sf-channel" autocomplete="off" placeholder="channel" />
-            <button type="button" id="sf-load-channels" class="adm-btn adm-btn-quiet">Load channels</button>
-            <select id="sf-channel-select" hidden></select>
-          </div>
-          <div class="adm-form" id="sf-mqtt-row-1" hidden>
-            <input type="text" id="sf-topic-root" autocomplete="off" placeholder="topic root, e.g. msh/US (blank = subscribe broadly)" />
-            <input type="text" id="sf-broker-username" autocomplete="off" placeholder="broker username (optional)" />
-          </div>
-          <p class="adm-hint" id="sf-mqtt-meshtastic-hint" hidden>Topic root and channel are both REQUIRED for the official Meshtastic broker &mdash; e.g. topic root <code>msh/US</code>, channel <code>LongFast</code>.</p>
-          <div class="adm-form" id="sf-mqtt-row-2" hidden>
-            <label class="adm-field-label adm-field-label-wide">Broker password
-              <input type="password" id="sf-broker-password" autocomplete="off" placeholder="leave blank to keep current" />
-            </label>
-            <label class="adm-check-label"><input type="checkbox" id="sf-clear-broker-password" class="adm-check" /> Clear</label>
-            <span class="adm-hint" id="sf-broker-password-hint"></span>
-          </div>
-          <div class="adm-form" id="sf-mqtt-row-3" hidden>
-            <label class="adm-field-label adm-field-label-wide">Channel key
-              <input type="password" id="sf-channel-key" autocomplete="off" placeholder="base64 PSK, blank = Meshtastic default" />
-            </label>
-            <label class="adm-check-label"><input type="checkbox" id="sf-clear-channel-key" class="adm-check" /> Clear</label>
-            <span class="adm-hint" id="sf-channel-key-hint"></span>
-          </div>
-          <div class="adm-form">
-            <label class="adm-check-label"><input type="checkbox" id="sf-enabled" class="adm-check" checked /> Enabled</label>
-          </div>
-          <div class="adm-form">
-            <button type="button" id="sf-save" class="adm-btn">Add source</button>
-            <button type="button" id="sf-cancel" class="adm-btn adm-btn-quiet" hidden>Cancel edit</button>
-          </div>
-          <div id="sf-result" class="adm-result"></div>
+          <h3 class="adm-h3">Connections <span class="adm-count" id="connections-count"></span></h3>
+          <div id="connections"></div>
         </section>
 
         <section class="adm-section" data-section="paint" hidden>
@@ -696,7 +558,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260923-1"></script>
+  <script src="/static/admin.js?v=20260928-3"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

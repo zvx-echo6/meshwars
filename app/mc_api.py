@@ -1098,6 +1098,38 @@ async def mc_players() -> list[dict]:
     return result if result is not None else []
 
 
+@router.get("/api/about/communities")
+async def about_communities() -> list[dict]:
+    """Public, unauthenticated feed for frontend/about.html's "Where
+    it's played" section (see frontend/about.js) -- one entry per
+    community row with shown_on_about=1, ordered by display_order then
+    name (matching the hand-typed order the original about.html list
+    used before this replaced it).
+
+    Matt's call: every entry's wording is entirely his to write by hand
+    (the `blurb`/Description field, edited from the admin panel's
+    Connections section) -- nothing here is assembled from net/source
+    data anymore. This used to also return each community's enabled
+    checkin_net rows and the set of protocols in use, so frontend/
+    about.js could generate a schedule sentence itself; that generation
+    is gone (see about.js's own comment), so the checkin_net/
+    observation_source queries that fed it are gone too. Returns only
+    name, url, blurb, and display_order for a shown-on-about community
+    -- never region, contact_url, or any net/source/connector data.
+    """
+    def run(conn):
+        return [
+            {"name": r["name"], "url": r["url"], "blurb": r["blurb"], "display_order": r["display_order"]}
+            for r in conn.execute(
+                "SELECT name, url, blurb, display_order FROM community "
+                " WHERE shown_on_about = 1 ORDER BY display_order, name"
+            ).fetchall()
+        ]
+
+    result = _safe_query(run)
+    return result if result is not None else []
+
+
 def history_for(protocol: str) -> list[dict]:
     """Closed seasons for `protocol`, newest first, each with its final
     per-team tile tally.

@@ -28,6 +28,10 @@ let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/accou
 let allPlayers = [];
 let expanded = new Set();   // player ids left open across a refresh
 let allAccounts = [];       // GET /api/admin/accounts -- every account, not just linked ones
+let allCommunities = [];    // GET /api/admin/communities
+let expandedConnections = new Set(); // 'net-'+id / 'source-'+id left open across a refresh, Connections list
+let expandedRecorded = new Set(); // same keys as expandedConnections -- "Recorded messages" sub-disclosure, opened independently
+let newConnectionDraft = null; // null, or a plain draft object rendered as the always-expanded first row while creating a connection -- see renderConnections()/startNewConnection()
 
 // Flips true the moment any /api/admin/* call first succeeds, and back
 // to false whenever showNoAccess() runs. This is the one piece of
@@ -1434,110 +1438,11 @@ async function freezeMonth(b) {
   b.disabled = false;
 }
 
-// ---- nets ---------------------------------------------------------------
+// ---- checkin config (points, streak bonus, poller timing knobs) --------
 //
-// Two independent pieces on one screen: the config singleton (points,
-// streak bonus, the poller's own timing knobs -- applies to every net
-// at once) and the nets list itself (each net's own connector, window,
-// and channel-or-hashtag). GET /api/admin/checkin/nets hands back both
-// in one call, so one load feeds both halves of the section.
-
-let allNets = [];
-let editingNetId = null;   // null while the form is adding, a net id while editing
-const NET_WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-// The five connector kinds an operator can pick (see app/checkin.py's
-// KIND_CORESCOPE/KIND_BEACON/KIND_MESHVIEW/KIND_MQTT/
-// KIND_MQTT_MESHTASTIC). `protocol` ('mc'/'mt') is derived from this
-// on the backend and is never sent by this form -- see
-// _validate_net_fields in app/admin_ops.py. Labels match the select
-// options in admin.html exactly; the badge reuses the same short
-// label so a row and the form agree on what to call a kind.
-const NET_KIND_LABELS = {
-  corescope: 'MC: CoreScope',
-  beacon: 'MC: Beacon',
-  meshview: 'MT: Meshview',
-  mqtt: 'MT: MQTT',
-  mqtt_meshtastic: 'MT: Official Meshtastic broker',
-};
-// corescope and beacon are channel-scoped connectors (a net picks one
-// channel on the connector); meshview, mqtt and mqtt_meshtastic are
-// all hashtag-scoped nets (found by their hashtag on any channel) --
-// see app/checkin.py's module docstring. mqtt and mqtt_meshtastic
-// ALSO show the channel field even though they're hashtag-scoped:
-// channel narrows which Meshtastic channel the broker subscription
-// itself watches (see app/mqtt_subscriber.py's topic_filters_for_row),
-// a separate concern from the hashtag that identifies this net's own
-// messages once they arrive -- so for these two kinds the channel and
-// hashtag rows are no longer simple opposites of each other, and each
-// gets its own visibility check below rather than one being !the
-// other.
-function netKindHasChannel(kind) { return kind !== 'meshview'; }
-function netKindHasHashtag(kind) { return kind !== 'corescope' && kind !== 'beacon'; }
-// corescope/beacon poll an upstream channel-list API (see
-// loadNetChannels below); an MQTT broker has no such API -- GET
-// /api/admin/checkin/channels returns applicable: false for both mqtt
-// kinds -- so "Load channels" only ever makes sense for the MeshCore
-// two.
-function netKindIsMeshCore(kind) { return kind === 'corescope' || kind === 'beacon'; }
-function netKindIsMqtt(kind) { return kind === 'mqtt' || kind === 'mqtt_meshtastic'; }
-
-// mqtt's connector is a broker address, not an http(s) URL like the
-// other kinds -- an https example there reads as a typo instruction
-// rather than guidance. Keyed by kind so updateNetFormKind/
-// updateSourceFormKind can swap the connector field's placeholder to
-// match whatever's selected. mqtt_meshtastic has no entry here: its
-// connector row is hidden outright (see updateNetFormKind below) since
-// there is only one official broker and nothing for an operator to
-// type -- app/admin_ops.py's _validate_connector_url forces it
-// server-side regardless of what this form would send.
-const NET_CONNECTOR_URL_EXAMPLES = {
-  corescope: 'https://live.mwmesh.com',
-  beacon: 'https://map.meshcore.coloradomesh.org',
-  meshview: 'https://meshview.freq51.net',
-  mqtt: 'mqtt://broker.example.org:1883',
-};
-
-function pad2(n) { return String(n).padStart(2, '0'); }
-
-// nf-timezone is a curated <select>, not free text, so a stored value
-// outside the curated list (e.g. someone posted a valid IANA zone like
-// Europe/Helsinki straight to the API before this picker existed, or
-// ever will again via direct API use) can't just be assigned -- the
-// browser silently leaves an unmatched <select>.value at whatever was
-// already selected, which here would be the first/default option. That
-// would make merely opening this net for edit -- without even touching
-// the field -- rewrite its timezone to that default on next save. So
-// if the value isn't one of the curated options, inject it as an extra
-// option and select that instead of falling back.
-const NF_TIMEZONE_CUSTOM_OPTION_ID = 'nf-timezone-custom-option';
-function setNetTimezoneValue(tz) {
-  const select = document.getElementById('nf-timezone');
-  const existingCustom = document.getElementById(NF_TIMEZONE_CUSTOM_OPTION_ID);
-  if (existingCustom) existingCustom.remove();
-  select.value = tz;
-  if (select.value !== tz) {
-    const opt = document.createElement('option');
-    opt.id = NF_TIMEZONE_CUSTOM_OPTION_ID;
-    opt.value = tz;
-    opt.textContent = tz + ' (current value, not in list)';
-    select.appendChild(opt);
-    select.value = tz;
-  }
-}
-
-// end_hour is inclusive through :59:59 (see app/db.py's checkin_net
-// comment), so displaying it as HH:59 rather than HH:00 is what
-// actually matches the window a message gets judged against.
-function netWindowText(n) {
-  return NET_WEEKDAY_ABBR[n.weekday] + ' ' + pad2(n.start_hour) + ':00-' +
-    pad2(n.end_hour) + ':59 ' + n.timezone;
-}
-
-function netHealthText(n) {
-  if (n.last_poll_error) return 'poll error: ' + n.last_poll_error;
-  return n.last_poll_at ? ('last polled ' + ago(n.last_poll_at)) : 'never polled yet';
-}
+// The config singleton -- applies to every net at once. GET
+// /api/admin/checkin/nets hands this back alongside the nets list
+// itself (see loadNets() further down, in the connections section).
 
 function renderConfigForm(c) {
   document.getElementById('nc-enabled').checked = !!c.enabled;
@@ -1572,538 +1477,172 @@ async function saveConfig(b) {
   b.disabled = false;
 }
 
-function renderNetRow(n) {
-  const wrap = el('div', { className: 'adm-net' });
-  const row = el('div', { className: 'adm-net-row' });
-  // Descriptive text lives in its own group so it can wrap on its own
-  // line lengths without dragging the action buttons around -- see
-  // .adm-net-row / .adm-net-info / .adm-net-actions in admin.css.
-  const info = el('div', { className: 'adm-net-info' });
-  info.appendChild(el('strong', { text: n.label }));
-  // Shows the KIND, not the protocol -- corescope and beacon are both
-  // 'mc' and otherwise indistinguishable in this row, so a protocol
-  // badge would leave an operator unable to tell them apart.
-  info.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
-  // mqtt_meshtastic's connector_url is always the same official broker
-  // address (see app/admin_ops.py's _validate_connector_url) -- not
-  // operator config, so showing it here the same way a real
-  // operator-chosen connector_url is shown would be misleading. The
-  // kind badge above already says which broker family this is; the
-  // topic root (the field that actually narrows this row) stands in
-  // for it instead. Every other kind still shows its real connector_url.
-  info.appendChild(el('span', {
-    className: 'adm-mono',
-    text: n.kind === 'mqtt_meshtastic' ? ('topic root: ' + n.topic_root) : n.connector_url,
-  }));
-  // channel and hashtag are no longer simple opposites for mqtt/
-  // mqtt_meshtastic (see netKindHasChannel/netKindHasHashtag above) --
-  // show whichever of the two this row actually has a value for; every
-  // other kind still only ever has one of them set.
-  if (n.channel) info.appendChild(el('span', { text: n.channel }));
-  if (n.hashtag) info.appendChild(el('span', { text: n.hashtag }));
-  info.appendChild(el('span', { text: netWindowText(n) }));
-  info.appendChild(el('span', {
-    className: 'adm-badge ' + (n.enabled ? 'adm-badge-ok' : 'adm-badge-bad'),
-    text: n.enabled ? 'enabled' : 'disabled',
-  }));
-  row.appendChild(info);
-  // Edit and Delete stay together as one unit pinned to the row's end,
-  // so they land in the same place regardless of how long the info
-  // group above happens to be.
-  const actions = el('div', { className: 'adm-net-actions' });
-  actions.appendChild(btn('Edit', 'adm-btn-quiet', () => startEditNet(n)));
-  actions.appendChild(btn('Delete', 'adm-btn-danger', async (b) => {
-    const typed = window.prompt('Deleting removes this net.\n\nType ' + n.label + ' to confirm.');
-    if (!typed) return;
-    b.disabled = true;
-    try {
-      await post('/api/admin/checkin/nets/delete', { id: n.id, label: typed });
-      setStatus('Deleted net ' + n.label, false);
-      if (editingNetId === n.id) resetNetForm();
-      await loadNets();
-    } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
-  }));
-  row.appendChild(actions);
-  wrap.appendChild(row);
-
-  // Poll status and unresolved-sender count share the same health line
-  // -- both answer "is this net actually working," just for two
-  // different silent failures (the connector being unreachable, versus
-  // a message it fetched fine but could never credit to anyone -- see
-  // app/checkin.py's module docstring). The count is its own span so
-  // only it takes the warn tone; a poll error already colors the whole
-  // line bad and should not be diluted by also drawing the eye to a
-  // separate, less urgent warn-colored number.
-  const healthP = el('p', {
-    className: 'adm-net-health' + (n.last_poll_error ? ' adm-status-bad' : ''),
-  });
-  healthP.appendChild(el('span', { text: netHealthText(n) }));
-  // Always rendered, zero included -- "0 check-ins" for a net's most
-  // recent net_date is exactly the signal an operator needs (a net
-  // that polls cleanly and has unresolved_count 0 can still be dead:
-  // nobody checked in at all), so this can never be the one line that
-  // silently omits itself on the good-looking case.
-  healthP.appendChild(el('span', {
-    text: '  ·  ' + n.last_checkin_count +
-      (n.last_checkin_count === 1 ? ' check-in' : ' check-ins') +
-      (n.last_checkin_net_date ? ' (' + n.last_checkin_net_date + ')' : ''),
-  }));
-  if (n.unresolved_count > 0) {
-    healthP.appendChild(el('span', {
-      className: 'adm-status-warn',
-      text: '  ·  ' + n.unresolved_count +
-        (n.unresolved_count === 1 ? ' unresolved sender' : ' unresolved senders') +
-        ' (' + n.unresolved_net_date + ')',
-    }));
-  }
-  wrap.appendChild(healthP);
-
-  // The names themselves, only when there are any -- compact, one line,
-  // built with textContent (never innerHTML) since a sender name is
-  // whatever a MeshCore node owner typed into their own device, not
-  // anything this app validated. Reuses .adm-net-health's own muted
-  // tone rather than a new class; this is a detail line under an
-  // already-established one, not a fresh kind of thing on the page.
-  if (n.unresolved_senders && n.unresolved_senders.length) {
-    wrap.appendChild(el('p', {
-      className: 'adm-net-health',
-      text: n.unresolved_senders
-        .map((s) => s.sender_name + ' (' + s.message_count + ')')
-        .join(', '),
-    }));
-  }
-  return wrap;
-}
-
-function renderNets() {
-  const host = document.getElementById('nets');
-  const count = document.getElementById('nets-count');
-  host.replaceChildren();
-  count.textContent = allNets.length
-    ? (allNets.length + (allNets.length === 1 ? ' net' : ' nets')) : '';
-  if (!allNets.length) {
-    host.appendChild(el('p', { className: 'adm-hint', text: 'No nets configured yet -- add one below.' }));
-    return;
-  }
-  allNets.forEach((n) => host.appendChild(renderNetRow(n)));
-}
-
-async function loadNets() {
-  try {
-    const d = await api('/api/admin/checkin/nets');
-    allNets = d.nets || [];
-    renderNets();
-    if (d.config) renderConfigForm(d.config);
-  } catch (e) {
-    setStatus('Nets load failed: ' + e.message, true);
-  }
-}
-
-// ---- paint source: meshview vs FreqMapper ------------------------------
+// ---- connections (nets + observation sources, merged) -------------------
 //
-// One combined form (source + connector + scoring), one Save button --
-// same "whole singleton, one POST" shape the Nets settings form above
-// uses for checkin_config. The paint-source SELECT is the one field
-// that gets its own confirmation before that POST goes out (see
-// savePaint below): switching it changes where live Meshtastic
-// territory comes from, the same kind of consequence the delete
-// buttons elsewhere in this file already guard with a typed prompt.
+// Nets (app/db.py's checkin_net) and observation sources (app/db.py's
+// observation_source) share a connector-kind vocabulary and the same
+// secret handling, and now the same optional community_id -- an
+// operator managing "the FREQ51 connection" thinks of one thing, not
+// two separate tables, so this section renders them as one merged
+// list (renderConnections below), with a shared connector-kind
+// vocabulary (NET_KIND_LABELS, netKindHasChannel/Hashtag/IsMeshCore/
+// IsMqtt, NET_CONNECTOR_URL_EXAMPLES). Every row -- including a
+// brand-new one, via the "New connection" button's draft -- edits
+// and creates inline in its own expanded panel (renderConnectionDetail
+// below), the same caret-expand idiom Players uses (see renderPlayers/
+// renderPlayerDetail); there is no separate bottom add-a-connection
+// form any more. The backend still exposes two tables and four
+// create/update endpoints (checkin/nets/* and observation/sources/*)
+// plus two conversion endpoints (nets/convert-to-source,
+// sources/convert-to-net) for flipping a row from one to the other --
+// this file never merges the tables, only the screen.
 
-// The mt_paint_source the form was last loaded/saved WITH -- compared
-// against the select's current value at save time so the confirmation
-// only fires on an actual switch, not on saving connector/scoring
-// changes while leaving the source alone.
-let loadedPaintSource = null;
+// The five connector kinds an operator can pick (see app/checkin.py's
+// KIND_CORESCOPE/KIND_BEACON/KIND_MESHVIEW/KIND_MQTT/
+// KIND_MQTT_MESHTASTIC). `protocol` ('mc'/'mt') is derived from this
+// on the backend and is never sent by this form -- see
+// _validate_net_fields in app/admin_ops.py.
+const NET_KIND_LABELS = {
+  corescope: 'MC: CoreScope',
+  beacon: 'MC: Beacon',
+  meshview: 'MT: Meshview',
+  mqtt: 'MT: MQTT',
+  mqtt_meshtastic: 'MT: Official Meshtastic broker',
+};
+// corescope and beacon are channel-scoped connectors (a net picks one
+// channel on the connector); meshview, mqtt and mqtt_meshtastic are
+// all hashtag-scoped nets (found by their hashtag on any channel) --
+// see app/checkin.py's module docstring. mqtt and mqtt_meshtastic
+// ALSO show the channel field even though they're hashtag-scoped:
+// channel narrows which Meshtastic channel the broker subscription
+// itself watches, a separate concern from the hashtag that identifies
+// this net's own messages once they arrive. An observation source
+// never has a hashtag at all regardless of kind (the
+// observation_source table has no such column) -- see
+// renderConnectionDetail's own refreshVisibility() below for where
+// that second condition is layered on top of this one.
+function netKindHasChannel(kind) { return kind !== 'meshview'; }
+function netKindHasHashtag(kind) { return kind !== 'corescope' && kind !== 'beacon'; }
+// corescope/beacon poll an upstream channel-list API (see
+// loadConnectorChannels below); an MQTT broker has no such API -- GET
+// /api/admin/checkin/channels returns applicable: false for both mqtt
+// kinds -- so "Load channels" only ever makes sense for the MeshCore
+// two.
+function netKindIsMeshCore(kind) { return kind === 'corescope' || kind === 'beacon'; }
+function netKindIsMqtt(kind) { return kind === 'mqtt' || kind === 'mqtt_meshtastic'; }
 
-function renderPaintForm(cfg) {
-  document.getElementById('pt-source').value = cfg.mt_paint_source;
-  document.getElementById('pt-enabled').checked = !!cfg.enabled;
-  document.getElementById('pt-base-url').value = cfg.base_url || '';
-  // Never pre-filled with the real key -- GET /api/admin/paint never
-  // returns it (see app/admin_ops.py's _scrub_freqmapper_secrets); the
-  // hint span is the only signal of whether one is set.
-  document.getElementById('pt-api-key').value = '';
-  document.getElementById('pt-clear-api-key').checked = false;
-  document.getElementById('pt-api-key-hint').textContent = cfg.has_api_key ? 'currently set' : 'not set';
-  document.getElementById('pt-poll-interval').value = cfg.poll_interval_seconds;
-  document.getElementById('pt-page-limit').value = cfg.page_limit;
-  document.getElementById('pt-paint-from').value = cfg.paint_from || '';
-  document.getElementById('pt-points-per-event').value = cfg.points_per_event;
-  document.getElementById('pt-unique-painter-bonus').value = cfg.unique_painter_bonus;
-  loadedPaintSource = cfg.mt_paint_source;
-}
+// mqtt's connector is a broker address, not an http(s) URL like the
+// other kinds -- an https example there reads as a typo instruction
+// rather than guidance. mqtt_meshtastic has no entry here: its
+// connector row is hidden outright (see renderConnectionDetail's own
+// refreshVisibility() below) since there is only one official broker
+// and nothing for an operator to type -- app/admin_ops.py's
+// _validate_connector_url forces it server-side regardless of what
+// this form would send.
+const NET_CONNECTOR_URL_EXAMPLES = {
+  corescope: 'https://live.mwmesh.com',
+  beacon: 'https://map.meshcore.coloradomesh.org',
+  meshview: 'https://meshview.freq51.net',
+  mqtt: 'mqtt://broker.example.org:1883',
+};
 
-function renderPaintStatus(cfg, cursor, verificationCount) {
-  const host = document.getElementById('pt-status');
-  host.replaceChildren();
+// Every row's own dynamically-built timezone <select>
+// (renderConnectionDetail below) offers these same curated choices.
+const NET_TIMEZONE_OPTIONS = [
+  ['America/Los_Angeles', 'Pacific - America/Los_Angeles'],
+  ['America/Denver', 'Mountain - America/Denver'],
+  ['America/Phoenix', 'Arizona, no DST - America/Phoenix'],
+  ['America/Boise', 'Mountain (Idaho) - America/Boise'],
+  ['America/Chicago', 'Central - America/Chicago'],
+  ['America/New_York', 'Eastern - America/New_York'],
+  ['America/Anchorage', 'Alaska - America/Anchorage'],
+  ['Pacific/Honolulu', 'Hawaii - Pacific/Honolulu'],
+  ['UTC', 'UTC'],
+];
 
-  const pollP = el('p', {
-    className: 'adm-net-health' + (cfg.last_poll_error ? ' adm-status-bad' : ''),
-  });
-  pollP.appendChild(el('span', {
-    text: cfg.last_poll_error ? ('poll error: ' + cfg.last_poll_error)
-      : (cfg.last_poll_at ? ('last polled ' + ago(cfg.last_poll_at)) : 'never polled yet'),
-  }));
-  host.appendChild(pollP);
+function pad2(n) { return String(n).padStart(2, '0'); }
 
-  const countP = el('p', { className: 'adm-net-health' });
-  countP.appendChild(el('span', {
-    text: verificationCount + (verificationCount === 1 ? ' event consumed' : ' events consumed'),
-  }));
-  host.appendChild(countP);
-
-  const cursorP = el('p', { className: 'adm-net-health' });
-  cursorP.appendChild(el('span', { text: 'cursor:' }));
-  host.appendChild(cursorP);
-
-  // The cursor is an opaque base64 blob with no whitespace of its own,
-  // so unlike the other .adm-mono values in this panel (a hash prefix,
-  // a connector URL) it can't just sit inline -- there is nowhere for
-  // it to wrap, and left alone it pushes the line out to whatever width
-  // it needs, ignoring the section around it. Boxing it as its own
-  // block with overflow-x scoped to that block keeps the value intact
-  // and copyable (drag-select still grabs the whole string) without
-  // ever letting it set the panel's width.
-  host.appendChild(el('div', {
-    className: 'adm-mono adm-mono-block',
-    text: cursor || '(none yet)',
-  }));
-}
-
-async function loadPaint() {
-  try {
-    const d = await api('/api/admin/paint');
-    renderPaintForm(d.config);
-    renderPaintStatus(d.config, d.cursor, d.verification_count);
-  } catch (e) {
-    setStatus('Paint config load failed: ' + e.message, true);
+// A curated <select> can't just be assigned a value outside its
+// options (e.g. a stored timezone posted straight to the API before
+// this picker existed) -- the browser silently leaves an unmatched
+// <select>.value at whatever was already selected. So if the value
+// isn't one of the curated options, inject it as an extra option and
+// select that instead of falling back -- otherwise merely opening a
+// row for edit, without touching the field, would rewrite its
+// timezone to the default on next save. Takes the <select> itself
+// (not an id) so both the one static form and every dynamically-built
+// row editor can share this.
+function setTimezoneSelectValue(select, tz) {
+  Array.from(select.querySelectorAll('option[data-custom-tz]')).forEach((o) => o.remove());
+  select.value = tz;
+  if (select.value !== tz) {
+    const opt = document.createElement('option');
+    opt.dataset.customTz = '1';
+    opt.value = tz;
+    opt.textContent = tz + ' (current value, not in list)';
+    select.appendChild(opt);
+    select.value = tz;
   }
 }
 
-async function savePaint(b) {
-  const out = document.getElementById('pt-result');
-  out.replaceChildren();
-
-  const source = document.getElementById('pt-source').value;
-  if (source !== loadedPaintSource) {
-    // Switching which source(s) paint the Meshtastic board -- named
-    // confirmation, same "type it to confirm" shape every destructive
-    // action in this file already uses, not a bare OK/Cancel a tired
-    // operator could click through without reading.
-    //
-    // Wording differs for "both" versus the two exclusive values,
-    // since the consequence is different: switching INTO both starts a
-    // second painter alongside whichever one was already running (no
-    // source stops); switching OUT of both to a single value stops
-    // whichever painter is being left. Neither case has a "which one
-    // wins" question to explain -- there is no arbitration between the
-    // two, the board's existing capture cooldowns handle any overlap.
-    const PAINT_LABELS = { meshview: 'Meshview', freqmapper: 'FreqMapper', both: 'Both' };
-    const label = PAINT_LABELS[source] || source;
-    const detail = source === 'both'
-      ? 'This starts both Meshview and FreqMapper painting live Meshtastic territory at once.'
-      : loadedPaintSource === 'both'
-        ? ('This stops the other source and leaves only ' + label + ' painting live Meshtastic territory.')
-        : ('This switches which source paints live Meshtastic territory to ' + label + '.');
-    const typed = window.prompt(
-      detail + '\n\n' + 'Type ' + label + ' to confirm switching to it.'
-    );
-    if (typed !== label) {
-      out.textContent = typed === null ? '' : 'Not confirmed -- no change made.';
-      return;
-    }
-  }
-
-  const payload = {
-    mt_paint_source: source,
-    enabled: document.getElementById('pt-enabled').checked,
-    base_url: document.getElementById('pt-base-url').value.trim(),
-    poll_interval_seconds: parseInt(document.getElementById('pt-poll-interval').value, 10),
-    page_limit: parseInt(document.getElementById('pt-page-limit').value, 10),
-    paint_from: document.getElementById('pt-paint-from').value,
-    points_per_event: parseFloat(document.getElementById('pt-points-per-event').value),
-    unique_painter_bonus: parseFloat(document.getElementById('pt-unique-painter-bonus').value),
-  };
-  // Blank means keep the existing key -- see app/admin_ops.py's
-  // admin_paint_update, the same convention checkin_net's
-  // broker_password/channel_key already use. clear_api_key is the
-  // explicit way to actually blank it.
-  if (document.getElementById('pt-clear-api-key').checked) {
-    payload.clear_api_key = true;
-  } else {
-    const apiKey = document.getElementById('pt-api-key').value;
-    if (apiKey) payload.api_key = apiKey;
-  }
-
-  b.disabled = true;
-  try {
-    const r = await post('/api/admin/paint', payload);
-    renderPaintForm(r.config);
-    out.textContent = 'Saved.';
-    setStatus('Paint config saved', false);
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
-  }
-  b.disabled = false;
+function netHealthText(n) {
+  if (n.last_poll_error) return 'poll error: ' + n.last_poll_error;
+  return n.last_poll_at ? ('last polled ' + ago(n.last_poll_at)) : 'never polled yet';
 }
 
-async function clearPaintCursor(b) {
-  const out = document.getElementById('pt-clear-result');
-  out.replaceChildren();
-  const typed = window.prompt(
-    'This makes the next FreqMapper poll re-walk its feed from the beginning.\n\n' +
-    'Already-seen events are skipped (deduped by their own id), never double-scored.\n\n' +
-    'Type CLEAR to confirm.'
-  );
-  if (typed !== 'CLEAR') {
-    out.textContent = typed === null ? '' : 'Not confirmed -- cursor left alone.';
-    return;
-  }
-  b.disabled = true;
-  try {
-    await post('/api/admin/paint/clear-cursor', {});
-    out.textContent = 'Cursor cleared.';
-    await loadPaint();
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
-  }
-  b.disabled = false;
+// Small builders shared by the connection-detail panel and the
+// community-detail panel below -- both build several label+input
+// pairs the same shape the static admin.html markup already uses
+// (.adm-field-label / .adm-check-label), just assembled with el()
+// instead of written out as HTML.
+function fieldLabel(text, input, variant) {
+  // variant: undefined (default 9rem), 'wide' (or `true`, existing
+  // call sites) for a fixed 20rem field, 'half' for a field that
+  // shares its row 50/50 with one sibling (see .adm-field-label-half
+  // in admin.css -- Where it's played's Name/Link pair), or 'full' for
+  // a field (e.g. a textarea) that takes the entire row on its own.
+  const MODIFIER_CLASSES = { half: 'adm-field-label-half', full: 'adm-field-label-full' };
+  const modifierClass = MODIFIER_CLASSES[variant] ? ' ' + MODIFIER_CLASSES[variant]
+    : variant ? ' adm-field-label-wide' : '';
+  const label = el('label', { className: 'adm-field-label' + modifierClass, text: text });
+  label.appendChild(input);
+  return label;
+}
+function checkLabel(text, input) {
+  const label = el('label', { className: 'adm-check-label' });
+  label.appendChild(input);
+  label.appendChild(document.createTextNode(' ' + text));
+  return label;
 }
 
-// ---- tile release: app/db.py's tile_release_config ---------------------
-//
-// Same "whole singleton, one POST" shape the Nets/Paint sections above
-// use for their own config. The one field that gets its own
-// confirmation before that POST goes out is dry_run switching from
-// true to false -- see saveTileRelease below -- the same "type a value
-// to confirm" shape savePaint/clearPaintCursor/the delete buttons all
-// use elsewhere in this file, except what has to be typed here is the
-// exact projected release count, not a fixed word, so an operator has
-// to actually look at the number before confirming it.
-
-// The dry_run the form was last loaded/saved WITH -- compared against
-// the checkbox's current value at save time so the confirmation only
-// fires on an actual true->false switch, not on saving zero_hours/
-// max_per_sweep/enabled changes while dry_run stays wherever it
-// already was.
-let loadedTileReleaseDryRun = true;
-let tileReleaseBounds = { zero_hours_floor: 168, max_per_sweep_floor: 1, max_per_sweep_ceiling: 2000 };
-
-function renderTileReleaseForm(cfg) {
-  document.getElementById('tr-enabled').checked = !!cfg.enabled;
-  document.getElementById('tr-zero-hours').value = cfg.zero_hours;
-  document.getElementById('tr-zero-hours').min = cfg.zero_hours_floor;
-  document.getElementById('tr-max-per-sweep').value = cfg.max_per_sweep;
-  document.getElementById('tr-max-per-sweep').min = cfg.max_per_sweep_floor;
-  document.getElementById('tr-max-per-sweep').max = cfg.max_per_sweep_ceiling;
-  document.getElementById('tr-dry-run').checked = !!cfg.dry_run;
-  document.getElementById('tr-dry-run-hint').hidden = !!cfg.dry_run;
-  loadedTileReleaseDryRun = !!cfg.dry_run;
-  tileReleaseBounds = {
-    zero_hours_floor: cfg.zero_hours_floor,
-    max_per_sweep_floor: cfg.max_per_sweep_floor,
-    max_per_sweep_ceiling: cfg.max_per_sweep_ceiling,
-  };
-}
-
-async function loadTileRelease() {
-  try {
-    const cfg = await api('/api/admin/tile_release/config');
-    renderTileReleaseForm(cfg);
-  } catch (e) {
-    setStatus('Tile release config load failed: ' + e.message, true);
-  }
-}
-
-function renderTileReleaseProjection(p) {
-  const host = document.getElementById('tr-projection');
-  host.replaceChildren();
-  if (p.season_id === null) {
-    host.appendChild(el('p', { className: 'adm-hint', text: 'No active MeshCore season -- nothing to project.' }));
-    return;
-  }
-  const tiles = el('div', { className: 'adm-tiles' });
-  tiles.appendChild(tile(p.count, 'would release at ' + p.zero_hours + 'h'));
-  tiles.appendChild(tile(p.board_pct.toFixed(1) + '%', 'of the whole board', p.board_pct >= 25 ? 'bad' : (p.board_pct >= 10 ? 'warn' : null)));
-  host.appendChild(tiles);
-  if (p.by_team.length) {
-    const list = el('div', { className: 'adm-hint' });
-    list.appendChild(el('span', {
-      text: p.by_team.map((t) => t.team + ': ' + t.count + ' of ' + t.team_total + ' (' + t.pct.toFixed(1) + '%)').join('  |  '),
-    }));
-    host.appendChild(list);
-  }
-}
-
-let lastTileReleaseProjection = null;
-
-async function previewTileRelease(b) {
-  const out = document.getElementById('tr-result');
-  out.replaceChildren();
-  const zeroHours = parseInt(document.getElementById('tr-zero-hours').value, 10);
-  if (!Number.isFinite(zeroHours) || zeroHours <= 0) {
-    out.textContent = 'Enter a positive number of hours first.';
-    return;
-  }
-  b.disabled = true;
-  try {
-    const p = await post('/api/admin/tile_release/projection', { zero_hours: zeroHours });
-    lastTileReleaseProjection = p;
-    renderTileReleaseProjection(p);
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
-  }
-  b.disabled = false;
-}
-
-async function saveTileRelease(b) {
-  const out = document.getElementById('tr-result');
-  out.replaceChildren();
-
-  const enabled = document.getElementById('tr-enabled').checked;
-  const zeroHours = parseInt(document.getElementById('tr-zero-hours').value, 10);
-  const maxPerSweep = parseInt(document.getElementById('tr-max-per-sweep').value, 10);
-  const dryRun = document.getElementById('tr-dry-run').checked;
-
-  if (!Number.isFinite(zeroHours) || zeroHours < tileReleaseBounds.zero_hours_floor) {
-    out.textContent = 'Abandonment window must be at least ' + tileReleaseBounds.zero_hours_floor + ' hours.';
-    return;
-  }
-  if (!Number.isFinite(maxPerSweep) || maxPerSweep < tileReleaseBounds.max_per_sweep_floor
-      || maxPerSweep > tileReleaseBounds.max_per_sweep_ceiling) {
-    out.textContent = 'Max releases per sweep must be between ' + tileReleaseBounds.max_per_sweep_floor
-      + ' and ' + tileReleaseBounds.max_per_sweep_ceiling + '.';
-    return;
-  }
-
-  const payload = { enabled, zero_hours: zeroHours, dry_run: dryRun, max_per_sweep: maxPerSweep };
-
-  if (loadedTileReleaseDryRun && !dryRun) {
-    // The destructive transition -- fetch the freshest possible
-    // projection for the window about to be saved (not whatever is
-    // sitting in the panel from an earlier click, which may be stale)
-    // and require it be typed back before this goes out. The server
-    // re-checks this exact number itself, fresh, inside its own write
-    // transaction, and 409s on any mismatch -- this client-side check
-    // only saves a round trip for the common case of an operator who
-    // simply never looked.
-    let fresh;
-    try {
-      fresh = await post('/api/admin/tile_release/projection', { zero_hours: zeroHours });
-    } catch (e) {
-      out.textContent = 'Could not fetch a fresh projection: ' + e.message;
-      return;
-    }
-    lastTileReleaseProjection = fresh;
-    renderTileReleaseProjection(fresh);
-    const typed = window.prompt(
-      'Turning dry run off starts deleting abandoned tiles on the next sweep.\n\n' +
-      'At ' + fresh.zero_hours + 'h this releases ' + fresh.count + ' cells (' + fresh.board_pct.toFixed(1) + '% of the board) right now.\n\n' +
-      'Type ' + fresh.count + ' to confirm.'
-    );
-    if (typed === null) {
-      out.textContent = '';
-      return;
-    }
-    if (parseInt(typed, 10) !== fresh.count || String(parseInt(typed, 10)) !== typed.trim()) {
-      out.textContent = 'Not confirmed -- no change made.';
-      return;
-    }
-    payload.confirm_release_count = fresh.count;
-  }
-
-  b.disabled = true;
-  try {
-    const cfg = await post('/api/admin/tile_release/config', payload);
-    // The save response carries the four saved fields, not the
-    // floor/ceiling GET /api/admin/tile_release/config also returns --
-    // reuse tileReleaseBounds (unchanged by a save) rather than a
-    // second round trip just to redraw the same form.
-    renderTileReleaseForm(Object.assign({}, cfg, tileReleaseBounds));
-    out.textContent = 'Saved.';
-    setStatus('Tile release config saved', false);
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
-  }
-  b.disabled = false;
-}
-
-function updateNetFormKind() {
-  const kind = document.getElementById('nf-kind').value;
-  document.getElementById('nf-channel-row').hidden = !netKindHasChannel(kind);
-  document.getElementById('nf-hashtag-row').hidden = !netKindHasHashtag(kind);
-  // Load channels only means anything for the MeshCore two -- see
-  // netKindIsMeshCore's own comment above. Switching away from them
-  // also clears any select a previous MeshCore kind left populated, so
-  // a stale channel list can't linger into a kind it was never loaded
-  // for.
-  const isMeshCore = netKindIsMeshCore(kind);
-  document.getElementById('nf-load-channels').hidden = !isMeshCore;
-  if (!isMeshCore) {
-    const select = document.getElementById('nf-channel-select');
-    select.hidden = true;
-    select.replaceChildren();
-  }
-  const isMqtt = netKindIsMqtt(kind);
-  const isOfficialMqtt = kind === 'mqtt_meshtastic';
-  // mqtt_meshtastic has exactly one broker, one address, one set of
-  // published credentials -- connector_url/broker_username/
-  // broker_password are not operator choices for this kind (see
-  // app/checkin.py's OFFICIAL_MESHTASTIC_* constants and
-  // app/admin_ops.py's _validate_connector_url/_validate_mqtt_fields,
-  // which force all three server-side regardless of what this form
-  // sends), so those rows never appear for it -- only topic root,
-  // channel, and channel key are real choices. The static hint below
-  // replaces the connector row so the operator can still see what
-  // broker it will use.
-  document.getElementById('nf-connector-row').hidden = isOfficialMqtt;
-  document.getElementById('nf-official-broker-hint').hidden = !isOfficialMqtt;
-  document.getElementById('nf-mqtt-row-1').hidden = !isMqtt;
-  document.getElementById('nf-broker-username').hidden = isOfficialMqtt;
-  document.getElementById('nf-mqtt-row-2').hidden = !isMqtt || isOfficialMqtt;
-  document.getElementById('nf-mqtt-row-3').hidden = !isMqtt;
-  document.getElementById('nf-mqtt-meshtastic-hint').hidden = !isOfficialMqtt;
-  const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
-  document.getElementById('nf-connector').placeholder = 'connector URL, e.g. ' + example;
-}
-
-async function loadNetChannels(b) {
-  const connector = document.getElementById('nf-connector').value.trim();
-  const kind = document.getElementById('nf-kind').value;
-  const out = document.getElementById('nf-result');
-  out.replaceChildren();
+// GET /api/admin/checkin/channels proxies whichever connector a kind
+// actually has a channel-list API for (see that route's own
+// docstring) -- shared by the add form and every row's own "Load
+// channels" button so the fetch/populate logic exists exactly once.
+async function loadConnectorChannels(kind, connector, channelSelect, channelInput, out) {
+  out.textContent = '';
   if (!connector) { out.textContent = 'Enter a connector URL first.'; return; }
-  b.disabled = true;
   try {
     const r = await api('/api/admin/checkin/channels?connector=' + encodeURIComponent(connector) +
       '&kind=' + encodeURIComponent(kind));
-    const select = document.getElementById('nf-channel-select');
-    select.replaceChildren();
-    // applicable is false only for a kind with no channel concept at
-    // all (meshview) -- see GET /api/admin/checkin/channels. The
-    // button that calls this is hidden for that kind, but this stays
-    // defensive rather than assuming the caller never changes.
+    channelSelect.replaceChildren();
     if (!r.applicable) {
-      select.hidden = true;
+      channelSelect.hidden = true;
       out.textContent = 'This connector kind has no channel list -- type the channel name by hand.';
-      b.disabled = false;
       return;
     }
     (r.channels || []).forEach((c) => {
-      // Tolerant of shape, same reasoning the backend proxy applies to
-      // CoreScope's own response: a channel might be a bare string or
-      // an object carrying a name under one of a few likely keys.
       const name = typeof c === 'string' ? c : (c.name || c.channel || c.label || '');
       if (!name) return;
-      select.appendChild(el('option', { value: name, text: name }));
+      channelSelect.appendChild(el('option', { value: name, text: name }));
     });
-    if (select.children.length) {
-      select.hidden = false;
-      select.value = select.children[0].value;
-      document.getElementById('nf-channel').value = select.value;
-      out.textContent = 'Loaded ' + select.children.length + ' channels.';
+    if (channelSelect.children.length) {
+      channelSelect.hidden = false;
+      channelSelect.value = channelSelect.children[0].value;
+      channelInput.value = channelSelect.value;
+      out.textContent = 'Loaded ' + channelSelect.children.length + ' channels.';
     } else {
-      select.hidden = true;
+      channelSelect.hidden = true;
       out.textContent = 'Connector returned no channels -- type the channel name by hand.';
     }
   } catch (e) {
@@ -2111,365 +1650,648 @@ async function loadNetChannels(b) {
     // leaves the plain text field usable.
     out.textContent = 'Could not load channels: ' + e.message + ' -- type the channel name by hand.';
   }
-  b.disabled = false;
 }
 
-function resetNetForm() {
-  editingNetId = null;
-  document.getElementById('nf-kind').value = 'corescope';
-  updateNetFormKind();
-  document.getElementById('nf-label').value = '';
-  document.getElementById('nf-connector').value = '';
-  document.getElementById('nf-channel').value = '';
-  document.getElementById('nf-hashtag').value = '';
-  document.getElementById('nf-weekday').value = '2';
-  document.getElementById('nf-start-hour').value = '17';
-  document.getElementById('nf-end-hour').value = '23';
-  setNetTimezoneValue('America/Boise');
-  document.getElementById('nf-start-date').value = '';
-  document.getElementById('nf-enabled').checked = true;
-  document.getElementById('nf-topic-root').value = '';
-  document.getElementById('nf-broker-username').value = '';
-  document.getElementById('nf-broker-password').value = '';
-  document.getElementById('nf-channel-key').value = '';
-  document.getElementById('nf-clear-broker-password').checked = false;
-  document.getElementById('nf-clear-channel-key').checked = false;
-  document.getElementById('nf-broker-password-hint').textContent = '';
-  document.getElementById('nf-channel-key-hint').textContent = '';
-  const select = document.getElementById('nf-channel-select');
-  select.hidden = true;
-  select.replaceChildren();
-  document.getElementById('net-form-title').textContent = 'Add a net';
-  document.getElementById('nf-save').textContent = 'Add net';
-  document.getElementById('nf-cancel').hidden = true;
-  // Deliberately does not touch nf-result -- saveNet() calls this right
-  // after a successful save specifically to clear the form back to a
-  // blank "add" state, and clearing the result here would erase the
-  // "Net added"/"Net updated" message in the same breath it appears.
-}
-
-function startEditNet(n) {
-  editingNetId = n.id;
-  document.getElementById('nf-kind').value = n.kind;
-  updateNetFormKind();
-  document.getElementById('nf-label').value = n.label;
-  document.getElementById('nf-connector').value = n.connector_url;
-  document.getElementById('nf-channel').value = n.channel || '';
-  document.getElementById('nf-hashtag').value = n.hashtag || '';
-  document.getElementById('nf-weekday').value = String(n.weekday);
-  document.getElementById('nf-start-hour').value = String(n.start_hour);
-  document.getElementById('nf-end-hour').value = String(n.end_hour);
-  setNetTimezoneValue(n.timezone);
-  document.getElementById('nf-start-date').value = n.start_date || '';
-  document.getElementById('nf-enabled').checked = !!n.enabled;
-  document.getElementById('nf-topic-root').value = n.topic_root || '';
-  document.getElementById('nf-broker-username').value = n.broker_username || '';
-  // Secrets are NEVER echoed back (see app/admin_ops.py's
-  // _scrub_secrets) -- these inputs start blank every edit, and a blank
-  // submission means "keep the existing value," not "clear it"; the
-  // has_* booleans GET /api/admin/checkin/nets does return are shown as
-  // a hint next to the field instead, and "Clear" is the only way to
-  // actually blank one out.
-  document.getElementById('nf-broker-password').value = '';
-  document.getElementById('nf-channel-key').value = '';
-  document.getElementById('nf-clear-broker-password').checked = false;
-  document.getElementById('nf-clear-channel-key').checked = false;
-  document.getElementById('nf-broker-password-hint').textContent = n.has_broker_password ? 'currently set' : 'not set';
-  document.getElementById('nf-channel-key-hint').textContent = n.has_channel_key ? 'currently set (blank = Meshtastic default)' : 'not set -- using Meshtastic default key';
-  const select = document.getElementById('nf-channel-select');
-  select.hidden = true;
-  select.replaceChildren();
-  document.getElementById('net-form-title').textContent = 'Edit net';
-  document.getElementById('nf-save').textContent = 'Save net';
-  document.getElementById('nf-cancel').hidden = false;
-  document.getElementById('nf-result').replaceChildren();
-  document.getElementById('net-form-title').scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
-
-async function saveNet(b) {
-  const out = document.getElementById('nf-result');
-  out.replaceChildren();
-  const payload = {
-    label: document.getElementById('nf-label').value.trim(),
-    kind: document.getElementById('nf-kind').value,
-    connector_url: document.getElementById('nf-connector').value.trim(),
-    channel: document.getElementById('nf-channel').value.trim(),
-    hashtag: document.getElementById('nf-hashtag').value.trim(),
-    weekday: parseInt(document.getElementById('nf-weekday').value, 10),
-    start_hour: parseInt(document.getElementById('nf-start-hour').value, 10),
-    end_hour: parseInt(document.getElementById('nf-end-hour').value, 10),
-    timezone: document.getElementById('nf-timezone').value.trim(),
-    start_date: document.getElementById('nf-start-date').value,
-    enabled: document.getElementById('nf-enabled').checked,
-    topic_root: document.getElementById('nf-topic-root').value.trim(),
-    broker_username: document.getElementById('nf-broker-username').value.trim(),
-    // Blank means "keep the existing secret" on the backend (see
-    // app/admin_ops.py's _validate_net_fields) -- so these are only
-    // ever sent as a real new value, or left blank; clear_* is the
-    // explicit override for actually blanking one out.
-    broker_password: document.getElementById('nf-broker-password').value,
-    channel_key: document.getElementById('nf-channel-key').value.trim(),
-    clear_broker_password: document.getElementById('nf-clear-broker-password').checked,
-    clear_channel_key: document.getElementById('nf-clear-channel-key').checked,
-  };
-  b.disabled = true;
-  try {
-    if (editingNetId === null) {
-      await post('/api/admin/checkin/nets/create', payload);
-      out.textContent = 'Net added.';
-    } else {
-      await post('/api/admin/checkin/nets/update', Object.assign({ id: editingNetId }, payload));
-      out.textContent = 'Net updated.';
-    }
-    resetNetForm();
-    await loadNets();
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
-  }
-  b.disabled = false;
-}
-
-// ---- observation sources (app/db.py's observation_source) -------------
+// ---- communities (app/db.py's community) -------------------------------
 //
-// A connector watched only for node discovery and node confirmation --
-// never check-in scoring (see app/admin_ops.py's own comment ahead of
-// its observation-source routes). Mirrors the nets section above --
-// same connector kinds, same MeshCore/mqtt row shape, same secret
-// handling and delete confirmation -- minus every scoring-window field
-// (weekday/start_hour/end_hour/timezone/start_date/hashtag): the
-// observation_source table has no such columns at all. Kind-keyed
-// helpers (NET_KIND_LABELS, netKindHasChannel, netKindIsMeshCore,
-// netKindIsMqtt, NET_CONNECTOR_URL_EXAMPLES) are reused as-is from the
-// nets section above rather than duplicated -- the connector-kind
-// vocabulary is identical for both tables.
+// No list UI of its own any more -- a community is now 1:1 with the one
+// connection that owns it ("Where it's played" inside that connection's
+// own expanded row, Part E of the connections rewrite), never a shared
+// picker. This just keeps allCommunities fresh so each row can look its
+// own community up by id -- see renderConnectionDetail's "Where it's
+// played" block below.
+async function loadCommunities() {
+  try {
+    const d = await api('/api/admin/communities');
+    allCommunities = d.communities || [];
+  } catch (e) {
+    setStatus('Communities load failed: ' + e.message, true);
+  }
+  renderConnections();
+}
 
+// ---- connections (app/db.py's checkin_net + observation_source) --------
+
+let allNets = [];
 let allSources = [];
-let editingSourceId = null;   // null while the form is adding, a source id while editing
 
-function renderSourceRow(n) {
+function connectionKey(row) { return (row.__isNet ? 'net-' : 'source-') + row.id; }
+
+// Kind -> {protocol, kind} for the collapsed row's "Protocol · Kind"
+// line (corescope/beacon are both 'mc' and otherwise indistinguishable
+// by protocol alone, so this shows the kind too).
+const CONN_KIND_META = {
+  corescope: { protocol: 'MeshCore', kind: 'CoreScope' },
+  beacon: { protocol: 'MeshCore', kind: 'Beacon' },
+  meshview: { protocol: 'Meshtastic', kind: 'Meshview' },
+  mqtt: { protocol: 'Meshtastic', kind: 'MQTT' },
+  mqtt_meshtastic: { protocol: 'Meshtastic', kind: 'Official Meshtastic broker' },
+};
+
+// Shared clock-hour vocabulary for the "From"/"To" schedule dropdowns
+// (Part C) AND the collapsed-row compact summary (Part B) -- both read
+// off this SAME array and the SAME index<->end_hour conversion below,
+// so a schedule reads identically whether the row is collapsed or open.
+const CLOCK_HOUR_LABELS = [
+  '12am', '1am', '2am', '3am', '4am', '5am', '6am', '7am', '8am', '9am', '10am', '11am',
+  '12pm', '1pm', '2pm', '3pm', '4pm', '5pm', '6pm', '7pm', '8pm', '9pm', '10pm', '11pm',
+];
+
+// The "To" dropdown has one extra option, 'midnight', appended after
+// 11pm (index 24) -- ground truth: selecting "midnight" must give
+// end_hour 23; selecting "8pm" (index 20) must give end_hour 19.
+function toIndexToEndHour(i) { return i === 24 ? 23 : (i - 1 + 24) % 24; }
+// The inverse -- always prefers to DISPLAY "midnight" over "12am" when
+// end_hour === 23 (every real net today ends at 23, and must open for
+// edit showing "midnight," not "12am").
+function endHourToToIndex(endHour) { return endHour === 23 ? 24 : (endHour + 1) % 24; }
+
+const WEEKDAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+// Matches the backend's own short zone names (net_window_text) -- used
+// only for the compact collapsed-row summary below; anything not in
+// this short list falls back to its raw IANA zone name.
+const TZ_SHORT_NAMES = {
+  'America/Boise': 'Mountain',
+  'America/Denver': 'Mountain',
+  'America/Los_Angeles': 'Pacific',
+  'America/Chicago': 'Central',
+  'America/New_York': 'Eastern',
+};
+
+// The collapsed row's compact schedule line -- deliberately NOT
+// window_text (that one reads "Wednesdays, 5:00pm to midnight Mountain
+// time," built for the public about page; too long for a collapsed
+// admin row). Shares CLOCK_HOUR_LABELS/the end-hour convention with the
+// From/To dropdowns in renderConnectionDetail below.
+function compactNetSummary(row) {
+  const weekday = row.weekday != null ? row.weekday : 0;
+  const tz = TZ_SHORT_NAMES[row.timezone] || row.timezone;
+  // start_hour 0 through end_hour 23 never closes within the day at
+  // all -- "12am-midnight" is a literally correct but misleading way
+  // to say that (reads like a one-minute window, not an all-day one),
+  // same "all day" special case net_window_text already carries for
+  // the public about page (app/checkin.py).
+  if (row.start_hour === 0 && row.end_hour === 23) {
+    return 'Net: ' + WEEKDAY_ABBR[weekday] + ' all day ' + tz;
+  }
+  const fromLabel = CLOCK_HOUR_LABELS[row.start_hour] || '?';
+  const toLabel = row.end_hour === 23 ? 'midnight' : (CLOCK_HOUR_LABELS[(row.end_hour + 1) % 24] || '?');
+  return 'Net: ' + WEEKDAY_ABBR[weekday] + ' ' + fromLabel + '-' + toLabel + ' ' + tz;
+}
+
+function renderConnections() {
+  const host = document.getElementById('connections');
+  const count = document.getElementById('connections-count');
+  host.replaceChildren();
+  const combined = allNets.map((n) => Object.assign({}, n, { __isNet: true }))
+    .concat(allSources.map((s) => Object.assign({}, s, { __isNet: false })));
+  count.textContent = combined.length
+    ? (combined.length + (combined.length === 1 ? ' connection' : ' connections')) : '';
+  if (newConnectionDraft) host.appendChild(renderNewConnectionRow());
+  if (!combined.length && !newConnectionDraft) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No connections configured yet -- use New connection above.' }));
+    return;
+  }
+  combined.forEach((row) => host.appendChild(renderConnectionRow(row)));
+}
+
+// Collapsed row: caret, label, "Protocol · Kind", a compact schedule
+// summary (or "watching only" for a source), and the enabled/disabled
+// badge -- deliberately nothing else. Poll status, check-in counts and
+// unresolved senders all moved into "Recorded messages" (Part D,
+// renderConnectionDetail below), collapsed by default.
+function renderConnectionRow(row) {
+  const key = connectionKey(row);
   const wrap = el('div', { className: 'adm-net' });
-  const row = el('div', { className: 'adm-net-row' });
-  const info = el('div', { className: 'adm-net-info' });
-  info.appendChild(el('strong', { text: n.label }));
-  info.appendChild(el('span', { className: 'adm-badge', text: NET_KIND_LABELS[n.kind] || n.kind }));
-  // Same "not operator config" reasoning as renderNetRow's identical
-  // check above -- mqtt_meshtastic's connector_url is always the one
-  // official broker address, so the topic root stands in for it here
-  // too.
-  info.appendChild(el('span', {
-    className: 'adm-mono',
-    text: n.kind === 'mqtt_meshtastic' ? ('topic root: ' + n.topic_root) : n.connector_url,
-  }));
-  // Blank for a kind that has nothing to narrow by (meshview) -- see
-  // _validate_source_fields in app/admin_ops.py -- so only shown when
-  // there's actually a value.
-  if (n.channel) info.appendChild(el('span', { text: n.channel }));
-  info.appendChild(el('span', {
-    className: 'adm-badge ' + (n.enabled ? 'adm-badge-ok' : 'adm-badge-bad'),
-    text: n.enabled ? 'enabled' : 'disabled',
-  }));
-  row.appendChild(info);
-  const actions = el('div', { className: 'adm-net-actions' });
-  actions.appendChild(btn('Edit', 'adm-btn-quiet', () => startEditSource(n)));
-  actions.appendChild(btn('Delete', 'adm-btn-danger', async (b) => {
-    const typed = window.prompt('Deleting removes this observation source.\n\nType ' + n.label + ' to confirm.');
-    if (!typed) return;
-    b.disabled = true;
-    try {
-      await post('/api/admin/observation/sources/delete', { id: n.id, label: typed });
-      setStatus('Deleted source ' + n.label, false);
-      if (editingSourceId === n.id) resetSourceForm();
-      await loadSources();
-    } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
-  }));
-  row.appendChild(actions);
-  wrap.appendChild(row);
+  const rowEl = el('div', { className: 'adm-net-row' });
+  const open = expandedConnections.has(key);
+  rowEl.appendChild(el('span', { className: 'adm-caret', text: open ? '▾' : '▸' }));
 
-  // Same health line the nets section shows -- last_poll_at/
-  // last_poll_error come straight off the row, see GET
-  // /api/admin/observation/sources.
-  const healthP = el('p', {
-    className: 'adm-net-health' + (n.last_poll_error ? ' adm-status-bad' : ''),
+  const info = el('div', { className: 'adm-net-info' });
+  info.appendChild(el('strong', { text: row.label }));
+  const meta = CONN_KIND_META[row.kind] || { protocol: row.protocol === 'mc' ? 'MeshCore' : 'Meshtastic', kind: row.kind };
+  info.appendChild(el('span', { text: meta.protocol + ' · ' + meta.kind }));
+  info.appendChild(el('span', {
+    className: 'adm-hint',
+    text: row.__isNet ? compactNetSummary(row) : 'watching only',
+  }));
+  info.appendChild(el('span', {
+    className: 'adm-badge ' + (row.enabled ? 'adm-badge-ok' : 'adm-badge-bad'),
+    text: row.enabled ? 'enabled' : 'disabled',
+  }));
+  rowEl.appendChild(info);
+  rowEl.addEventListener('click', () => {
+    if (expandedConnections.has(key)) expandedConnections.delete(key);
+    else expandedConnections.add(key);
+    renderConnections();
   });
-  healthP.appendChild(el('span', { text: netHealthText(n) }));
-  wrap.appendChild(healthP);
+  wrap.appendChild(rowEl);
+
+  if (open) wrap.appendChild(renderConnectionDetail(row, false));
   return wrap;
 }
 
-function renderSources() {
-  const host = document.getElementById('sources');
-  const count = document.getElementById('sources-count');
-  host.replaceChildren();
-  count.textContent = allSources.length
-    ? (allSources.length + (allSources.length === 1 ? ' source' : ' sources')) : '';
-  if (!allSources.length) {
-    host.appendChild(el('p', { className: 'adm-hint', text: 'No observation sources configured yet -- add one below.' }));
-    return;
+// The always-expanded draft row inserted at the top of the list by the
+// "New connection" button -- same detail panel renderConnectionDetail
+// builds for any other row, just fed a plain in-memory draft object
+// instead of a server row, and with isDraft=true so its Save button
+// creates rather than updates (and Cancel replaces Delete).
+function renderNewConnectionRow() {
+  const wrap = el('div', { className: 'adm-net' });
+  const rowEl = el('div', { className: 'adm-net-row' });
+  rowEl.appendChild(el('span', { className: 'adm-caret', text: '▾' }));
+  const info = el('div', { className: 'adm-net-info' });
+  info.appendChild(el('strong', { text: 'New connection' }));
+  rowEl.appendChild(info);
+  wrap.appendChild(rowEl);
+  wrap.appendChild(renderConnectionDetail(newConnectionDraft, true));
+  return wrap;
+}
+
+function startNewConnection() {
+  newConnectionDraft = {
+    __isNet: false,
+    id: null,
+    label: '',
+    kind: 'corescope',
+    connector_url: '',
+    channel: '',
+    hashtag: '',
+    topic_root: '',
+    broker_username: '',
+    has_broker_password: false,
+    has_channel_key: false,
+    enabled: true,
+    community_id: null,
+    weekday: 2,
+    start_hour: 17,
+    end_hour: 23,
+    timezone: 'America/Boise',
+    start_date: '',
+  };
+  renderConnections();
+  const host = document.getElementById('connections');
+  if (host.firstElementChild) host.firstElementChild.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// The inline edit panel a row (or the new-connection draft) expands
+// into -- same caret-expand idiom Players uses (renderPlayerDetail),
+// not a shared bottom form: every field here is a freshly built
+// element read back by closure, not a fixed id, so any number of rows
+// (plus the draft) can be open and edited at once without colliding.
+function renderConnectionDetail(row, isDraft) {
+  const originalIsNet = !!row.__isNet;
+  const key = isDraft ? null : connectionKey(row);
+  const d = el('div', { className: 'adm-player-detail' });
+
+  // -- Label --
+  const labelInput = el('input', { value: row.label || '' });
+  labelInput.placeholder = 'e.g. Wednesday Net';
+  const labelRow = el('div', { className: 'adm-form' });
+  labelRow.appendChild(fieldLabel('Label', labelInput, 'wide'));
+  d.appendChild(labelRow);
+
+  // -- Connector --
+  d.appendChild(el('div', { className: 'adm-sub-title', text: 'Connector' }));
+  const kindSelect = el('select');
+  Object.keys(NET_KIND_LABELS).forEach((k) => {
+    kindSelect.appendChild(el('option', { value: k, text: NET_KIND_LABELS[k] }));
+  });
+  kindSelect.value = row.kind;
+  const kindRow = el('div', { className: 'adm-form' });
+  kindRow.appendChild(fieldLabel('Connector kind', kindSelect));
+  d.appendChild(kindRow);
+
+  const connectorInput = el('input', { value: row.connector_url || '' });
+  const connectorRow = el('div', { className: 'adm-form' });
+  connectorRow.appendChild(fieldLabel('Server URL', connectorInput, 'wide'));
+  d.appendChild(connectorRow);
+
+  const officialHint = el('p', { className: 'adm-hint', text: 'Uses the official Meshtastic broker at mqtt.meshtastic.org.' });
+  d.appendChild(officialHint);
+
+  // Topic root lives in Connector for BOTH mqtt-family kinds (plain
+  // mqtt and the official broker) -- not tucked into the net-schedule
+  // area the way it used to be.
+  const topicRootInput = el('input', { value: row.topic_root || '' });
+  topicRootInput.placeholder = 'e.g. msh/US (blank = subscribe broadly)';
+  const topicRootRow = el('div', { className: 'adm-form' });
+  topicRootRow.appendChild(fieldLabel('Topic root', topicRootInput, true));
+  d.appendChild(topicRootRow);
+
+  // Broker username/password: plain mqtt only -- mqtt_meshtastic's
+  // broker credentials are forced server-side to the official broker's
+  // own constants and are not this operator's to set (see
+  // app/admin_ops.py's _validate_connector_url).
+  const brokerUsernameInput = el('input', { value: row.broker_username || '' });
+  brokerUsernameInput.placeholder = 'optional';
+  const brokerUsernameRow = el('div', { className: 'adm-form' });
+  brokerUsernameRow.appendChild(fieldLabel('Broker username', brokerUsernameInput, true));
+  d.appendChild(brokerUsernameRow);
+
+  // Secrets are NEVER echoed back (see app/admin_ops.py's
+  // _scrub_secrets) -- these inputs start blank every time a row
+  // opens, and a blank submission means "keep the existing value," not
+  // "clear it"; the has_* booleans the row already carries are shown
+  // as a hint instead, and "Clear" is the only way to actually blank
+  // one out.
+  const brokerPasswordInput = el('input', { type: 'password' });
+  brokerPasswordInput.placeholder = 'leave blank to keep current';
+  const clearBrokerPassword = el('input', { type: 'checkbox' });
+  const brokerPasswordHint = el('span', { className: 'adm-hint', text: row.has_broker_password ? 'currently set' : 'not set' });
+  const brokerPasswordRow = el('div', { className: 'adm-form' });
+  brokerPasswordRow.appendChild(fieldLabel('Broker password', brokerPasswordInput, true));
+  brokerPasswordRow.appendChild(checkLabel('Clear', clearBrokerPassword));
+  brokerPasswordRow.appendChild(brokerPasswordHint);
+  d.appendChild(brokerPasswordRow);
+
+  // Channel key applies to BOTH mqtt kinds.
+  const channelKeyInput = el('input', { type: 'password' });
+  channelKeyInput.placeholder = 'base64 PSK, blank = Meshtastic default';
+  const clearChannelKey = el('input', { type: 'checkbox' });
+  const channelKeyHint = el('span', {
+    className: 'adm-hint',
+    text: row.has_channel_key ? 'currently set (blank = Meshtastic default)' : 'not set -- using Meshtastic default key',
+  });
+  const channelKeyRow = el('div', { className: 'adm-form' });
+  channelKeyRow.appendChild(fieldLabel('Channel key', channelKeyInput, true));
+  channelKeyRow.appendChild(checkLabel('Clear', clearChannelKey));
+  channelKeyRow.appendChild(channelKeyHint);
+  d.appendChild(channelKeyRow);
+
+  // Channel -- always visible regardless of kind (meshview's is now a
+  // free-typed optional display name with no upstream list, so it gets
+  // the input without the "Load channels" button/select).
+  const channelInput = el('input', { value: row.channel || '' });
+  const channelSelect = el('select');
+  channelSelect.hidden = true;
+  const channelOut = el('span', { className: 'adm-hint' });
+  const loadChannelsBtn = btn('Load channels', 'adm-btn-quiet', async (b) => {
+    b.disabled = true;
+    await loadConnectorChannels(kindSelect.value, connectorInput.value.trim(), channelSelect, channelInput, channelOut);
+    b.disabled = false;
+  });
+  channelSelect.addEventListener('change', () => { channelInput.value = channelSelect.value; });
+  const channelRow = el('div', { className: 'adm-form' });
+  channelRow.appendChild(fieldLabel('Channel', channelInput));
+  channelRow.appendChild(loadChannelsBtn);
+  channelRow.appendChild(channelSelect);
+  d.appendChild(channelRow);
+  d.appendChild(channelOut);
+
+  // -- On/Off --
+  const enabledCheck = el('input', { type: 'checkbox' });
+  enabledCheck.checked = !!row.enabled;
+  const enabledRow = el('div', { className: 'adm-form' });
+  enabledRow.appendChild(checkLabel('Enabled', enabledCheck));
+  d.appendChild(enabledRow);
+
+  // -- Net check-in --
+  const scoresNetCheck = el('input', { type: 'checkbox' });
+  scoresNetCheck.checked = originalIsNet;
+  const scoresNetRow = el('div', { className: 'adm-form' });
+  scoresNetRow.appendChild(checkLabel('Net check-in', scoresNetCheck));
+  d.appendChild(scoresNetRow);
+
+  const scheduleGroup = el('div');
+  const weekdaySelect = el('select');
+  WEEKDAY_NAMES.forEach((name, i) => weekdaySelect.appendChild(el('option', { value: String(i), text: name })));
+  weekdaySelect.value = String(row.weekday != null ? row.weekday : 2);
+
+  const fromSelect = el('select');
+  CLOCK_HOUR_LABELS.forEach((label, i) => fromSelect.appendChild(el('option', { value: String(i), text: label })));
+  fromSelect.value = String(row.start_hour != null ? row.start_hour : 17);
+
+  const toSelect = el('select');
+  CLOCK_HOUR_LABELS.concat(['midnight']).forEach((label, i) => toSelect.appendChild(el('option', { value: String(i), text: label })));
+  toSelect.value = String(endHourToToIndex(row.end_hour != null ? row.end_hour : 23));
+
+  const timezoneSelect = el('select');
+  NET_TIMEZONE_OPTIONS.forEach(([value, text]) => timezoneSelect.appendChild(el('option', { value: value, text: text })));
+  setTimezoneSelectValue(timezoneSelect, row.timezone || 'America/Boise');
+
+  const scheduleRow1 = el('div', { className: 'adm-form' });
+  scheduleRow1.appendChild(fieldLabel('Weekday', weekdaySelect));
+  scheduleRow1.appendChild(fieldLabel('From', fromSelect));
+  scheduleRow1.appendChild(fieldLabel('To', toSelect));
+  scheduleRow1.appendChild(fieldLabel('Timezone', timezoneSelect, true));
+  scheduleGroup.appendChild(scheduleRow1);
+
+  // Hashtag lives ONLY here, inside the Net check-in reveal, for
+  // Meshtastic kinds -- never in Connector (channel already covers
+  // that), never for MeshCore (no hashtag column at all).
+  const hashtagInput = el('input', { value: row.hashtag || '' });
+  hashtagInput.placeholder = 'e.g. #Freq51';
+  const hashtagRow = el('div', { className: 'adm-form' });
+  hashtagRow.appendChild(fieldLabel('Hashtag', hashtagInput));
+  scheduleGroup.appendChild(hashtagRow);
+
+  const startDateInput = el('input', { type: 'date' });
+  startDateInput.value = row.start_date || '';
+  const scheduleRow2 = el('div', { className: 'adm-form' });
+  scheduleRow2.appendChild(fieldLabel('Start date', startDateInput));
+  scheduleGroup.appendChild(scheduleRow2);
+  scheduleGroup.appendChild(el('p', {
+    className: 'adm-hint',
+    text: 'An empty start date blocks every award for this net.',
+  }));
+  d.appendChild(scheduleGroup);
+
+  function refreshVisibility() {
+    const kind = kindSelect.value;
+    const isOfficialMqtt = kind === 'mqtt_meshtastic';
+    const isMqtt = netKindIsMqtt(kind);
+    const isMeshCore = netKindIsMeshCore(kind);
+
+    connectorRow.hidden = isOfficialMqtt;
+    officialHint.hidden = !isOfficialMqtt;
+    const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
+    connectorInput.placeholder = 'e.g. ' + example;
+
+    topicRootRow.hidden = !isMqtt;
+    brokerUsernameRow.hidden = kind !== 'mqtt';
+    brokerPasswordRow.hidden = kind !== 'mqtt';
+    channelKeyRow.hidden = !isMqtt;
+
+    loadChannelsBtn.hidden = !isMeshCore;
+    if (!isMeshCore) {
+      channelSelect.hidden = true;
+      channelSelect.replaceChildren();
+    }
+    channelInput.placeholder = isMeshCore ? 'e.g. #weekly-net' : 'e.g. LongFast';
+
+    const scoresNet = scoresNetCheck.checked;
+    scheduleGroup.hidden = !scoresNet;
+    // An observation source (and a MeshCore net) never has a hashtag --
+    // only a Meshtastic net does.
+    hashtagRow.hidden = !scoresNet || !netKindHasHashtag(kind);
   }
-  allSources.forEach((n) => host.appendChild(renderSourceRow(n)));
+  kindSelect.addEventListener('change', refreshVisibility);
+  scoresNetCheck.addEventListener('change', refreshVisibility);
+  refreshVisibility();
+
+  // -- Where it's played --
+  // One community linked 1:1 to this connection -- never a shared
+  // dropdown-picked community. row.community_id (if set) is looked up
+  // in allCommunities purely to hydrate this checkbox and its fields;
+  // there is no picker anywhere in this UI.
+  const linkedCommunity = row.community_id != null ? allCommunities.find((c) => c.id === row.community_id) : null;
+  const wherePlayedCheck = el('input', { type: 'checkbox' });
+  wherePlayedCheck.checked = !!(linkedCommunity && linkedCommunity.shown_on_about);
+  const wherePlayedRow = el('div', { className: 'adm-form' });
+  wherePlayedRow.appendChild(checkLabel("Where it's played", wherePlayedCheck));
+  d.appendChild(wherePlayedRow);
+
+  const whereGroup = el('div');
+  const whereNameInput = el('input', { value: linkedCommunity ? linkedCommunity.name : '' });
+  whereNameInput.placeholder = 'e.g. FREQ51 — Intermountain Mesh';
+  const whereLinkInput = el('input', { value: linkedCommunity ? (linkedCommunity.url || '') : '' });
+  whereLinkInput.placeholder = 'e.g. https://freq51.net';
+  const whereRow1 = el('div', { className: 'adm-form' });
+  whereRow1.appendChild(fieldLabel('Name', whereNameInput, 'half'));
+  whereRow1.appendChild(fieldLabel('Link', whereLinkInput, 'half'));
+  whereGroup.appendChild(whereRow1);
+
+  const whereBlurbInput = el('textarea', { className: 'adm-textarea' });
+  whereBlurbInput.value = linkedCommunity ? (linkedCommunity.blurb || '') : '';
+  whereBlurbInput.placeholder = 'shown under the name on the About page';
+  const whereRow2 = el('div', { className: 'adm-form' });
+  whereRow2.appendChild(fieldLabel('Description', whereBlurbInput, 'full'));
+  whereGroup.appendChild(whereRow2);
+
+  const whereOrderInput = el('input', { type: 'number' });
+  whereOrderInput.value = linkedCommunity && linkedCommunity.display_order != null ? linkedCommunity.display_order : 0;
+  const whereRow3 = el('div', { className: 'adm-form' });
+  whereRow3.appendChild(fieldLabel('About page order', whereOrderInput));
+  whereGroup.appendChild(whereRow3);
+  d.appendChild(whereGroup);
+
+  function refreshWherePlayedVisibility() { whereGroup.hidden = !wherePlayedCheck.checked; }
+  wherePlayedCheck.addEventListener('change', refreshWherePlayedVisibility);
+  refreshWherePlayedVisibility();
+
+  // Runs BEFORE the net/source save below, so a freshly created
+  // community's id can be included in the same net/source payload.
+  // Never calls /api/admin/communities/delete -- unchecking only sets
+  // shown_on_about false, it never removes the community or clears
+  // community_id off this row.
+  async function saveWherePlayed() {
+    const checked = wherePlayedCheck.checked;
+    let communityId = row.community_id;
+    if (checked) {
+      const payload = {
+        name: whereNameInput.value.trim(),
+        region: '',
+        blurb: whereBlurbInput.value.trim(),
+        url: whereLinkInput.value.trim(),
+        contact_url: '',
+        display_order: parseInt(whereOrderInput.value, 10) || 0,
+        shown_on_about: true,
+      };
+      if (communityId != null) {
+        await post('/api/admin/communities/update', Object.assign({ id: communityId }, payload));
+      } else {
+        const created = await post('/api/admin/communities/create', payload);
+        communityId = created.id;
+      }
+    } else if (communityId != null) {
+      const existing = allCommunities.find((c) => c.id === communityId);
+      if (existing) {
+        await post('/api/admin/communities/update', {
+          id: communityId,
+          name: existing.name,
+          region: existing.region || '',
+          blurb: existing.blurb || '',
+          url: existing.url || '',
+          contact_url: existing.contact_url || '',
+          display_order: existing.display_order != null ? existing.display_order : 0,
+          shown_on_about: false,
+        });
+      }
+    }
+    return communityId;
+  }
+
+  // -- Save / Delete or Cancel --
+  const out = el('div', { className: 'adm-result' });
+  const actionsRow = el('div', { className: 'adm-form' });
+  actionsRow.appendChild(btn('Save', 'adm-btn', async (b) => {
+    out.textContent = '';
+    b.disabled = true;
+    try {
+      const communityId = await saveWherePlayed();
+      const scoresNet = scoresNetCheck.checked;
+      const basePayload = {
+        label: labelInput.value.trim(),
+        kind: kindSelect.value,
+        connector_url: connectorInput.value.trim(),
+        channel: channelInput.value.trim(),
+        enabled: enabledCheck.checked,
+        topic_root: topicRootInput.value.trim(),
+        broker_username: brokerUsernameInput.value.trim(),
+        broker_password: brokerPasswordInput.value,
+        channel_key: channelKeyInput.value.trim(),
+        clear_broker_password: clearBrokerPassword.checked,
+        clear_channel_key: clearChannelKey.checked,
+        community_id: communityId,
+      };
+      if (!isDraft) basePayload.id = row.id;
+      const scheduleFields = {
+        hashtag: hashtagInput.value.trim(),
+        weekday: parseInt(weekdaySelect.value, 10),
+        start_hour: parseInt(fromSelect.value, 10),
+        end_hour: toIndexToEndHour(parseInt(toSelect.value, 10)),
+        timezone: timezoneSelect.value.trim(),
+        start_date: startDateInput.value,
+      };
+
+      if (isDraft) {
+        if (scoresNet) {
+          await post('/api/admin/checkin/nets/create', Object.assign({}, basePayload, scheduleFields));
+          setStatus('Net added.', false);
+        } else {
+          await post('/api/admin/observation/sources/create', basePayload);
+          setStatus('Source added.', false);
+        }
+        newConnectionDraft = null;
+      } else if (originalIsNet && scoresNet) {
+        await post('/api/admin/checkin/nets/update', Object.assign({}, basePayload, scheduleFields));
+        setStatus('Updated ' + basePayload.label, false);
+      } else if (!originalIsNet && !scoresNet) {
+        await post('/api/admin/observation/sources/update', basePayload);
+        setStatus('Updated ' + basePayload.label, false);
+      } else if (originalIsNet && !scoresNet) {
+        // Toggled off -- the conversion endpoint carries over label/
+        // kind/connector/credentials/enabled/community_id from the
+        // existing net itself; any edits made to those same fields in
+        // this same save are not applied when a toggle is also saved.
+        await post('/api/admin/checkin/nets/convert-to-source', { id: row.id });
+        setStatus('Converted ' + basePayload.label + ' to an observation source', false);
+      } else {
+        // !originalIsNet && scoresNet -- toggled on; same "existing
+        // fields carry over, only the schedule is new" contract, other
+        // direction.
+        await post('/api/admin/observation/sources/convert-to-net', Object.assign({ id: row.id }, scheduleFields));
+        setStatus('Converted ' + basePayload.label + ' to a net', false);
+      }
+      if (!isDraft) expandedConnections.delete(key);
+      await Promise.all([loadCommunities(), loadNets(), loadSources()]);
+    } catch (e) {
+      out.textContent = 'Failed: ' + e.message;
+      b.disabled = false;
+    }
+  }));
+  if (isDraft) {
+    actionsRow.appendChild(btn('Cancel', 'adm-btn-quiet', () => {
+      newConnectionDraft = null;
+      renderConnections();
+    }));
+  } else {
+    actionsRow.appendChild(btn('Delete', 'adm-btn-danger', async (b) => {
+      const typed = window.prompt(
+        'Deleting removes this ' + (originalIsNet ? 'net' : 'observation source') + '.\n\nType ' + row.label + ' to confirm.');
+      if (!typed) return;
+      b.disabled = true;
+      try {
+        if (originalIsNet) {
+          await post('/api/admin/checkin/nets/delete', { id: row.id, label: typed });
+        } else {
+          await post('/api/admin/observation/sources/delete', { id: row.id, label: typed });
+        }
+        setStatus('Deleted ' + row.label, false);
+        expandedConnections.delete(key);
+        expandedRecorded.delete(key);
+        if (originalIsNet) await loadNets(); else await loadSources();
+      } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
+    }));
+  }
+  d.appendChild(actionsRow);
+  d.appendChild(out);
+
+  // -- Recorded messages -- collapsed by default, own caret, keyed
+  // separately from the connection row itself so opening this never
+  // collapses the row it lives inside.
+  if (!isDraft) {
+    const recOpen = expandedRecorded.has(key);
+    const recHead = el('div', { className: 'adm-net-row' });
+    recHead.appendChild(el('span', { className: 'adm-caret', text: recOpen ? '▾' : '▸' }));
+    recHead.appendChild(el('span', { className: 'adm-sub-title', text: 'Recorded messages' }));
+    recHead.addEventListener('click', () => {
+      if (expandedRecorded.has(key)) expandedRecorded.delete(key); else expandedRecorded.add(key);
+      renderConnections();
+    });
+    d.appendChild(recHead);
+
+    if (recOpen) {
+      // Last polled: never shown for a corescope/beacon/meshview
+      // OBSERVATION SOURCE -- nothing in this codebase ever writes
+      // last_poll_at for that combination, so "never polled yet" there
+      // would be a permanent, meaningless lie.
+      if (originalIsNet || netKindIsMqtt(row.kind)) {
+        d.appendChild(el('p', {
+          className: 'adm-net-health' + (row.last_poll_error ? ' adm-status-bad' : ''),
+          text: netHealthText(row),
+        }));
+      }
+      if (originalIsNet) {
+        d.appendChild(el('p', {
+          className: 'adm-hint',
+          text: row.last_checkin_count +
+            (row.last_checkin_count === 1 ? ' check-in' : ' check-ins') +
+            (row.last_checkin_net_date ? ' (' + row.last_checkin_net_date + ')' : ''),
+        }));
+        if (row.unresolved_count > 0 && row.unresolved_senders && row.unresolved_senders.length) {
+          d.appendChild(el('div', { className: 'adm-sub-title', text: 'Senders not matched to a player' }));
+          const table = el('table', { className: 'adm-table' });
+          const thead = el('thead');
+          const headRow = el('tr');
+          ['Sender', 'Unmatched messages'].forEach((h) => headRow.appendChild(el('th', { text: h })));
+          thead.appendChild(headRow);
+          table.appendChild(thead);
+          const tbody = el('tbody');
+          // Already sorted by the server, descending by count then name --
+          // never re-sorted here.
+          row.unresolved_senders.forEach((s) => {
+            const tr = el('tr');
+            tr.appendChild(el('td', { text: s.sender_name }));
+            tr.appendChild(el('td', { text: String(s.message_count) }));
+            tbody.appendChild(tr);
+          });
+          table.appendChild(tbody);
+          const wrap = el('div', { className: 'adm-table-wrap' });
+          wrap.appendChild(table);
+          d.appendChild(wrap);
+        }
+      }
+    }
+  }
+
+  return d;
+}
+
+async function loadNets() {
+  try {
+    const d = await api('/api/admin/checkin/nets');
+    allNets = d.nets || [];
+    if (d.config) renderConfigForm(d.config);
+  } catch (e) {
+    setStatus('Nets load failed: ' + e.message, true);
+  }
+  renderConnections();
 }
 
 async function loadSources() {
   try {
     const d = await api('/api/admin/observation/sources');
     allSources = d.sources || [];
-    renderSources();
   } catch (e) {
     setStatus('Sources load failed: ' + e.message, true);
   }
+  renderConnections();
 }
 
-function updateSourceFormKind() {
-  const kind = document.getElementById('sf-kind').value;
-  document.getElementById('sf-channel-row').hidden = !netKindHasChannel(kind);
-  const isMeshCore = netKindIsMeshCore(kind);
-  document.getElementById('sf-load-channels').hidden = !isMeshCore;
-  if (!isMeshCore) {
-    const select = document.getElementById('sf-channel-select');
-    select.hidden = true;
-    select.replaceChildren();
-  }
-  const isMqtt = netKindIsMqtt(kind);
-  const isOfficialMqtt = kind === 'mqtt_meshtastic';
-  // Same "one broker, nothing to choose" reasoning as
-  // updateNetFormKind's identical block above.
-  document.getElementById('sf-connector-row').hidden = isOfficialMqtt;
-  document.getElementById('sf-official-broker-hint').hidden = !isOfficialMqtt;
-  document.getElementById('sf-mqtt-row-1').hidden = !isMqtt;
-  document.getElementById('sf-broker-username').hidden = isOfficialMqtt;
-  document.getElementById('sf-mqtt-row-2').hidden = !isMqtt || isOfficialMqtt;
-  document.getElementById('sf-mqtt-row-3').hidden = !isMqtt;
-  document.getElementById('sf-mqtt-meshtastic-hint').hidden = !isOfficialMqtt;
-  const example = NET_CONNECTOR_URL_EXAMPLES[kind] || NET_CONNECTOR_URL_EXAMPLES.corescope;
-  document.getElementById('sf-connector').placeholder = 'connector URL, e.g. ' + example;
-}
-
-async function loadSourceChannels(b) {
-  const connector = document.getElementById('sf-connector').value.trim();
-  const kind = document.getElementById('sf-kind').value;
-  const out = document.getElementById('sf-result');
-  out.replaceChildren();
-  if (!connector) { out.textContent = 'Enter a connector URL first.'; return; }
-  b.disabled = true;
-  try {
-    const r = await api('/api/admin/checkin/channels?connector=' + encodeURIComponent(connector) +
-      '&kind=' + encodeURIComponent(kind));
-    const select = document.getElementById('sf-channel-select');
-    select.replaceChildren();
-    if (!r.applicable) {
-      select.hidden = true;
-      out.textContent = 'This connector kind has no channel list -- type the channel name by hand.';
-      b.disabled = false;
-      return;
-    }
-    (r.channels || []).forEach((c) => {
-      const name = typeof c === 'string' ? c : (c.name || c.channel || c.label || '');
-      if (!name) return;
-      select.appendChild(el('option', { value: name, text: name }));
-    });
-    if (select.children.length) {
-      select.hidden = false;
-      select.value = select.children[0].value;
-      document.getElementById('sf-channel').value = select.value;
-      out.textContent = 'Loaded ' + select.children.length + ' channels.';
-    } else {
-      select.hidden = true;
-      out.textContent = 'Connector returned no channels -- type the channel name by hand.';
-    }
-  } catch (e) {
-    out.textContent = 'Could not load channels: ' + e.message + ' -- type the channel name by hand.';
-  }
-  b.disabled = false;
-}
-
-function resetSourceForm() {
-  editingSourceId = null;
-  document.getElementById('sf-kind').value = 'corescope';
-  updateSourceFormKind();
-  document.getElementById('sf-label').value = '';
-  document.getElementById('sf-connector').value = '';
-  document.getElementById('sf-channel').value = '';
-  document.getElementById('sf-enabled').checked = true;
-  document.getElementById('sf-topic-root').value = '';
-  document.getElementById('sf-broker-username').value = '';
-  document.getElementById('sf-broker-password').value = '';
-  document.getElementById('sf-channel-key').value = '';
-  document.getElementById('sf-clear-broker-password').checked = false;
-  document.getElementById('sf-clear-channel-key').checked = false;
-  document.getElementById('sf-broker-password-hint').textContent = '';
-  document.getElementById('sf-channel-key-hint').textContent = '';
-  const select = document.getElementById('sf-channel-select');
-  select.hidden = true;
-  select.replaceChildren();
-  document.getElementById('source-form-title').textContent = 'Add a source';
-  document.getElementById('sf-save').textContent = 'Add source';
-  document.getElementById('sf-cancel').hidden = true;
-  // Deliberately does not touch sf-result -- same reason resetNetForm
-  // doesn't touch nf-result, see that function's own comment.
-}
-
-function startEditSource(n) {
-  editingSourceId = n.id;
-  document.getElementById('sf-kind').value = n.kind;
-  updateSourceFormKind();
-  document.getElementById('sf-label').value = n.label;
-  document.getElementById('sf-connector').value = n.connector_url;
-  document.getElementById('sf-channel').value = n.channel || '';
-  document.getElementById('sf-enabled').checked = !!n.enabled;
-  document.getElementById('sf-topic-root').value = n.topic_root || '';
-  document.getElementById('sf-broker-username').value = n.broker_username || '';
-  // Secrets are NEVER echoed back -- see startEditNet's own comment on
-  // the identical nf-broker-password/nf-channel-key pattern above.
-  document.getElementById('sf-broker-password').value = '';
-  document.getElementById('sf-channel-key').value = '';
-  document.getElementById('sf-clear-broker-password').checked = false;
-  document.getElementById('sf-clear-channel-key').checked = false;
-  document.getElementById('sf-broker-password-hint').textContent = n.has_broker_password ? 'currently set' : 'not set';
-  document.getElementById('sf-channel-key-hint').textContent = n.has_channel_key ? 'currently set (blank = Meshtastic default)' : 'not set -- using Meshtastic default key';
-  const select = document.getElementById('sf-channel-select');
-  select.hidden = true;
-  select.replaceChildren();
-  document.getElementById('source-form-title').textContent = 'Edit source';
-  document.getElementById('sf-save').textContent = 'Save source';
-  document.getElementById('sf-cancel').hidden = false;
-  document.getElementById('sf-result').replaceChildren();
-  document.getElementById('source-form-title').scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
-
-async function saveSource(b) {
-  const out = document.getElementById('sf-result');
-  out.replaceChildren();
-  const payload = {
-    label: document.getElementById('sf-label').value.trim(),
-    kind: document.getElementById('sf-kind').value,
-    connector_url: document.getElementById('sf-connector').value.trim(),
-    channel: document.getElementById('sf-channel').value.trim(),
-    enabled: document.getElementById('sf-enabled').checked,
-    topic_root: document.getElementById('sf-topic-root').value.trim(),
-    broker_username: document.getElementById('sf-broker-username').value.trim(),
-    // Blank means "keep the existing secret" on the backend -- same
-    // convention saveNet's identical payload fields document above.
-    broker_password: document.getElementById('sf-broker-password').value,
-    channel_key: document.getElementById('sf-channel-key').value.trim(),
-    clear_broker_password: document.getElementById('sf-clear-broker-password').checked,
-    clear_channel_key: document.getElementById('sf-clear-channel-key').checked,
-  };
-  b.disabled = true;
-  try {
-    if (editingSourceId === null) {
-      await post('/api/admin/observation/sources/create', payload);
-      out.textContent = 'Source added.';
-    } else {
-      await post('/api/admin/observation/sources/update', Object.assign({ id: editingSourceId }, payload));
-      out.textContent = 'Source updated.';
-    }
-    resetSourceForm();
-    await loadSources();
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
-  }
-  b.disabled = false;
-}
 
 // ---- places rotation preview -------------------------------------------
 
@@ -3126,7 +2948,8 @@ function badge(id, value, bad) {
 
 async function refreshAll() {
   const loads = [
-    loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(), loadNets(), loadSources(),
+    loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(),
+    loadCommunities(), loadNets(), loadSources(),
     loadPaint(), loadTileRelease(), loadDiscord(), loadTraffic(), loadCheckinAwards(),
   ];
   await Promise.all(loads);
@@ -3289,25 +3112,9 @@ document.getElementById('tr-save').addEventListener('click', function () { saveT
 document.getElementById('tr-dry-run').addEventListener('change', function () {
   document.getElementById('tr-dry-run-hint').hidden = this.checked;
 });
-document.getElementById('nf-kind').addEventListener('change', updateNetFormKind);
-document.getElementById('nf-load-channels').addEventListener('click', function () { loadNetChannels(this); });
-document.getElementById('nf-channel-select').addEventListener('change', function () {
-  document.getElementById('nf-channel').value = this.value;
-});
-document.getElementById('nf-save').addEventListener('click', function () { saveNet(this); });
-document.getElementById('nf-cancel').addEventListener('click', function () {
-  resetNetForm();
-  document.getElementById('nf-result').replaceChildren();
-});
-document.getElementById('sf-kind').addEventListener('change', updateSourceFormKind);
-document.getElementById('sf-load-channels').addEventListener('click', function () { loadSourceChannels(this); });
-document.getElementById('sf-channel-select').addEventListener('change', function () {
-  document.getElementById('sf-channel').value = this.value;
-});
-document.getElementById('sf-save').addEventListener('click', function () { saveSource(this); });
-document.getElementById('sf-cancel').addEventListener('click', function () {
-  resetSourceForm();
-  document.getElementById('sf-result').replaceChildren();
+document.getElementById('conn-new').addEventListener('click', function () {
+  if (newConnectionDraft) return; // already have one open -- don't stack a second blank draft
+  startNewConnection();
 });
 document.getElementById('mo-freeze').addEventListener('click', function () { freezeMonth(this); });
 document.getElementById('pl-preview').addEventListener('click', function () { previewPlaces(this); });

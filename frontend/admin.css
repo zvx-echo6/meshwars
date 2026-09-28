@@ -1008,6 +1008,29 @@ body {
 .adm-field-label-wide input,
 .adm-field-label-wide select { width: 20rem; }
 
+/* Where it's played's Name/Link pair: a fixed rem width (like the
+   -wide modifier above) either wastes space or still clips a long
+   community name ("FREQ51 -- Intermountain Mesh") depending on the
+   viewport -- growing to share the row 50/50 with exactly one sibling
+   scales with it instead. min-width: 0 is required for a flex item's
+   own text input to actually shrink below its content size rather than
+   overflowing the row on a narrow viewport. */
+.adm-field-label-half { flex: 1 1 0; min-width: 0; }
+.adm-field-label-half input,
+.adm-field-label-half select { width: 100%; }
+
+/* Where it's played's Description: a captioned textarea that takes
+   the whole row rather than shrinking to its own default cols/rows
+   intrinsic size the way an uncaptioned .adm-textarea (a DIRECT .adm-
+   form child, sized by its own width: 100% against .adm-form's content
+   box) already does -- wrapping it in a column-flex .adm-field-label
+   changes what "100%" is relative to, so the label itself needs its
+   own flex-basis forced to the full row, not just its child resized. */
+.adm-field-label-full { flex: 1 1 100%; min-width: 0; }
+.adm-field-label-full textarea,
+.adm-field-label-full input,
+.adm-field-label-full select { width: 100%; }
+
 /* Add-net's first row pairs a captioned .adm-field-label (Protocol)
    with a bare, uncaptioned label input -- .adm-form's default
    align-items: center then centers each on its own height, and since

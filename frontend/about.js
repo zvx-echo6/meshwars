@@ -119,3 +119,77 @@
   loadScores();
   loadPlayers();
 })();
+
+// ---- "Where it's played" community list ------------------------------
+//
+// GET /api/about/communities (public, unauthenticated -- see
+// app/mc_api.py's own docstring on that route) replaces what used to be
+// seven hand-typed <li> entries under #where with a live-fetched list
+// built the same way: one <li> per community, a link (or a plain name
+// when the community has no url, matching Central Oregon's existing
+// no-link style) followed by its Description exactly as an operator
+// typed it in the admin panel.
+//
+// Matt's call: every entry's wording is entirely his to write by hand.
+// This file used to also assemble a protocol prefix, a net/schedule
+// sentence, and an "isn't set up yet" fallback from checkin_net/
+// observation_source data -- none of that exists anymore, on either
+// side: the server no longer even returns net/protocol data (see
+// app/mc_api.py), and this file no longer has any code that would
+// build a sentence from it. A community's `blurb` (admin panel:
+// "Description") is rendered verbatim, plain text, nothing added.
+//
+// Same "enhancement only" contract the stats band above documents --
+// a fetch failure or an empty response just leaves #community-list
+// empty; this never throws, and the rest of the page is unaffected.
+//
+// SECURITY: every field on a community (name, url, blurb) comes from
+// the server and is untrusted -- every element below is built with
+// document.createElement + .textContent, never innerHTML/
+// insertAdjacentHTML, same as the rest of this file. No bolding, no
+// markup of any kind inside a community's own text.
+(function () {
+  function buildCommunityItem(community) {
+    const li = document.createElement('li');
+
+    if (community.url) {
+      const a = document.createElement('a');
+      a.href = community.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = community.name;
+      li.appendChild(a);
+    } else {
+      const span = document.createElement('span');
+      span.className = 'landing-link-name';
+      span.textContent = community.name;
+      li.appendChild(span);
+    }
+
+    if (community.blurb) {
+      const desc = document.createElement('span');
+      desc.className = 'landing-link-desc';
+      desc.textContent = community.blurb;
+      li.appendChild(desc);
+    }
+
+    return li;
+  }
+
+  async function loadCommunities() {
+    const host = document.getElementById('community-list');
+    if (!host) return;
+    try {
+      const res = await fetch('/api/about/communities');
+      if (!res.ok) return;
+      const communities = await res.json();
+      if (!Array.isArray(communities)) return;
+      communities.forEach((community) => host.appendChild(buildCommunityItem(community)));
+    } catch {
+      // Enhancement only -- leave the list empty rather than showing a
+      // broken page, same contract as loadScores()/loadPlayers() above.
+    }
+  }
+
+  loadCommunities();
+})();

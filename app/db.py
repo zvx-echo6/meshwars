@@ -1438,6 +1438,36 @@ CREATE TABLE IF NOT EXISTS observation_source (
 );
 CREATE INDEX IF NOT EXISTS idx_observation_source_enabled ON observation_source(enabled, protocol);
 
+-- Communities: a purely presentational grouping of nets/observation
+-- sources for the public "Where it's played" section on frontend/
+-- about.html (see GET /api/about/communities in app/mc_api.py). A
+-- community is not a connector and carries no protocol/kind/window of
+-- its own -- it is a name, a blurb, and a display position that zero or
+-- more checkin_net/observation_source rows can point at via their own
+-- community_id column (see the MIGRATIONS ALTERs below for those).
+-- shown_on_about is the operator's own kill switch for taking an entry
+-- off the public page without deleting the community (and therefore
+-- without un-linking every connector pointed at it) -- display_order
+-- then breaks ties by name, matching the hand-typed order the original
+-- about.html list carried before this table replaced it.
+--
+-- Brand new table, no existing deployed shape to ALTER, so CREATE TABLE
+-- IF NOT EXISTS here is sufficient on its own, same reasoning as
+-- checkin_net/observation_source above; no MIGRATIONS entry needed for
+-- the table itself.
+CREATE TABLE IF NOT EXISTS community (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    region          TEXT NOT NULL DEFAULT '',
+    blurb           TEXT NOT NULL DEFAULT '',
+    url             TEXT NOT NULL DEFAULT '',
+    contact_url     TEXT NOT NULL DEFAULT '',
+    display_order   INTEGER NOT NULL DEFAULT 0,
+    shown_on_about  INTEGER NOT NULL DEFAULT 1,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_community_display_order ON community(shown_on_about, display_order, name);
+
 -- Push-subscription buffer for the mqtt connector kind
 -- (app/mqtt_subscriber.py's MqttSubscriber). MQTT is a persistent
 -- broker connection, not a 30-second HTTP poll like every other
@@ -3123,6 +3153,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_announcement_key ON announcement(kind, key
 
 
 MIGRATIONS = [
+    # community_id: links a net/source row to the community.id it
+    # belongs to on the public "Where it's played" page (see the
+    # community table's own comment above) -- nullable, no backfill,
+    # since a connector configured before this feature existed has no
+    # community to guess at; an operator links it by hand from the
+    # admin panel. Both tables already exist on every deployed DB
+    # (unlike `community` itself, which is brand new), so this needs a
+    # real ALTER rather than just being part of CREATE TABLE.
+    "ALTER TABLE checkin_net ADD COLUMN community_id INTEGER",
+    "ALTER TABLE observation_source ADD COLUMN community_id INTEGER",
     # Nullable on purpose, both of them: every award written before these
     # columns existed genuinely has no value to backfill. message_ts is
     # not recoverable at all -- the check-in feed only serves its newest

@@ -93,7 +93,7 @@ def _mqtt_meshtastic_net(**overrides) -> dict:
 # ---------------------------------------------------------------------
 
 def test_valid_corescope_net_validates():
-    fields, err = _validate_net_fields(_corescope_net())
+    fields, err = _validate_net_fields(_corescope_net(), None)
     assert err is None
     assert fields["kind"] == "corescope"
     assert fields["protocol"] == "mc"
@@ -102,7 +102,7 @@ def test_valid_corescope_net_validates():
 
 
 def test_valid_meshview_net_validates():
-    fields, err = _validate_net_fields(_meshview_net())
+    fields, err = _validate_net_fields(_meshview_net(), None)
     assert err is None
     assert fields["kind"] == "meshview"
     assert fields["protocol"] == "mt"
@@ -115,25 +115,37 @@ def test_valid_meshview_net_validates():
 # ---------------------------------------------------------------------
 
 def test_corescope_without_channel_is_400():
-    fields, err = _validate_net_fields(_corescope_net(channel=""))
+    fields, err = _validate_net_fields(_corescope_net(channel=""), None)
     assert err is not None
     assert err.status_code == 400
 
 
 def test_meshview_without_hashtag_is_400():
-    fields, err = _validate_net_fields(_meshview_net(hashtag=""))
+    fields, err = _validate_net_fields(_meshview_net(hashtag=""), None)
     assert err is not None
     assert err.status_code == 400
 
 
-def test_meshview_forces_channel_to_empty_string():
-    fields, err = _validate_net_fields(_meshview_net(channel="some-channel-that-should-be-dropped"))
+def test_meshview_channel_is_kept_not_forced_blank():
+    # Changed behavior (Connections feature): a meshview net's channel
+    # is no longer discarded -- it's optional, purely-display config
+    # (the public about-page wording reads it straight off this column,
+    # see GET /api/about/communities in app/mc_api.py). Matching still
+    # happens by hashtag alone -- this must never change.
+    fields, err = _validate_net_fields(_meshview_net(channel="Freq51"), None)
+    assert err is None
+    assert fields["channel"] == "Freq51"
+    assert fields["hashtag"] == "#freq51"
+
+
+def test_meshview_blank_channel_still_accepted():
+    fields, err = _validate_net_fields(_meshview_net(channel=""), None)
     assert err is None
     assert fields["channel"] == ""
 
 
 def test_corescope_forces_hashtag_to_empty_string():
-    fields, err = _validate_net_fields(_corescope_net(hashtag="#should-be-dropped"))
+    fields, err = _validate_net_fields(_corescope_net(hashtag="#should-be-dropped"), None)
     assert err is None
     assert fields["hashtag"] == ""
 
@@ -143,29 +155,29 @@ def test_corescope_forces_hashtag_to_empty_string():
 # ---------------------------------------------------------------------
 
 def test_weekday_out_of_range_is_400():
-    fields, err = _validate_net_fields(_corescope_net(weekday=7))
+    fields, err = _validate_net_fields(_corescope_net(weekday=7), None)
     assert err is not None
     assert err.status_code == 400
 
-    fields, err = _validate_net_fields(_corescope_net(weekday=-1))
+    fields, err = _validate_net_fields(_corescope_net(weekday=-1), None)
     assert err is not None
     assert err.status_code == 400
 
 
 def test_start_hour_greater_than_end_hour_is_400():
-    fields, err = _validate_net_fields(_corescope_net(start_hour=20, end_hour=18))
+    fields, err = _validate_net_fields(_corescope_net(start_hour=20, end_hour=18), None)
     assert err is not None
     assert err.status_code == 400
 
 
 def test_bad_timezone_is_400():
-    fields, err = _validate_net_fields(_corescope_net(timezone="Not/A_Real_Zone"))
+    fields, err = _validate_net_fields(_corescope_net(timezone="Not/A_Real_Zone"), None)
     assert err is not None
     assert err.status_code == 400
 
 
 def test_bad_start_date_is_400():
-    fields, err = _validate_net_fields(_corescope_net(start_date="not-a-date"))
+    fields, err = _validate_net_fields(_corescope_net(start_date="not-a-date"), None)
     assert err is not None
     assert err.status_code == 400
 
@@ -175,7 +187,7 @@ def test_blank_start_date_is_accepted():
     net_date_for_net docstring), not an error -- must be accepted, not
     rejected.
     """
-    fields, err = _validate_net_fields(_corescope_net(start_date=""))
+    fields, err = _validate_net_fields(_corescope_net(start_date=""), None)
     assert err is None
     assert fields["start_date"] == ""
 
@@ -196,7 +208,7 @@ def test_switching_kind_to_mqtt_preserves_stored_broker_password():
         "channel_key": "AQ==",
     }
     body = _mqtt_net(broker_password="", channel_key="")
-    fields, err = _validate_net_fields(body, current=current)
+    fields, err = _validate_net_fields(body, None, current=current)
     assert err is None
     assert fields["broker_password"] == "s3cret-broker-pw"
     assert fields["channel_key"] == "AQ=="
@@ -217,7 +229,7 @@ def test_switching_kind_to_mqtt_meshtastic_forces_broker_credentials_but_keeps_c
         "channel_key": "AQ==",
     }
     body = _mqtt_meshtastic_net()  # broker_password/channel_key omitted -- blank submission
-    fields, err = _validate_net_fields(body, current=current)
+    fields, err = _validate_net_fields(body, None, current=current)
     assert err is None
     assert fields["connector_url"] == OFFICIAL_MESHTASTIC_MQTT_URL
     assert fields["broker_username"] == OFFICIAL_MESHTASTIC_MQTT_USERNAME
@@ -240,7 +252,7 @@ def test_mqtt_meshtastic_net_with_no_connector_or_credentials_succeeds():
     assert "connector_url" not in body
     assert "broker_username" not in body
     assert "broker_password" not in body
-    fields, err = _validate_net_fields(body)
+    fields, err = _validate_net_fields(body, None)
     assert err is None
     assert fields["connector_url"] == OFFICIAL_MESHTASTIC_MQTT_URL
     assert fields["broker_username"] == OFFICIAL_MESHTASTIC_MQTT_USERNAME
@@ -259,7 +271,7 @@ def test_mqtt_meshtastic_net_submitted_credentials_are_overridden_not_persisted(
         broker_username="not-meshdev",
         broker_password="not-large4cats",
     )
-    fields, err = _validate_net_fields(body)
+    fields, err = _validate_net_fields(body, None)
     assert err is None
     assert fields["connector_url"] == OFFICIAL_MESHTASTIC_MQTT_URL
     assert fields["broker_username"] == OFFICIAL_MESHTASTIC_MQTT_USERNAME
@@ -267,13 +279,13 @@ def test_mqtt_meshtastic_net_submitted_credentials_are_overridden_not_persisted(
 
 
 def test_mqtt_meshtastic_net_blank_topic_root_is_400():
-    fields, err = _validate_net_fields(_mqtt_meshtastic_net(topic_root=""))
+    fields, err = _validate_net_fields(_mqtt_meshtastic_net(topic_root=""), None)
     assert err is not None
     assert err.status_code == 400
 
 
 def test_mqtt_meshtastic_net_blank_channel_is_400():
-    fields, err = _validate_net_fields(_mqtt_meshtastic_net(channel=""))
+    fields, err = _validate_net_fields(_mqtt_meshtastic_net(channel=""), None)
     assert err is not None
     assert err.status_code == 400
 
@@ -288,7 +300,7 @@ def test_plain_mqtt_net_keeps_submitted_connector_and_credentials():
         broker_username="brokeruser",
         broker_password="brokerpw",
     )
-    fields, err = _validate_net_fields(body)
+    fields, err = _validate_net_fields(body, None)
     assert err is None
     assert fields["connector_url"] == "mqtt://broker.private:1883"
     assert fields["broker_username"] == "brokeruser"
@@ -296,6 +308,6 @@ def test_plain_mqtt_net_keeps_submitted_connector_and_credentials():
 
 
 def test_plain_mqtt_net_requires_mqtt_scheme_connector_url():
-    fields, err = _validate_net_fields(_mqtt_net(connector_url="https://not-a-broker.example"))
+    fields, err = _validate_net_fields(_mqtt_net(connector_url="https://not-a-broker.example"), None)
     assert err is not None
     assert err.status_code == 400
