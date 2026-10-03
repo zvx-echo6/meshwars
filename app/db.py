@@ -450,6 +450,26 @@ CREATE TABLE IF NOT EXISTS player_cell_repeater_credit (
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_repeater_credit_seen ON player_cell_repeater_credit(seen_at);
 
+-- What the most recent scored REAL ping in each cell earned, by anyone:
+-- one row per (protocol, cell), `points` is what apply_paint() credited
+-- (repeater count * mc_points_per_repeater, already capped), `ts` is that
+-- ping's scoring timestamp, `player_id` who scored it. A MeshMapper
+-- "DEFER" item carries no repeaters, so it scores this value for its
+-- cell (app/mc_ingest.py). Written ONLY by apply_paint()'s per-repeater
+-- path (never DEFERs, flat-mode FreqMapper paints, or 0-point pings),
+-- only when the new ts >= the stored one. Deliberately NEVER pruned:
+-- unlike player_cell_repeater_credit above (48h retention) this must
+-- outlive that window, and it is one small row per cell, so it is not
+-- in _housekeeping_sync.
+CREATE TABLE IF NOT EXISTS mc_cell_last_score (
+    protocol   TEXT NOT NULL,
+    cell_id    TEXT NOT NULL,
+    points     REAL NOT NULL,
+    ts         INTEGER NOT NULL,
+    player_id  INTEGER NOT NULL,
+    PRIMARY KEY (protocol, cell_id)
+);
+
 -- Backs the per-player cell-claim rate cap (settings.mc_cell_claim_cap,
 -- app/mc_ingest.py) -- one row per (player, protocol, cell) the FIRST
 -- time that player ever lands an accepted, repeater-bearing ping there.
@@ -499,8 +519,9 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     pings_low_precision     INTEGER NOT NULL DEFAULT 0,
     pings_implausible_speed INTEGER NOT NULL DEFAULT 0,
     -- MeshCore-only (app/mc_ingest.py's parse_repeaters()): a ping whose
-    -- `type` field is PRESENT but not one of the four recognized values
-    -- (TX/RX/DISC/TRACE) -- e.g. a future MeshMapper build's "DEFER".
+    -- `type` field is PRESENT but not one of the recognized values
+    -- (TX/RX/DISC/TRACE/DEFER) -- e.g. a future MeshMapper build's new type.
+    -- (DEFER itself is recognized and scores like a normal ping.)
     -- Never rejected: the ping is still accepted and still writes a
     -- position row exactly as before, it just cannot be told apart from
     -- a legitimate ping that heard no repeaters without this counter, so
@@ -3657,7 +3678,8 @@ MIGRATIONS = [
     # pings_unknown_type added after player_ingest_stat already shipped --
     # see that column's own comment on the CREATE TABLE above for the
     # full story (a MeshCore ping whose `type` is present but not one of
-    # TX/RX/DISC/TRACE, e.g. "DEFER"). ADD COLUMN ... DEFAULT 0 backfills
+    # TX/RX/DISC/TRACE at the time; DEFER has since become a recognized,
+    # scoring type and no longer counts here). ADD COLUMN ... DEFAULT 0 backfills
     # every existing row in the same statement SQLite runs the ALTER in
     # -- correct for 100% of them, since nothing before this column
     # existed could have counted toward it, and it does not change what
@@ -3821,6 +3843,37 @@ MIGRATIONS = [
     # uses; every existing row correctly backfills to NULL (never
     # marked), since the column did not exist for anything to have set.
     "ALTER TABLE player ADD COLUMN evasion_marked_at INTEGER",
+    # mc_cell_last_score (see its SCHEMA comment above) -- SCHEMA already
+    # creates it; repeated here so the migration list is self-contained.
+    """CREATE TABLE IF NOT EXISTS mc_cell_last_score (
+        protocol   TEXT NOT NULL,
+        cell_id    TEXT NOT NULL,
+        points     REAL NOT NULL,
+        ts         INTEGER NOT NULL,
+        player_id  INTEGER NOT NULL,
+        PRIMARY KEY (protocol, cell_id)
+    )""",
+    # One-time-effect seed for mc_cell_last_score from the credit rows
+    # that exist at deploy: per MeshCore cell, the latest (player_id, ts)
+    # group among non-DEFER rows (apply_paint stamps every repeater one
+    # ping credited with the same ts), points = row count *
+    # mc_points_per_repeater capped at mc_max_points_per_ping. INSERT OR
+    # IGNORE, so it never overwrites a live row and re-running every boot
+    # (the MIGRATIONS loop's contract) is a no-op: after deploy every
+    # credited cell already has a row written in the same transaction.
+    # Values are formatted from settings at import (same numbers
+    # apply_paint uses). Needs SQLite window functions (>= 3.25).
+    f"""INSERT OR IGNORE INTO mc_cell_last_score(protocol, cell_id, points, ts, player_id)
+        SELECT g.protocol, g.cell_id, MIN(g.n * {float(settings.mc_points_per_repeater)!r}, {float(settings.mc_max_points_per_ping)!r}), g.ts, g.player_id
+          FROM (
+            SELECT protocol, cell_id, player_id, ts, COUNT(*) AS n,
+                   ROW_NUMBER() OVER (PARTITION BY protocol, cell_id
+                                      ORDER BY ts DESC, player_id) AS rn
+              FROM player_cell_repeater_credit
+             WHERE protocol = 'mc' AND repeater_id != 'DEFER'
+             GROUP BY protocol, cell_id, player_id, ts
+          ) g
+         WHERE g.rn = 1""",
 ]
 
 PRAGMAS = [

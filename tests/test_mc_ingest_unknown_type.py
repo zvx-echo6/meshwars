@@ -1,7 +1,7 @@
 """Tests for pings_unknown_type (app/mc_ingest.py's is_unknown_ping_type()),
 the counter added so a MeshCore ping whose `type` is present but not one
-of the four parse_repeaters() recognizes (TX/RX/DISC/TRACE) -- e.g. a
-future MeshMapper build's "DEFER" -- can be told apart from a ping that
+of the ones parse_repeaters() recognizes (TX/RX/DISC/TRACE/DEFER) -- e.g. a
+future MeshMapper build's "FOO" -- can be told apart from a ping that
 legitimately heard no repeaters. Before this counter existed, both cases
 landed in pings_no_repeaters with no way to distinguish them.
 
@@ -105,13 +105,13 @@ def _position_rows(db_path, player_id=1):
 # Unit-level: is_unknown_ping_type() itself
 # ---------------------------------------------------------------------
 
-@pytest.mark.parametrize("ping_type", ["TX", "RX", "DISC", "TRACE"])
+@pytest.mark.parametrize("ping_type", ["TX", "RX", "DISC", "TRACE", "DEFER"])
 def test_recognized_types_are_not_unknown(ping_type):
     assert is_unknown_ping_type({"type": ping_type}) is False
 
 
 def test_present_unrecognized_type_is_unknown():
-    assert is_unknown_ping_type({"type": "DEFER"}) is True
+    assert is_unknown_ping_type({"type": "FOO"}) is True
 
 
 def test_missing_type_is_not_unknown():
@@ -142,7 +142,7 @@ def test_unknown_type_ping_increments_unknown_type_counter(db_path):
     _seed_player(db_path, player_id=1)
 
     ingestor = McIngestor()
-    ingestor._process_batch_sync(1, "keyhash-1", [_ping("DEFER")], NOW)
+    ingestor._process_batch_sync(1, "keyhash-1", [_ping("FOO")], NOW)
 
     stats = _ingest_stat(db_path, player_id=1)
     assert stats["pings_unknown_type"] == 1
@@ -157,7 +157,7 @@ def test_unknown_type_ping_also_increments_no_repeaters(db_path):
     _seed_player(db_path, player_id=1)
 
     ingestor = McIngestor()
-    ingestor._process_batch_sync(1, "keyhash-1", [_ping("DEFER")], NOW)
+    ingestor._process_batch_sync(1, "keyhash-1", [_ping("FOO")], NOW)
 
     stats = _ingest_stat(db_path, player_id=1)
     assert stats["pings_unknown_type"] == 1
@@ -172,7 +172,7 @@ def test_unknown_type_ping_is_still_accepted_and_writes_position_row(db_path):
     _seed_player(db_path, player_id=1)
 
     ingestor = McIngestor()
-    ingestor._process_batch_sync(1, "keyhash-1", [_ping("DEFER")], NOW)
+    ingestor._process_batch_sync(1, "keyhash-1", [_ping("FOO")], NOW)
 
     stats = _ingest_stat(db_path, player_id=1)
     assert stats["pings_accepted"] == 1
@@ -253,7 +253,7 @@ def test_mixed_batch_counts_each_ping_once(db_path):
     _seed_player(db_path, player_id=1)
 
     pings = [
-        _ping("DEFER", ts=NOW),
+        _ping("FOO", ts=NOW),
         _ping("RX", ts=NOW + 1, heard_repeats="cafefeed(3.5)"),
     ]
 
