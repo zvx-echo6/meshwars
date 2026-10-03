@@ -145,14 +145,16 @@ def test_defer_can_flip_other_teams_cell_like_a_real_ping(db_path):
 def test_defer_flip_matches_real_ping_flip(db_path):
     """Same scenario with TX pings (one repeater each, 0.1 pts) shows the
     rules are shared: a lone weaker real ping does not flip, a DEFER (1.0
-    flat) does -- DEFER earns the max a normal ping can."""
+    flat) does -- DEFER earns the max a normal ping can. The flip must
+    hand the cell to the DEFER player's team."""
     _seed_player(db_path, 1, "RED")
     _seed_player(db_path, 2, "BLUE")
     ing = McIngestor()
     _ingest(ing, 1, [_defer(contact="aaaaaaaa")], NOW)
     t2 = NOW + settings.mc_defense_window_seconds + 60
     _ingest(ing, 2, [_tx(ts=t2, contact="bbbbbbbb")], t2)
-    assert _tile(db_path)["owner_team"] in ("RED", "BLUE")  # resolved by the shared rules
+    # One real TX (0.1 pts + 0.5 first-paint bonus) is below RED's 1.0 + 0.5: no flip.
+    assert _tile(db_path)["owner_team"] == "RED"
     _ingest(ing, 2, [_defer(ts=t2 + 400, contact="bbbbbbbb")], t2 + 400)
     assert _tile(db_path)["owner_team"] == "BLUE"
 
