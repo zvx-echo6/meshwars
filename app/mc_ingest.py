@@ -217,12 +217,24 @@ def _parse_heard_snr(text: str) -> float | None:
 # way for the two to drift apart.
 _HEARD_PING_TYPES = frozenset({"TX", "RX"})
 _DIRECT_PING_TYPES = frozenset({"DISC", "TRACE"})
-_RECOGNIZED_PING_TYPES = _HEARD_PING_TYPES | _DIRECT_PING_TYPES
+# MeshMapper's "DEFER" item carries no heard_repeats/repeater_id, so
+# parse_repeaters() returns [] for it. It is recognized (never counted as
+# unknown) and scored like a normal ping in flat mode -- see
+# _process_one_ping() step 13 and _DEFER_CREDIT_ID below.
+_DEFER_PING_TYPE = "DEFER"
+_RECOGNIZED_PING_TYPES = _HEARD_PING_TYPES | _DIRECT_PING_TYPES | {_DEFER_PING_TYPE}
+
+# Sentinel "repeater id" under which a scored DEFER is stamped in
+# player_cell_repeater_credit, so a DEFER gets the same per-cell
+# mc_cooldown_seconds limit real pings have, using the existing table
+# (no schema change). Real repeater ids are hex key prefixes, so this
+# can never collide with one.
+_DEFER_CREDIT_ID = "DEFER"
 
 
 def is_unknown_ping_type(ping: dict) -> bool:
     """True if `ping` names a `type` that parse_repeaters() does not
-    recognize -- e.g. a future MeshMapper build's "DEFER". Such a ping
+    recognize -- e.g. a future MeshMapper build's type. Such a ping
     still falls through parse_repeaters() to an empty repeater list (and
     so still counts toward pings_no_repeaters, same as always); this is
     purely additional observability so an unrecognized protocol type can
@@ -1471,7 +1483,7 @@ class McIngestor:
 
         # 9. Unknown ping type -- observability only, never a rejection.
         # A `type` that is present but not one of the four parse_repeaters()
-        # recognizes (e.g. "DEFER") falls through to an empty repeater
+        # recognizes (e.g. a future type) falls through to an empty repeater
         # list exactly like a legitimate "heard nothing" ping does, so
         # without this it is invisible, silently indistinguishable from
         # real no-coverage evidence in pings_no_repeaters (below) -- which
@@ -1515,7 +1527,8 @@ class McIngestor:
         # credited to this player on this cell within the cooldown
         # window -- is decided inside apply_paint(), not here.
         repeater_ids = [e.repeater_id for e in entries]
-        if not repeater_ids:
+        is_defer = isinstance(ping, dict) and ping.get("type") == _DEFER_PING_TYPE
+        if not repeater_ids and not is_defer:
             counters["pings_no_repeaters"] += 1
 
         # 13. MeshCore scoring, inside the same write transaction as the
@@ -1541,7 +1554,7 @@ class McIngestor:
             # NEW territory can be claimed, not to throttle revisiting
             # ground already held.
             cap_exceeded = False
-            if repeater_ids and settings.mc_cell_claim_cap_enabled:
+            if (repeater_ids or is_defer) and settings.mc_cell_claim_cap_enabled:
                 already_claimed = conn.execute(
                     "SELECT 1 FROM player_cell_claim"
                     " WHERE player_id = ? AND protocol = ? AND cell_id = ?",
@@ -1581,11 +1594,33 @@ class McIngestor:
 
             paint_result = None
             try:
-                paint_result = mc_scoring.apply_paint(
-                    conn, season_id, player_id, team, cell, now_ts, repeater_ids,
-                    settings.mc_points_per_repeater, settings.mc_max_points_per_ping,
-                    PROTOCOL, received_at, by_air,
-                )
+                if is_defer:
+                    # A DEFER scores exactly like a normal ping: flat
+                    # mode (as FreqMapper does) at the most a normal
+                    # ping can earn. Flat mode has no cooldown, so give
+                    # it the real-ping per-cell limit here: a DEFER in a
+                    # cell earns nothing again until mc_cooldown_seconds
+                    # after this player's last scored DEFER there.
+                    if _DEFER_CREDIT_ID in mc_scoring._credited_repeaters(
+                        conn, player_id, PROTOCOL, cell, now_ts, settings.mc_cooldown_seconds,
+                    ):
+                        paint_result = mc_scoring.PaintResult("cooldown", cell, team)
+                    else:
+                        paint_result = mc_scoring.apply_paint(
+                            conn, season_id, player_id, team, cell, now_ts, [],
+                            0.0, 0.0, PROTOCOL, received_at, by_air,
+                            flat_points=settings.mc_max_points_per_ping,
+                        )
+                        mc_scoring._record_repeater_credit(
+                            conn, player_id, PROTOCOL, cell, _DEFER_CREDIT_ID,
+                            now_ts, received_at,
+                        )
+                else:
+                    paint_result = mc_scoring.apply_paint(
+                        conn, season_id, player_id, team, cell, now_ts, repeater_ids,
+                        settings.mc_points_per_repeater, settings.mc_max_points_per_ping,
+                        PROTOCOL, received_at, by_air,
+                    )
             except Exception:
                 log.exception(
                     "mc scoring: apply_paint failed for player %d cell %s",

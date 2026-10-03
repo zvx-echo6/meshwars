@@ -499,8 +499,9 @@ CREATE TABLE IF NOT EXISTS player_ingest_stat (
     pings_low_precision     INTEGER NOT NULL DEFAULT 0,
     pings_implausible_speed INTEGER NOT NULL DEFAULT 0,
     -- MeshCore-only (app/mc_ingest.py's parse_repeaters()): a ping whose
-    -- `type` field is PRESENT but not one of the four recognized values
-    -- (TX/RX/DISC/TRACE) -- e.g. a future MeshMapper build's "DEFER".
+    -- `type` field is PRESENT but not one of the recognized values
+    -- (TX/RX/DISC/TRACE/DEFER) -- e.g. a future MeshMapper build's new type.
+    -- (DEFER itself is recognized and scores like a normal ping.)
     -- Never rejected: the ping is still accepted and still writes a
     -- position row exactly as before, it just cannot be told apart from
     -- a legitimate ping that heard no repeaters without this counter, so
@@ -3657,7 +3658,8 @@ MIGRATIONS = [
     # pings_unknown_type added after player_ingest_stat already shipped --
     # see that column's own comment on the CREATE TABLE above for the
     # full story (a MeshCore ping whose `type` is present but not one of
-    # TX/RX/DISC/TRACE, e.g. "DEFER"). ADD COLUMN ... DEFAULT 0 backfills
+    # TX/RX/DISC/TRACE at the time; DEFER has since become a recognized,
+    # scoring type and no longer counts here). ADD COLUMN ... DEFAULT 0 backfills
     # every existing row in the same statement SQLite runs the ALTER in
     # -- correct for 100% of them, since nothing before this column
     # existed could have counted toward it, and it does not change what
