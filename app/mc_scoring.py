@@ -389,6 +389,23 @@ def apply_paint(
         for repeater_id in credit_ids:
             _record_repeater_credit(conn, player_id, protocol, cell_id, repeater_id, ts, received_at)
         points = min(len(credit_ids) * points_per_repeater, remaining)
+        # Remember what this cell's most recent scored real ping earned
+        # (a DEFER scores this -- see mc_cell_last_score in app/db.py).
+        # Written here, not in the caller, because `points` is only known
+        # here, and only this per-repeater path is a real scored ping:
+        # DEFER/FreqMapper take the flat branch below and cooldown /
+        # no_signal returned above, so none of those can reach this line.
+        # Same transaction as the paint. Older-ts uploads never replace
+        # a newer value.
+        if points > 0 and protocol == "mc":
+            conn.execute(
+                "INSERT INTO mc_cell_last_score(protocol, cell_id, points, ts, player_id) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(protocol, cell_id) DO UPDATE SET "
+                "  points = excluded.points, ts = excluded.ts, player_id = excluded.player_id "
+                "WHERE excluded.ts >= mc_cell_last_score.ts",
+                (protocol, cell_id, points, ts, player_id),
+            )
     else:
         # Flat-award mode (see this function's docstring) -- no repeater
         # cooldown, no per-visit cap, no repeater-credit bookkeeping.

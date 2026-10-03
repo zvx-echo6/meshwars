@@ -450,6 +450,26 @@ CREATE TABLE IF NOT EXISTS player_cell_repeater_credit (
 );
 CREATE INDEX IF NOT EXISTS idx_player_cell_repeater_credit_seen ON player_cell_repeater_credit(seen_at);
 
+-- What the most recent scored REAL ping in each cell earned, by anyone:
+-- one row per (protocol, cell), `points` is what apply_paint() credited
+-- (repeater count * mc_points_per_repeater, already capped), `ts` is that
+-- ping's scoring timestamp, `player_id` who scored it. A MeshMapper
+-- "DEFER" item carries no repeaters, so it scores this value for its
+-- cell (app/mc_ingest.py). Written ONLY by apply_paint()'s per-repeater
+-- path (never DEFERs, flat-mode FreqMapper paints, or 0-point pings),
+-- only when the new ts >= the stored one. Deliberately NEVER pruned:
+-- unlike player_cell_repeater_credit above (48h retention) this must
+-- outlive that window, and it is one small row per cell, so it is not
+-- in _housekeeping_sync.
+CREATE TABLE IF NOT EXISTS mc_cell_last_score (
+    protocol   TEXT NOT NULL,
+    cell_id    TEXT NOT NULL,
+    points     REAL NOT NULL,
+    ts         INTEGER NOT NULL,
+    player_id  INTEGER NOT NULL,
+    PRIMARY KEY (protocol, cell_id)
+);
+
 -- Backs the per-player cell-claim rate cap (settings.mc_cell_claim_cap,
 -- app/mc_ingest.py) -- one row per (player, protocol, cell) the FIRST
 -- time that player ever lands an accepted, repeater-bearing ping there.
@@ -3823,6 +3843,37 @@ MIGRATIONS = [
     # uses; every existing row correctly backfills to NULL (never
     # marked), since the column did not exist for anything to have set.
     "ALTER TABLE player ADD COLUMN evasion_marked_at INTEGER",
+    # mc_cell_last_score (see its SCHEMA comment above) -- SCHEMA already
+    # creates it; repeated here so the migration list is self-contained.
+    """CREATE TABLE IF NOT EXISTS mc_cell_last_score (
+        protocol   TEXT NOT NULL,
+        cell_id    TEXT NOT NULL,
+        points     REAL NOT NULL,
+        ts         INTEGER NOT NULL,
+        player_id  INTEGER NOT NULL,
+        PRIMARY KEY (protocol, cell_id)
+    )""",
+    # One-time-effect seed for mc_cell_last_score from the credit rows
+    # that exist at deploy: per MeshCore cell, the latest (player_id, ts)
+    # group among non-DEFER rows (apply_paint stamps every repeater one
+    # ping credited with the same ts), points = row count *
+    # mc_points_per_repeater capped at mc_max_points_per_ping. INSERT OR
+    # IGNORE, so it never overwrites a live row and re-running every boot
+    # (the MIGRATIONS loop's contract) is a no-op: after deploy every
+    # credited cell already has a row written in the same transaction.
+    # Values are formatted from settings at import (same numbers
+    # apply_paint uses). Needs SQLite window functions (>= 3.25).
+    f"""INSERT OR IGNORE INTO mc_cell_last_score(protocol, cell_id, points, ts, player_id)
+        SELECT g.protocol, g.cell_id, MIN(g.n * {float(settings.mc_points_per_repeater)!r}, {float(settings.mc_max_points_per_ping)!r}), g.ts, g.player_id
+          FROM (
+            SELECT protocol, cell_id, player_id, ts, COUNT(*) AS n,
+                   ROW_NUMBER() OVER (PARTITION BY protocol, cell_id
+                                      ORDER BY ts DESC, player_id) AS rn
+              FROM player_cell_repeater_credit
+             WHERE protocol = 'mc' AND repeater_id != 'DEFER'
+             GROUP BY protocol, cell_id, player_id, ts
+          ) g
+         WHERE g.rn = 1""",
 ]
 
 PRAGMAS = [
