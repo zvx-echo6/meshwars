@@ -358,7 +358,9 @@ def _build_get_nodes(*, include_attribution: bool) -> dict:
 
 
 @router.get("/get-nodes")
-async def get_nodes(session: SessionPrincipal | None = Depends(optional_session)) -> Response:
+async def get_nodes(
+    request: Request, session: SessionPrincipal | None = Depends(optional_session)
+) -> Response:
     """The map's main data route. See _build_get_nodes() above.
 
     Cached separately per auth state (`mt_board_public` vs.
@@ -370,11 +372,54 @@ async def get_nodes(session: SessionPrincipal | None = Depends(optional_session)
     close) just as easily as an authenticated request could serve a
     stale public one. Two independent cache entries -- one per shape --
     is the only way this stays both cached and correct.
+
+    The request is passed through, exactly as app/mc_api.py's
+    /api/mc/board does: without it cached_json_response cannot tell
+    whether the client takes gzip or holds a current copy, so it never
+    cached the gzip bytes (GZipMiddleware recompressed this ~3.3 MB body
+    on every request) and could never answer a matching If-None-Match
+    with a 304 -- which the map page already sends (frontend/map2.js's
+    fetchBoard()).
+
+    Both keys are also published by the worker role, which builds them
+    ahead of time and writes them to board_cache -- see the registration
+    right below this function. The inline build here is the cold-start /
+    worker-down fallback, as for /api/mc/board.
     """
     cache_key = "mt_board_authed" if session is not None else "mt_board_public"
     return mc_api.cached_json_response(
-        cache_key, lambda: _build_get_nodes(include_attribution=session is not None)
+        cache_key,
+        lambda: _build_get_nodes(include_attribution=session is not None),
+        request,
     )
+
+
+# Worker-published copies of both /get-nodes shapes (app/mc_api.py's
+# run_forever()/_publish_board_once(); this route's cached_json_response
+# reads them back as its tier 2). Registered HERE, at import time, and not
+# in mc_api's own _PUBLISHED_BOARD_BUILDS literal, because _build_get_nodes
+# lives in this module and this module imports mc_api, never the other way
+# round (see mc_api.MT_PROTOCOL's comment for the cycle that would close).
+# app/main.py imports this module before its lifespan starts the publisher
+# loop, in the web and the worker role alike.
+#
+# Safe to build with no request or session in hand: the ONLY thing that
+# differs between the two keys is include_attribution, i.e. whether a
+# session is PRESENT -- the route above passes `session is not None` and
+# nothing else from the session reaches the build, and _mt_node_teams()
+# (what include_attribution=True adds) takes no user and returns the same
+# node -> team map for every caller. So the authed row is the same bytes for
+# every signed-in user. The privacy gate stays in the route: it still picks
+# the key from the session, and the public row is built with
+# include_attribution=False, so it never carries a team.
+#
+# Keep these two keys spelled exactly like the route's cache_key above.
+mc_api.register_published_board(
+    "mt_board_authed", lambda: _build_get_nodes(include_attribution=True)
+)
+mc_api.register_published_board(
+    "mt_board_public", lambda: _build_get_nodes(include_attribution=False)
+)
 
 
 # Deliberately NOT the bare "/results" the other Meshtastic data routes
