@@ -11,7 +11,7 @@ the page, and requiring no key, same as /get-nodes.
 Both routes only ever return LIVE places -- active (place.active = 1,
 app/places_seed.py's reconcile flag) AND either always-active
 (rotates=0) or in this week's resolved rotating set (app/place_rotation.
-resolve_week) -- never a place that has left the seed, and never a
+ensure_week_resolved) -- never a place that has left the seed, and never a
 rotating place that is not currently drawable, so the map can never show
 a marker a player cannot actually score.
 
@@ -43,7 +43,7 @@ from . import places_seed
 from .config import settings
 from .db import connect
 from .grid import distance_m
-from .place_rotation import current_week_start, resolve_week
+from .place_rotation import current_week_start, ensure_week_resolved
 from .place_scoring import _stable_tiebreak
 
 log = logging.getLogger("places_api")
@@ -244,6 +244,13 @@ def _park_boundaries_in_viewport(
 # _PLACES_CACHE_MAX bounds it: OrderedDict
 # gives O(1) move-to-end on a hit and pop-oldest on overflow, i.e. a plain
 # LRU, with no extra bookkeeping structure needed.
+#
+# An entry COUNT is not a memory bound, though: a zoomed-out viewport
+# response is a few hundred KB, plus a gzip copy of it, so 512 of them is
+# far more than one worker process should be holding (the web workers
+# were being OOM-killed at 650-800 MB each when this second bound was
+# added, 2026-10-05). _PLACES_CACHE_MAX_BYTES bounds the bytes the
+# entries actually hold, and eviction is LRU until the cache is under BOTH.
 
 # GZIP_COMPRESSLEVEL matches app/main.py's app.add_middleware(GZipMiddleware,
 # minimum_size=1000) call -- compresslevel is left at GZipMiddleware's own
@@ -279,9 +286,44 @@ class _CachedBody:
             self.gzip_body = gzip.compress(self.body, compresslevel=_GZIP_COMPRESSLEVEL)
         return self.gzip_body
 
+    def stored_bytes(self) -> int:
+        """Bytes this entry holds: the plaintext body plus its gzip copy
+        once that exists. The gzip copy is made lazily, on the first
+        gzip-accepting request, so an entry is bigger after it has been
+        stored than when it was."""
+        return len(self.body) + (len(self.gzip_body) if self.gzip_body is not None else 0)
+
 
 _PLACES_CACHE: "OrderedDict[str, _CachedBody]" = OrderedDict()
 _PLACES_CACHE_MAX = 512
+# Per-PROCESS ceiling on the bytes _PLACES_CACHE holds (body + gzip copy of
+# every entry), enforced alongside _PLACES_CACHE_MAX -- see the comment
+# at the top of this section. Each web worker has its own cache, so this
+# is multiplied by the worker count.
+_PLACES_CACHE_MAX_BYTES = 24 * 1024 * 1024
+
+
+def _places_cache_bytes() -> int:
+    """Bytes currently held by _PLACES_CACHE. Summed from the entries on
+    each call rather than kept as a running total: there are at most
+    _PLACES_CACHE_MAX of them, and a total that has to be adjusted by
+    every insert, overwrite, eviction, lazy gzip fill and external
+    clear() can drift, where a sum cannot."""
+    return sum(entry.stored_bytes() for entry in _PLACES_CACHE.values())
+
+
+def _evict_places_cache() -> None:
+    """Drop least-recently-used entries until _PLACES_CACHE is under BOTH
+    bounds: _PLACES_CACHE_MAX entries and _PLACES_CACHE_MAX_BYTES bytes.
+    An entry that on its own is over the byte bound ends up evicted
+    too, which leaves the cache empty rather than over -- the response
+    that built it is still served, it just is not kept."""
+    total = _places_cache_bytes()
+    while _PLACES_CACHE and (
+        len(_PLACES_CACHE) > _PLACES_CACHE_MAX or total > _PLACES_CACHE_MAX_BYTES
+    ):
+        _key, evicted = _PLACES_CACHE.popitem(last=False)
+        total -= evicted.stored_bytes()
 
 
 def _coord_key(value: float) -> str:
@@ -315,6 +357,11 @@ def cached_places_response(key: str, ttl: int, build, request: Request | None) -
     since minting a validator costs nothing extra on top of the
     serialization this route was doing anyway.
 
+    The cache is bounded twice, by _PLACES_CACHE_MAX entries and by
+    _PLACES_CACHE_MAX_BYTES bytes (body plus gzip copy), and evicts the
+    least-recently-used entries until it is under both -- on every
+    insert, and again when an entry's gzip copy is first made.
+
     Gzip: one ETag covers both the plaintext and gzip representations of
     an entry. See app/mc_api.py's cached_json_response docstring for the
     full reasoning (same choice, same justification) -- gzip is a
@@ -337,7 +384,14 @@ def cached_places_response(key: str, ttl: int, build, request: Request | None) -
             return Response(status_code=304, headers=headers)
         if gzip_ok:
             headers["Content-Encoding"] = "gzip"
-            return Response(content=entry.gzipped(), media_type="application/json", headers=headers)
+            first_gzip = entry.gzip_body is None
+            gz = entry.gzipped()
+            if first_gzip and ttl > 0 and _PLACES_CACHE.get(key) is entry:
+                # That gzip copy is new bytes inside an entry already in
+                # the cache -- count it against the byte bound now, not
+                # after every entry has quietly doubled.
+                _evict_places_cache()
+            return Response(content=gz, media_type="application/json", headers=headers)
         return Response(content=entry.body, media_type="application/json", headers=headers)
 
     if ttl > 0:
@@ -362,8 +416,7 @@ def cached_places_response(key: str, ttl: int, build, request: Request | None) -
     if ttl > 0:
         _PLACES_CACHE[key] = entry
         _PLACES_CACHE.move_to_end(key)
-        if len(_PLACES_CACHE) > _PLACES_CACHE_MAX:
-            _PLACES_CACHE.popitem(last=False)
+        _evict_places_cache()
     return answer(entry)
 
 
@@ -410,10 +463,30 @@ async def places_in_viewport(
         week_start = current_week_start()
         conn = connect()
         try:
-            resolve_week(conn, week_start)
+            ensure_week_resolved(conn, week_start)
             protocol = "mt" if board == "meshtastic" else "mc"
+            # Two levels, on purpose. The INNER select picks the rows that
+            # survive ORDER BY ... LIMIT -- the same box, liveness filter,
+            # order and tiebreak this query always had. The OUTER select
+            # then attaches claimed_by_team to those rows only. As one flat
+            # select, SQLite ran the correlated claim lookup for every
+            # candidate in the box BEFORE the LIMIT cut them down: at low
+            # zoom that is ~42,500 candidates for the 2,000 rows kept,
+            # 100-150 ms of a query that was already 470-850 ms.
+            #
+            # The outer ORDER BY repeats the inner one. It makes the row
+            # order a guarantee of this statement (a derived table's own
+            # order is not part of the SQL contract) and it is also what
+            # keeps SQLite from merging the two levels back into the flat
+            # form: it will not flatten a subquery into an outer query when
+            # both have an ORDER BY. The order is total (the tiebreak is a
+            # multiplication modulo the prime 1,000,000,007, so it is
+            # injective over place ids, which are far below that), hence
+            # the rows that survive the LIMIT and the order they come out
+            # in are exactly what the flat query returned.
             rows = conn.execute(
-                "SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates, "
+                "SELECT t.id AS id, t.ref_type AS ref_type, t.name AS name, "
+                "       t.lat AS lat, t.lon AS lon, t.points AS points, t.rotates AS rotates, "
                 # Newest claim on this place, on this board. place_activation
                 # is small and indexed by place_id (its UNIQUE), so this is a
                 # cheap correlated lookup rather than a walk of the capture
@@ -421,12 +494,14 @@ async def places_in_viewport(
                 # other team attribution in the game makes.
                 "       (SELECT pl.team FROM place_activation a "
                 "          JOIN player pl ON pl.player_id = a.player_id "
-                "         WHERE a.place_id = p.id AND a.protocol = ? "
+                "         WHERE a.place_id = t.id AND a.protocol = ? "
                 "         ORDER BY a.awarded_at DESC LIMIT 1) AS claimed_by_team "
-                "  FROM place p "
-                " WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
-                f"  AND {_live_where(week_start)} "
-                f" ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT ?",
+                "  FROM (SELECT p.id, p.ref_type, p.name, p.lat, p.lon, p.points, p.rotates "
+                "          FROM place p "
+                "         WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ? "
+                f"          AND {_live_where(week_start)} "
+                f"         ORDER BY p.points DESC, {_stable_tiebreak('p.id')} LIMIT ?) AS t "
+                f" ORDER BY t.points DESC, {_stable_tiebreak('t.id')}",
                 (protocol, south, north, west, east, week_start, MAX_VIEWPORT_RESULTS),
             ).fetchall()
             _log_if_still_loading(len(rows))
@@ -498,7 +573,7 @@ async def places_near(
         week_start = current_week_start()
         conn = connect()
         try:
-            resolve_week(conn, week_start)
+            ensure_week_resolved(conn, week_start)
             rows: list = []
             ranked: list = []
             # Degrees of latitude are ~111 km everywhere; longitude shrinks

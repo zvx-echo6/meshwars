@@ -7,6 +7,8 @@ drawn earlier in the week, then deactivated by a later seed reload).
 from __future__ import annotations
 
 import asyncio
+import gzip
+import hashlib
 import json
 import time
 
@@ -14,7 +16,7 @@ import pytest
 from fastapi import Request
 
 import app.places_api as places_api_module
-from app.place_rotation import current_week_start
+from app.place_rotation import _prev_week_start, current_week_start
 from app.places_api import places_in_viewport, places_near
 
 WEEK = current_week_start()
@@ -53,16 +55,18 @@ class _NonClosingConn:
         pass
 
 
-def _request(if_none_match: str | None = None) -> Request:
+def _request(if_none_match: str | None = None, accept_gzip: bool = False) -> Request:
     """A minimal Request carrying just enough of an ASGI scope for
-    cached_places_response to read If-None-Match off it -- same idea as
-    tests/test_auth.py's own _request() helper, which builds a bare
-    Request the same way to test code that reads request headers
-    without a running server.
+    cached_places_response to read If-None-Match (and, when asked,
+    Accept-Encoding) off it -- same idea as tests/test_auth.py's own
+    _request() helper, which builds a bare Request the same way to test
+    code that reads request headers without a running server.
     """
     headers = []
     if if_none_match is not None:
         headers.append((b"if-none-match", if_none_match.encode("latin-1")))
+    if accept_gzip:
+        headers.append((b"accept-encoding", b"gzip, deflate, br"))
     scope = {
         "type": "http",
         "method": "GET",
@@ -376,3 +380,352 @@ def test_places_cache_eviction_bounded_at_max(conn, monkeypatch):
         asyncio.run(places_near(request=_request(), lat=i * 0.01, lon=-116.0, limit=1))
 
     assert len(places_api_module._PLACES_CACHE) == places_api_module._PLACES_CACHE_MAX
+
+
+# ---- the weekly draw is probed, not fetched (2026-10-05) -------------------
+#
+# Both routes called resolve_week() on every cache miss, and it fetched the
+# week's whole id list -- about 500,000 rows, 94-98% of a ~0.5 s miss --
+# only for the routes to throw it away. They call ensure_week_resolved()
+# now. `counting_conn` (tests/conftest.py) records how many rows each
+# statement pulled back.
+
+
+def test_viewport_and_near_probe_the_week_instead_of_fetching_it(conn, counting_conn, monkeypatch):
+    monkeypatch.setattr(places_api_module, "connect", lambda: counting_conn)
+    _place(conn, 1, "summit", 43.0, -116.0, points=100)
+    conn.executemany(
+        "INSERT INTO place_week(week_start, place_id) VALUES (?, ?)",
+        [(WEEK, 9000 + i) for i in range(60)],
+    )
+
+    asyncio.run(places_in_viewport(request=_request(), north=44.0, south=42.0, west=-117.0, east=-115.0))
+    asyncio.run(places_near(request=_request(), lat=43.0, lon=-116.0, limit=20))
+
+    # One probe per route, each stopping at the first of the draw's 60 rows.
+    assert counting_conn.week_reads(WEEK) == [1, 1]
+
+
+# ---- claimed_by_team is attached AFTER the LIMIT (2026-10-05) ----------------
+#
+# The viewport used to look up every candidate's newest claim and only then
+# cut the list to MAX_VIEWPORT_RESULTS -- ~42,500 lookups at zoom 5 for the
+# 2,000 rows kept. It now picks the surviving rows first and looks claims up
+# for those alone. What comes back must be exactly what it always was: the
+# same rows, in the same order, with the same team. The expectations below
+# are written out by hand from _seed_claims_fixture(), not produced by
+# running either version of the query.
+
+_BOX = dict(north=44.0, south=42.0, west=-117.0, east=-115.0)
+
+# id -> (type, lat, lon, points, rotates) for the eight live places.
+_LIVE_PLACES = {
+    1: ("summit", 43.01, -116.01, 100, False),
+    2: ("summit", 43.02, -116.02, 100, False),
+    3: ("park", 43.03, -116.03, 50, False),
+    4: ("park", 43.04, -116.04, 50, False),
+    5: ("park", 43.05, -116.05, 50, False),
+    6: ("landmark", 43.06, -116.06, 10, False),
+    7: ("landmark", 43.07, -116.07, 5, False),
+    8: ("landmark", 43.08, -116.08, 50, True),
+}
+
+
+def _expected_places(*id_and_team):
+    """The `places` list /api/places should return for these
+    (id, claimed_by_team) pairs, in this order -- spelled out from
+    _LIVE_PLACES, key order and all, so it can also be compared against
+    the response's raw bytes."""
+    out = []
+    for place_id, team in id_and_team:
+        ref_type, lat, lon, points, rotates = _LIVE_PLACES[place_id]
+        out.append({
+            "id": place_id, "type": ref_type, "name": f"place-{place_id}",
+            "lat": lat, "lon": lon, "points": points, "rotates": rotates,
+            "claimed_by_team": team,
+        })
+    return out
+
+
+def _seed_claims_fixture(conn):
+    """Twelve places around the box north=44/south=42/west=-117/east=-115:
+    eight live, four decoys that must never come back. Every decoy is worth
+    100 points, the top tier, so one that leaked in would show up at the
+    front of the list.
+
+    LIVE, ranked by points DESC then _stable_tiebreak(id), i.e.
+    (id * 2654435761) % 1000000007 ascending:
+
+      100 points: id 2 (308871487), id 1 (654435747)
+       50 points: id 8 (235485941; rotating, in this week's draw),
+                  id 5 (272178714), id 4 (617742974), id 3 (963307234)
+       10 points: id 6
+        5 points: id 7
+
+    so the full order is 2, 1, 8, 5, 4, 3, 6, 7 -- and the tiebreak, not
+    id order, is what puts 8 before 5 before 4 before 3.
+
+    DECOYS:
+      9   rotating, in no draw at all              -> not live this week
+      10  always-active, but active = 0            -> left the seed
+      11  always-active and active, but lat 46     -> outside the box
+      12  rotating, drawn only LAST week           -> not live this week
+
+    CLAIMS (place_activation), newest awarded_at first, per board
+    'mc' (meshcore) / 'mt' (meshtastic); teams are 10 = RED, 11 = BLUE:
+
+      2  mc 2000 BLUE | mc 1000 RED | mt 3000 RED     mc -> BLUE, mt -> RED
+      1  mt 4000 BLUE                                  mc -> none, mt -> BLUE
+      8  mc 5000 RED                                   mc -> RED, mt -> none
+      5  mc 7000 BLUE (inserted FIRST) | mc 6000 RED (inserted second)
+         | mc 9000 by player 99, who does not exist
+                                                       mc -> BLUE, mt -> none
+         (newest by TIME among claimants that still exist: not the last
+         inserted, and not player 99's newer row, which the join to
+         `player` drops)
+      4  mt 8000 RED                                   mc -> none, mt -> RED
+      3, 6, 7  never claimed                           none on both boards
+    """
+    def place(place_id, ref_type, lat, lon, points, rotates=0, active=1):
+        _place(conn, place_id, ref_type, lat, lon, points, rotates=rotates, active=active)
+
+    place(1, "summit", 43.01, -116.01, 100)
+    place(2, "summit", 43.02, -116.02, 100)
+    place(3, "park", 43.03, -116.03, 50)
+    place(4, "park", 43.04, -116.04, 50)
+    place(5, "park", 43.05, -116.05, 50)
+    place(6, "landmark", 43.06, -116.06, 10)
+    place(7, "landmark", 43.07, -116.07, 5)
+    place(8, "landmark", 43.08, -116.08, 50, rotates=1)
+    place(9, "landmark", 43.09, -116.09, 100, rotates=1)
+    place(10, "summit", 43.10, -116.10, 100, active=0)
+    place(11, "summit", 46.00, -116.00, 100)
+    place(12, "landmark", 43.12, -116.12, 100, rotates=1)
+
+    conn.executemany(
+        "INSERT INTO place_week(week_start, place_id) VALUES (?, ?)",
+        [(WEEK, 8), (_prev_week_start(WEEK), 12)],
+    )
+    for player_id, team in ((10, "RED"), (11, "BLUE")):
+        conn.execute(
+            "INSERT INTO player(player_id, display_name, team, created_at) VALUES (?, ?, ?, ?)",
+            (player_id, f"player-{player_id}", team, int(time.time())),
+        )
+    # week_start only has to keep UNIQUE(place_id, player_id, week_start)
+    # satisfied, so "an old week" is any string that is not WEEK.
+    old_a, old_b = "2020-01-01", "2020-01-08"
+    conn.executemany(
+        "INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (2, 10, old_a, 100, 1000, "mc"),
+            (2, 11, old_b, 100, 2000, "mc"),
+            (2, 10, WEEK, 100, 3000, "mt"),
+            (1, 11, WEEK, 100, 4000, "mt"),
+            (8, 10, WEEK, 50, 5000, "mc"),
+            (5, 11, old_b, 50, 7000, "mc"),
+            (5, 10, old_a, 50, 6000, "mc"),
+            (5, 99, WEEK, 50, 9000, "mc"),
+            (4, 10, WEEK, 50, 8000, "mt"),
+        ],
+    )
+
+
+def test_viewport_keeps_the_right_rows_and_claims_when_candidates_exceed_the_limit(conn, monkeypatch):
+    """Eight live candidates, a limit of four, the meshcore board. The
+    cut falls inside the 50-point tier, so which of its four members
+    survive is decided by the tiebreak alone: 8 and 5 stay, 4 and 3 go.
+    """
+    monkeypatch.setattr(places_api_module, "connect", lambda: _NonClosingConn(conn))
+    monkeypatch.setattr(places_api_module, "MAX_VIEWPORT_RESULTS", 4)
+    _seed_claims_fixture(conn)
+
+    result = asyncio.run(places_in_viewport(request=_request(), **_BOX))
+    data = json.loads(result.body)
+
+    expected = _expected_places((2, "BLUE"), (1, None), (8, "RED"), (5, "BLUE"))
+    assert data["places"] == expected
+    assert data["count"] == 4
+    assert data["truncated"] is True
+    # ...and byte for byte, key order and number formatting included.
+    expected_bytes = json.dumps(expected, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert expected_bytes in result.body
+
+
+def test_viewport_claims_follow_the_requested_board(conn, monkeypatch):
+    """Same rows, same order -- claims never change which places are kept
+    or how they rank -- but each place's team is its newest claim on THE
+    BOARD ASKED FOR: place 2's newest claim overall is a meshtastic one
+    (RED), its newest meshcore one is BLUE.
+    """
+    monkeypatch.setattr(places_api_module, "connect", lambda: _NonClosingConn(conn))
+    monkeypatch.setattr(places_api_module, "MAX_VIEWPORT_RESULTS", 4)
+    _seed_claims_fixture(conn)
+
+    result = asyncio.run(places_in_viewport(request=_request(), board="meshtastic", **_BOX))
+    data = json.loads(result.body)
+
+    assert data["places"] == _expected_places((2, "RED"), (1, "BLUE"), (8, None), (5, None))
+    assert data["count"] == 4
+    assert data["truncated"] is True
+
+
+def test_viewport_full_order_when_nothing_is_cut(conn, monkeypatch):
+    """The default limit (2000) is far above eight places: every live
+    place comes back, the decoys do not, and the order is the full
+    points-then-tiebreak ranking worked out in _seed_claims_fixture()."""
+    monkeypatch.setattr(places_api_module, "connect", lambda: _NonClosingConn(conn))
+    _seed_claims_fixture(conn)
+
+    result = asyncio.run(places_in_viewport(request=_request(), **_BOX))
+    data = json.loads(result.body)
+
+    assert data["places"] == _expected_places(
+        (2, "BLUE"), (1, None), (8, "RED"), (5, "BLUE"), (4, None), (3, None), (6, None), (7, None),
+    )
+    assert data["count"] == 8
+    assert data["truncated"] is False
+
+
+def test_viewport_claim_lookup_sits_outside_the_limit(conn, counting_conn, monkeypatch):
+    """The point of the change, pinned structurally: the select that
+    applies ORDER BY ... LIMIT must not mention place_activation at all,
+    and the claim lookup must still be in the statement, outside it. A
+    flat select (claim subquery beside the LIMIT) would run that lookup
+    for every candidate in the box before the LIMIT cut them down.
+    """
+    monkeypatch.setattr(places_api_module, "connect", lambda: counting_conn)
+    _place(conn, 1, "summit", 43.0, -116.0, points=100)
+
+    asyncio.run(places_in_viewport(request=_request(), **_BOX))
+
+    [sql] = [rec["sql"] for rec in counting_conn.statements if "claimed_by_team" in rec["sql"]]
+    start = sql.index("FROM (SELECT")
+    inner = sql[start:sql.index(") AS t", start)]
+    assert "LIMIT ?" in inner
+    assert "place_activation" not in inner
+    assert "place_activation" in sql
+
+
+# ---- _PLACES_CACHE is bounded in BYTES as well as entries (2026-10-05) -----
+#
+# 512 entries of a few hundred KB each (plus a gzip copy of each) is far
+# more than one web worker should hold, so _PLACES_CACHE_MAX_BYTES bounds
+# what the entries actually weigh, alongside the entry cap, and eviction is
+# least-recently-used until the cache is under both.
+
+
+def _body_len(payload) -> int:
+    """How many bytes cached_places_response stores for `payload` as the
+    entry's plaintext body."""
+    return len(json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _serve(key, payload, accept_gzip=False):
+    """Run `payload` through cached_places_response under `key`, with a
+    60 s ttl, the way a route would."""
+    return places_api_module.cached_places_response(
+        key, 60, lambda: payload, _request(accept_gzip=accept_gzip)
+    )
+
+
+def test_places_cache_limits_default_to_512_entries_and_24_mib():
+    assert places_api_module._PLACES_CACHE_MAX == 512
+    assert places_api_module._PLACES_CACHE_MAX_BYTES == 24 * 1024 * 1024
+
+
+def test_places_cache_byte_bound_evicts_the_oldest_entries_first(monkeypatch):
+    payload = {"pad": "x" * 1000}
+    size = _body_len(payload)
+    # Room for exactly three bodies. Plain requests, so no gzip copies yet.
+    monkeypatch.setattr(places_api_module, "_PLACES_CACHE_MAX_BYTES", 3 * size)
+
+    for i in range(5):
+        _serve(f"k{i}", payload)
+
+    assert list(places_api_module._PLACES_CACHE) == ["k2", "k3", "k4"]
+    assert places_api_module._places_cache_bytes() == 3 * size
+
+
+def test_places_cache_byte_bound_evicts_the_least_recently_used_entry(monkeypatch):
+    """Eviction order is by USE, not by when an entry went in: a hit on
+    "a" makes it the newest, so the entry that goes is "b"."""
+    payload = {"pad": "x" * 1000}
+    monkeypatch.setattr(places_api_module, "_PLACES_CACHE_MAX_BYTES", 3 * _body_len(payload))
+
+    for key in ("a", "b", "c"):
+        _serve(key, payload)
+    _serve("a", payload)  # a hit, inside the ttl
+    _serve("d", payload)  # over the bound: the least recently used entry goes
+
+    assert list(places_api_module._PLACES_CACHE) == ["c", "a", "d"]
+
+
+def test_places_cache_byte_bound_counts_the_gzip_copy_when_it_is_made(monkeypatch):
+    """An entry's gzip copy is made lazily, on the first gzip-accepting
+    request -- after the entry is already stored -- so the bound has to be
+    enforced again at that point, not only when entries go in. The bound
+    here leaves room for one entry with its gzip copy plus one more bare
+    body, but not for two gzip copies.
+    """
+    # Hex digests: they compress, but nowhere near to nothing.
+    payload = {"pad": "".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(16))}
+    body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    body_size = len(body)
+    gzip_size = len(gzip.compress(body, compresslevel=places_api_module._GZIP_COMPRESSLEVEL))
+    assert 0 < gzip_size < body_size
+    monkeypatch.setattr(places_api_module, "_PLACES_CACHE_MAX_BYTES", 2 * body_size + gzip_size)
+
+    _serve("a", payload, accept_gzip=True)
+    assert places_api_module._places_cache_bytes() == body_size + gzip_size
+
+    resp = _serve("b", payload, accept_gzip=True)
+    # b went in fine (a with its gzip copy, plus b's bare body, is under
+    # the bound), and then b's own gzip copy took the total over it, so
+    # the least recently used entry, a, went.
+    assert list(places_api_module._PLACES_CACHE) == ["b"]
+    assert places_api_module._places_cache_bytes() == body_size + gzip_size
+    assert gzip.decompress(resp.body) == body  # and b was still answered correctly
+
+    # The same two entries asked for WITHOUT gzip hold no gzip copies, so
+    # both fit: it really was the gzip bytes that tipped it.
+    places_api_module._PLACES_CACHE.clear()
+    _serve("a", payload)
+    _serve("b", payload)
+    assert list(places_api_module._PLACES_CACHE) == ["a", "b"]
+
+
+def test_places_cache_entry_cap_still_holds_alongside_the_byte_bound(monkeypatch):
+    """The byte bound is added to the entry cap, not swapped for it: with
+    the byte bound far out of reach, entries are still capped by count."""
+    monkeypatch.setattr(places_api_module, "_PLACES_CACHE_MAX", 3)
+
+    for i in range(5):
+        _serve(f"k{i}", {"n": i})
+
+    assert list(places_api_module._PLACES_CACHE) == ["k2", "k3", "k4"]
+
+
+def test_places_cache_entry_bigger_than_the_byte_bound_is_served_but_not_kept(monkeypatch):
+    payload = {"pad": "x" * 1000}
+    monkeypatch.setattr(places_api_module, "_PLACES_CACHE_MAX_BYTES", _body_len(payload) - 1)
+
+    resp = _serve("big", payload)
+
+    assert json.loads(resp.body) == payload  # answered, and correctly
+    assert len(places_api_module._PLACES_CACHE) == 0
+    assert places_api_module._places_cache_bytes() == 0
+
+
+def test_places_cache_expired_entry_is_replaced_not_double_counted():
+    """A key whose ttl has lapsed is rebuilt over the old entry. The
+    cache's weight is whatever is in it now, never the old and the new
+    entry added together."""
+    _serve("a", {"pad": "x" * 500})
+    places_api_module._PLACES_CACHE["a"].built_at -= 1000  # well past the 60 s ttl
+
+    second = {"pad": "y" * 900}
+    _serve("a", second)
+
+    assert list(places_api_module._PLACES_CACHE) == ["a"]
+    assert places_api_module._places_cache_bytes() == _body_len(second)

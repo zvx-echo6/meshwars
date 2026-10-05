@@ -1823,8 +1823,9 @@ CREATE TABLE IF NOT EXISTS mc_directory_cache (
     fetched_at    INTEGER NOT NULL
 );
 
--- Worker-published /api/mc/board response (app/mc_api.py's board_cache
--- publisher run_forever(), cached_json_response()'s DB fallback). Same
+-- Worker-published board responses: the /api/mc/board row and the two
+-- /get-nodes rows (app/mc_api.py's board_cache publisher run_forever(),
+-- cached_json_response()'s DB fallback). Same
 -- worker-writes/web-reads split as mc_directory_cache directly above,
 -- for the identical reason: after the web/worker split
 -- (docker-compose.yml's `meshwars`/`meshwars-worker` services,
@@ -1851,13 +1852,21 @@ CREATE TABLE IF NOT EXISTS mc_directory_cache (
 -- reads all three back through the same tiers. Each route's own inline
 -- build stays the cold-start / worker-down fallback.
 --
--- body/gzip_body/etag are the FINISHED artifact -- already-serialized
--- JSON bytes, already-gzip-compressed bytes, and the etag hashed from
--- body -- so a web process reading this row does zero serialization and
--- zero compression, only a lookup. Both representations are stored
--- (unlike _CachedBody's own gzip_body, which the in-process cache fills
--- lazily on first gzip-accepting request) because the whole point here
--- is a web process never doing that compression itself either.
+-- gzip_body and etag are the FINISHED artifact -- the already-gzip-
+-- compressed JSON bytes, and the etag hashed from the plaintext JSON they
+-- were made from -- so a web process reading this row does zero
+-- serialization and zero compression, only a lookup. The worker
+-- compresses eagerly (unlike _CachedBody's own gzip_body, which the
+-- in-process cache fills lazily on first gzip-accepting request) because
+-- the whole point here is a web process never doing that work itself.
+-- body is stored EMPTY: an empty blob rather than NULL, because the
+-- column is NOT NULL and an existing database keeps that constraint.
+-- Nearly every client takes gzip, so keeping the plaintext as well was
+-- about ten times the bytes for nothing. The rare client that cannot
+-- take gzip gets the plaintext inflated from gzip_body once per process
+-- and entry (see _CachedBody in app/mc_api.py). A row written before
+-- that change, or by hand, may still carry a body and is served as it
+-- always was.
 --
 -- built_at is wall-clock (int(time.time()), like mc_directory_cache's
 -- fetched_at, not app/mc_api.py's own _CachedBody.built_at which is
