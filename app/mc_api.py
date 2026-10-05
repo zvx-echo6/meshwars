@@ -40,7 +40,7 @@ import math
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
@@ -590,10 +590,12 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
        first publish pass, a row that holds nothing servable, or any key
        nothing publishes -- and it is also what keeps a web-role process
        correct even if the worker role is entirely down: this function
-       never hard-depends on the publisher having run. Every key in
-       _PUBLISHED_BOARD_BUILDS, /get-nodes's 'mt_board_authed' and
-       'mt_board_public' included, goes through all three tiers; the
-       route's own inline build is what is left of tier 3 for them.
+       never hard-depends on the publisher having run. Every key the
+       publisher writes (_published_board_keys(): _PUBLISHED_BOARD_BUILDS
+       plus the groups registered through register_published_board_group()),
+       /get-nodes's 'mt_board_authed' and 'mt_board_public' included, goes
+       through all three tiers; the route's own inline build is what is
+       left of tier 3 for them.
 
     ttl = 0 skips ALL THREE tiers of caching, including this table: not
     just "don't read _BOARD_CACHE", the full contract
@@ -798,17 +800,21 @@ async def mc_board(request: Request) -> Response:
 
 # ---- board cache publisher (worker role only) ---------------------------
 #
-# The build FUNCTIONS this loop publishes into board_cache, keyed exactly
-# like _BOARD_CACHE / cached_json_response's own `key` argument:
+# What this loop publishes into board_cache, keyed exactly like
+# _BOARD_CACHE / cached_json_response's own `key` argument:
 #
 # - 'mc_board' -- /api/mc/board's own cache key, the measured
 #   4.2MB/~6.8s-rebuild route (see run_forever()'s own docstring). Its
-#   build is a fixed, parameterless closure defined right here.
+#   build is a fixed, parameterless closure defined right here, in
+#   _PUBLISHED_BOARD_BUILDS.
 # - 'mt_board_public' and 'mt_board_authed' -- /get-nodes's two keys. Their
 #   build lives in app/api.py, which imports THIS module and so cannot be
 #   imported back (see MT_PROTOCOL's comment near the top of this file),
 #   so app/api.py adds them itself, at import time, through
-#   register_published_board() below. app/main.py imports app/api.py
+#   register_published_board_group() below -- as ONE group
+#   (_PUBLISHED_BOARD_GROUPS), because the two payloads are cut from the
+#   same expensive build and this way the loop runs that build once per
+#   cycle instead of once per key. app/main.py imports app/api.py
 #   before its lifespan ever starts this loop, in the web and the worker
 #   role alike, so the registration has always happened by the first cycle.
 #
@@ -825,14 +831,76 @@ _PUBLISHED_BOARD_BUILDS: dict[str, Callable[[], list[dict] | dict]] = {
     "mc_board": lambda: board_for(MC_PROTOCOL, include_meta=False),
 }
 
+# Keys that share ONE build per cycle: the group's set of cache keys ->
+# (build_base, {key: shape}). _publish_board_once() calls build_base() once
+# and then each key's shape(base) for that key's payload -- see
+# register_published_board_group().
+_PUBLISHED_BOARD_GROUPS: dict[
+    frozenset[str],
+    tuple[Callable[[], Any], dict[str, Callable[[Any], list[dict] | dict]]],
+] = {}
+
 
 def register_published_board(key: str, build: Callable[[], list[dict] | dict]) -> None:
     """Have run_forever() publish `build()`'s result under `key` -- the
     same `key` the route passes to cached_json_response, which is what
     makes that route's tier-2 read find the row. For a build that lives in
     a module this one cannot import (see the comment above). Idempotent:
-    registering a key again just replaces its build."""
+    registering a key again just replaces its build. A key a group (see
+    register_published_board_group) already publishes is refused with
+    ValueError, since it would be built and written twice a cycle."""
+    if any(key in group_keys for group_keys in _PUBLISHED_BOARD_GROUPS):
+        raise ValueError(f"board_cache key {key!r} is already published by a group")
     _PUBLISHED_BOARD_BUILDS[key] = build
+
+
+def register_published_board_group(
+    build_base: Callable[[], Any],
+    shapers: dict[str, Callable[[Any], list[dict] | dict]],
+) -> None:
+    """Have run_forever() publish SEVERAL keys from ONE expensive build:
+    each cycle it calls `build_base()` once, then `shapers[key](base)` for
+    every key to get that key's payload. For payloads that are the same
+    work and differ only in a cheap last step -- /get-nodes' two shapes
+    (app/api.py), which differ only in whether team attribution is added.
+    Registering each key with register_published_board() instead would run
+    the whole build once per key.
+
+    Everything after the shared build stays per key, exactly as for a
+    single registration: each payload is serialized, hashed and compared
+    with that key's OWN stored etag, an unchanged key is skipped, and each
+    key has its own board_cache row and its own etag. A shaper that raises
+    costs only its own key for that cycle; a `build_base` that raises
+    costs the whole group. The base is handed to every shaper as it is,
+    so a shaper must treat it as read-only. Nothing is kept from one cycle
+    to the next -- the base is rebuilt every cycle, because comparing
+    etags needs the fresh payloads.
+
+    The group is identified by its set of keys, so registering the same
+    keys again (in any order) replaces it. A key another registration
+    already publishes is refused with ValueError, for the same reason as
+    in register_published_board()."""
+    keys = frozenset(shapers)
+    if not keys:
+        raise ValueError("a board_cache group needs at least one key")
+    clashes = keys & set(_PUBLISHED_BOARD_BUILDS)
+    for group_keys in _PUBLISHED_BOARD_GROUPS:
+        if group_keys != keys:
+            clashes |= keys & group_keys
+    if clashes:
+        raise ValueError(
+            f"board_cache key(s) already published by another registration: {sorted(clashes)}"
+        )
+    _PUBLISHED_BOARD_GROUPS[keys] = (build_base, dict(shapers))
+
+
+def _published_board_keys() -> list[str]:
+    """Every cache key the publisher writes, in the order it writes them:
+    the single registrations first, then each group's keys."""
+    keys = list(_PUBLISHED_BOARD_BUILDS)
+    for _build_base, shapers in _PUBLISHED_BOARD_GROUPS.values():
+        keys.extend(shapers)
+    return keys
 
 
 def _stored_board_etag(key: str) -> str | None:
@@ -857,15 +925,46 @@ def _stored_board_etag(key: str) -> str | None:
     return row["etag"] if row is not None else None
 
 
+async def _publish_board_payload(key: str, payload: list[dict] | dict) -> None:
+    """Publish ONE key's already-built `payload`: serialize it, hash it,
+    and upsert its board_cache row unless the stored etag already equals
+    that hash -- see _publish_board_once() for why each step is the way it
+    is. Everything that cycle does per key, for a single registration and
+    for each key of a group alike. Raises on any failure; the caller keeps
+    that failure to this key."""
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+    if _stored_board_etag(key) == etag:
+        log.debug("board_cache: key %s unchanged (etag %s), skipping publish", key, etag)
+        return
+    gzip_body = gzip.compress(body, compresslevel=_GZIP_COMPRESSLEVEL)
+    async with WriteSession() as conn:
+        conn.execute(
+            "INSERT INTO board_cache(cache_key, body, gzip_body, etag, built_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(cache_key) DO UPDATE SET"
+            " body = excluded.body, gzip_body = excluded.gzip_body,"
+            " etag = excluded.etag, built_at = excluded.built_at",
+            (key, b"", gzip_body, etag, int(time.time())),
+        )
+
+
 async def _publish_board_once() -> None:
-    """One board_cache publish cycle: rebuild every key in
-    _PUBLISHED_BOARD_BUILDS and upsert the row of each one whose content
-    changed. Best-effort per key, same
+    """One board_cache publish cycle: rebuild every registered key and
+    upsert the row of each one whose content changed. A key registered on
+    its own (_PUBLISHED_BOARD_BUILDS) has its own build; the keys of a
+    group (_PUBLISHED_BOARD_GROUPS) share one -- the group's `build_base()`
+    runs ONCE and each key's shaper cuts that key's payload from the
+    result, so whatever the keys have in common is paid for once per
+    cycle and not once per key. Best-effort per key, same
     "a publish failure must never take down the loop or leave a half
     -written cycle" contract app/checkin.py's
     _refresh_mc_directory_if_stale gives mc_directory_cache -- a web-role
     reader just keeps serving whatever row (or in-process copy) it
     already has until the next successful cycle here writes a newer one.
+    For a group that means a shaper that fails costs only its own key, and
+    a `build_base()` that fails costs the group's keys for this cycle (each
+    keeps its row) -- the loop goes on to the next registration either way.
 
     Builds and serializes OUTSIDE the WriteSession -- board_for() only
     reads, and json.dumps/gzip.compress are pure CPU, so neither needs
@@ -902,23 +1001,23 @@ async def _publish_board_once() -> None:
     """
     for key, build in _PUBLISHED_BOARD_BUILDS.items():
         try:
-            body = json.dumps(build(), separators=(",", ":")).encode()
-            etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
-            if _stored_board_etag(key) == etag:
-                log.debug("board_cache: key %s unchanged (etag %s), skipping publish", key, etag)
-                continue
-            gzip_body = gzip.compress(body, compresslevel=_GZIP_COMPRESSLEVEL)
-            async with WriteSession() as conn:
-                conn.execute(
-                    "INSERT INTO board_cache(cache_key, body, gzip_body, etag, built_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(cache_key) DO UPDATE SET"
-                    " body = excluded.body, gzip_body = excluded.gzip_body,"
-                    " etag = excluded.etag, built_at = excluded.built_at",
-                    (key, b"", gzip_body, etag, int(time.time())),
-                )
+            await _publish_board_payload(key, build())
         except Exception:
             log.exception("board_cache: failed to publish key %s", key)
+
+    for build_base, shapers in _PUBLISHED_BOARD_GROUPS.values():
+        try:
+            base = build_base()
+        except Exception:
+            log.exception(
+                "board_cache: failed to build the shared input for keys %s", ", ".join(shapers)
+            )
+            continue
+        for key, shape in shapers.items():
+            try:
+                await _publish_board_payload(key, shape(base))
+            except Exception:
+                log.exception("board_cache: failed to publish key %s", key)
 
 
 async def run_forever() -> None:
@@ -963,7 +1062,7 @@ async def run_forever() -> None:
     cycle must not crash the process or stop every later cycle (and every
     later web-role read) from ever seeing a fresh board again.
     """
-    log.info("board cache publisher loop starting (cache_key(s): %s)", ", ".join(_PUBLISHED_BOARD_BUILDS))
+    log.info("board cache publisher loop starting (cache_key(s): %s)", ", ".join(_published_board_keys()))
     while True:
         try:
             await _publish_board_once()

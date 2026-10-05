@@ -25,6 +25,13 @@ stored gzip bytes as they are and inflates the plaintext from them only
 for a client that cannot take gzip. /get-nodes' two cache keys go through
 the same rows and tiers; tests/test_get_nodes_cache.py covers those.
 
+Keys that are the same expensive build seen two ways can be registered as
+a group (register_published_board_group): one build per cycle, one cheap
+shaper per key, everything after that -- etag, skip-unchanged, row,
+failure isolation -- still per key. The last section here proves those
+mechanics with synthetic payloads; the real /get-nodes wiring is in
+tests/test_get_nodes_cache.py.
+
 Real file-backed sqlite (not the in-memory `conn` fixture other
 app/mc_api.py tests use, e.g. tests/test_mc_api_cell_park.py):
 _publish_board_once() writes through WriteSession(), which goes through
@@ -599,3 +606,192 @@ def test_publisher_and_inline_path_compress_at_the_one_shared_level(db_path, mon
     assert inline_levels == [6]
     assert len(levels) > len(inline_levels)  # the publisher compressed too
     assert set(levels) == {6}
+
+
+# ---- keys that share one build ---------------------------------------------
+
+
+@pytest.fixture
+def empty_registries(monkeypatch):
+    """The publisher's registries emptied for one test, so a cycle
+    publishes only what the test registers (the real ones hold 'mc_board'
+    and, once anything in the run has imported app/api.py, /get-nodes'
+    group). monkeypatch puts the real ones back, and the registration
+    functions write to whatever the module attribute is at call time."""
+    monkeypatch.setattr(mc_api_module, "_PUBLISHED_BOARD_BUILDS", {})
+    monkeypatch.setattr(mc_api_module, "_PUBLISHED_BOARD_GROUPS", {})
+
+
+def _body_and_etag(payload) -> tuple[bytes, str]:
+    """The serialized bytes and etag a key publishing `payload` must end up
+    with -- the same json.dumps/hashlib formula every tier above uses."""
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    return body, '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+
+
+def test_a_group_builds_its_base_once_and_each_key_gets_its_own_row(db_path, empty_registries):
+    """One `build_base()` call per cycle however many keys it feeds, and
+    one row per key, each holding what its own shaper produced: gzip bytes
+    and etag of that key's own payload, `body` empty, as for any key."""
+    calls = {"base": 0}
+
+    def build_base():
+        calls["base"] += 1
+        return {"n": 7}
+
+    mc_api_module.register_published_board_group(
+        build_base,
+        {
+            "g_one": lambda base: {"which": "one", "n": base["n"]},
+            "g_two": lambda base: {"which": "two", "n": base["n"]},
+        },
+    )
+
+    asyncio.run(mc_api_module._publish_board_once())
+
+    assert calls["base"] == 1
+    for key, payload in (
+        ("g_one", {"which": "one", "n": 7}),
+        ("g_two", {"which": "two", "n": 7}),
+    ):
+        expected_body, expected_etag = _body_and_etag(payload)
+        row = _board_row(db_path, key)
+        assert row is not None
+        assert bytes(row["body"]) == b""
+        assert gzip.decompress(bytes(row["gzip_body"])) == expected_body
+        assert row["etag"] == expected_etag
+    assert _board_row(db_path, "g_one")["etag"] != _board_row(db_path, "g_two")["etag"]
+
+
+def test_a_group_skips_each_unchanged_key_on_its_own(db_path, empty_registries, caplog):
+    """The skip-unchanged check is per key inside a group: when only one
+    key's payload changes, only that key's row is rewritten, and the
+    skipped one says so at DEBUG like any other."""
+    state = {"two": 1}
+    mc_api_module.register_published_board_group(
+        lambda: dict(state),
+        {
+            "g_one": lambda base: {"fixed": True},
+            "g_two": lambda base: {"v": base["two"]},
+        },
+    )
+    asyncio.run(mc_api_module._publish_board_once())
+    _set_built_at(db_path, "g_one", 1)
+    _set_built_at(db_path, "g_two", 1)
+
+    state["two"] = 2
+    with caplog.at_level(logging.DEBUG, logger="mc_api"):
+        asyncio.run(mc_api_module._publish_board_once())
+
+    assert _board_row(db_path, "g_one")["built_at"] == 1  # unchanged: no upsert
+    two = _board_row(db_path, "g_two")
+    assert two["built_at"] > 1  # changed: rewritten
+    assert gzip.decompress(bytes(two["gzip_body"])) == _body_and_etag({"v": 2})[0]
+    assert any(
+        r.levelno == logging.DEBUG
+        and "g_one" in r.getMessage()
+        and "unchanged" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_failing_shaper_costs_only_its_own_key(db_path, empty_registries, caplog):
+    """Best-effort per key holds inside a group: a shaper that raises
+    leaves its own row alone and is logged by key, and the other keys of
+    the same group still publish from the same base."""
+
+    def broken(base):
+        raise RuntimeError("shaper blew up")
+
+    mc_api_module.register_published_board_group(
+        lambda: {"n": 1},
+        {"g_bad": broken, "g_good": lambda base: {"n": base["n"]}},
+    )
+
+    with caplog.at_level(logging.ERROR, logger="mc_api"):
+        asyncio.run(mc_api_module._publish_board_once())
+
+    assert _board_row(db_path, "g_bad") is None
+    good = _board_row(db_path, "g_good")
+    assert gzip.decompress(bytes(good["gzip_body"])) == _body_and_etag({"n": 1})[0]
+    assert any(
+        r.levelno == logging.ERROR and "g_bad" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_a_failing_base_build_costs_the_group_but_not_the_rest_of_the_cycle(
+    db_path, empty_registries, caplog
+):
+    """A base build that raises publishes nothing for the group's keys this
+    cycle (they keep whatever row they have) and names them in the log,
+    and the cycle carries on: a single registration and a later group
+    still publish."""
+
+    def broken_base():
+        raise RuntimeError("base blew up")
+
+    mc_api_module.register_published_board("single", lambda: {"s": 1})
+    mc_api_module.register_published_board_group(
+        broken_base, {"g_one": lambda base: base, "g_two": lambda base: base}
+    )
+    mc_api_module.register_published_board_group(lambda: {"v": 1}, {"h_one": lambda base: base})
+
+    with caplog.at_level(logging.ERROR, logger="mc_api"):
+        asyncio.run(mc_api_module._publish_board_once())
+
+    assert _board_row(db_path, "single") is not None
+    assert _board_row(db_path, "h_one") is not None
+    assert _board_row(db_path, "g_one") is None
+    assert _board_row(db_path, "g_two") is None
+    assert any(
+        r.levelno == logging.ERROR
+        and "g_one" in r.getMessage()
+        and "g_two" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_registering_the_same_group_again_replaces_it(empty_registries):
+    """Idempotent, like registering a single key again: the group is
+    identified by its set of keys, in any order, and the later build wins."""
+
+    def base_a():
+        return {}
+
+    def base_b():
+        return {}
+
+    mc_api_module.register_published_board_group(
+        base_a, {"g_one": lambda base: base, "g_two": lambda base: base}
+    )
+    mc_api_module.register_published_board_group(
+        base_b, {"g_two": lambda base: base, "g_one": lambda base: base}
+    )
+
+    assert list(mc_api_module._PUBLISHED_BOARD_GROUPS) == [frozenset({"g_one", "g_two"})]
+    assert mc_api_module._PUBLISHED_BOARD_GROUPS[frozenset({"g_one", "g_two"})][0] is base_b
+    assert sorted(mc_api_module._published_board_keys()) == ["g_one", "g_two"]
+
+
+def test_a_key_can_only_be_published_by_one_registration(empty_registries):
+    """A key two registrations both published would be built and written
+    twice a cycle, last write winning -- so the second registration is
+    refused, whichever kind it is, and a refused one changes nothing."""
+
+    def shape(base):
+        return base
+
+    mc_api_module.register_published_board("single", lambda: [])
+    mc_api_module.register_published_board_group(lambda: {}, {"g_one": shape, "g_two": shape})
+    assert mc_api_module._published_board_keys() == ["single", "g_one", "g_two"]
+
+    with pytest.raises(ValueError):
+        mc_api_module.register_published_board_group(lambda: {}, {"single": shape, "g_three": shape})
+    with pytest.raises(ValueError):
+        mc_api_module.register_published_board_group(lambda: {}, {"g_two": shape, "g_three": shape})
+    with pytest.raises(ValueError):
+        mc_api_module.register_published_board("g_one", lambda: [])
+    with pytest.raises(ValueError):
+        mc_api_module.register_published_board_group(lambda: {}, {})
+
+    assert mc_api_module._published_board_keys() == ["single", "g_one", "g_two"]

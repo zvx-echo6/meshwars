@@ -15,10 +15,20 @@ sends), and every web process rebuilt the board on every cache miss.
 
 The privacy line this route draws (team attribution only with a session,
 see app/api.py's _build_get_nodes) is the thing most worth guarding here:
-publishing a row per key must not move it. The two registered builds
-differ ONLY in include_attribution, the public row must never carry a
+publishing a row per key must not move it. The two published shapes are
+cut from one shared base build and differ ONLY in include_attribution
+(app/api.py's _shape_get_nodes), the public row must never carry a
 `team`, and a validator minted against the signed-in body must never
 answer 304 for the signed-out one.
+
+The two keys are registered with the publisher as ONE group
+(mc_api.register_published_board_group): the expensive, session-independent
+base build runs once per publish cycle and each key's shaper cuts its
+payload from it, instead of the whole build running once per key on the
+worker process that also runs ingest and check-ins. The tests below pin
+that, and that it moves nothing else: each key keeps its own row, etag and
+skip-unchanged check, and a row is byte-for-byte what the route's own
+inline build of the same variant produces.
 
 Real file-backed sqlite and a bare FastAPI app around app/api.py's real
 router -- same fixture shape and reasoning as
@@ -30,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import json
 import sqlite3
 import time
@@ -147,14 +158,61 @@ def _board_row(path: str, key: str):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT body, gzip_body, etag FROM board_cache WHERE cache_key = ?", (key,)
+        "SELECT body, gzip_body, etag, built_at FROM board_cache WHERE cache_key = ?", (key,)
     ).fetchone()
     conn.close()
     return row
 
 
+def _park_built_at(path: str, key: str) -> None:
+    """Park a row's built_at on 1, a value no real publish can produce: a
+    rewrite stamps the current time, so one shows up at once, and a key
+    that was skipped as unchanged is the one still reading 1 -- no
+    sleeping."""
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE board_cache SET built_at = 1 WHERE cache_key = ?", (key,))
+    conn.commit()
+    conn.close()
+
+
 GZIP = {"Accept-Encoding": "gzip"}
 PLAIN = {"Accept-Encoding": "identity"}
+
+# The two cache keys /get-nodes publishes -- one group, one build per cycle.
+GET_NODES_KEYS = frozenset({"mt_board_authed", "mt_board_public"})
+
+
+def _registered_get_nodes_payloads() -> dict[str, dict]:
+    """Both /get-nodes payloads exactly as the publisher cuts them: the
+    registered group's one base build, then each key's shaper."""
+    build_base, shapers = mc_api_module._PUBLISHED_BOARD_GROUPS[GET_NODES_KEYS]
+    base = build_base()
+    return {key: shape(base) for key, shape in shapers.items()}
+
+
+@pytest.fixture
+def build_counts(monkeypatch):
+    """How often each step of a /get-nodes build runs, counted around the
+    real functions: "base" is the expensive session-independent build,
+    "teams" the attribution lookup that only the signed-in shape does.
+    Both are looked up by name when a build runs, so wrapping the module
+    attribute reaches the publisher's group and the route's inline
+    fallback alike."""
+    counts = {"base": 0, "teams": 0}
+    real_base = api_module._build_get_nodes_base
+    real_teams = api_module._mt_node_teams
+
+    def counting_base():
+        counts["base"] += 1
+        return real_base()
+
+    def counting_teams(conn):
+        counts["teams"] += 1
+        return real_teams(conn)
+
+    monkeypatch.setattr(api_module, "_build_get_nodes_base", counting_base)
+    monkeypatch.setattr(api_module, "_mt_node_teams", counting_teams)
+    return counts
 
 
 # ---- the route passes its request: cached gzip bytes, ETag, 304 -----------
@@ -252,28 +310,52 @@ def test_get_nodes_does_not_recompress_on_a_cache_hit(anon, db_path, monkeypatch
 
 
 def test_both_get_nodes_keys_are_registered_for_publishing():
-    builds = mc_api_module._PUBLISHED_BOARD_BUILDS
-    assert "mt_board_public" in builds
-    assert "mt_board_authed" in builds
-    assert "mc_board" in builds  # the original key is still published
+    published = mc_api_module._published_board_keys()
+    assert "mt_board_public" in published
+    assert "mt_board_authed" in published
+    assert "mc_board" in published  # the original key is still published
+    # Registered as ONE group, so a cycle builds them from one base -- not
+    # as two single registrations, which would each run the whole build.
+    assert GET_NODES_KEYS in mc_api_module._PUBLISHED_BOARD_GROUPS
+    assert "mt_board_public" not in mc_api_module._PUBLISHED_BOARD_BUILDS
+    assert "mt_board_authed" not in mc_api_module._PUBLISHED_BOARD_BUILDS
+    # ...and each key is published exactly once.
+    assert len(published) == len(set(published))
 
 
 def test_registered_builds_differ_only_by_team_attribution(db_path):
-    """The two shapes are the same build with ONE boolean flipped -- which
-    is what makes it safe for a session-less worker to publish both. If
-    the wiring were ever swapped or merged, the public row would carry
-    team attribution (the leak this route's whole privacy pass closed)."""
+    """The two registered payloads are cut from the same base with ONE
+    boolean flipped -- which is what makes it safe for a session-less
+    worker to publish both. If the wiring were ever swapped or merged, the
+    public row would carry team attribution (the leak this route's whole
+    privacy pass closed)."""
     _seed_mt_board(db_path)
 
-    public = mc_api_module._PUBLISHED_BOARD_BUILDS["mt_board_public"]()
-    authed = mc_api_module._PUBLISHED_BOARD_BUILDS["mt_board_authed"]()
+    payloads = _registered_get_nodes_payloads()
+    public = payloads["mt_board_public"]
+    authed = payloads["mt_board_authed"]
 
+    assert set(payloads) == GET_NODES_KEYS
     assert [r["team"] for r in public["repeaters"]] == [None]
     assert [r["team"] for r in authed["repeaters"]] == ["BLUE"]
     assert public["coverage"] == authed["coverage"]
     assert [{k: v for k, v in r.items() if k != "team"} for r in public["repeaters"]] == [
         {k: v for k, v in r.items() if k != "team"} for r in authed["repeaters"]
     ]
+
+
+def test_each_variant_keeps_the_key_order_its_bytes_and_etag_depend_on(db_path):
+    """json.dumps keeps insertion order and the etag hashes the bytes, so
+    reordering keys would change every client's validator. `team` stays
+    the last key of a repeater, and is present (null) in the public
+    variant too -- both exactly as the build was before it was split."""
+    _seed_mt_board(db_path)
+
+    for payload in _registered_get_nodes_payloads().values():
+        assert list(payload) == ["coverage", "repeaters"]
+        assert list(payload["repeaters"][0]) == [
+            "id", "name", "lat", "lon", "elev", "time", "team",
+        ]
 
 
 def test_publisher_writes_both_get_nodes_rows_and_only_the_authed_one_has_teams(db_path):
@@ -292,6 +374,147 @@ def test_publisher_writes_both_get_nodes_rows_and_only_the_authed_one_has_teams(
     assert pub_row["etag"] != auth_row["etag"]
 
 
+# ---- one base build per publish cycle, however many keys it feeds ---------
+
+
+def test_publish_cycle_builds_the_base_once_and_writes_both_rows(db_path, build_counts):
+    """The point of publishing the two shapes as a group. The two builds
+    used to repeat board_for(), the score and capture maps and both row
+    loops once per key, on the one worker process that also runs ingest
+    and check-ins. Now the expensive base is built ONCE per cycle, both
+    rows are still written, and the attribution lookup (the only other
+    difference between the shapes) runs once, for the signed-in shape."""
+    _seed_mt_board(db_path)
+
+    asyncio.run(mc_api_module._publish_board_once())
+
+    assert build_counts["base"] == 1
+    assert _board_row(db_path, "mt_board_public") is not None
+    assert _board_row(db_path, "mt_board_authed") is not None
+    assert build_counts["teams"] == 1
+
+
+def test_each_cycle_builds_the_base_again_and_skips_the_rows_that_did_not_change(
+    db_path, build_counts
+):
+    """Nothing is remembered from one cycle to the next -- the etag
+    comparison needs the fresh payloads -- so a second cycle builds the
+    base again (once). The two unchanged rows are still not rewritten."""
+    _seed_mt_board(db_path)
+    asyncio.run(mc_api_module._publish_board_once())
+    etags = {}
+    for key in GET_NODES_KEYS:
+        _park_built_at(db_path, key)
+        etags[key] = _board_row(db_path, key)["etag"]
+
+    asyncio.run(mc_api_module._publish_board_once())
+
+    assert build_counts["base"] == 2
+    for key in GET_NODES_KEYS:
+        row = _board_row(db_path, key)
+        assert row["built_at"] == 1  # untouched: no upsert happened
+        assert row["etag"] == etags[key]
+
+
+def test_only_the_get_nodes_row_whose_content_changed_is_rewritten(db_path):
+    """Skip-unchanged is still per key inside the group. Change something
+    only the attributed shape shows -- the radio owner's team -- and the
+    authed row is rewritten while the public row, whose bytes did not
+    change, is left alone."""
+    _seed_mt_board(db_path)
+    asyncio.run(mc_api_module._publish_board_once())
+    for key in GET_NODES_KEYS:
+        _park_built_at(db_path, key)
+    old_public_etag = _board_row(db_path, "mt_board_public")["etag"]
+    old_authed_etag = _board_row(db_path, "mt_board_authed")["etag"]
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE player SET team = 'RED' WHERE player_id = 1")
+    conn.commit()
+    conn.close()
+
+    asyncio.run(mc_api_module._publish_board_once())
+
+    public = _board_row(db_path, "mt_board_public")
+    authed = _board_row(db_path, "mt_board_authed")
+    assert public["built_at"] == 1 and public["etag"] == old_public_etag
+    assert authed["built_at"] > 1 and authed["etag"] != old_authed_etag
+    authed_payload = json.loads(gzip.decompress(bytes(authed["gzip_body"])))
+    assert [r["team"] for r in authed_payload["repeaters"]] == ["RED"]
+
+
+@pytest.mark.parametrize(
+    "key, include_attribution", [("mt_board_public", False), ("mt_board_authed", True)]
+)
+def test_published_row_is_byte_identical_to_the_inline_build_of_that_variant(
+    db_path, key, include_attribution
+):
+    """Cutting a payload from a shared base must produce exactly the bytes
+    the route's own inline build of the same variant does (base and shape
+    in a row): same plaintext once inflated, same etag -- so a validator
+    minted by one is good for the other."""
+    _seed_mt_board(db_path)
+    asyncio.run(mc_api_module._publish_board_once())
+
+    inline = json.dumps(
+        api_module._build_get_nodes(include_attribution=include_attribution),
+        separators=(",", ":"),
+    ).encode()
+
+    row = _board_row(db_path, key)
+    assert gzip.decompress(bytes(row["gzip_body"])) == inline
+    assert row["etag"] == '"%s"' % hashlib.sha256(inline).hexdigest()[:32]
+
+
+def test_shaping_never_changes_the_shared_base(db_path):
+    """Both shapers receive the very same base object, so neither may
+    change it: the repeater dicts are copied with `team` added, never
+    updated in place. Cutting the variants in either order gives the same
+    two payloads."""
+    _seed_mt_board(db_path)
+    base = api_module._build_get_nodes_base()
+    before = json.dumps([base.coverage, base.repeaters])
+
+    authed = api_module._shape_get_nodes(base, include_attribution=True)
+    public = api_module._shape_get_nodes(base, include_attribution=False)
+
+    assert json.dumps([base.coverage, base.repeaters]) == before
+    assert all("team" not in repeater for _node_id, repeater in base.repeaters)
+    assert authed["repeaters"][0] is not base.repeaters[0][1]
+    assert public["repeaters"][0] is not base.repeaters[0][1]
+    assert authed["repeaters"][0]["team"] == "BLUE"
+    assert public["repeaters"][0]["team"] is None
+    assert api_module._shape_get_nodes(base, include_attribution=False) == public
+    assert api_module._shape_get_nodes(base, include_attribution=True) == authed
+
+
+def test_without_an_active_season_both_keys_publish_the_empty_payload(db_path, build_counts):
+    """No Meshtastic season yet: the base is empty, both shapes come out
+    as the bare empty payload (not a payload of null teams), and there is
+    nothing to attribute so no lookup runs."""
+    asyncio.run(mc_api_module._publish_board_once())
+
+    for key in GET_NODES_KEYS:
+        payload = json.loads(gzip.decompress(bytes(_board_row(db_path, key)["gzip_body"])))
+        assert payload == {"coverage": [], "repeaters": []}
+    assert build_counts == {"base": 1, "teams": 0}
+
+
+def test_inline_fallback_builds_only_the_variant_the_request_needs(
+    anon, authed, db_path, build_counts
+):
+    """The web process's cold-start path is unchanged by the split: one
+    request, one variant -- its own base build plus the shape it needs.
+    The signed-out request never runs the attribution lookup at all."""
+    _seed_mt_board(db_path)
+
+    assert anon.get("/get-nodes", headers=GZIP).status_code == 200
+    assert build_counts == {"base": 1, "teams": 0}
+
+    assert authed.get("/get-nodes", headers=GZIP).status_code == 200
+    assert build_counts == {"base": 2, "teams": 1}
+
+
 def test_get_nodes_is_served_from_the_published_rows_without_a_rebuild(
     anon, authed, db_path, monkeypatch
 ):
@@ -306,10 +529,11 @@ def test_get_nodes_is_served_from_the_published_rows_without_a_rebuild(
     pub_row = _board_row(db_path, "mt_board_public")
     auth_row = _board_row(db_path, "mt_board_authed")
 
-    def no_rebuild(*, include_attribution):
+    def no_rebuild(*args, **kwargs):
         raise AssertionError("served from board_cache, never rebuilt")
 
     monkeypatch.setattr(api_module, "_build_get_nodes", no_rebuild)
+    monkeypatch.setattr(api_module, "_build_get_nodes_base", no_rebuild)
 
     pub = anon.get("/get-nodes", headers=GZIP)
     auth = authed.get("/get-nodes", headers=GZIP)

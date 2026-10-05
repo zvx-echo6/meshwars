@@ -247,9 +247,11 @@ def _park_boundaries_in_viewport(
 
 # GZIP_COMPRESSLEVEL matches app/main.py's app.add_middleware(GZipMiddleware,
 # minimum_size=1000) call -- compresslevel is left at GZipMiddleware's own
-# default (9) there. Same value app/mc_api.py's _CachedBody uses, kept as
-# its own module-level constant rather than imported -- this module is
-# deliberately self-contained from mc_api's cache, per the comment above.
+# default (9) there. It is NOT the value app/mc_api.py's _CachedBody uses
+# any more: that one moved to 6 (zlib's default -- see the comment on its
+# own _GZIP_COMPRESSLEVEL), while this module's is still 9. Kept as its own
+# module-level constant rather than imported -- this module is deliberately
+# self-contained from mc_api's cache, per the comment above.
 _GZIP_COMPRESSLEVEL = 9
 
 
