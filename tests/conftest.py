@@ -10,6 +10,7 @@ pydantic-settings reads the environment at import time.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 
 os.environ.setdefault("MESHVIEW_BASE_URL", "https://example.invalid")
@@ -79,3 +80,95 @@ def conn():
             raise
     yield c
     c.close()
+
+
+class _RowCountingCursor:
+    """Wraps a cursor and counts the rows its caller actually pulls back
+    from it -- by iterating, or by fetchone/fetchmany/fetchall -- into the
+    record RowCountingConn.execute() made for the statement. Everything
+    else on the cursor passes straight through."""
+
+    def __init__(self, cursor, record):
+        self._cursor = cursor
+        self._record = record
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        row = next(self._cursor)
+        self._record["rows"] += 1
+        return row
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is not None:
+            self._record["rows"] += 1
+        return row
+
+    def fetchmany(self, *args):
+        rows = self._cursor.fetchmany(*args)
+        self._record["rows"] += len(rows)
+        return rows
+
+    def fetchall(self):
+        rows = self._cursor.fetchall()
+        self._record["rows"] += len(rows)
+        return rows
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class RowCountingConn:
+    """A spy around a sqlite3 connection, for asserting that code under
+    test never pulls back more rows than it needs. A sqlite3.Connection is
+    a C object whose methods cannot be monkeypatched in place, so this
+    wraps one instead.
+
+    Every statement run through .execute() is recorded in `statements` as
+    {"sql", "params", "rows"}, where "rows" is how many rows the caller
+    actually read back from it. Everything else -- executemany,
+    in_transaction, row_factory -- passes straight through to the wrapped
+    connection, and close() is a no-op so a route's connect()/close()
+    cycle leaves the shared fixture connection open.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.statements: list[dict] = []
+
+    def execute(self, sql, params=()):
+        record = {"sql": sql, "params": tuple(params), "rows": 0}
+        self.statements.append(record)
+        return _RowCountingCursor(self._conn.execute(sql, params), record)
+
+    def close(self):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def week_reads(self, week_start):
+        """Rows read back, one entry per statement, by each statement that
+        reads place_week DIRECTLY for `week_start` -- i.e. one that starts
+        "SELECT <something> FROM place_week" with that week bound. This is
+        how the weekly rotation draw is read back as a list of ids (or
+        probed for existence). A bigger statement that merely mentions
+        place_week inside an EXISTS subquery is not one of these.
+        """
+        return [
+            rec["rows"] for rec in self.statements
+            if week_start in rec["params"]
+            and re.match(r"\s*SELECT\s+\w+\s+FROM\s+place_week\b", rec["sql"], re.IGNORECASE)
+        ]
+
+
+@pytest.fixture
+def counting_conn(conn):
+    """The `conn` database again, behind a RowCountingConn. Hand THIS to
+    the code under test and keep using `conn` itself for setup and for
+    reading results back, so a test's own queries are not counted as the
+    code's.
+    """
+    return RowCountingConn(conn)

@@ -1823,8 +1823,9 @@ CREATE TABLE IF NOT EXISTS mc_directory_cache (
     fetched_at    INTEGER NOT NULL
 );
 
--- Worker-published /api/mc/board response (app/mc_api.py's board_cache
--- publisher run_forever(), cached_json_response()'s DB fallback). Same
+-- Worker-published board responses: the /api/mc/board row and the two
+-- /get-nodes rows (app/mc_api.py's board_cache publisher run_forever(),
+-- cached_json_response()'s DB fallback). Same
 -- worker-writes/web-reads split as mc_directory_cache directly above,
 -- for the identical reason: after the web/worker split
 -- (docker-compose.yml's `meshwars`/`meshwars-worker` services,
@@ -1838,26 +1839,34 @@ CREATE TABLE IF NOT EXISTS mc_directory_cache (
 -- discipline as mc_directory_cache) publishes the finished payload so a
 -- web process's cache miss reads a row instead of rebuilding.
 --
--- One row per cache_key -- today just 'mc_board' (/api/mc/board has
+-- One row per cache_key -- today three: 'mc_board' (/api/mc/board has
 -- exactly one cache key: the route takes no query parameters and always
--- builds board_for(MC_PROTOCOL, include_meta=False), so the key space
--- is a single, fixed entry, not something that grows with callers the
--- way mc_directory_cache's connector_url or app/places_api.py's
--- viewport-keyed _PLACES_CACHE do). /get-nodes' own cached_json_response
--- keys ('mt_board_authed'/'mt_board_public') deliberately do NOT get a
--- row here: this table opportunistically serves ANY key
--- cached_json_response asks it for, but nothing publishes those two, so
--- that route is unaffected and keeps rebuilding on its own miss exactly
--- as before -- see cached_json_response's own docstring for why only
--- 'mc_board' was worth precomputing.
+-- builds board_for(MC_PROTOCOL, include_meta=False)) and /get-nodes' two,
+-- 'mt_board_authed' and 'mt_board_public' (one per auth state, see
+-- app/api.py's get_nodes()). The key space is a small, fixed set, not
+-- something that grows with callers the way mc_directory_cache's
+-- connector_url or app/places_api.py's viewport-keyed _PLACES_CACHE do.
+-- The worker publishes all three (app/mc_api.py's _publish_board_once()),
+-- the two /get-nodes rows from ONE shared build per cycle (see
+-- register_published_board_group() there), and cached_json_response()
+-- reads all three back through the same tiers. Each route's own inline
+-- build stays the cold-start / worker-down fallback.
 --
--- body/gzip_body/etag are the FINISHED artifact -- already-serialized
--- JSON bytes, already-gzip-compressed bytes, and the etag hashed from
--- body -- so a web process reading this row does zero serialization and
--- zero compression, only a lookup. Both representations are stored
--- (unlike _CachedBody's own gzip_body, which the in-process cache fills
--- lazily on first gzip-accepting request) because the whole point here
--- is a web process never doing that compression itself either.
+-- gzip_body and etag are the FINISHED artifact -- the already-gzip-
+-- compressed JSON bytes, and the etag hashed from the plaintext JSON they
+-- were made from -- so a web process reading this row does zero
+-- serialization and zero compression, only a lookup. The worker
+-- compresses eagerly (unlike _CachedBody's own gzip_body, which the
+-- in-process cache fills lazily on first gzip-accepting request) because
+-- the whole point here is a web process never doing that work itself.
+-- body is stored EMPTY: an empty blob rather than NULL, because the
+-- column is NOT NULL and an existing database keeps that constraint.
+-- Nearly every client takes gzip, so keeping the plaintext as well was
+-- about ten times the bytes for nothing. The rare client that cannot
+-- take gzip gets the plaintext inflated from gzip_body once per process
+-- and entry (see _CachedBody in app/mc_api.py). A row written before
+-- that change, or by hand, may still carry a body and is served as it
+-- always was.
 --
 -- built_at is wall-clock (int(time.time()), like mc_directory_cache's
 -- fetched_at, not app/mc_api.py's own _CachedBody.built_at which is
@@ -1866,8 +1875,11 @@ CREATE TABLE IF NOT EXISTS mc_directory_cache (
 -- cached_json_response's own docstring for why an out-of-date board
 -- beats a 7-second rebuild on a viewer's request, the same reasoning
 -- mc_directory_cache's SCHEMA comment gives for its own fetched_at.
--- Kept anyway for operator visibility (how stale is the live row right
--- now) the same way fetched_at is.
+-- Kept anyway for operator visibility: it says when the stored content
+-- was last PUBLISHED. The publisher leaves a row whose content has not
+-- changed alone (_publish_board_once()'s skip-unchanged check), so
+-- built_at advances only when the content does -- it is not a per-cycle
+-- heartbeat, and an old built_at on an unchanged board is normal.
 CREATE TABLE IF NOT EXISTS board_cache (
     cache_key TEXT PRIMARY KEY,
     body      BLOB NOT NULL,

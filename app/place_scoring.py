@@ -74,7 +74,7 @@ import logging
 import sqlite3
 
 from .grid import ring_expand
-from .place_rotation import resolve_week, week_start_for_ts
+from .place_rotation import ensure_week_resolved, week_start_for_ts
 
 log = logging.getLogger("place_scoring")
 
@@ -220,15 +220,18 @@ def credit_places(
 
     week_start = week_start_for_ts(ts)
     # Ensures this week's draw is computed and persisted before the
-    # liveness check below reads place_week -- idempotent and cheap
-    # after the first ping of a new week resolves it (see
-    # place_rotation.resolve_week). A cell almost always maps to one or
-    # two place_ids, so filtering those few directly against place_week
-    # here is far cheaper than materializing the whole always-active set
-    # (tens of thousands of rows) on every scoring ping the way
-    # live_place_ids() does -- that helper is for the map/admin routes,
-    # which need the full set anyway.
-    resolve_week(conn, week_start)
+    # liveness check below reads place_week -- idempotent, and after the
+    # first ping of a new week resolves it a single one-row probe (see
+    # place_rotation.ensure_week_resolved). It used to be resolve_week(),
+    # which fetched the week's whole id list and threw it away: ~500,000
+    # rows, ~0.5 s, with SQLite's write lock held, because this runs
+    # inside the scoring write transaction. A cell almost always maps to
+    # one or two place_ids, so filtering those few directly against
+    # place_week here is far cheaper than materializing the whole
+    # always-active set (tens of thousands of rows) on every scoring ping
+    # the way live_place_ids() does -- that helper is for the map/admin
+    # routes, which need the full set anyway.
+    ensure_week_resolved(conn, week_start)
     marks = ",".join("?" * len(place_ids))
     # LIMIT 1 is the non-stacking rule itself: the dearest eligible
     # place on this cell is the ONLY candidate, and the runners-up are

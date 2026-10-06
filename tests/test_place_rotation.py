@@ -13,7 +13,10 @@ from app.place_rotation import (
     ROTATION_QUOTA_CAP,
     ROTATION_QUOTA_FLOOR,
     _compute_week,
+    _prev_week_start,
     current_week_start,
+    ensure_week_resolved,
+    live_place_ids,
     region_quota,
     resolve_week,
     week_start_for_date,
@@ -156,6 +159,175 @@ def test_resolve_week_inside_an_open_transaction(conn):
     except Exception:
         conn.execute("ROLLBACK")
         raise
+
+
+def test_resolve_week_returns_an_existing_draw_as_stored_without_recomputing(conn):
+    """resolve_week()'s contract is unchanged: with a draw already in
+    place_week it returns exactly those ids. No `place` rows exist here,
+    so a recompute would draw nothing -- getting the planted ids back
+    proves the stored draw was returned as it stands.
+    """
+    conn.executemany(
+        "INSERT INTO place_week(week_start, place_id) VALUES (?, ?)",
+        [(WEEK, 9), (WEEK, 3), (WEEK, 7)],
+    )
+
+    assert sorted(resolve_week(conn, WEEK)) == [3, 7, 9]
+
+
+# ---- ensure_week_resolved: the one-row probe (2026-10-05) ----------------
+#
+# resolve_week() is what the places API routes and credit_places() used to
+# call, and it fetched the week's whole id list -- about 500,000 rows, ~0.5
+# s -- on every call, for both of them to throw it away. They call
+# ensure_week_resolved() now. These pin that it never reads more than one
+# row of the week it is resolving, and that everything else about
+# resolving a week is as it was: an existing draw is left alone, a missing
+# one is computed and persisted, last week's picks still count, and a week
+# with nothing to draw persists nothing. `counting_conn` (tests/conftest.py)
+# records how many rows each statement pulled back.
+
+
+def test_ensure_week_resolved_reads_one_row_when_the_draw_exists(conn, counting_conn):
+    """The common case, and the one that cost half a second: this week's
+    draw is already stored, and it is a big one. Resolving it must read
+    one row of it, not the lot -- and must leave it exactly as it was.
+    """
+    planted = list(range(1, 61))
+    conn.executemany(
+        "INSERT INTO place_week(week_start, place_id) VALUES (?, ?)",
+        [(WEEK, pid) for pid in planted],
+    )
+    # A rotating candidate the stored draw does not contain: if the draw
+    # were recomputed and persisted over the top, this is what would show up.
+    _insert_place(conn, 500, "landmark", 43.0, -116.0)
+
+    ensure_week_resolved(counting_conn, WEEK)
+
+    reads = counting_conn.week_reads(WEEK)
+    assert len(reads) == 1, "one probe, no second look at the week"
+    assert reads[0] == 1, "the probe stops at the first row"
+    stored = [r[0] for r in conn.execute(
+        "SELECT place_id FROM place_week WHERE week_start = ? ORDER BY place_id", (WEEK,)
+    )]
+    assert stored == planted
+
+
+def test_ensure_week_resolved_persists_the_computed_draw_when_missing(conn, counting_conn):
+    """No draw yet: it is computed and persisted -- the very draw
+    _compute_week() produces for that week -- and still without ever
+    reading more than one row of the week being resolved.
+    """
+    for i in range(30):
+        _insert_place(conn, i, "landmark", 43.0 + i * 0.05, -116.0 + i * 0.05)
+    expected, _report = _compute_week(conn, WEEK)
+    assert expected, "the fixture must actually draw something"
+
+    ensure_week_resolved(counting_conn, WEEK)
+
+    stored = [r[0] for r in conn.execute(
+        "SELECT place_id FROM place_week WHERE week_start = ?", (WEEK,)
+    )]
+    assert sorted(stored) == sorted(expected)
+    reads = counting_conn.week_reads(WEEK)
+    assert reads and max(reads) <= 1
+
+
+def test_ensure_week_resolved_still_pushes_last_weeks_picks_to_the_back(conn, counting_conn):
+    """The earlier-week logic lives in the draw, and is untouched: a cell
+    with 48 candidates earns a quota of 27 (see
+    test_p90_density_cell_gets_more_than_15_live), 27 of them were drawn
+    last week, so the 21 that were NOT must all be drawn this week and
+    the remaining 6 slots go to last week's picks. Worked out by hand --
+    it does not depend on what the RNG shuffles to.
+    """
+    ids = _place_grid_in_cell(conn, 0, lat_idx=101, lon_idx=-201, rows=6, cols=8)
+    assert len(ids) == 48
+    last_week = _prev_week_start(WEEK)
+    drawn_last_week, fresh = ids[:27], ids[27:]
+    conn.executemany(
+        "INSERT INTO place_week(week_start, place_id) VALUES (?, ?)",
+        [(last_week, pid) for pid in drawn_last_week],
+    )
+
+    ensure_week_resolved(counting_conn, WEEK)
+
+    stored = [r[0] for r in conn.execute(
+        "SELECT place_id FROM place_week WHERE week_start = ?", (WEEK,)
+    )]
+    assert len(stored) == 27
+    assert set(fresh) <= set(stored)
+    # Reading LAST week's picks is the draw's business; the week being
+    # resolved is still only ever probed.
+    assert max(counting_conn.week_reads(WEEK)) <= 1
+
+
+def test_ensure_week_resolved_with_nothing_to_draw_persists_nothing(conn, counting_conn):
+    """A week with no rotating candidates at all (only an always-active
+    summit exists): nothing is persisted and nothing raises -- same as
+    before -- and resolve_week() still reports an empty draw.
+    """
+    _insert_place(conn, 1, "summit", 43.0, -116.0, points=100, rotates=0)
+
+    ensure_week_resolved(counting_conn, WEEK)
+    ensure_week_resolved(counting_conn, WEEK)
+
+    assert conn.execute("SELECT COUNT(*) FROM place_week").fetchone()[0] == 0
+    assert counting_conn.week_reads(WEEK) == [0, 0]  # a probe each time, finding nothing
+    assert resolve_week(conn, WEEK) == []
+
+
+def test_ensure_week_resolved_inside_an_open_transaction_rides_along(conn):
+    """credit_places() calls this from inside the scoring write
+    transaction. It must neither open a second transaction nor commit
+    the caller's: the draw it persists is the caller's to commit or to
+    roll back.
+    """
+    _insert_place(conn, 1, "landmark", 43.0, -116.0)
+
+    conn.execute("BEGIN IMMEDIATE")
+    ensure_week_resolved(conn, WEEK)
+    assert conn.in_transaction, "the caller's transaction must still be open"
+    conn.execute("ROLLBACK")
+    assert conn.execute("SELECT COUNT(*) FROM place_week").fetchone()[0] == 0
+
+    conn.execute("BEGIN IMMEDIATE")
+    ensure_week_resolved(conn, WEEK)
+    conn.execute("COMMIT")
+    assert [r[0] for r in conn.execute(
+        "SELECT place_id FROM place_week WHERE week_start = ?", (WEEK,)
+    )] == [1]
+
+
+# ---- live_place_ids: the one reader that needs the drawn ids ---------------
+
+
+def test_live_place_ids_is_the_always_active_set_plus_the_active_drawn_set(conn):
+    """Always-active (rotates=0) places plus this week's drawn rotating
+    places, both restricted to active = 1. Worked out by hand from the
+    fixture below, with this week's draw planted so nothing depends on
+    the RNG:
+
+      1  always-active, active                    -> live
+      2  always-active, deactivated               -> out (left the seed)
+      3  rotating, drawn this week, active        -> live
+      4  rotating, drawn this week, deactivated   -> out (stale place_week row)
+      5  rotating, not drawn this week            -> out
+      6  rotating, drawn only LAST week           -> out
+    """
+    _insert_place(conn, 1, "summit", 43.0, -116.0, points=100, rotates=0)
+    _insert_place(conn, 2, "summit", 43.5, -116.5, points=100, rotates=0)
+    _insert_place(conn, 3, "landmark", 44.0, -117.0, rotates=1)
+    _insert_place(conn, 4, "landmark", 44.5, -117.5, rotates=1)
+    _insert_place(conn, 5, "landmark", 45.0, -118.0, rotates=1)
+    _insert_place(conn, 6, "landmark", 45.5, -118.5, rotates=1)
+    conn.execute("UPDATE place SET active = 0 WHERE id IN (2, 4)")
+    conn.executemany(
+        "INSERT INTO place_week(week_start, place_id) VALUES (?, ?)",
+        [(WEEK, 3), (WEEK, 4), (_prev_week_start(WEEK), 6)],
+    )
+
+    assert live_place_ids(conn, WEEK) == {1, 3}
 
 
 def test_min_spacing_enforced(conn):

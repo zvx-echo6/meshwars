@@ -124,6 +124,93 @@ def test_rotating_place_only_credits_when_live(conn):
     assert credited == []
 
 
+# ---------------------------------------------------------------------
+# The weekly draw (2026-10-05): credit_places() only needs it to EXIST.
+# It used to call resolve_week(), which fetched the week's whole id list
+# -- about 500,000 rows, ~0.5 s -- just to be sure a draw was there, and
+# did it INSIDE the scoring write transaction, so SQLite's write lock was
+# held for all of it. It calls ensure_week_resolved() now, which reads one
+# row. What gets credited must not have changed, with a draw already
+# stored and without one. `counting_conn` (tests/conftest.py) records how
+# many rows each statement pulled back.
+# ---------------------------------------------------------------------
+
+def test_credit_places_probes_an_existing_draw_instead_of_reading_it(conn, counting_conn):
+    cid = _place(conn, 1, "landmark", 43.0, -116.0, points=5, rotates=1)
+    conn.executemany(
+        "INSERT INTO place_week(week_start, place_id) VALUES (?, ?)",
+        [(WEEK, 1)] + [(WEEK, 9000 + i) for i in range(60)],
+    )
+
+    credited = credit_places(counting_conn, player_id=60, cell_id=cid, ts=NOW, paint_outcome="captured")
+
+    assert credited == [(1, 5)]
+    # One probe that stops at the first row -- not the 61 ids of the draw.
+    # (The liveness check that follows asks about place 1 alone, inside a
+    # bigger statement, and is not a read of the week.)
+    assert counting_conn.week_reads(WEEK) == [1]
+
+
+def test_credit_places_with_a_big_draw_that_leaves_the_place_out_credits_nothing(conn, counting_conn):
+    cid = _place(conn, 1, "landmark", 43.0, -116.0, points=5, rotates=1)
+    conn.executemany(
+        "INSERT INTO place_week(week_start, place_id) VALUES (?, ?)",
+        [(WEEK, 9000 + i) for i in range(60)],
+    )
+
+    credited = credit_places(counting_conn, player_id=61, cell_id=cid, ts=NOW, paint_outcome="captured")
+
+    assert credited == []
+    assert conn.execute("SELECT COUNT(*) FROM place_activation").fetchone()[0] == 0
+    assert counting_conn.week_reads(WEEK) == [1]
+
+
+def test_credit_places_resolves_a_missing_draw_and_then_credits(conn, counting_conn):
+    """No draw stored yet: credit_places() draws the week, then credits
+    against that fresh draw. The only rotating candidate on the board is
+    always drawn (nothing to compete with, nothing within spacing), so
+    this one credits."""
+    cid = _place(conn, 1, "landmark", 43.0, -116.0, points=5, rotates=1)
+    assert conn.execute("SELECT COUNT(*) FROM place_week").fetchone()[0] == 0
+
+    credited = credit_places(counting_conn, player_id=62, cell_id=cid, ts=NOW, paint_outcome="captured")
+
+    assert credited == [(1, 5)]
+    assert [tuple(r) for r in conn.execute("SELECT week_start, place_id FROM place_week")] == [(WEEK, 1)]
+    assert counting_conn.week_reads(WEEK) == [0]  # one probe, which found no draw
+
+
+def test_credit_places_without_a_draw_credits_only_the_place_the_draw_picks(conn):
+    """Two rotating places on the very same spot, no draw stored: the
+    draw's spacing rule lets exactly one of them through, and only that
+    one is live -- so only that one credits, whichever it is."""
+    cid = _place(conn, 1, "landmark", 43.0, -116.0, points=5, rotates=1)
+    _place(conn, 2, "landmark", 43.0, -116.0, points=5, rotates=1)
+
+    credited = credit_places(conn, player_id=63, cell_id=cid, ts=NOW, paint_outcome="captured")
+
+    drawn = [r[0] for r in conn.execute("SELECT place_id FROM place_week WHERE week_start = ?", (WEEK,))]
+    assert len(drawn) == 1, "two candidates on one spot: exactly one gets drawn"
+    assert credited == [(drawn[0], 5)]
+
+
+def test_credit_places_resolves_the_draw_inside_the_scoring_transaction(conn):
+    """The production call shape: the ingest path holds the write lock
+    and an open transaction when it calls credit_places(). The draw it
+    resolves along the way belongs to that transaction -- committed with
+    the credit, or rolled back with it."""
+    cid = _place(conn, 1, "landmark", 43.0, -116.0, points=5, rotates=1)
+
+    conn.execute("BEGIN IMMEDIATE")
+    credited = credit_places(conn, player_id=65, cell_id=cid, ts=NOW, paint_outcome="captured")
+    assert credited == [(1, 5)]
+    assert conn.in_transaction, "the caller's transaction must still be open"
+    conn.execute("ROLLBACK")
+
+    assert conn.execute("SELECT COUNT(*) FROM place_week").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM place_activation").fetchone()[0] == 0
+
+
 def test_place_worth_more_than_remaining_cap_is_clamped_to_the_remainder(conn):
     """95 points already earned this week; a 100-point summit does not
     fit whole, so it is credited for the 5 points still left rather

@@ -16,6 +16,22 @@ worker now precomputes and publishes that payload to board_cache
 instead, so a web process's cache miss reads a finished row rather than
 rebuilding.
 
+What the published row holds, and when it is rewritten (also covered
+here): the worker stores gzip_body, etag and built_at and leaves `body`
+EMPTY, and skips the write entirely when the freshly built board's etag
+equals the one already stored -- a 6.16 MB body used to be rewritten
+every 10 s whether or not anything had changed. A web process serves the
+stored gzip bytes as they are and inflates the plaintext from them only
+for a client that cannot take gzip. /get-nodes' two cache keys go through
+the same rows and tiers; tests/test_get_nodes_cache.py covers those.
+
+Keys that are the same expensive build seen two ways can be registered as
+a group (register_published_board_group): one build per cycle, one cheap
+shaper per key, everything after that -- etag, skip-unchanged, row,
+failure isolation -- still per key. The last section here proves those
+mechanics with synthetic payloads; the real /get-nodes wiring is in
+tests/test_get_nodes_cache.py.
+
 Real file-backed sqlite (not the in-memory `conn` fixture other
 app/mc_api.py tests use, e.g. tests/test_mc_api_cell_park.py):
 _publish_board_once() writes through WriteSession(), which goes through
@@ -31,6 +47,7 @@ import asyncio
 import gzip
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 
@@ -133,6 +150,42 @@ def _expected_bytes(db_path) -> tuple[bytes, str]:
     return body, etag
 
 
+def _board_row(db_path, key: str = "mc_board"):
+    """The raw board_cache row for `key`, read with plain sqlite (not the
+    app's own connect()), or None when there is no such row."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT body, gzip_body, etag, built_at FROM board_cache WHERE cache_key = ?",
+        (key,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def _put_row(db_path, key: str, body: bytes, gzip_body: bytes | None, etag: str) -> None:
+    """Write a board_cache row by hand, in any shape a row can be found
+    in -- including shapes the current publisher never writes."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO board_cache(cache_key, body, gzip_body, etag, built_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(cache_key) DO UPDATE SET"
+        " body = excluded.body, gzip_body = excluded.gzip_body,"
+        " etag = excluded.etag, built_at = excluded.built_at",
+        (key, body, gzip_body, etag, NOW),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _set_built_at(db_path, key: str, built_at: int) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE board_cache SET built_at = ? WHERE cache_key = ?", (built_at, key))
+    conn.commit()
+    conn.close()
+
+
 def test_web_role_serves_from_table_without_rebuild(db_path, monkeypatch):
     """A web-role process (publisher loop not running in this process,
     in-process cache empty) serves /api/mc/board's payload straight from
@@ -208,25 +261,25 @@ def test_cold_start_builds_inline_when_table_and_memory_both_empty(db_path, monk
 
 
 def test_publisher_row_is_byte_identical_to_inline_build(db_path):
-    """The publisher's own INSERT must produce EXACTLY what an inline
+    """The publisher's own INSERT must describe EXACTLY what an inline
     build produces for the same DB state -- both derive from the same
     board_for()/json.dumps()/hashlib formula, just run at different
-    times/in different processes -- and its gzip bytes must decompress
-    back to that same plaintext."""
+    times/in different processes. Its etag IS the inline etag, and its
+    gzip bytes decompress back to the inline plaintext byte for byte.
+
+    The plaintext itself is deliberately NOT stored any more: `body` is
+    empty (b"" -- the column is NOT NULL, so not NULL), because a web
+    process serves the gzip bytes and only inflates a plaintext for a
+    client that cannot take gzip. This test used to assert the opposite
+    (body stored on every publish)."""
     _seed_board(db_path)
     expected_body, expected_etag = _expected_bytes(db_path)
 
     asyncio.run(mc_api_module._publish_board_once())
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT body, gzip_body, etag FROM board_cache WHERE cache_key = 'mc_board'"
-    ).fetchone()
-    conn.close()
-
+    row = _board_row(db_path)
     assert row is not None
-    assert bytes(row["body"]) == expected_body
+    assert bytes(row["body"]) == b""
     assert row["etag"] == expected_etag
     assert gzip.decompress(bytes(row["gzip_body"])) == expected_body
 
@@ -302,3 +355,443 @@ def test_ttl_zero_bypasses_memory_and_table_entirely(db_path, monkeypatch):
     assert resp.body == expected_body
     assert resp.body != stale_body
     assert resp.headers["ETag"] == expected_etag
+
+
+# ---- skipping unchanged publishes -----------------------------------------
+
+
+def test_publisher_skips_an_unchanged_key_without_writing_and_logs_at_debug(db_path, caplog):
+    """A key whose freshly built etag equals the stored one is not
+    rewritten: no gzip, no upsert (so no write lock, no WAL traffic).
+    This used to rewrite a 6.16 MB body every cycle whether or not one
+    cell had changed.
+
+    A rewrite stamps built_at with the current time, so the row is parked
+    on a value no real publish can produce -- any upsert shows up at once,
+    with no sleeping. The skip is logged at DEBUG, not louder."""
+    _seed_board(db_path)
+    asyncio.run(mc_api_module._publish_board_once())
+    _set_built_at(db_path, "mc_board", 1)
+    before = _board_row(db_path)
+
+    with caplog.at_level(logging.DEBUG, logger="mc_api"):
+        asyncio.run(mc_api_module._publish_board_once())
+
+    after = _board_row(db_path)
+    assert after["built_at"] == 1  # untouched: no upsert happened
+    assert after["etag"] == before["etag"]
+    assert bytes(after["gzip_body"]) == bytes(before["gzip_body"])
+    assert any(
+        r.levelno == logging.DEBUG
+        and "mc_board" in r.getMessage()
+        and "unchanged" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_publisher_rewrites_the_row_when_the_board_changes(db_path):
+    """The other half of the skip: once the board's content (so its etag)
+    changes, the row is rewritten -- new etag, new gzip bytes, fresh
+    built_at, and still no plaintext stored."""
+    season_id = _seed_board(db_path)
+    asyncio.run(mc_api_module._publish_board_once())
+    _set_built_at(db_path, "mc_board", 1)
+    old_etag = _board_row(db_path)["etag"]
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO mc_tile(season_id, cell_id, owner_team, last_player_id, last_report_ts) "
+        "VALUES (?, '2000_-2000', 'RED', 1, ?)",
+        (season_id, NOW),
+    )
+    conn.commit()
+    conn.close()
+    new_body, new_etag = _expected_bytes(db_path)
+    assert new_etag != old_etag  # the precondition: the board really did change
+
+    asyncio.run(mc_api_module._publish_board_once())
+
+    row = _board_row(db_path)
+    assert row["etag"] == new_etag
+    assert row["built_at"] > 1
+    assert bytes(row["body"]) == b""
+    assert gzip.decompress(bytes(row["gzip_body"])) == new_body
+
+
+def test_stored_board_etag_reads_the_published_row(db_path):
+    _seed_board(db_path)
+    _, expected_etag = _expected_bytes(db_path)
+    assert mc_api_module._stored_board_etag("mc_board") is None  # no row yet
+
+    asyncio.run(mc_api_module._publish_board_once())
+
+    assert mc_api_module._stored_board_etag("mc_board") == expected_etag
+
+
+def test_stored_board_etag_lookup_failure_reads_as_no_row(monkeypatch):
+    """Fails OPEN: a lookup that cannot be answered reads as "nothing
+    stored", which is what makes the publisher publish -- a flaky read can
+    cost a redundant write, never a skipped one."""
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(mc_api_module, "connect", boom)
+    assert mc_api_module._stored_board_etag("mc_board") is None
+
+
+# ---- serving a row whose plaintext body is empty --------------------------
+
+
+def test_non_gzip_client_gets_raw_bytes_and_etag_from_a_row_with_empty_body(db_path, monkeypatch):
+    """The publisher leaves `body` empty, so a client that cannot take
+    gzip is served the plaintext INFLATED from gzip_body: byte-identical
+    to an inline build, same ETag, same 304 -- and kept in the in-process
+    cache the way a built body would be, so a second plaintext request
+    inflates nothing."""
+    _seed_board(db_path)
+    monkeypatch.setattr(settings, "board_cache_seconds", 10)
+    expected_body, expected_etag = _expected_bytes(db_path)
+    asyncio.run(mc_api_module._publish_board_once())
+    assert bytes(_board_row(db_path)["body"]) == b""  # the precondition under test
+
+    inflates = {"n": 0}
+    real_decompress = gzip.decompress
+
+    def counting_decompress(data, *args, **kwargs):
+        inflates["n"] += 1
+        return real_decompress(data, *args, **kwargs)
+
+    monkeypatch.setattr(mc_api_module.gzip, "decompress", counting_decompress)
+
+    calls = {"n": 0}
+
+    def build():
+        calls["n"] += 1
+        return board_for(MC_PROTOCOL, include_meta=False)
+
+    first = cached_json_response("mc_board", build, _request())
+    assert first.status_code == 200
+    assert first.body == expected_body
+    assert first.headers["ETag"] == expected_etag
+    assert "content-encoding" not in first.headers
+
+    second = cached_json_response("mc_board", build, _request())
+    assert second.body == expected_body
+    assert mc_api_module._BOARD_CACHE["mc_board"].body == expected_body
+    assert inflates["n"] == 1  # inflated once, then served from the in-process entry
+    assert calls["n"] == 0  # and never rebuilt
+
+    revalidated = cached_json_response("mc_board", build, _request(if_none_match=expected_etag))
+    assert revalidated.status_code == 304
+    assert revalidated.body == b""
+
+
+def test_gzip_client_gets_the_stored_gzip_bytes_from_a_row_with_empty_body(db_path, monkeypatch):
+    """A gzip client is served the stored artifact as it is -- not
+    recompressed, not rebuilt -- with the same ETag the plaintext client
+    gets."""
+    _seed_board(db_path)
+    monkeypatch.setattr(settings, "board_cache_seconds", 10)
+    expected_body, expected_etag = _expected_bytes(db_path)
+    asyncio.run(mc_api_module._publish_board_once())
+    stored_gzip = bytes(_board_row(db_path)["gzip_body"])
+
+    compressions = {"n": 0}
+    real_compress = gzip.compress
+
+    def counting_compress(data, *args, **kwargs):
+        compressions["n"] += 1
+        return real_compress(data, *args, **kwargs)
+
+    monkeypatch.setattr(mc_api_module.gzip, "compress", counting_compress)
+
+    def build():
+        raise AssertionError("served from the published row, never rebuilt")
+
+    resp = cached_json_response("mc_board", build, _request(accept_gzip=True))
+
+    assert resp.status_code == 200
+    assert resp.headers["content-encoding"] == "gzip"
+    assert resp.headers["vary"] == "Accept-Encoding"
+    assert resp.headers["ETag"] == expected_etag
+    assert resp.body == stored_gzip
+    assert compressions["n"] == 0
+    assert gzip.decompress(resp.body) == expected_body
+
+
+@pytest.mark.parametrize("shape", ["gzip_only", "body_only", "body_and_gzip"])
+def test_every_row_shape_serves_both_kinds_of_client_with_one_etag(db_path, monkeypatch, shape):
+    """A row can be found in more than one shape: gzip only (what the
+    publisher writes now), plaintext only, or both (what it used to
+    write -- and one of those stays in place after a deploy for as long as
+    the board does not change, since an unchanged board is not rewritten).
+    All three must serve a gzip client and a plaintext client correctly,
+    under one ETag."""
+    _seed_board(db_path)
+    monkeypatch.setattr(settings, "board_cache_seconds", 10)
+    expected_body, expected_etag = _expected_bytes(db_path)
+    _put_row(
+        db_path,
+        "mc_board",
+        body=b"" if shape == "gzip_only" else expected_body,
+        gzip_body=None if shape == "body_only" else gzip.compress(expected_body),
+        etag=expected_etag,
+    )
+
+    def build():
+        raise AssertionError("served from the row, never rebuilt")
+
+    plain = cached_json_response("mc_board", build, _request())
+    mc_api_module._BOARD_CACHE.clear()  # the gzip client below reads the row afresh
+    gz = cached_json_response("mc_board", build, _request(accept_gzip=True))
+
+    assert plain.body == expected_body
+    assert "content-encoding" not in plain.headers
+    assert gz.headers["content-encoding"] == "gzip"
+    assert gzip.decompress(gz.body) == expected_body
+    assert plain.headers["ETag"] == gz.headers["ETag"] == expected_etag
+
+
+def test_row_with_neither_body_nor_gzip_falls_back_to_the_inline_build(db_path, monkeypatch):
+    """A row holding nothing servable reads as a miss, so the request
+    builds inline exactly as if there were no row at all -- the web role
+    never depends on the table being well-formed."""
+    _seed_board(db_path)
+    monkeypatch.setattr(settings, "board_cache_seconds", 10)
+    expected_body, expected_etag = _expected_bytes(db_path)
+    _put_row(db_path, "mc_board", body=b"", gzip_body=None, etag='"nothing-to-serve"')
+
+    calls = {"n": 0}
+
+    def build():
+        calls["n"] += 1
+        return board_for(MC_PROTOCOL, include_meta=False)
+
+    resp = cached_json_response("mc_board", build, _request())
+
+    assert calls["n"] == 1
+    assert resp.body == expected_body
+    assert resp.headers["ETag"] == expected_etag  # the built one, not the empty row's
+
+
+# ---- one gzip level --------------------------------------------------------
+
+
+def test_publisher_and_inline_path_compress_at_the_one_shared_level(db_path, monkeypatch):
+    """_GZIP_COMPRESSLEVEL is the single knob for both the worker's
+    published artifact and the inline (cold-start) per-entry compression.
+    It was 9 (GZipMiddleware's default, a multiple of the CPU of 6 for a
+    marginal size gain on a ~6 MB body); it is 6 now."""
+    levels = []
+    real_compress = gzip.compress
+
+    def recording_compress(data, *args, **kwargs):
+        levels.append(kwargs.get("compresslevel"))
+        return real_compress(data, *args, **kwargs)
+
+    monkeypatch.setattr(mc_api_module.gzip, "compress", recording_compress)
+    _seed_board(db_path)
+
+    # Inline path: ttl=0 skips every tier, so this builds and compresses here.
+    monkeypatch.setattr(settings, "board_cache_seconds", 0)
+    cached_json_response(
+        "mc_board", lambda: board_for(MC_PROTOCOL, include_meta=False), _request(accept_gzip=True)
+    )
+    inline_levels = list(levels)
+    # Worker path.
+    asyncio.run(mc_api_module._publish_board_once())
+
+    assert mc_api_module._GZIP_COMPRESSLEVEL == 6
+    assert inline_levels == [6]
+    assert len(levels) > len(inline_levels)  # the publisher compressed too
+    assert set(levels) == {6}
+
+
+# ---- keys that share one build ---------------------------------------------
+
+
+@pytest.fixture
+def empty_registries(monkeypatch):
+    """The publisher's registries emptied for one test, so a cycle
+    publishes only what the test registers (the real ones hold 'mc_board'
+    and, once anything in the run has imported app/api.py, /get-nodes'
+    group). monkeypatch puts the real ones back, and the registration
+    functions write to whatever the module attribute is at call time."""
+    monkeypatch.setattr(mc_api_module, "_PUBLISHED_BOARD_BUILDS", {})
+    monkeypatch.setattr(mc_api_module, "_PUBLISHED_BOARD_GROUPS", {})
+
+
+def _body_and_etag(payload) -> tuple[bytes, str]:
+    """The serialized bytes and etag a key publishing `payload` must end up
+    with -- the same json.dumps/hashlib formula every tier above uses."""
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    return body, '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+
+
+def test_a_group_builds_its_base_once_and_each_key_gets_its_own_row(db_path, empty_registries):
+    """One `build_base()` call per cycle however many keys it feeds, and
+    one row per key, each holding what its own shaper produced: gzip bytes
+    and etag of that key's own payload, `body` empty, as for any key."""
+    calls = {"base": 0}
+
+    def build_base():
+        calls["base"] += 1
+        return {"n": 7}
+
+    mc_api_module.register_published_board_group(
+        build_base,
+        {
+            "g_one": lambda base: {"which": "one", "n": base["n"]},
+            "g_two": lambda base: {"which": "two", "n": base["n"]},
+        },
+    )
+
+    asyncio.run(mc_api_module._publish_board_once())
+
+    assert calls["base"] == 1
+    for key, payload in (
+        ("g_one", {"which": "one", "n": 7}),
+        ("g_two", {"which": "two", "n": 7}),
+    ):
+        expected_body, expected_etag = _body_and_etag(payload)
+        row = _board_row(db_path, key)
+        assert row is not None
+        assert bytes(row["body"]) == b""
+        assert gzip.decompress(bytes(row["gzip_body"])) == expected_body
+        assert row["etag"] == expected_etag
+    assert _board_row(db_path, "g_one")["etag"] != _board_row(db_path, "g_two")["etag"]
+
+
+def test_a_group_skips_each_unchanged_key_on_its_own(db_path, empty_registries, caplog):
+    """The skip-unchanged check is per key inside a group: when only one
+    key's payload changes, only that key's row is rewritten, and the
+    skipped one says so at DEBUG like any other."""
+    state = {"two": 1}
+    mc_api_module.register_published_board_group(
+        lambda: dict(state),
+        {
+            "g_one": lambda base: {"fixed": True},
+            "g_two": lambda base: {"v": base["two"]},
+        },
+    )
+    asyncio.run(mc_api_module._publish_board_once())
+    _set_built_at(db_path, "g_one", 1)
+    _set_built_at(db_path, "g_two", 1)
+
+    state["two"] = 2
+    with caplog.at_level(logging.DEBUG, logger="mc_api"):
+        asyncio.run(mc_api_module._publish_board_once())
+
+    assert _board_row(db_path, "g_one")["built_at"] == 1  # unchanged: no upsert
+    two = _board_row(db_path, "g_two")
+    assert two["built_at"] > 1  # changed: rewritten
+    assert gzip.decompress(bytes(two["gzip_body"])) == _body_and_etag({"v": 2})[0]
+    assert any(
+        r.levelno == logging.DEBUG
+        and "g_one" in r.getMessage()
+        and "unchanged" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_failing_shaper_costs_only_its_own_key(db_path, empty_registries, caplog):
+    """Best-effort per key holds inside a group: a shaper that raises
+    leaves its own row alone and is logged by key, and the other keys of
+    the same group still publish from the same base."""
+
+    def broken(base):
+        raise RuntimeError("shaper blew up")
+
+    mc_api_module.register_published_board_group(
+        lambda: {"n": 1},
+        {"g_bad": broken, "g_good": lambda base: {"n": base["n"]}},
+    )
+
+    with caplog.at_level(logging.ERROR, logger="mc_api"):
+        asyncio.run(mc_api_module._publish_board_once())
+
+    assert _board_row(db_path, "g_bad") is None
+    good = _board_row(db_path, "g_good")
+    assert gzip.decompress(bytes(good["gzip_body"])) == _body_and_etag({"n": 1})[0]
+    assert any(
+        r.levelno == logging.ERROR and "g_bad" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_a_failing_base_build_costs_the_group_but_not_the_rest_of_the_cycle(
+    db_path, empty_registries, caplog
+):
+    """A base build that raises publishes nothing for the group's keys this
+    cycle (they keep whatever row they have) and names them in the log,
+    and the cycle carries on: a single registration and a later group
+    still publish."""
+
+    def broken_base():
+        raise RuntimeError("base blew up")
+
+    mc_api_module.register_published_board("single", lambda: {"s": 1})
+    mc_api_module.register_published_board_group(
+        broken_base, {"g_one": lambda base: base, "g_two": lambda base: base}
+    )
+    mc_api_module.register_published_board_group(lambda: {"v": 1}, {"h_one": lambda base: base})
+
+    with caplog.at_level(logging.ERROR, logger="mc_api"):
+        asyncio.run(mc_api_module._publish_board_once())
+
+    assert _board_row(db_path, "single") is not None
+    assert _board_row(db_path, "h_one") is not None
+    assert _board_row(db_path, "g_one") is None
+    assert _board_row(db_path, "g_two") is None
+    assert any(
+        r.levelno == logging.ERROR
+        and "g_one" in r.getMessage()
+        and "g_two" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_registering_the_same_group_again_replaces_it(empty_registries):
+    """Idempotent, like registering a single key again: the group is
+    identified by its set of keys, in any order, and the later build wins."""
+
+    def base_a():
+        return {}
+
+    def base_b():
+        return {}
+
+    mc_api_module.register_published_board_group(
+        base_a, {"g_one": lambda base: base, "g_two": lambda base: base}
+    )
+    mc_api_module.register_published_board_group(
+        base_b, {"g_two": lambda base: base, "g_one": lambda base: base}
+    )
+
+    assert list(mc_api_module._PUBLISHED_BOARD_GROUPS) == [frozenset({"g_one", "g_two"})]
+    assert mc_api_module._PUBLISHED_BOARD_GROUPS[frozenset({"g_one", "g_two"})][0] is base_b
+    assert sorted(mc_api_module._published_board_keys()) == ["g_one", "g_two"]
+
+
+def test_a_key_can_only_be_published_by_one_registration(empty_registries):
+    """A key two registrations both published would be built and written
+    twice a cycle, last write winning -- so the second registration is
+    refused, whichever kind it is, and a refused one changes nothing."""
+
+    def shape(base):
+        return base
+
+    mc_api_module.register_published_board("single", lambda: [])
+    mc_api_module.register_published_board_group(lambda: {}, {"g_one": shape, "g_two": shape})
+    assert mc_api_module._published_board_keys() == ["single", "g_one", "g_two"]
+
+    with pytest.raises(ValueError):
+        mc_api_module.register_published_board_group(lambda: {}, {"single": shape, "g_three": shape})
+    with pytest.raises(ValueError):
+        mc_api_module.register_published_board_group(lambda: {}, {"g_two": shape, "g_three": shape})
+    with pytest.raises(ValueError):
+        mc_api_module.register_published_board("g_one", lambda: [])
+    with pytest.raises(ValueError):
+        mc_api_module.register_published_board_group(lambda: {}, {})
+
+    assert mc_api_module._published_board_keys() == ["single", "g_one", "g_two"]

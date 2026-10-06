@@ -40,7 +40,7 @@ import math
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
@@ -434,13 +434,20 @@ def season_team_checkin_points(conn, season_id: int) -> dict[str, float]:
 
 # ---- board response cache ---------------------------------------------
 
-# GZIP_COMPRESSLEVEL matches app/main.py's app.add_middleware(GZipMiddleware,
-# minimum_size=1000) call -- compresslevel is left at GZipMiddleware's own
-# default (9) there, so this reproduces the same compression this response
-# would have gotten from the middleware, just computed once per cache
-# rebuild instead of once per request. See _CachedBody below for why this
-# module compresses at all instead of always leaning on the middleware.
-_GZIP_COMPRESSLEVEL = 9
+# The ONE gzip level for everything this module compresses itself: the lazy
+# per-entry compression in _CachedBody.gzipped() (the inline / cold-start
+# path) and the worker's published artifact in _publish_board_once(). 6 is
+# zlib's own default. Level 9 -- what this used to be, and what
+# GZipMiddleware (app/main.py) defaults to -- buys a marginal size
+# reduction on JSON like this at a multiple of the CPU, and the worker pays
+# that CPU on a ~6 MB body every time the board changes. The ETag is a hash
+# of the PLAINTEXT, never of the gzip bytes, so changing this level
+# invalidates no client's validator. A response built here already carries
+# Content-Encoding: gzip, which GZipMiddleware passes through untouched
+# instead of recompressing (starlette/middleware/gzip.py's
+# content_encoding_set branch). See _CachedBody below for why this module
+# compresses at all instead of always leaning on the middleware.
+_GZIP_COMPRESSLEVEL = 6
 
 
 class _CachedBody:
@@ -467,15 +474,33 @@ class _CachedBody:
     synchronously on the event loop with no `await` between the None
     check and the assignment (confirmed -- no run_in_threadpool/to_thread
     wraps it anywhere), so two requests can never interleave inside it.
+
+    The same laziness runs the other way for an entry read out of
+    board_cache (see _read_board_cache_row): the worker stores only the
+    gzip bytes there (an empty `body`), so such an entry is built with
+    body=None and `body` inflates it from gzip_body the first time a
+    request that cannot take gzip actually needs the plaintext, then
+    keeps the result exactly as a body built inline would be kept. Almost
+    every client takes gzip, so most entries never inflate at all. `body`
+    is a property so that EVERY reader of an entry (answer() below,
+    tests) sees the real plaintext, never an unfilled placeholder.
     """
 
-    __slots__ = ("built_at", "body", "etag", "gzip_body")
+    __slots__ = ("built_at", "_body", "etag", "gzip_body")
 
-    def __init__(self, built_at: float, body: bytes, etag: str) -> None:
+    def __init__(self, built_at: float, body: bytes | None, etag: str) -> None:
         self.built_at = built_at
-        self.body = body
+        self._body = body  # None only for a board_cache entry that carries gzip_body alone
         self.etag = etag
         self.gzip_body: bytes | None = None  # filled on first gzip-accepting request
+
+    @property
+    def body(self) -> bytes:
+        if self._body is None:
+            # Only reachable for an entry whose row held no plaintext, and
+            # _read_board_cache_row never builds one without gzip_body.
+            self._body = gzip.decompress(self.gzip_body)
+        return self._body
 
     def gzipped(self) -> bytes:
         if self.gzip_body is None:
@@ -500,9 +525,12 @@ _BOARD_CACHE: dict[str, _CachedBody] = {}
 
 def _wants_gzip(request: Request | None) -> bool:
     """True only when the request explicitly says it can decode gzip.
-    request=None (a caller that never passes one -- see app/api.py's
-    /get-nodes) always means "no": a plaintext-only client that got
-    served gzip bytes could never decode them."""
+    request=None (a caller that does not pass one) always means "no": a
+    plaintext-only client that got served gzip bytes could never decode
+    them. Both callers today (/api/mc/board here, /get-nodes in
+    app/api.py) pass their request -- a caller that did not would also
+    get no 304 and no cached gzip bytes, and GZipMiddleware would
+    recompress the same body on every request."""
     if request is None:
         return False
     return "gzip" in request.headers.get("accept-encoding", "")
@@ -552,16 +580,22 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
        row fresh -- reading it is one indexed PRIMARY KEY lookup, nothing
        like the cost `build()` pays. The row found here is copied into
        _BOARD_CACHE so the NEXT request in this same process hits tier 1
-       instead of the DB again.
+       instead of the DB again. The worker's row carries the gzip bytes
+       and the etag and leaves `body` empty, so a client that cannot
+       take gzip gets the plaintext inflated from gzip_body ONCE and
+       kept in _BOARD_CACHE (see _CachedBody); the etag, and so the 304
+       behaviour, is the same for both kinds of client.
     3. `build()`, inline, exactly as before this table existed. This is
        the cold-start fallback -- a fresh deploy before the worker's
-       first publish pass, or any key nothing ever publishes (the /get-
-       nodes routes' 'mt_board_authed'/'mt_board_public' keys, which are
-       looked up here too but never written by run_forever(), so this
-       always misses for them and they rebuild exactly as before) -- and
-       it is also what keeps a web-role process correct even if the
-       worker role is entirely down: this function never hard-depends on
-       the publisher having run.
+       first publish pass, a row that holds nothing servable, or any key
+       nothing publishes -- and it is also what keeps a web-role process
+       correct even if the worker role is entirely down: this function
+       never hard-depends on the publisher having run. Every key the
+       publisher writes (_published_board_keys(): _PUBLISHED_BOARD_BUILDS
+       plus the groups registered through register_published_board_group()),
+       /get-nodes's 'mt_board_authed' and 'mt_board_public' included, goes
+       through all three tiers; the route's own inline build is what is
+       left of tier 3 for them.
 
     ttl = 0 skips ALL THREE tiers of caching, including this table: not
     just "don't read _BOARD_CACHE", the full contract
@@ -641,7 +675,20 @@ def _read_board_cache_row(key: str) -> _CachedBody | None:
     requests in THIS process hit tier 1 (_BOARD_CACHE) before trying the
     table again. It is deliberately NOT used to reject a stale row --
     see cached_json_response's own docstring for why an out-of-date board
-    beats a rebuild.
+    beats a rebuild. The row's own wall-clock built_at column is not
+    even selected here: nothing on this read path depends on how fresh
+    it is, which is what lets _publish_board_once() leave an unchanged
+    row alone instead of re-stamping it every cycle.
+
+    What a row may hold: the worker writes gzip_body and etag and leaves
+    `body` EMPTY (b""; the column is NOT NULL, see app/db.py's SCHEMA),
+    so the plaintext is inflated from gzip_body only if a client that
+    cannot take gzip ever asks for it -- see _CachedBody. A row written
+    before that change, or by hand, may instead carry a body, with or
+    without gzip_body, and is served as it always was. A row with
+    neither (sqlite hands an empty blob back as b"") has nothing to
+    serve, so it reads as a miss and the caller builds inline, exactly
+    as if there were no row.
     """
     try:
         conn = connect()
@@ -657,9 +704,12 @@ def _read_board_cache_row(key: str) -> _CachedBody | None:
         return None
     if row is None:
         return None
-    entry = _CachedBody(time.monotonic(), bytes(row["body"]), row["etag"])
-    if row["gzip_body"] is not None:
-        entry.gzip_body = bytes(row["gzip_body"])
+    body = bytes(row["body"]) if row["body"] else None
+    gzip_body = bytes(row["gzip_body"]) if row["gzip_body"] else None
+    if body is None and gzip_body is None:
+        return None
+    entry = _CachedBody(time.monotonic(), body, row["etag"])
+    entry.gzip_body = gzip_body
     return entry
 
 
@@ -750,34 +800,171 @@ async def mc_board(request: Request) -> Response:
 
 # ---- board cache publisher (worker role only) ---------------------------
 #
-# The build FUNCTIONS this loop publishes into board_cache, keyed exactly
-# like _BOARD_CACHE / cached_json_response's own `key` argument. Only
-# 'mc_board' -- /api/mc/board's own cache key -- is worth publishing here:
-# it is the measured 4.2MB/~6.8s-rebuild route (see run_forever()'s own
-# docstring), and its build is a fixed, parameterless closure, unlike
-# /get-nodes's 'mt_board_authed'/'mt_board_public' keys (app/api.py),
-# which depend on the calling session (session=None vs. a real
-# SessionPrincipal) and so are not something a session-less background
-# loop can build on a caller's behalf in the first place. Their rebuild
-# cost has not been measured/reported as a problem the way /api/mc/board's
-# was, so they are deliberately left exactly as before: cached_json_response
-# still opportunistically checks board_cache for them (see that
-# function's docstring), it will just always miss since nothing ever
-# writes those keys, and they fall through to their existing inline
-# rebuild-on-miss behavior, unchanged.
-_PUBLISHED_BOARD_BUILDS: dict[str, Callable[[], list[dict]]] = {
+# What this loop publishes into board_cache, keyed exactly like
+# _BOARD_CACHE / cached_json_response's own `key` argument:
+#
+# - 'mc_board' -- /api/mc/board's own cache key, the measured
+#   4.2MB/~6.8s-rebuild route (see run_forever()'s own docstring). Its
+#   build is a fixed, parameterless closure defined right here, in
+#   _PUBLISHED_BOARD_BUILDS.
+# - 'mt_board_public' and 'mt_board_authed' -- /get-nodes's two keys. Their
+#   build lives in app/api.py, which imports THIS module and so cannot be
+#   imported back (see MT_PROTOCOL's comment near the top of this file),
+#   so app/api.py adds them itself, at import time, through
+#   register_published_board_group() below -- as ONE group
+#   (_PUBLISHED_BOARD_GROUPS), because the two payloads are cut from the
+#   same expensive build and this way the loop runs that build once per
+#   cycle instead of once per key. app/main.py imports app/api.py
+#   before its lifespan ever starts this loop, in the web and the worker
+#   role alike, so the registration has always happened by the first cycle.
+#
+# An earlier version of this comment left the /get-nodes keys out because
+# they "depend on the calling session" and so could not be built by a
+# session-less loop. They depend only on WHETHER a session is present
+# (_build_get_nodes(include_attribution=<bool>)), never on WHICH one:
+# nothing in that build takes a user, and _mt_node_teams() returns the same
+# node -> team map for every caller. So the worker builds both shapes, one
+# row each, and a web process still picks the row by session presence in
+# the route -- the privacy gate stays where it was; this table only holds
+# what each key's own build produced.
+_PUBLISHED_BOARD_BUILDS: dict[str, Callable[[], list[dict] | dict]] = {
     "mc_board": lambda: board_for(MC_PROTOCOL, include_meta=False),
 }
 
+# Keys that share ONE build per cycle: the group's set of cache keys ->
+# (build_base, {key: shape}). _publish_board_once() calls build_base() once
+# and then each key's shape(base) for that key's payload -- see
+# register_published_board_group().
+_PUBLISHED_BOARD_GROUPS: dict[
+    frozenset[str],
+    tuple[Callable[[], Any], dict[str, Callable[[Any], list[dict] | dict]]],
+] = {}
+
+
+def register_published_board(key: str, build: Callable[[], list[dict] | dict]) -> None:
+    """Have run_forever() publish `build()`'s result under `key` -- the
+    same `key` the route passes to cached_json_response, which is what
+    makes that route's tier-2 read find the row. For a build that lives in
+    a module this one cannot import (see the comment above). Idempotent:
+    registering a key again just replaces its build. A key a group (see
+    register_published_board_group) already publishes is refused with
+    ValueError, since it would be built and written twice a cycle."""
+    if any(key in group_keys for group_keys in _PUBLISHED_BOARD_GROUPS):
+        raise ValueError(f"board_cache key {key!r} is already published by a group")
+    _PUBLISHED_BOARD_BUILDS[key] = build
+
+
+def register_published_board_group(
+    build_base: Callable[[], Any],
+    shapers: dict[str, Callable[[Any], list[dict] | dict]],
+) -> None:
+    """Have run_forever() publish SEVERAL keys from ONE expensive build:
+    each cycle it calls `build_base()` once, then `shapers[key](base)` for
+    every key to get that key's payload. For payloads that are the same
+    work and differ only in a cheap last step -- /get-nodes' two shapes
+    (app/api.py), which differ only in whether team attribution is added.
+    Registering each key with register_published_board() instead would run
+    the whole build once per key.
+
+    Everything after the shared build stays per key, exactly as for a
+    single registration: each payload is serialized, hashed and compared
+    with that key's OWN stored etag, an unchanged key is skipped, and each
+    key has its own board_cache row and its own etag. A shaper that raises
+    costs only its own key for that cycle; a `build_base` that raises
+    costs the whole group. The base is handed to every shaper as it is,
+    so a shaper must treat it as read-only. Nothing is kept from one cycle
+    to the next -- the base is rebuilt every cycle, because comparing
+    etags needs the fresh payloads.
+
+    The group is identified by its set of keys, so registering the same
+    keys again (in any order) replaces it. A key another registration
+    already publishes is refused with ValueError, for the same reason as
+    in register_published_board()."""
+    keys = frozenset(shapers)
+    if not keys:
+        raise ValueError("a board_cache group needs at least one key")
+    clashes = keys & set(_PUBLISHED_BOARD_BUILDS)
+    for group_keys in _PUBLISHED_BOARD_GROUPS:
+        if group_keys != keys:
+            clashes |= keys & group_keys
+    if clashes:
+        raise ValueError(
+            f"board_cache key(s) already published by another registration: {sorted(clashes)}"
+        )
+    _PUBLISHED_BOARD_GROUPS[keys] = (build_base, dict(shapers))
+
+
+def _published_board_keys() -> list[str]:
+    """Every cache key the publisher writes, in the order it writes them:
+    the single registrations first, then each group's keys."""
+    keys = list(_PUBLISHED_BOARD_BUILDS)
+    for _build_base, shapers in _PUBLISHED_BOARD_GROUPS.values():
+        keys.extend(shapers)
+    return keys
+
+
+def _stored_board_etag(key: str) -> str | None:
+    """The etag board_cache currently holds for `key`, or None when there
+    is no row or the lookup failed. A plain connect()/SELECT -- one
+    indexed PRIMARY KEY read that, like _read_board_cache_row's, never
+    waits on the write lock -- so the publisher can tell "nothing
+    changed" before it takes that lock at all. Fails OPEN: any error
+    reads as "no stored etag", which makes the caller publish, so a
+    flaky read can only cost a redundant write, never a skipped one."""
+    try:
+        conn = connect()
+        try:
+            row = conn.execute(
+                "SELECT etag FROM board_cache WHERE cache_key = ?", (key,)
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        log.debug("board_cache: etag lookup failed for key %s, publishing anyway", key, exc_info=True)
+        return None
+    return row["etag"] if row is not None else None
+
+
+async def _publish_board_payload(key: str, payload: list[dict] | dict) -> None:
+    """Publish ONE key's already-built `payload`: serialize it, hash it,
+    and upsert its board_cache row unless the stored etag already equals
+    that hash -- see _publish_board_once() for why each step is the way it
+    is. Everything that cycle does per key, for a single registration and
+    for each key of a group alike. Raises on any failure; the caller keeps
+    that failure to this key."""
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
+    if _stored_board_etag(key) == etag:
+        log.debug("board_cache: key %s unchanged (etag %s), skipping publish", key, etag)
+        return
+    gzip_body = gzip.compress(body, compresslevel=_GZIP_COMPRESSLEVEL)
+    async with WriteSession() as conn:
+        conn.execute(
+            "INSERT INTO board_cache(cache_key, body, gzip_body, etag, built_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(cache_key) DO UPDATE SET"
+            " body = excluded.body, gzip_body = excluded.gzip_body,"
+            " etag = excluded.etag, built_at = excluded.built_at",
+            (key, b"", gzip_body, etag, int(time.time())),
+        )
+
 
 async def _publish_board_once() -> None:
-    """One board_cache publish cycle: rebuild every key in
-    _PUBLISHED_BOARD_BUILDS and upsert its row. Best-effort per key, same
+    """One board_cache publish cycle: rebuild every registered key and
+    upsert the row of each one whose content changed. A key registered on
+    its own (_PUBLISHED_BOARD_BUILDS) has its own build; the keys of a
+    group (_PUBLISHED_BOARD_GROUPS) share one -- the group's `build_base()`
+    runs ONCE and each key's shaper cuts that key's payload from the
+    result, so whatever the keys have in common is paid for once per
+    cycle and not once per key. Best-effort per key, same
     "a publish failure must never take down the loop or leave a half
     -written cycle" contract app/checkin.py's
     _refresh_mc_directory_if_stale gives mc_directory_cache -- a web-role
     reader just keeps serving whatever row (or in-process copy) it
     already has until the next successful cycle here writes a newer one.
+    For a group that means a shaper that fails costs only its own key, and
+    a `build_base()` that fails costs the group's keys for this cycle (each
+    keeps its row) -- the loop goes on to the next registration either way.
 
     Builds and serializes OUTSIDE the WriteSession -- board_for() only
     reads, and json.dumps/gzip.compress are pure CPU, so neither needs
@@ -785,25 +972,52 @@ async def _publish_board_once() -> None:
     Computes the gzip bytes eagerly (unlike _CachedBody.gzipped(), which
     fills its own gzip_body lazily on first gzip-accepting request) --
     the whole point of a worker-published row is that a web process
-    reading it pays for neither serialization nor compression, so both
-    representations must already be finished before the row is written.
+    reading it pays for neither serialization nor compression, so the
+    representation it serves must already be finished before the row is
+    written.
+
+    UNCHANGED keys are skipped. The etag is a hash of the fresh plaintext
+    body, so a row whose stored etag already equals it holds exactly
+    these bytes: that cycle does no gzip and no write at all, and says so
+    at DEBUG. (Measured on prod before this: a 6.16 MB body, 604 KB
+    gzipped, was rewritten every 10 s whether or not one cell had
+    changed.) The comparison is one plain read, no write lock, and a
+    missing row, a different etag or a failed read all fall through to
+    the publish below, so the worst case is the old behaviour.
+
+    The row stores gzip_body, etag and built_at and leaves `body` EMPTY:
+    b"" and not NULL, because the column is NOT NULL (app/db.py's SCHEMA)
+    and an existing database keeps that constraint. Nearly every client
+    takes gzip, so the plaintext was ~10x the bytes for nothing; the
+    rare client that cannot gets it inflated from gzip_body once per
+    process and entry -- see _CachedBody.
+
+    built_at therefore moves only when the CONTENT changes, no longer
+    once per cycle: it says when this content was published, not when
+    the worker last looked. Nothing reads it back (see
+    _read_board_cache_row, which does not even select it), so a skipped
+    cycle deliberately leaves it alone -- the point of skipping is to
+    take no write lock and write nothing.
     """
     for key, build in _PUBLISHED_BOARD_BUILDS.items():
         try:
-            body = json.dumps(build(), separators=(",", ":")).encode()
-            etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
-            gzip_body = gzip.compress(body, compresslevel=_GZIP_COMPRESSLEVEL)
-            async with WriteSession() as conn:
-                conn.execute(
-                    "INSERT INTO board_cache(cache_key, body, gzip_body, etag, built_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(cache_key) DO UPDATE SET"
-                    " body = excluded.body, gzip_body = excluded.gzip_body,"
-                    " etag = excluded.etag, built_at = excluded.built_at",
-                    (key, body, gzip_body, etag, int(time.time())),
-                )
+            await _publish_board_payload(key, build())
         except Exception:
             log.exception("board_cache: failed to publish key %s", key)
+
+    for build_base, shapers in _PUBLISHED_BOARD_GROUPS.values():
+        try:
+            base = build_base()
+        except Exception:
+            log.exception(
+                "board_cache: failed to build the shared input for keys %s", ", ".join(shapers)
+            )
+            continue
+        for key, shape in shapers.items():
+            try:
+                await _publish_board_payload(key, shape(base))
+            except Exception:
+                log.exception("board_cache: failed to publish key %s", key)
 
 
 async def run_forever() -> None:
@@ -835,18 +1049,20 @@ async def run_forever() -> None:
     is allowed to get" everywhere else in this module (it is
     _BOARD_CACHE's own TTL), so publishing on the same cadence keeps a
     single knob with one meaning instead of two intervals an operator
-    would have to reason about together. A row this loop just wrote is at
-    most one board_cache_seconds old by the time ANY reader (in-process
-    hit, table hit, or a future publish cycle) looks at it -- exactly the
-    staleness bound the pre-existing per-process cache already promised,
-    just no longer paid for on a request path.
+    would have to reason about together. What a row holds is at most one
+    board_cache_seconds behind the board by the time ANY reader
+    (in-process hit, table hit, or a future publish cycle) looks at it --
+    a row of unchanged content is not rewritten (see _publish_board_once),
+    but unchanged means it is still current -- exactly the staleness
+    bound the pre-existing per-process cache already promised, just no
+    longer paid for on a request path.
 
     Never raises out of the loop -- same fire-and-forget contract
     app/discord_notify.py's run_forever() gives its own poll cycle: a bad
     cycle must not crash the process or stop every later cycle (and every
     later web-role read) from ever seeing a fresh board again.
     """
-    log.info("board cache publisher loop starting (cache_key(s): %s)", ", ".join(_PUBLISHED_BOARD_BUILDS))
+    log.info("board cache publisher loop starting (cache_key(s): %s)", ", ".join(_published_board_keys()))
     while True:
         try:
             await _publish_board_once()

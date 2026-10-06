@@ -37,6 +37,7 @@ import re
 import time
 from email.utils import formatdate
 from pathlib import Path
+from typing import NamedTuple
 
 import anyio
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -261,6 +262,16 @@ def _build_get_nodes(*, include_attribution: bool) -> dict:
     for its own query, enrichment pass and serialization of identical
     bytes. See that helper for why the cache is time-based only.
 
+    Two steps, so the worker can publish both variants from one build.
+    _build_get_nodes_base() does everything that does not depend on who
+    is asking -- the expensive part: the season, the owned-cell list and
+    its per-cell enrichment, the node_seen rows -- and _shape_get_nodes()
+    adds or omits team attribution on top of it -- the cheap part. This
+    function is just the two in a row, for the ONE variant a web
+    process's inline fallback needs; the worker's publisher runs the
+    first step once per cycle and the second once per key (see the group
+    registration below the route).
+
     `coverage` is grid cells straight from mc_tile/mc_tile_score/
     mc_tile_capture (owner team, per-team scores, capture time) --
     replaces the old geohash `tile`/`tile_score`/`tile_capture` reads.
@@ -303,11 +314,44 @@ def _build_get_nodes(*, include_attribution: bool) -> dict:
     `repeaters` again, at which point it will already degrade to an
     unattributed marker instead of a wrong one.
     """
+    return _shape_get_nodes(_build_get_nodes_base(), include_attribution=include_attribution)
+
+
+class _GetNodesBase(NamedTuple):
+    """What _build_get_nodes_base() returns: the session-independent half
+    of /get-nodes' payload, before team attribution is decided.
+
+    Shared READ-ONLY. The worker's publisher hands one of these to the
+    shaper of every key it publishes, so nothing that receives one may
+    change it -- _shape_get_nodes() copies what it modifies.
+    """
+
+    # Final coverage rows, exactly as they appear in the payload.
+    coverage: list[dict]
+    # (node_id, repeater dict WITHOUT its "team" key), in node_seen row
+    # order. node_id is the raw integer the team lookup is keyed on -- the
+    # dict itself only carries it as the "!xxxxxxxx" hex string.
+    repeaters: list[tuple[int, dict]]
+
+
+def _build_get_nodes_base() -> _GetNodesBase:
+    """The part of /get-nodes' payload that does not depend on who is
+    asking, and where all of its cost is: the active season, the owned
+    cells (mc_api.board_for) and the per-cell score and capture maps they
+    are enriched from, the coverage rows, and node_seen's marker rows.
+    See _build_get_nodes() for what each field means and for the privacy
+    line the next step draws.
+
+    Nothing here touches team attribution -- no _mt_node_teams() lookup and
+    no `team` key on a repeater -- which is what makes the result safe to
+    share between variants. Run once per publish cycle on the worker,
+    however many variants are then cut from it.
+    """
     conn = connect()
     try:
         active = mc_api.active_season(conn, MT_PROTOCOL)
         if not active:
-            return {"coverage": [], "repeaters": []}
+            return _GetNodesBase([], [])
         season_id = active["id"]
 
         cells = mc_api.board_for(MT_PROTOCOL)
@@ -331,7 +375,6 @@ def _build_get_nodes(*, include_attribution: bool) -> dict:
                 "east": c["east"],
             })
 
-        node_teams = _mt_node_teams(conn) if include_attribution else {}
         node_rows = conn.execute(
             "SELECT node_id, name, lat, lon, elev, last_seen "
             "  FROM node_seen "
@@ -340,25 +383,61 @@ def _build_get_nodes(*, include_attribution: bool) -> dict:
         ).fetchall()
         repeaters = []
         for r in node_rows:
-            repeaters.append({
-                "id": _node_hex(r["node_id"]),
-                "name": r["name"],
-                "lat": r["lat"],
-                "lon": r["lon"],
-                "elev": r["elev"] or 0,
-                "time": _truncate(r["last_seen"]),
-                # None unauthenticated (see docstring) -- never the
-                # registered player's team unless include_attribution.
-                "team": node_teams.get(r["node_id"]) if include_attribution else None,
-            })
+            repeaters.append((
+                r["node_id"],
+                {
+                    "id": _node_hex(r["node_id"]),
+                    "name": r["name"],
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "elev": r["elev"] or 0,
+                    "time": _truncate(r["last_seen"]),
+                },
+            ))
     finally:
         conn.close()
 
-    return {"coverage": coverage, "repeaters": repeaters}
+    return _GetNodesBase(coverage, repeaters)
+
+
+def _shape_get_nodes(base: _GetNodesBase, *, include_attribution: bool) -> dict:
+    """One variant of /get-nodes' payload, cut from a shared base: the
+    same `coverage` either way, and `repeaters` that carry a registered
+    player's `team` only when include_attribution (None otherwise -- see
+    _build_get_nodes()'s docstring for the privacy reasoning).
+
+    The cheap half of the build: one small query (_mt_node_teams) when
+    attributing, plus a pass over the repeaters. include_attribution=False
+    runs no query at all, and neither does an empty base (nothing to
+    attribute). `base` is only read: every repeater dict is built fresh
+    with its `team` added, never updated in place, and `coverage` is
+    shared by reference with every other payload cut from the same base --
+    safe because the only things done with a payload are serializing it,
+    so shaping one variant can never change what another one sees.
+    """
+    node_teams: dict[int, str] = {}
+    if include_attribution and base.repeaters:
+        conn = connect()
+        try:
+            node_teams = _mt_node_teams(conn)
+        finally:
+            conn.close()
+
+    repeaters = [
+        # `team` goes last, where the pre-split single build put it: the
+        # serialized bytes, and so each variant's etag, depend on key order.
+        # None unauthenticated -- never the registered player's team unless
+        # include_attribution.
+        {**rep, "team": node_teams.get(node_id) if include_attribution else None}
+        for node_id, rep in base.repeaters
+    ]
+    return {"coverage": base.coverage, "repeaters": repeaters}
 
 
 @router.get("/get-nodes")
-async def get_nodes(session: SessionPrincipal | None = Depends(optional_session)) -> Response:
+async def get_nodes(
+    request: Request, session: SessionPrincipal | None = Depends(optional_session)
+) -> Response:
     """The map's main data route. See _build_get_nodes() above.
 
     Cached separately per auth state (`mt_board_public` vs.
@@ -370,11 +449,71 @@ async def get_nodes(session: SessionPrincipal | None = Depends(optional_session)
     close) just as easily as an authenticated request could serve a
     stale public one. Two independent cache entries -- one per shape --
     is the only way this stays both cached and correct.
+
+    The request is passed through, exactly as app/mc_api.py's
+    /api/mc/board does: without it cached_json_response cannot tell
+    whether the client takes gzip or holds a current copy, so it never
+    cached the gzip bytes (GZipMiddleware recompressed this ~3.3 MB body
+    on every request) and could never answer a matching If-None-Match
+    with a 304 -- which the map page already sends (frontend/map2.js's
+    fetchBoard()).
+
+    Both keys are also published by the worker role, which builds them
+    ahead of time -- one shared base build per cycle, shaped once per
+    key -- and writes them to board_cache; see the registration right
+    below this function. The inline build here builds just the one
+    variant this request needs, and is the cold-start / worker-down
+    fallback, as for /api/mc/board.
     """
     cache_key = "mt_board_authed" if session is not None else "mt_board_public"
     return mc_api.cached_json_response(
-        cache_key, lambda: _build_get_nodes(include_attribution=session is not None)
+        cache_key,
+        lambda: _build_get_nodes(include_attribution=session is not None),
+        request,
     )
+
+
+# Worker-published copies of both /get-nodes shapes (app/mc_api.py's
+# run_forever()/_publish_board_once(); this route's cached_json_response
+# reads them back as its tier 2). Registered HERE, at import time, and not
+# in mc_api's own _PUBLISHED_BOARD_BUILDS literal, because _build_get_nodes
+# lives in this module and this module imports mc_api, never the other way
+# round (see mc_api.MT_PROTOCOL's comment for the cycle that would close).
+# app/main.py imports this module before its lifespan starts the publisher
+# loop, in the web and the worker role alike.
+#
+# Registered as ONE group, not as two builds. The two shapes differ only in
+# include_attribution, and everything expensive -- board_for(), the score
+# and capture maps, the coverage and repeater row loops -- does not depend
+# on it; two separate builds ran all of that twice per cycle, on the one
+# worker process that also runs ingest and check-ins. The group runs
+# _build_get_nodes_base() ONCE per cycle and then _shape_get_nodes() once
+# per key, which is all that is left to differ (the team lookup and the
+# `team` field). The publisher still hashes, skips and writes each key on
+# its own -- per-key etags and board_cache rows are exactly what two builds
+# produced -- and a shaper that fails costs only its own key.
+#
+# Safe to build with no request or session in hand: the ONLY thing that
+# differs between the two keys is include_attribution, i.e. whether a
+# session is PRESENT -- the route above passes `session is not None` and
+# nothing else from the session reaches the build, and _mt_node_teams()
+# (what include_attribution=True adds) takes no user and returns the same
+# node -> team map for every caller. So the authed row is the same bytes for
+# every signed-in user. The privacy gate stays in the route: it still picks
+# the key from the session, and the public row is shaped with
+# include_attribution=False, so it never carries a team.
+#
+# The base is built through a lambda, like the route's own build above, so
+# its name is looked up when the cycle runs rather than captured here.
+#
+# Keep these two keys spelled exactly like the route's cache_key above.
+mc_api.register_published_board_group(
+    lambda: _build_get_nodes_base(),
+    {
+        "mt_board_authed": lambda base: _shape_get_nodes(base, include_attribution=True),
+        "mt_board_public": lambda base: _shape_get_nodes(base, include_attribution=False),
+    },
+)
 
 
 # Deliberately NOT the bare "/results" the other Meshtastic data routes

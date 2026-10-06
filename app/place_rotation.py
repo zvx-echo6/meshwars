@@ -337,7 +337,8 @@ def _compute_week(
 
     Pure with respect to the database: reads `place` and, for the anti-
     repeat preference, last week's persisted `place_week` if present.
-    Writes nothing -- resolve_week() below is what persists a result.
+    Writes nothing -- ensure_week_resolved() below is what persists a
+    result (resolve_week() goes through it).
     """
     lat_deg, lon_deg = _region_cell_degrees()
     rng = random.Random(_seed_for(week_start))
@@ -385,21 +386,37 @@ def _compute_week(
     return chosen, region_report
 
 
-def resolve_week(conn: sqlite3.Connection, week_start: str) -> list[int]:
-    """The live rotating place_ids for `week_start`, computed once and
-    cached in place_week. Safe to call from a read path -- if the draw
-    is already there, this is a single indexed SELECT; if not, it
-    computes and persists it in its own write transaction so every
-    later call (this week, any player, any process) sees the same
-    stored result rather than a freshly re-rolled one.
+def ensure_week_resolved(conn: sqlite3.Connection, week_start: str) -> None:
+    """Make sure `week_start`'s rotation draw is persisted in place_week,
+    computing and persisting it first if it is not there yet. Returns
+    nothing. Safe to call from a read path -- if the draw is already
+    there, this is one single-row indexed probe; if not, it computes and
+    persists it in its own write transaction so every later call (this
+    week, any player, any process) sees the same stored result rather
+    than a freshly re-rolled one.
+
+    This is for a caller that only needs the draw to EXIST -- the places
+    API routes, which then match places against it with an EXISTS
+    subquery, and credit_places(), which does the same for the handful
+    of places on one cell -- and not the ids themselves. "Is there a
+    draw?" needs one row. resolve_week() answers it by fetching the
+    week's whole id list, which since the worldwide expansion is about
+    500,000 rows (14,780 for the 2026-09-09 week, 501,525 for
+    2026-09-16): roughly half a second of index walk and per-row Python
+    objects, thrown away by every caller that ignored the return value.
+    That was paid on every /api/places and /api/places/near cache miss,
+    and by credit_places() inside the scoring write transaction, with
+    SQLite's write lock held the whole time.
+
+    The probe is one seek on place_week's PRIMARY KEY (week_start,
+    place_id), which leads with week_start. Everything after it is the
+    old resolve_week() unchanged: the same _compute_week() draw, the same
+    INSERT OR IGNORE, the same transaction handling.
     """
-    existing = [
-        r[0] for r in conn.execute(
-            "SELECT place_id FROM place_week WHERE week_start = ?", (week_start,)
-        )
-    ]
-    if existing:
-        return existing
+    if conn.execute(
+        "SELECT 1 FROM place_week WHERE week_start = ? LIMIT 1", (week_start,)
+    ).fetchone() is not None:
+        return
 
     chosen, _report = _compute_week(conn, week_start)
 
@@ -433,6 +450,21 @@ def resolve_week(conn: sqlite3.Connection, week_start: str) -> list[int]:
         if own_transaction:
             conn.execute("ROLLBACK")
         raise
+
+
+def resolve_week(conn: sqlite3.Connection, week_start: str) -> list[int]:
+    """The live rotating place_ids for `week_start`, computed once and
+    cached in place_week (ensure_week_resolved() does that part), then
+    every id in the draw returned.
+
+    That return value is the WHOLE week -- about half a million ids at
+    the current draw size, ~0.5 s to fetch -- so this is for a caller
+    that genuinely needs the ids. Nothing on a request or scoring path
+    does (live_place_ids() below reads them with a join instead of
+    through this list). A caller that only needs the draw to exist must
+    call ensure_week_resolved(), which reads one row, not the week.
+    """
+    ensure_week_resolved(conn, week_start)
     return [
         r[0] for r in conn.execute(
             "SELECT place_id FROM place_week WHERE week_start = ?", (week_start,)
@@ -480,20 +512,24 @@ def live_place_ids(conn: sqlite3.Connection, week_start: str) -> set[int]:
     boundary.
 
     The rotating half is filtered by active here rather than trusted
-    as-is: place_week is only ever appended to (resolve_week's INSERT
-    OR IGNORE), so a place drawn earlier this week that a later seed
-    reconcile has since deactivated must not still count as live --
+    as-is: place_week is only ever appended to (ensure_week_resolved's
+    INSERT OR IGNORE), so a place drawn earlier this week that a later
+    seed reconcile has since deactivated must not still count as live --
     its place_week row survives (place_week is never rewritten after a
     week resolves) but no longer resolves to a scoreable place.
     """
     always = {r[0] for r in conn.execute("SELECT id FROM place WHERE rotates = 0 AND active = 1")}
-    rotating_ids = resolve_week(conn, week_start)
-    rotating: set[int] = set()
-    if rotating_ids:
-        marks = ",".join("?" * len(rotating_ids))
-        rotating = {
-            r[0] for r in conn.execute(
-                f"SELECT id FROM place WHERE active = 1 AND id IN ({marks})", rotating_ids
-            )
-        }
+    ensure_week_resolved(conn, week_start)
+    # This is the one reader that really does need the drawn ids, so it
+    # reads them with a join instead of resolve_week()'s id list fed back
+    # through an IN (...) list: at ~500,000 ids that list is more bound
+    # parameters than SQLite allows in one statement by default, and the
+    # join returns exactly the same rows without materializing it.
+    rotating = {
+        r[0] for r in conn.execute(
+            "SELECT p.id FROM place_week w JOIN place p ON p.id = w.place_id "
+            " WHERE w.week_start = ? AND p.active = 1",
+            (week_start,),
+        )
+    }
     return always | rotating
