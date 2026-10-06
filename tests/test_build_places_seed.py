@@ -225,6 +225,7 @@ def test_frac_area_outside_city_large_mostly_remote_park_is_mostly_outside():
     """A big (~55km x 50km) park with only a small town's circle
     brushing one corner of it -- almost all of its own area must fall
     outside that circle, well past PARK_REMOTE_AREA_FRAC."""
+    pytest.importorskip("osgeo")  # GDAL bindings; reached via build_places_seed line ~943
     big_park = box(-114.05, 43.75, -113.55, 44.25)
     buckets = _one_anchor_bucket(43.76, -114.04, 3000.0)  # a small 3km-radius town at one corner
     frac = bps._frac_area_outside_city(big_park, buckets)
@@ -264,6 +265,7 @@ def test_frac_area_outside_city_invalid_geometry_does_not_raise():
     the mostly-remote case above -- not fully covered, not fully
     missed -- so the bbox shortcut can't answer it and the real
     repair-then-intersect (or centroid-fallback) path actually runs."""
+    pytest.importorskip("osgeo")  # GDAL bindings; reached via build_places_seed line ~943
     from shapely.geometry import Polygon
 
     bowtie = Polygon([(-114.05, 43.75), (-113.55, 44.25), (-114.05, 44.25), (-113.55, 43.75)])
