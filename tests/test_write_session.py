@@ -48,6 +48,23 @@ def _init_schema(path: str) -> None:
     conn.close()
 
 
+def _lock_holder(path: str) -> sqlite3.Connection:
+    """A plain connection holding BEGIN IMMEDIATE on a WAL database.
+
+    The file must be in WAL *before* the lock is taken: the pool's first
+    connect runs PRAGMA journal_mode=WAL, and a rollback->WAL switch needs
+    an exclusive lock that fails instantly with "database is locked" (it
+    ignores busy_timeout) if a holder already has a write lock. Real
+    databases are already WAL, so this only matters for fresh fixtures.
+    """
+    prep = sqlite3.connect(path, isolation_level=None)
+    prep.execute("PRAGMA journal_mode=WAL")
+    prep.close()
+    holder = sqlite3.connect(path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    return holder
+
+
 @pytest.fixture
 def db_path(tmp_path, monkeypatch):
     """Point app.db's connect() at a fresh temp file-backed database."""
@@ -69,8 +86,7 @@ def test_lock_released_when_begin_immediate_fails(db_path, monkeypatch):
     # A second, plain connection holds its own BEGIN IMMEDIATE open,
     # which is what makes WriteSession's own BEGIN IMMEDIATE lose the
     # race and raise "database is locked".
-    blocker = sqlite3.connect(db_path, isolation_level=None)
-    blocker.execute("BEGIN IMMEDIATE")
+    blocker = _lock_holder(db_path)
 
     try:
         with pytest.raises(sqlite3.OperationalError, match="locked"):
@@ -151,8 +167,7 @@ def test_event_loop_keeps_ticking_while_begin_immediate_waits_for_file_lock(db_p
     _fast_busy(monkeypatch, 5000)
     monkeypatch.setattr(db.settings, "db_write_wait_in_thread", True)
 
-    holder = sqlite3.connect(db_path, isolation_level=None)
-    holder.execute("BEGIN IMMEDIATE")
+    holder = _lock_holder(db_path)
 
     async def scenario():
         ticks = 0
@@ -209,8 +224,7 @@ def test_flag_off_keeps_synchronous_begin_immediate(db_path, monkeypatch):
 def test_begin_immediate_locked_error_propagates_and_releases(db_path, monkeypatch, flag):
     _fast_busy(monkeypatch, 20)
     monkeypatch.setattr(db.settings, "db_write_wait_in_thread", flag)
-    holder = sqlite3.connect(db_path, isolation_level=None)
-    holder.execute("BEGIN IMMEDIATE")
+    holder = _lock_holder(db_path)
 
     async def scenario():
         with pytest.raises(sqlite3.OperationalError, match="locked"):
@@ -256,8 +270,7 @@ def test_two_concurrent_write_sessions_serialize_in_thread_mode(db_path, monkeyp
 def test_cancel_during_begin_immediate_wait_does_not_leak_transaction(db_path, monkeypatch):
     _fast_busy(monkeypatch, 800)
     monkeypatch.setattr(db.settings, "db_write_wait_in_thread", True)
-    holder = sqlite3.connect(db_path, isolation_level=None)
-    holder.execute("BEGIN IMMEDIATE")
+    holder = _lock_holder(db_path)
 
     async def scenario():
         async def writer():
