@@ -30,15 +30,15 @@ class Settings(BaseSettings):
     # schema before it can serve a single request, and that DDL is
     # idempotent, so running it redundantly in every process is free.
     #
-    # Exactly ONE process in a deployment must have this True -- the
-    # dedicated worker service. Every web-role process (however many
+    # Exactly ONE process per role in a deployment must have this True
+    # (see BACKGROUND_ROLES below). Every web-role process (however many
     # `--workers` uvicorn runs) must have it False: two owners of the
     # same background loop would duplicate every poll, and two owners
     # of the same startup write would race the same INSERTs. The durable
     # `mc_ingest_queue` table (app/db.py) is what makes this split safe
     # at all -- a web-role process can still accept a POST /api/mc/ingest
     # batch (McIngestor.submit() is a single WriteSession INSERT, not a
-    # loop) with no drain loop of its own; the worker process drains it.
+    # loop) with no drain loop of its own; the ingest-role process drains it.
     run_background_tasks: bool = True
 
     # Which background roles this process runs when run_background_tasks
@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     # which holds the loop -> role table. Unknown names fail at startup.
     # run_background_tasks=false disables everything regardless of this.
     background_roles: str = "all"
+
+    # WriteSession (app/db.py) runs BEGIN IMMEDIATE and COMMIT in a worker
+    # thread (env DB_WRITE_WAIT_IN_THREAD) so a wait on SQLite's file
+    # write lock, held by ANOTHER process, does not freeze this
+    # process's whole event loop for up to busy_timeout. Set false to
+    # restore the old synchronous behaviour if it ever misbehaves.
+    db_write_wait_in_thread: bool = True
 
     @field_validator("background_roles")
     @classmethod

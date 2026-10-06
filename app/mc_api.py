@@ -436,7 +436,7 @@ def season_team_checkin_points(conn, season_id: int) -> dict[str, float]:
 
 # The ONE gzip level for everything this module compresses itself: the lazy
 # per-entry compression in _CachedBody.gzipped() (the inline / cold-start
-# path) and the worker's published artifact in _publish_board_once(). 6 is
+# path) and the publisher role's published artifact in _publish_board_once(). 6 is
 # zlib's own default. Level 9 -- what this used to be, and what
 # GZipMiddleware (app/main.py) defaults to -- buys a marginal size
 # reduction on JSON like this at a multiple of the CPU, and the worker pays
@@ -573,7 +573,7 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
     1. This process's own _BOARD_CACHE (unchanged from before board_cache
        existed) -- a warm process answers from memory, no DB touched at
        all.
-    2. board_cache (app/db.py): the worker-published table (see that
+    2. board_cache (app/db.py): the publisher-role-published table (app/roles.py) (see that
        table's own SCHEMA comment and run_forever() below). A web-role
        process's _BOARD_CACHE is only ever filled from here or from #3
        below, never by its own rebuild while the worker is keeping this
@@ -798,7 +798,7 @@ async def mc_board(request: Request) -> Response:
     )
 
 
-# ---- board cache publisher (worker role only) ---------------------------
+# ---- board cache publisher (publisher role only) ---------------------------
 #
 # What this loop publishes into board_cache, keyed exactly like
 # _BOARD_CACHE / cached_json_response's own `key` argument:
@@ -971,7 +971,7 @@ async def _publish_board_once() -> None:
     the write lock held; only the INSERT ... ON CONFLICT itself does.
     Computes the gzip bytes eagerly (unlike _CachedBody.gzipped(), which
     fills its own gzip_body lazily on first gzip-accepting request) --
-    the whole point of a worker-published row is that a web process
+    the whole point of a publisher-published row is that a web process
     reading it pays for neither serialization nor compression, so the
     representation it serves must already be finished before the row is
     written.
@@ -1025,7 +1025,7 @@ async def run_forever() -> None:
     started UNCONDITIONALLY (subject to settings.run_background_tasks) by
     app/main.py's lifespan, the same wiring and shutdown handling
     (asyncio.create_task, cancelled and awaited in that function's
-    `finally` block) every other worker-role loop there gets; see that
+    `finally` block) every other background loop there gets; see that
     module's own comment block for why every loop is gated on the SAME
     flag rather than each having its own switch.
 

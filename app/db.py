@@ -1847,7 +1847,7 @@ CREATE TABLE IF NOT EXISTS mc_directory_cache (
 -- app/api.py's get_nodes()). The key space is a small, fixed set, not
 -- something that grows with callers the way mc_directory_cache's
 -- connector_url or app/places_api.py's viewport-keyed _PLACES_CACHE do.
--- The worker publishes all three (app/mc_api.py's _publish_board_once()),
+-- The publisher role (see app/roles.py) publishes all three (app/mc_api.py's _publish_board_once()),
 -- the two /get-nodes rows from ONE shared build per cycle (see
 -- register_published_board_group() there), and cached_json_response()
 -- reads all three back through the same tiers. Each route's own inline
@@ -4723,12 +4723,50 @@ async def with_write_lock():
     return _WRITE_LOCK
 
 
+async def _run_in_thread_uncancellable(fn, *args):
+    """Run a blocking sqlite call in a worker thread without ever
+    abandoning it mid-flight.
+
+    A plain `await asyncio.to_thread(...)` that gets cancelled returns
+    control to the caller while the thread is STILL inside the sqlite
+    call. WriteSession's error path would then release the connection
+    to the pool (and roll it back) while the thread is still waiting
+    for, or about to take, the file write lock -- a transaction opened
+    on a connection already sitting in the free list. So on
+    cancellation we wait for the thread to finish (bounded by
+    busy_timeout), then re-raise the CancelledError."""
+    fut = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        while not fut.done():
+            try:
+                await asyncio.wait({fut})
+            except asyncio.CancelledError:
+                pass
+        if not fut.cancelled():
+            fut.exception()  # mark retrieved; the cancel wins
+        raise
+
+
 # Async-compatible wrapper using the global write lock.
 class WriteSession:
-    """`async with WriteSession() as conn:` -> connection inside the global lock."""
+    """`async with WriteSession() as conn:` -> connection inside the global lock.
+
+    BEGIN IMMEDIATE and COMMIT can block on SQLite's FILE lock, which
+    other PROCESSES (web workers, the ingest/publisher processes) also
+    contend for, for up to busy_timeout (15 s). Run on the event-loop
+    thread that wait froze the whole loop (measured on prod: a web
+    worker frozen ~0.94 s by py-spy; every request on it stalled).
+    With settings.db_write_wait_in_thread (default true) both calls run
+    in a worker thread instead. This moves a WAIT, not work, and is
+    bounded to one thread per process: _WRITE_LOCK admits one coroutine
+    at a time past this point. The flag is read once per session.
+    """
 
     def __init__(self):
         self.conn: sqlite3.Connection | None = None
+        self._in_thread = True
 
     async def __aenter__(self) -> sqlite3.Connection:
         await _WRITE_LOCK.acquire()
@@ -4743,8 +4781,12 @@ class WriteSession:
         # BaseException (not Exception) matters because this is asyncio
         # code: a task cancellation must not leak the lock either.
         try:
+            self._in_thread = bool(settings.db_write_wait_in_thread)
             self.conn = connect()
-            self.conn.execute("BEGIN IMMEDIATE")
+            if self._in_thread:
+                await _run_in_thread_uncancellable(self.conn.execute, "BEGIN IMMEDIATE")
+            else:
+                self.conn.execute("BEGIN IMMEDIATE")
         except BaseException:
             if self.conn is not None:
                 self.conn.close()
@@ -4756,8 +4798,13 @@ class WriteSession:
     async def __aexit__(self, exc_type, exc, tb):
         try:
             if exc_type is None:
-                self.conn.execute("COMMIT")
+                if self._in_thread:
+                    await _run_in_thread_uncancellable(self.conn.execute, "COMMIT")
+                else:
+                    self.conn.execute("COMMIT")
             else:
+                # ROLLBACK stays synchronous: rare and fast (no fsync of
+                # new data, nothing to wait for).
                 self.conn.execute("ROLLBACK")
         finally:
             self.conn.close()

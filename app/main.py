@@ -96,9 +96,10 @@ async def lifespan(app: FastAPI):
 
     # Every background loop below (plus the Discord outbox drain task
     # further down) is gated on settings.run_background_tasks: this
-    # process either owns ALL of them (the dedicated worker role) or
-    # NONE of them (a web role, HTTP only) -- see that setting's own
-    # comment in app/config.py. app.state still gets a real, constructed
+    # process runs the loops its BACKGROUND_ROLES selects (all of them,
+    # one role's worth -- ingest or publisher -- or, with
+    # run_background_tasks false, none: a web role, HTTP only) -- see
+    # that setting's own comment in app/config.py and app/roles.py. app.state still gets a real, constructed
     # instance of every one of these objects either way (not just when
     # running background tasks), because several HTTP routes reach
     # through request.app.state.mc_ingestor / .checkin_poller for

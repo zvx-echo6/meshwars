@@ -134,3 +134,148 @@ def test_normal_path_still_commits(db_path):
     row = check.execute("SELECT v FROM cursor WHERE k = 'normal-key'").fetchone()
     check.close()
     assert row["v"] == "normal-value"
+
+
+# ---- BEGIN IMMEDIATE / COMMIT wait in a worker thread --------------------
+
+def _fast_busy(monkeypatch, ms: int) -> None:
+    monkeypatch.setattr(db, "PRAGMAS", [
+        p if not p.startswith("PRAGMA busy_timeout") else f"PRAGMA busy_timeout={ms}"
+        for p in db.PRAGMAS
+    ])
+
+
+def test_event_loop_keeps_ticking_while_begin_immediate_waits_for_file_lock(db_path, monkeypatch):
+    import time
+
+    _fast_busy(monkeypatch, 5000)
+    monkeypatch.setattr(db.settings, "db_write_wait_in_thread", True)
+
+    holder = sqlite3.connect(db_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+
+    async def scenario():
+        ticks = 0
+        stop = False
+
+        async def ticker():
+            nonlocal ticks
+            while not stop:
+                ticks += 1
+                await asyncio.sleep(0)
+
+        async def writer():
+            async with WriteSession() as conn:
+                conn.execute("INSERT INTO cursor(k, v) VALUES ('tick', 'x')")
+
+        t = asyncio.create_task(ticker())
+        w = asyncio.create_task(writer())
+        await asyncio.sleep(0.3)  # writer is now blocked on the file lock
+        ticks_before = ticks
+        await asyncio.sleep(0.3)
+        assert not w.done()
+        assert ticks - ticks_before > 10, "event loop was frozen by BEGIN IMMEDIATE"
+        holder.execute("ROLLBACK")  # release the file lock
+        await asyncio.wait_for(w, timeout=3)
+        stop = True
+        await t
+
+    asyncio.run(scenario())
+    holder.close()
+    chk = sqlite3.connect(db_path)
+    assert chk.execute("SELECT v FROM cursor WHERE k='tick'").fetchone() == ("x",)
+    chk.close()
+
+
+def test_flag_off_keeps_synchronous_begin_immediate(db_path, monkeypatch):
+    monkeypatch.setattr(db.settings, "db_write_wait_in_thread", False)
+
+    def boom(*a, **k):
+        raise AssertionError("to_thread must not be used with the flag off")
+
+    monkeypatch.setattr(db.asyncio, "to_thread", boom)
+
+    async def scenario():
+        async with WriteSession() as conn:
+            conn.execute("INSERT INTO cursor(k, v) VALUES ('sync', 'y')")
+
+    asyncio.run(scenario())
+    chk = sqlite3.connect(db_path)
+    assert chk.execute("SELECT v FROM cursor WHERE k='sync'").fetchone() == ("y",)
+    chk.close()
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_begin_immediate_locked_error_propagates_and_releases(db_path, monkeypatch, flag):
+    _fast_busy(monkeypatch, 20)
+    monkeypatch.setattr(db.settings, "db_write_wait_in_thread", flag)
+    holder = sqlite3.connect(db_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+
+    async def scenario():
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            async with WriteSession():
+                pytest.fail("body must not run")
+        assert not db._WRITE_LOCK.locked()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    # connection was released to the pool, not leaked in a transaction
+    conn = db.connect()
+    assert not conn.in_transaction
+    conn.close()
+
+
+def test_two_concurrent_write_sessions_serialize_in_thread_mode(db_path, monkeypatch):
+    monkeypatch.setattr(db.settings, "db_write_wait_in_thread", True)
+    inside = 0
+    max_inside = 0
+
+    async def writer(key):
+        nonlocal inside, max_inside
+        async with WriteSession() as conn:
+            inside += 1
+            max_inside = max(max_inside, inside)
+            await asyncio.sleep(0.02)
+            conn.execute("INSERT INTO cursor(k, v) VALUES (?, 'w')", (key,))
+            inside -= 1
+
+    async def scenario():
+        await asyncio.gather(writer("a"), writer("b"), writer("c"))
+
+    asyncio.run(scenario())
+    assert max_inside == 1
+    chk = sqlite3.connect(db_path)
+    assert {r[0] for r in chk.execute("SELECT k FROM cursor WHERE k IN ('a','b','c')")} == {"a", "b", "c"}
+    chk.close()
+
+
+def test_cancel_during_begin_immediate_wait_does_not_leak_transaction(db_path, monkeypatch):
+    _fast_busy(monkeypatch, 800)
+    monkeypatch.setattr(db.settings, "db_write_wait_in_thread", True)
+    holder = sqlite3.connect(db_path, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+
+    async def scenario():
+        async def writer():
+            async with WriteSession():
+                pass
+
+        w = asyncio.create_task(writer())
+        await asyncio.sleep(0.2)
+        w.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await w
+        assert not db._WRITE_LOCK.locked()
+
+    asyncio.run(scenario())
+    holder.execute("ROLLBACK")
+    holder.close()
+    conn = db.connect()
+    assert not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE")  # file lock is free again
+    conn.execute("ROLLBACK")
+    conn.close()
