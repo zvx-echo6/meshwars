@@ -85,9 +85,9 @@ def _init_schema(path: str) -> None:
 
 
 @pytest.fixture
-def db_path(tmp_path, monkeypatch):
+def db_path(tmp_path, monkeypatch, make_schema_db):
     path = str(tmp_path / "game.db")
-    _init_schema(path)
+    make_schema_db(path)
     monkeypatch.setattr(db.settings, "db_path", path)
     return path
 
@@ -702,7 +702,7 @@ def test_mt_start_issues_code(client, db_path):
         assert ch not in "0oO1lI"
 
 
-def test_mt_status_returns_same_code_as_start(client, db_path):
+def test_mt_status_returns_same_code_as_start(client, db_path, monkeypatch):
     """GET .../status must echo back the SAME code POST .../start
     issued, so a page reload mid-window can recover it (see
     frontend/account.js's renderCheckinConfirmWaiting, which now reads
@@ -713,6 +713,10 @@ def test_mt_status_returns_same_code_as_start(client, db_path):
     """
     _make_meshview_net(db_path)
     _login(client, db_path)
+    # status runs a live mt scan; without this it builds a real
+    # MeshviewClient against MT_CONNECTOR_URL and waits out its 15 s
+    # httpx timeout. Same fake the other mt status tests use.
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: _FakeMeshviewClient())
 
     start_body = client.post("/api/checkin/confirm/start", json={"protocol": "mt"}).json()
     code = start_body["code"]
@@ -1052,6 +1056,9 @@ def test_mt_start_clears_any_open_mc_window(client, db_path, monkeypatch):
     state = {"nodes": [_node()]}
     calls: list[str] = []
     _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+    # the mt status call below runs a live mt scan; fake it so it does
+    # not build a real MeshviewClient and wait out its 15 s httpx timeout.
+    monkeypatch.setattr(checkin_module, "MeshviewClient", lambda base_url=None: _FakeMeshviewClient())
     assert client.post("/api/checkin/confirm/start", json={"protocol": "mc", "name": NAME}).status_code == 200
     assert client.get("/api/checkin/confirm/status").json()["protocol"] == "mc"
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sqlite3
 
 os.environ.setdefault("MESHVIEW_BASE_URL", "https://example.invalid")
@@ -19,6 +20,71 @@ import pytest
 
 from app import db
 from app.db import MIGRATIONS, SCHEMA
+
+
+# Test-sized PRAGMAs. app/db.py's PRAGMAS carry the production cache_size
+# (64 MiB per connection) and mmap_size (1 GiB); every pooled connection
+# applies them, which under pytest-xdist in a small container makes the
+# SQLite concurrency tests flaky. Swap just those two entries for small
+# values for the whole test session -- journal_mode=WAL, busy_timeout,
+# synchronous, foreign_keys and temp_store are left exactly as prod has
+# them. Tests that monkeypatch db.PRAGMAS themselves still override this
+# for their own duration (function-scoped monkeypatch layered on top).
+_TEST_PRAGMA_OVERRIDES = {
+    "PRAGMA mmap_size=": "PRAGMA mmap_size=16777216",   # 16 MiB (prod: 1 GiB)
+    "PRAGMA cache_size=": "PRAGMA cache_size=-4096",    # 4 MiB (prod: 64 MiB)
+}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _test_sized_pragmas():
+    original = list(db.PRAGMAS)
+    patched = []
+    for p in original:
+        for prefix, repl in _TEST_PRAGMA_OVERRIDES.items():
+            if p.startswith(prefix):
+                p = repl
+                break
+        patched.append(p)
+    db.PRAGMAS[:] = patched  # in place: _make_real_connection iterates the same list object
+    yield
+    db.PRAGMAS[:] = original
+
+
+@pytest.fixture(scope="session")
+def _schema_template_db(tmp_path_factory):
+    """SCHEMA + MIGRATIONS applied ONCE per pytest session (per xdist
+    worker process -- each worker has its own session and its own
+    tmp_path_factory basetemp, so workers never share a template path).
+    Built exactly the way every per-file _init_schema() did: a plain
+    sqlite3 connection, default (rollback-journal) mode, closed
+    afterwards, so the file is self-contained with no -wal/-shm."""
+    path = str(tmp_path_factory.mktemp("schema_template") / "template.db")
+    c = sqlite3.connect(path)
+    c.executescript(SCHEMA)
+    for stmt in MIGRATIONS:
+        try:
+            c.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                continue
+            raise
+    c.commit()
+    c.close()
+    return path
+
+
+@pytest.fixture
+def make_schema_db(_schema_template_db):
+    """Returns a callable: make_schema_db(path) creates a fresh file
+    database at `path` holding the full current schema, by copying the
+    session template (~ms) instead of re-running SCHEMA + ~100 migrations
+    (~235 ms). Only for fixtures that just want an empty schema'd file;
+    tests of schema/migration behaviour must still build from scratch."""
+    def _make(path):
+        shutil.copyfile(_schema_template_db, path)
+        return path
+    return _make
 
 
 @pytest.fixture(autouse=True)

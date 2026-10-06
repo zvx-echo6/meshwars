@@ -50,7 +50,7 @@ def _init_schema(path: str) -> None:
 
 
 @pytest.fixture
-def db_path(tmp_path, monkeypatch):
+def db_path(tmp_path, monkeypatch, make_schema_db):
     """A fresh temp file-backed database -- only maybe_run()'s own tests
     need this (it opens a real WriteSession, which reads settings.db_path
     via app/db.py's connect()); every provider/check_due() test below
@@ -59,7 +59,7 @@ def db_path(tmp_path, monkeypatch):
     tests/test_discord_notify.py's check_due_time_driven() tests make.
     """
     path = str(tmp_path / "game.db")
-    _init_schema(path)
+    make_schema_db(path)
     monkeypatch.setattr(db.settings, "db_path", path)
     return path
 

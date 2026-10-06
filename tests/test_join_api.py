@@ -49,9 +49,9 @@ def _init_schema(path: str) -> None:
 
 
 @pytest.fixture
-def db_path(tmp_path, monkeypatch):
+def db_path(tmp_path, monkeypatch, make_schema_db):
     path = str(tmp_path / "game.db")
-    _init_schema(path)
+    make_schema_db(path)
     # app/join_api.py imports the SAME settings singleton app/db.py does
     # (both `from .config import settings`), so patching it via either
     # module's own reference mutates the one object both read --

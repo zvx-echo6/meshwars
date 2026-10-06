@@ -55,9 +55,9 @@ def _init_schema(conn_or_path) -> None:
 
 
 @pytest.fixture
-def db_path(tmp_path, monkeypatch):
+def db_path(tmp_path, monkeypatch, make_schema_db):
     path = str(tmp_path / "game.db")
-    _init_schema(path)
+    make_schema_db(path)
     monkeypatch.setattr(db.settings, "db_path", path)
     return path
 

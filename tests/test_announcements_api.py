@@ -53,9 +53,9 @@ def _init_schema(path: str) -> None:
 
 
 @pytest.fixture
-def db_path(tmp_path, monkeypatch):
+def db_path(tmp_path, monkeypatch, make_schema_db):
     path = str(tmp_path / "game.db")
-    _init_schema(path)
+    make_schema_db(path)
     monkeypatch.setattr(public_api_module.settings, "db_path", path)
     # Also patch app.db.settings.db_path -- app/public_api.py's connect()
     # is app.db.connect, which reads settings.db_path off the SAME
