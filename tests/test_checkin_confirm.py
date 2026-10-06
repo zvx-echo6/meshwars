@@ -625,6 +625,189 @@ def test_accept_succeeds_when_node_already_bound_to_caller(client, db_path, monk
     assert row["player_id"] == player_id  # unchanged -- still theirs
 
 
+# ---- accept stores the confirmed key on an existing own row --------------
+# A trust-on-first-use row (bound before confirmation existed, or via POST
+# /api/nodes) has public_key NULL. Proving possession of that same radio
+# must record the full key rather than throwing the proof away.
+
+def _bind_own_row(path: str, player_id: int, node_ref: str, public_key) -> int:
+    bound_at = NOW - 1000
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+        "VALUES ('mc', ?, ?, ?, ?)",
+        (node_ref, player_id, bound_at, public_key),
+    )
+    conn.commit()
+    conn.close()
+    return bound_at
+
+
+def _bound_at(path: str, node_ref: str) -> int:
+    conn = sqlite3.connect(path)
+    value = conn.execute(
+        "SELECT bound_at FROM player_node WHERE node_ref = ?", (node_ref,)
+    ).fetchone()[0]
+    conn.close()
+    return value
+
+
+@pytest.mark.parametrize("empty_key", [None, ""])
+def test_accept_stores_confirmed_key_on_existing_own_row_with_no_key(
+    client, db_path, monkeypatch, empty_key
+):
+    _make_corescope_net(db_path)
+    player_id = _login(client, db_path)
+    bound_at = _bind_own_row(db_path, player_id, PUBKEY[:8], empty_key)
+
+    state = {"nodes": [_node(last_heard="2026-09-01T12:00:00Z")]}
+    calls: list[str] = []
+    _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+
+    assert client.post("/api/checkin/confirm/start", json={"name": NAME}).status_code == 200
+    state["nodes"][0]["last_heard"] = "2026-09-01T12:05:00Z"
+
+    resp = client.post("/api/checkin/confirm/accept", json={"public_key": PUBKEY})
+    assert resp.status_code == 200
+    assert resp.json() == {"node_ref": PUBKEY[:8]}
+
+    row = _player_node_row(db_path, PUBKEY[:8])
+    assert row["player_id"] == player_id
+    assert row["public_key"] == PUBKEY
+    assert _bound_at(db_path, PUBKEY[:8]) == bound_at  # bound_at never touched
+    assert client.get("/api/checkin/confirm/status").json() == {"state": "none"}
+
+
+def test_accept_leaves_existing_nonempty_key_on_own_row_unchanged(client, db_path, monkeypatch):
+    _make_corescope_net(db_path)
+    player_id = _login(client, db_path)
+    # Same 8-hex node_ref as PUBKEY, but a different stored full key.
+    stored_key = PUBKEY[:8] + "00" * 28
+    assert stored_key != PUBKEY
+    bound_at = _bind_own_row(db_path, player_id, PUBKEY[:8], stored_key)
+
+    state = {"nodes": [_node(last_heard="2026-09-01T12:00:00Z")]}
+    calls: list[str] = []
+    _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+
+    assert client.post("/api/checkin/confirm/start", json={"name": NAME}).status_code == 200
+    state["nodes"][0]["last_heard"] = "2026-09-01T12:05:00Z"
+
+    resp = client.post("/api/checkin/confirm/accept", json={"public_key": PUBKEY})
+    assert resp.status_code == 200
+    assert resp.json() == {"node_ref": PUBKEY[:8]}
+
+    row = _player_node_row(db_path, PUBKEY[:8])
+    assert row["player_id"] == player_id
+    assert row["public_key"] == stored_key  # untouched
+    assert _bound_at(db_path, PUBKEY[:8]) == bound_at
+
+
+def test_accept_other_players_keyless_row_still_409_and_key_not_written(client, db_path, monkeypatch):
+    _make_corescope_net(db_path)
+    other_player_id = _make_player(db_path, display_name="Other", team="BLUE")
+    _bind_own_row(db_path, other_player_id, PUBKEY[:8], None)
+    player_id = _login(client, db_path)
+    assert player_id != other_player_id
+
+    state = {"nodes": [_node(last_heard="2026-09-01T12:00:00Z")]}
+    calls: list[str] = []
+    _patch_checkin_http(monkeypatch, _corescope_handler(state, calls))
+
+    assert client.post("/api/checkin/confirm/start", json={"name": NAME}).status_code == 200
+    state["nodes"][0]["last_heard"] = "2026-09-01T12:05:00Z"
+
+    resp = client.post("/api/checkin/confirm/accept", json={"public_key": PUBKEY})
+    assert resp.status_code == 409
+
+    row = _player_node_row(db_path, PUBKEY[:8])
+    assert row["player_id"] == other_player_id
+    assert row["public_key"] is None  # the caller's proof is never written onto another player's row
+
+
+# ---- one radio heard by two connectors is ONE confirmation candidate -----
+
+CONNECTOR_URL_2 = "https://cs2.test"
+
+
+def _two_connector_handler(states: dict[str, dict], calls: list[str]):
+    """Like _corescope_handler, but one `state` per upstream host so two
+    connectors can report different views of the same radio.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host + request.url.path)
+        if request.url.path == "/api/nodes":
+            return httpx.Response(200, json={"nodes": list(states[request.url.host]["nodes"])})
+        return httpx.Response(404)
+
+    return handler
+
+
+def test_scan_all_connectors_dedupes_same_key_keeping_max_last_heard(db_path, monkeypatch):
+    _make_corescope_net(db_path, CONNECTOR_URL)
+    _make_corescope_net(db_path, CONNECTOR_URL_2)
+    states = {
+        "cs.test": {"nodes": [_node(role=None, last_heard="2026-09-01T12:05:00Z")]},
+        "cs2.test": {"nodes": [_node(role="companion", last_heard="2026-09-01T12:09:00Z")]},
+    }
+    _patch_checkin_http(monkeypatch, _two_connector_handler(states, []))
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        merged = _run(checkin_module.confirm_scan_all_connectors(conn, NAME))
+    finally:
+        conn.close()
+
+    assert len(merged) == 1
+    cand = merged[0]
+    assert cand["public_key"] == PUBKEY
+    assert cand["name"] == NAME
+    assert cand["role"] == "companion"  # first non-empty value wins over a None
+    assert cand["last_heard_epoch"] == checkin_module._parse_iso_ts("2026-09-01T12:09:00Z")
+    assert set(cand) == {"public_key", "name", "role", "last_heard_epoch"}  # shape unchanged
+
+
+def test_scan_all_connectors_keeps_distinct_keys_separate(db_path, monkeypatch):
+    _make_corescope_net(db_path, CONNECTOR_URL)
+    _make_corescope_net(db_path, CONNECTOR_URL_2)
+    states = {
+        "cs.test": {"nodes": [_node(public_key=PUBKEY)]},
+        "cs2.test": {"nodes": [_node(public_key=OTHER_PUBKEY)]},
+    }
+    _patch_checkin_http(monkeypatch, _two_connector_handler(states, []))
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        merged = _run(checkin_module.confirm_scan_all_connectors(conn, NAME))
+    finally:
+        conn.close()
+
+    assert sorted(c["public_key"] for c in merged) == sorted([PUBKEY, OTHER_PUBKEY])
+
+
+def test_status_shows_one_candidate_when_two_connectors_hear_same_radio(client, db_path, monkeypatch):
+    _make_corescope_net(db_path, CONNECTOR_URL)
+    _make_corescope_net(db_path, CONNECTOR_URL_2)
+    _login(client, db_path)
+    states = {
+        "cs.test": {"nodes": [_node(last_heard="2026-09-01T12:00:00Z")]},
+        "cs2.test": {"nodes": [_node(last_heard="2026-09-01T12:00:00Z")]},
+    }
+    _patch_checkin_http(monkeypatch, _two_connector_handler(states, []))
+
+    assert client.post("/api/checkin/confirm/start", json={"name": NAME}).status_code == 200
+    states["cs.test"]["nodes"][0]["last_heard"] = "2026-09-01T12:05:00Z"
+    states["cs2.test"]["nodes"][0]["last_heard"] = "2026-09-01T12:07:00Z"
+
+    body = client.get("/api/checkin/confirm/status").json()
+    assert body["state"] == "found"
+    assert len(body["candidates"]) == 1
+    assert body["candidates"][0]["public_key"] == PUBKEY
+
+
 # ---- expired window -------------------------------------------------------
 
 def test_expired_window_status_none_and_accept_409(client, db_path, monkeypatch):
