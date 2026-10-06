@@ -775,7 +775,7 @@ async def accept_confirmation(player_id: int, body: dict) -> tuple[dict, int]:
             # beats letting player_node's (protocol, node_ref) PRIMARY
             # KEY raise on a cross-player conflict.
             existing = conn.execute(
-                "SELECT player_id FROM player_node WHERE protocol = ? AND node_ref = ?",
+                "SELECT player_id, public_key FROM player_node WHERE protocol = ? AND node_ref = ?",
                 (protocol, node_ref),
             ).fetchone()
             if existing is not None and existing["player_id"] != player_id:
@@ -786,6 +786,17 @@ async def accept_confirmation(player_id: int, body: dict) -> tuple[dict, int]:
                     "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (protocol, node_ref, player_id, bound_at, bind_public_key),
+                )
+            elif bind_public_key and not existing["public_key"]:
+                # The caller already holds this node (trust-on-first-use
+                # row with no stored key): keep the possession proof they
+                # just passed by recording the confirmed full key. A row
+                # that already has a key is left alone, and bound_at is
+                # never touched.
+                conn.execute(
+                    "UPDATE player_node SET public_key = ? "
+                    " WHERE protocol = ? AND node_ref = ? AND player_id = ?",
+                    (bind_public_key, protocol, node_ref, player_id),
                 )
             # Already bound to the caller, or freshly bound just now --
             # either way the window is consumed: it did its job. Clears

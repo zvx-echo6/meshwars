@@ -548,6 +548,105 @@ def test_checkin_health_contact_key_ambiguous(client, db_path):
     assert "operator" in mc["summary"].lower()
 
 
+# ---- the same radio listed by more than one connector is NOT ambiguous ----
+#
+# These use a REAL CheckinPoller (not FakePoller, which bypasses the union
+# entirely) so directory_snapshot()'s own union -- the code that used to
+# concatenate every connector's list with no dedupe -- is what's under test.
+
+DUP_KEY = "aaaaaaaa" + "11" * 28  # 64 lowercase hex, 8-hex prefix "aaaaaaaa"
+OTHER_KEY_SAME_PREFIX = "aaaaaaaa" + "22" * 28
+
+
+def _real_poller():
+    # Imported lazily: app.checkin pulls in aiolimiter via
+    # meshview_client, which not every box running this file has.
+    from app.checkin import CheckinPoller
+    from app.meshview_client import MeshviewClient
+
+    return CheckinPoller(MeshviewClient())
+
+
+def _seed_directory_cache(path: str, connector_url: str, nodes: list[dict]) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO mc_directory_cache(connector_url, nodes, fetched_at) VALUES (?, ?, ?)",
+        (connector_url, json.dumps(nodes), NOW),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _health_mc_contact(client, db_path) -> dict:
+    return client.get("/api/account/checkin-health").json()["boards"]["mc"]["contacts"][0]
+
+
+def test_checkin_health_same_key_in_two_connectors_in_memory_is_resolved(client, db_path):
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    _bind_node(db_path, player_id, "aaaaaaaa")
+    poller = _real_poller()
+    poller._mc_directory["https://live.mwmesh.example"] = [_node("Radio One", DUP_KEY)]
+    poller._mc_directory["https://beacon.example"] = [_node("Radio One", DUP_KEY)]
+    client.app.state.checkin_poller = poller
+
+    contact = _health_mc_contact(client, db_path)
+
+    assert contact["status"] == "resolved"
+    assert contact["resolved_name"] == "Radio One"
+    assert contact["match_count"] == 1
+
+
+def test_checkin_health_same_key_in_two_connectors_from_db_cache_is_resolved(client, db_path):
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    _bind_node(db_path, player_id, "aaaaaaaa")
+    _seed_directory_cache(db_path, "https://live.mwmesh.example", [_node("Radio One", DUP_KEY)])
+    _seed_directory_cache(db_path, "https://beacon.example", [_node("Radio One", DUP_KEY)])
+    poller = _real_poller()
+    assert poller._mc_directory == {}  # DB-fallback branch of directory_snapshot()
+    client.app.state.checkin_poller = poller
+
+    contact = _health_mc_contact(client, db_path)
+
+    assert contact["status"] == "resolved"
+    assert contact["match_count"] == 1
+
+
+def test_checkin_health_same_key_twice_inside_one_connector_is_resolved(client, db_path):
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    _bind_node(db_path, player_id, "aaaaaaaa")
+    poller = _real_poller()
+    poller._mc_directory["https://live.mwmesh.example"] = [
+        _node("Radio One", DUP_KEY),
+        _node("Radio One", DUP_KEY.upper()),
+    ]
+    client.app.state.checkin_poller = poller
+
+    contact = _health_mc_contact(client, db_path)
+
+    assert contact["status"] == "resolved"
+    assert contact["match_count"] == 1
+
+
+def test_checkin_health_different_keys_sharing_prefix_across_connectors_still_key_ambiguous(
+    client, db_path
+):
+    account_id, _ = _login(client, db_path)
+    player_id = _make_player(db_path, account_id=account_id)
+    _bind_node(db_path, player_id, "aaaaaaaa")
+    poller = _real_poller()
+    poller._mc_directory["https://live.mwmesh.example"] = [_node("Radio One", DUP_KEY)]
+    poller._mc_directory["https://beacon.example"] = [_node("Radio Two", OTHER_KEY_SAME_PREFIX)]
+    client.app.state.checkin_poller = poller
+
+    contact = _health_mc_contact(client, db_path)
+
+    assert contact["status"] == "key_ambiguous"
+    assert contact["match_count"] == 2
+
+
 def test_checkin_health_contact_name_ambiguous(client, db_path):
     account_id, _ = _login(client, db_path)
     player_id = _make_player(db_path, account_id=account_id)

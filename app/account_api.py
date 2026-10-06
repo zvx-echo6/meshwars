@@ -2427,10 +2427,9 @@ def _checkin_contacts_status(
     """Every one of this player's bound radios on `protocol` (player_node,
     protocol=`protocol`), classified per-contact.
 
-    MeshCore (`protocol='mc'`) reuses checkin.mc_contact_status() -- the
-    exact same per-contact decision checkin._build_directory_bridge()
-    makes at check-in time against `directory`, just not thrown away for
-    the cases that don't cleanly resolve.
+    MeshCore (`protocol='mc'`) reuses checkin.mc_contact_status() and
+    evaluates the player's contacts against the deduplicated union of all
+    connector directories, whereas crediting resolves per connector.
 
     Meshtastic (`protocol='mt'`) has no equivalent resolution step to
     classify against: app/checkin.py's own _process_mt_packet /

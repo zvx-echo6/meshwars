@@ -1531,10 +1531,26 @@ async def confirm_scan_all_connectors(conn, name: str) -> list[dict]:
     results = await asyncio.gather(
         *[confirm_scan_connector(r["kind"], r["connector_url"], name) for r in rows]
     )
-    out: list[dict] = []
+    merged: dict[str, dict] = {}
     for r in results:
-        out.extend(r)
-    return out
+        for cand in r:
+            key = cand.get("public_key")
+            current = merged.get(key)
+            if current is None:
+                merged[key] = dict(cand)
+                continue
+            # Same radio reported by more than one connector: keep the
+            # newest last_heard_epoch and, for every other field, the
+            # first non-empty value seen.
+            for field, value in cand.items():
+                if field == "last_heard_epoch":
+                    if value is not None and (
+                        current.get(field) is None or value > current[field]
+                    ):
+                        current[field] = value
+                elif current.get(field) in (None, "") and value not in (None, ""):
+                    current[field] = value
+    return list(merged.values())
 
 
 # ---- Meshtastic: node confirmation (app/checkin_api.py's ----------------
@@ -1825,6 +1841,32 @@ def _record_node_name(conn, connector: str, node_ref: str, player_id: int, name:
         "VALUES (?, ?, ?, ?, ?)",
         (connector, node_ref, player_id, name, now),
     )
+
+
+def dedupe_mc_directory(nodes: list[dict]) -> list[dict]:
+    """Drop repeat entries for the same radio from a MeshCore directory
+    list, keyed on the full public key lowercased -- the same
+    normalization _index_mc_directory applies. First occurrence wins and
+    order is preserved. A node whose public_key is not a string cannot be
+    keyed, so it is passed through unchanged (_index_mc_directory skips
+    such nodes on its own).
+
+    CheckinPoller.directory_snapshot() concatenates every connector's
+    node list, so a radio that two connectors both list (the same 64-hex
+    key) would otherwise be indexed twice and read as "key matches more
+    than one entry".
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for node in nodes:
+        pubkey = node.get("public_key") if isinstance(node, dict) else None
+        if isinstance(pubkey, str):
+            key = pubkey.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(node)
+    return out
 
 
 def _index_mc_directory(
@@ -2676,7 +2718,7 @@ class CheckinPoller:
             out: list[dict] = []
             for nodes in self._mc_directory.values():
                 out.extend(nodes)
-            return out
+            return dedupe_mc_directory(out)
         return self._directory_from_db(None)
 
     def _directory_from_db(self, connector_url: str | None) -> list[dict]:
@@ -2701,7 +2743,7 @@ class CheckinPoller:
             out: list[dict] = []
             for row in conn.execute("SELECT nodes FROM mc_directory_cache"):
                 out.extend(json.loads(row["nodes"]))
-            return out
+            return dedupe_mc_directory(out)
         finally:
             conn.close()
 

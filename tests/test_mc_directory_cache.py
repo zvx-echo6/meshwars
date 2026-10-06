@@ -213,3 +213,67 @@ def test_refresh_writes_row_then_a_separate_poller_reads_it_back(db_path, monkey
     conn.close()
     assert json.loads(row[0]) == [NODE_A, NODE_B]
     assert row[1] > 0
+
+
+# ---------------------------------------------------------------------
+# dedupe_mc_directory: one radio listed by several connectors is one
+# entry in the union, keyed on the full public key.
+# ---------------------------------------------------------------------
+
+FULL_KEY = "ab" * 32  # 64 lowercase hex
+
+
+def test_dedupe_mc_directory_first_wins_order_preserved_case_insensitive():
+    first = {"public_key": FULL_KEY, "name": "first"}
+    other = {"public_key": "cd" * 32, "name": "other"}
+    dup_upper = {"public_key": FULL_KEY.upper(), "name": "dup-upper"}
+    dup_lower = {"public_key": FULL_KEY, "name": "dup-lower"}
+    last = {"public_key": "ef" * 32, "name": "last"}
+
+    out = checkin_module.dedupe_mc_directory([first, other, dup_upper, dup_lower, last])
+
+    assert out == [first, other, last]
+    assert out[0] is first  # the first occurrence itself, not a later duplicate
+
+
+def test_dedupe_mc_directory_passes_non_string_keys_through():
+    no_key = {"name": "no key"}
+    none_key = {"public_key": None, "name": "none key"}
+    int_key = {"public_key": 12345, "name": "int key"}
+    nodes = [no_key, none_key, int_key, no_key, none_key, int_key]
+
+    assert checkin_module.dedupe_mc_directory(nodes) == nodes
+
+
+def test_dedupe_mc_directory_does_not_mutate_input_and_handles_empty():
+    nodes = [{"public_key": FULL_KEY}, {"public_key": FULL_KEY}]
+    assert checkin_module.dedupe_mc_directory([]) == []
+    assert len(checkin_module.dedupe_mc_directory(nodes)) == 1
+    assert len(nodes) == 2
+
+
+def test_in_memory_union_dedupes_same_key_across_connectors(db_path):
+    poller = _poller()
+    a = {"public_key": FULL_KEY, "name": "radio", "role": "REPEATER"}
+    b = {"public_key": FULL_KEY.upper(), "name": "radio", "role": "REPEATER"}
+    poller._mc_directory["https://corescope.example"] = [a, NODE_A]
+    poller._mc_directory["https://beacon.example"] = [b, NODE_B]
+
+    union = poller.directory_snapshot()
+
+    assert union == [a, NODE_A, NODE_B]
+
+
+def test_db_fallback_union_dedupes_same_key_across_connectors(db_path):
+    a = {"public_key": FULL_KEY, "name": "radio", "role": "REPEATER"}
+    b = {"public_key": FULL_KEY.upper(), "name": "radio", "role": "REPEATER"}
+    _seed_cache_row(db_path, "https://corescope.example", [a, NODE_A])
+    _seed_cache_row(db_path, "https://beacon.example", [b, NODE_B])
+
+    poller = _poller()
+    assert poller._mc_directory == {}
+
+    union = poller.directory_snapshot()
+
+    keys = [n["public_key"].lower() for n in union]
+    assert sorted(keys) == sorted([FULL_KEY, NODE_A["public_key"], NODE_B["public_key"]])
