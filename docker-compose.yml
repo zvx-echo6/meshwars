@@ -35,9 +35,17 @@
 #                        is needed here for that to keep working; it
 #                        simply isn't published to the host.
 #
-# Exactly one process across the two services has RUN_BACKGROUND_TASKS
-# true -- see that setting's own comment in app/config.py for what goes
-# wrong if that is ever more or less than one.
+#   meshwars-publisher -- publisher role. One process, no published port,
+#                        RUN_BACKGROUND_TASKS=true with BACKGROUND_ROLES=
+#                        publisher: runs only the board-cache publisher
+#                        loop (app/roles.py), so its CPU is off the
+#                        worker's event loop. meshwars-worker runs with
+#                        BACKGROUND_ROLES=ingest (every other loop and
+#                        the startup writes).
+#
+# Each loop and startup write has exactly one owner across the three
+# services (role table in app/roles.py) -- see RUN_BACKGROUND_TASKS's
+# own comment in app/config.py for what goes wrong otherwise.
 #
 # The rest of this file's environment variables are IDENTICAL between
 # the two services (both roles need every setting -- e.g. the worker
@@ -369,6 +377,12 @@ services:
       # comment above.
       RUN_BACKGROUND_TASKS: "false"
     volumes: *meshwars-volumes
+    # Bounded json-file log rotation (was unbounded).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   meshwars-worker:
     build: .
@@ -393,7 +407,40 @@ services:
       # startup writes (places-seed thread, checkin/freqmapper/discord
       # config bootstraps) -- see app/config.py's run_background_tasks.
       RUN_BACKGROUND_TASKS: "true"
+      # Every background loop EXCEPT the board-cache publisher, which
+      # runs in meshwars-publisher below (app/roles.py).
+      BACKGROUND_ROLES: "ingest"
     volumes: *meshwars-volumes
+    # Bounded json-file log rotation (was unbounded).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Publisher role: one process whose only job is the board-cache
+  # publisher (app/mc_api.py run_forever -- mc_board + the two
+  # /get-nodes keys, every board_cache_seconds). Measured on prod at
+  # ~1 s of CPU per ~11 s, synchronous; in its own container it no
+  # longer blocks the worker's ingest and check-in event loop. Same
+  # image, env and volumes as meshwars-worker; no published port.
+  meshwars-publisher:
+    build: .
+    image: meshwars:latest
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    mem_limit: 512m
+    environment:
+      <<: *meshwars-environment
+      RUN_BACKGROUND_TASKS: "true"
+      BACKGROUND_ROLES: "publisher"
+    volumes: *meshwars-volumes
+    # Bounded json-file log rotation (was unbounded).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
 volumes:
   # Kept only so an existing install's database is not orphaned by the

@@ -22,6 +22,7 @@ from .log_redact import DiscordWebhookRedactionFilter
 from .mc_ingest import McIngestor
 from .meshview_client import MeshviewClient
 from .mqtt_subscriber import MqttSubscriber
+from .roles import KNOWN_LOOPS, active_roles, loop_enabled
 from .traffic import TrafficMiddleware
 
 logging.basicConfig(
@@ -43,6 +44,20 @@ async def lifespan(app: FastAPI):
     log.info(
         "startup: meshview=%s db=%s run_background_tasks=%s",
         settings.meshview_url, settings.db_path, settings.run_background_tasks,
+    )
+    # Fails fast (ValueError) on an unknown BACKGROUND_ROLES name.
+    _roles = active_roles(settings.background_roles)
+
+    def _on(name: str) -> bool:
+        return loop_enabled(name, settings.run_background_tasks, settings.background_roles)
+
+    _started = [n for n in KNOWN_LOOPS if n != "startup_writes" and _on(n)]
+    _skipped = [n for n in KNOWN_LOOPS if n != "startup_writes" and not _on(n)]
+    log.info(
+        "background roles: %s (run_background_tasks=%s) loops started: %s; skipped: %s; startup writes: %s",
+        ",".join(sorted(_roles)) or "-", settings.run_background_tasks,
+        ",".join(_started) or "none", ",".join(_skipped) or "none",
+        "yes" if _on("startup_writes") else "no",
     )
     if not settings.admin_require_auth:
         # Loud on purpose, at the loudest point in startup: an operator
@@ -94,11 +109,11 @@ async def lifespan(app: FastAPI):
     client = MeshviewClient()
     ingestor = Ingestor(client)
     task = None
-    if settings.run_background_tasks:
+    if _on("ingest"):
         task = asyncio.create_task(ingestor.run_forever(), name="ingest")
 
     mc_ingestor = McIngestor()
-    if settings.run_background_tasks and settings.mc_ingest_enabled:
+    if _on("mc_ingest") and settings.mc_ingest_enabled:
         await mc_ingestor.start()
 
     # FreqMapper (app/freqmapper_ingest.py): an alternative Meshtastic
@@ -115,7 +130,7 @@ async def lifespan(app: FastAPI):
     # enabled and an api_key are both set.
     freqmapper_ingestor = FreqMapperIngestor()
     freqmapper_task = None
-    if settings.run_background_tasks:
+    if _on("freqmapper_ingest"):
         freqmapper_task = asyncio.create_task(freqmapper_ingestor.run_forever(), name="freqmapper-ingest")
 
     # Net check-ins (app/checkin.py). Shares `client` (the same
@@ -134,7 +149,7 @@ async def lifespan(app: FastAPI):
     # role), but that task polls nothing until an admin adds a net and
     # turns it on.
     checkin_poller = CheckinPoller(client)
-    if settings.run_background_tasks:
+    if _on("checkin_poller"):
         await checkin_poller.start()
 
     # MQTT connector kind (app/mqtt_subscriber.py). Started unconditionally
@@ -147,7 +162,7 @@ async def lifespan(app: FastAPI):
     # into it -- see that module's docstring for why a persistent broker
     # subscription has no business living inside a 30-second poll loop.
     mqtt_subscriber = MqttSubscriber()
-    if settings.run_background_tasks:
+    if _on("mqtt_subscriber"):
         await mqtt_subscriber.start()
 
     # Discord outbox drain loop (app/discord_notify.py): posts
@@ -164,7 +179,7 @@ async def lifespan(app: FastAPI):
     # there is no discord_notify.stop() to call at shutdown, only the
     # task cancellation every other task here already gets.
     discord_task = None
-    if settings.run_background_tasks:
+    if _on("discord_outbox"):
         discord_task = asyncio.create_task(discord_notify.run_forever(), name="discord-outbox")
 
     # Board cache publisher (app/mc_api.py): rebuilds /api/mc/board's
@@ -177,7 +192,7 @@ async def lifespan(app: FastAPI):
     # shape as discord_task just above -- nothing to gracefully release,
     # only the task cancellation every loop here gets at shutdown.
     board_publisher_task = None
-    if settings.run_background_tasks:
+    if _on("board_publisher"):
         board_publisher_task = asyncio.create_task(mc_api.run_forever(), name="board-cache-publisher")
 
     app.state.client = client

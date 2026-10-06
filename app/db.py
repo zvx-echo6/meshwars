@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import settings
+from .roles import loop_enabled
 from .device_label import device_label_from_user_agent
 
 log = logging.getLogger("db")
@@ -4583,7 +4584,9 @@ def init_db() -> None:
         # same one-time config bootstrap INSERTs -- wasted work at best,
         # a lock-contention pile-up at worst. Exactly one process (the
         # dedicated worker) should have run_background_tasks=True.
-        if settings.run_background_tasks:
+        # Role-routed (app/roles.py): these writes belong to the `ingest`
+        # role, so a publisher-only process skips them too.
+        if loop_enabled("startup_writes", settings.run_background_tasks, settings.background_roles):
             # Places Worth Going seed (app/places_seed.py): reference
             # data shipped with the code, same as app/reference/
             # places.csv, but loaded into `place`/`place_cell` rather

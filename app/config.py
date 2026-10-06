@@ -1,5 +1,8 @@
 """Configuration loaded from environment variables."""
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .roles import parse_roles
 
 
 class Settings(BaseSettings):
@@ -37,6 +40,20 @@ class Settings(BaseSettings):
     # batch (McIngestor.submit() is a single WriteSession INSERT, not a
     # loop) with no drain loop of its own; the worker process drains it.
     run_background_tasks: bool = True
+
+    # Which background roles this process runs when run_background_tasks
+    # is true (env BACKGROUND_ROLES, comma-separated): `all` (default),
+    # `ingest` (every loop except the board-cache publisher) or
+    # `publisher` (only the board-cache publisher). See app/roles.py,
+    # which holds the loop -> role table. Unknown names fail at startup.
+    # run_background_tasks=false disables everything regardless of this.
+    background_roles: str = "all"
+
+    @field_validator("background_roles")
+    @classmethod
+    def _validate_background_roles(cls, v: str) -> str:
+        parse_roles(v)
+        return v
 
     # Places Worth Going seed (app/places_seed.py): the loader normally
     # skips its own reconcile pass when the seed's sha256 content hash

@@ -49,6 +49,7 @@ import app.discord_interactions as discord_interactions_module
 import app.discord_notify as discord_notify_module
 import app.freqmapper_ingest as freqmapper_module
 import app.main as main_module
+import app.roles as roles_module
 from app.db import MIGRATIONS, SCHEMA
 
 
@@ -110,6 +111,7 @@ def test_init_db_skips_startup_writes_when_run_background_tasks_false(db_path, m
 
 def test_init_db_runs_startup_writes_when_run_background_tasks_true(db_path, monkeypatch):
     monkeypatch.setattr(db.settings, "run_background_tasks", True)
+    monkeypatch.setattr(db.settings, "background_roles", "all")
 
     fake_thread_cls = MagicMock(name="threading.Thread")
     monkeypatch.setattr(db.threading, "Thread", fake_thread_cls)
@@ -268,6 +270,7 @@ def test_lifespan_starts_no_loops_when_run_background_tasks_false(db_path, monke
 
 def test_lifespan_starts_all_loops_when_run_background_tasks_true(db_path, monkeypatch, _fake_loop_owners):
     monkeypatch.setattr(main_module.settings, "run_background_tasks", True)
+    monkeypatch.setattr(main_module.settings, "background_roles", "all")
 
     app = _FakeApp()
 
@@ -298,6 +301,201 @@ def test_lifespan_starts_all_loops_when_run_background_tasks_true(db_path, monke
         assert app.state.board_publisher_task.cancelled()
 
     asyncio.run(_drive())
+
+
+# =========================================================================
+# BACKGROUND_ROLES: app/roles.py parsing and role-routed loops
+# =========================================================================
+
+_ALL_TASK_NAMES = ("ingest", "freqmapper-ingest", "discord-outbox", "board-cache-publisher")
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("all", {"all"}),
+        ("ingest", {"ingest"}),
+        ("publisher", {"publisher"}),
+        ("ingest,publisher", {"ingest", "publisher"}),
+        (" Ingest , PUBLISHER ", {"ingest", "publisher"}),
+    ],
+)
+def test_parse_roles_valid(raw, expected):
+    assert roles_module.parse_roles(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["bogus", "ingest,bogus", "", " , "])
+def test_parse_roles_unknown_or_empty_raises(raw):
+    with pytest.raises(ValueError, match="BACKGROUND_ROLES"):
+        roles_module.parse_roles(raw)
+
+
+def test_settings_default_background_roles_is_all():
+    from app.config import Settings
+
+    assert Settings(meshview_base_url="http://x").background_roles == "all"
+
+
+def test_settings_rejects_unknown_background_roles(monkeypatch):
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    monkeypatch.setenv("BACKGROUND_ROLES", "nonsense")
+    with pytest.raises(ValidationError):
+        Settings(meshview_base_url="http://x")
+
+
+def test_active_roles_all_expands_to_both():
+    assert roles_module.active_roles("all") == {"ingest", "publisher"}
+
+
+def test_every_known_loop_has_a_role():
+    assert set(roles_module.KNOWN_LOOPS) == set(roles_module.LOOP_ROLES)
+    assert roles_module.LOOP_ROLES["board_publisher"] == "publisher"
+    for name in roles_module.KNOWN_LOOPS:
+        if name != "board_publisher":
+            assert roles_module.LOOP_ROLES[name] == "ingest"
+
+
+def test_loop_enabled_unknown_loop_raises():
+    with pytest.raises(KeyError):
+        roles_module.loop_enabled("new_loop_nobody_assigned", True, "all")
+
+
+def test_loop_enabled_false_when_background_tasks_off_regardless_of_roles():
+    for raw in ("all", "ingest", "publisher", "ingest,publisher"):
+        for name in roles_module.KNOWN_LOOPS:
+            assert roles_module.loop_enabled(name, False, raw) is False
+
+
+def test_loop_enabled_still_validates_roles_when_background_tasks_off():
+    with pytest.raises(ValueError):
+        roles_module.loop_enabled("ingest", False, "bogus")
+
+
+def _init_db_with_fakes(monkeypatch):
+    fake_thread_cls = MagicMock(name="threading.Thread")
+    monkeypatch.setattr(db.threading, "Thread", fake_thread_cls)
+    seeds = [MagicMock(), MagicMock(), MagicMock()]
+    monkeypatch.setattr(checkin_module, "seed_nets_from_env", seeds[0])
+    monkeypatch.setattr(freqmapper_module, "seed_freqmapper_config_from_env", seeds[1])
+    monkeypatch.setattr(discord_notify_module, "seed_discord_config_from_env", seeds[2])
+    db.init_db()
+    return fake_thread_cls, seeds
+
+
+def test_init_db_publisher_role_runs_no_startup_writes(db_path, monkeypatch):
+    monkeypatch.setattr(db.settings, "run_background_tasks", True)
+    monkeypatch.setattr(db.settings, "background_roles", "publisher")
+    fake_thread_cls, seeds = _init_db_with_fakes(monkeypatch)
+    fake_thread_cls.assert_not_called()
+    for seed in seeds:
+        seed.assert_not_called()
+    # Schema creation is still ungated.
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("SELECT id FROM season LIMIT 1")
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("roles", ["ingest", "ingest,publisher", "all"])
+def test_init_db_ingest_role_runs_startup_writes(db_path, monkeypatch, roles):
+    monkeypatch.setattr(db.settings, "run_background_tasks", True)
+    monkeypatch.setattr(db.settings, "background_roles", roles)
+    fake_thread_cls, seeds = _init_db_with_fakes(monkeypatch)
+    fake_thread_cls.assert_called_once()
+    for seed in seeds:
+        seed.assert_called_once()
+
+
+def test_init_db_no_startup_writes_when_background_tasks_off_any_role(db_path, monkeypatch):
+    monkeypatch.setattr(db.settings, "run_background_tasks", False)
+    monkeypatch.setattr(db.settings, "background_roles", "all")
+    fake_thread_cls, seeds = _init_db_with_fakes(monkeypatch)
+    fake_thread_cls.assert_not_called()
+    for seed in seeds:
+        seed.assert_not_called()
+
+
+def _lifespan_snapshot(app):
+    """Run lifespan() and record what was started while it was live."""
+    seen = {}
+
+    async def _drive():
+        async with main_module.lifespan(app):
+            seen["ingest"] = isinstance(app.state.ingest_task, asyncio.Task)
+            seen["freqmapper"] = isinstance(app.state.freqmapper_task, asyncio.Task)
+            seen["discord"] = isinstance(app.state.discord_task, asyncio.Task)
+            seen["publisher"] = isinstance(app.state.board_publisher_task, asyncio.Task)
+            seen["mc_ingest"] = app.state.mc_ingestor.started
+            seen["checkin"] = app.state.checkin_poller.started
+            seen["mqtt"] = app.state.mqtt_subscriber.started
+            seen["names"] = {t.get_name() for t in asyncio.all_tasks()}
+
+    asyncio.run(_drive())
+    return seen
+
+
+def test_lifespan_publisher_role_starts_only_publisher(db_path, monkeypatch, _fake_loop_owners):
+    monkeypatch.setattr(main_module.settings, "run_background_tasks", True)
+    monkeypatch.setattr(main_module.settings, "background_roles", "publisher")
+    monkeypatch.setattr(db.threading, "Thread", MagicMock(name="threading.Thread"))
+    seed = MagicMock()
+    monkeypatch.setattr(checkin_module, "seed_nets_from_env", seed)
+
+    seen = _lifespan_snapshot(_FakeApp())
+
+    assert seen["publisher"] is True
+    assert "board-cache-publisher" in seen["names"]
+    for k in ("ingest", "freqmapper", "discord", "mc_ingest", "checkin", "mqtt"):
+        assert seen[k] is False, k
+    for forbidden in ("ingest", "freqmapper-ingest", "discord-outbox"):
+        assert forbidden not in seen["names"]
+    # No startup writes.
+    db.threading.Thread.assert_not_called()
+    seed.assert_not_called()
+
+
+def test_lifespan_ingest_role_starts_everything_but_publisher(db_path, monkeypatch, _fake_loop_owners):
+    monkeypatch.setattr(main_module.settings, "run_background_tasks", True)
+    monkeypatch.setattr(main_module.settings, "background_roles", "ingest")
+    monkeypatch.setattr(db.threading, "Thread", MagicMock(name="threading.Thread"))
+    seed = MagicMock()
+    monkeypatch.setattr(checkin_module, "seed_nets_from_env", seed)
+
+    seen = _lifespan_snapshot(_FakeApp())
+
+    assert seen["publisher"] is False
+    assert "board-cache-publisher" not in seen["names"]
+    for k in ("ingest", "freqmapper", "discord", "mc_ingest", "checkin", "mqtt"):
+        assert seen[k] is True, k
+    for expected in ("ingest", "freqmapper-ingest", "discord-outbox"):
+        assert expected in seen["names"]
+    # Startup writes run on the ingest role.
+    db.threading.Thread.assert_called_once()
+    seed.assert_called_once()
+
+
+@pytest.mark.parametrize("roles", ["all", "ingest", "publisher", "ingest,publisher"])
+def test_lifespan_starts_nothing_when_background_tasks_off_any_role(
+    db_path, monkeypatch, _fake_loop_owners, roles
+):
+    monkeypatch.setattr(main_module.settings, "run_background_tasks", False)
+    monkeypatch.setattr(main_module.settings, "background_roles", roles)
+    seen = _lifespan_snapshot(_FakeApp())
+    for k in ("ingest", "freqmapper", "discord", "publisher", "mc_ingest", "checkin", "mqtt"):
+        assert seen[k] is False, k
+    for forbidden in _ALL_TASK_NAMES:
+        assert forbidden not in seen["names"]
+
+
+def test_lifespan_unknown_role_fails_fast(db_path, monkeypatch, _fake_loop_owners):
+    monkeypatch.setattr(main_module.settings, "run_background_tasks", True)
+    monkeypatch.setattr(main_module.settings, "background_roles", "bogus")
+    with pytest.raises(ValueError, match="BACKGROUND_ROLES"):
+        _lifespan_snapshot(_FakeApp())
 
 
 # =========================================================================
