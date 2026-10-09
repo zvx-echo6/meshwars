@@ -27,6 +27,9 @@
 let myRole = null;         // null | 'admin' | 'operator' -- from GET /api/account, or synthetic 'operator' when admin_require_auth is off (see checkAccess())
 let allPlayers = [];
 let expanded = new Set();   // player ids left open across a refresh
+// Keep one-time key displays in this page's memory across player-list rebuilds.
+// Never persist plaintext keys in browser storage or send them back to the server.
+const playerKeyResults = new Map();
 let allAccounts = [];       // GET /api/admin/accounts -- every account, not just linked ones
 let allCommunities = [];    // GET /api/admin/communities
 let expandedConnections = new Set(); // 'net-'+id / 'source-'+id left open across a refresh, Connections list
@@ -841,6 +844,19 @@ function revealKey(host, label, key) {
   box.select();
 }
 
+function revealPlayerKey(p, host, label, key, replaceExisting = false) {
+  // Reissue revokes earlier keys; extra issuance leaves all previous reveals usable.
+  if (replaceExisting) host.replaceChildren();
+  const result = el('div', { className: 'adm-result' });
+  host.appendChild(result);
+  revealKey(result, label, key);
+  result.appendChild(btn('Dismiss key', 'adm-btn-quiet', () => {
+    result.remove();
+    if (!host.childElementCount) playerKeyResults.delete(p.player_id);
+  }));
+  playerKeyResults.set(p.player_id, host);
+}
+
 function renderPlayerDetail(p) {
   const d = el('div', { className: 'adm-player-detail', });
 
@@ -924,7 +940,7 @@ function renderPlayerDetail(p) {
     p.keys.forEach((k) => d.appendChild(renderKey(k)));
   }
 
-  const out = el('div', { className: 'adm-result' });
+  const out = playerKeyResults.get(p.player_id) || el('div', { className: 'adm-result' });
 
   d.appendChild(el('div', { className: 'adm-sub-title', text: 'Diagnostics' }));
   const diag = el('div', { className: 'adm-result' });
@@ -963,8 +979,8 @@ function renderPlayerDetail(p) {
     b.disabled = true;
     try {
       const r = await post('/api/admin/player/issue_key', { player_id: p.player_id });
-      revealKey(out, 'Extra key for ' + p.display_name, r.key);
-      await refreshAll();
+      revealPlayerKey(p, out, 'Extra key for ' + p.display_name, r.key);
+      await loadPlayers();
     } catch (e) { setStatus('Failed: ' + e.message, true); }
     b.disabled = false;
   }));
@@ -975,8 +991,8 @@ function renderPlayerDetail(p) {
     try {
       const r = await post('/api/admin/player/reissue',
         { player_id: p.player_id, display_name: typed });
-      revealKey(out, 'New key for ' + p.display_name + ' (' + r.revoked_count + ' revoked)', r.key);
-      await refreshAll();
+      revealPlayerKey(p, out, 'New key for ' + p.display_name + ' (' + r.revoked_count + ' revoked)', r.key, true);
+      await loadPlayers();
     } catch (e) { setStatus('Failed: ' + e.message, true); }
     b.disabled = false;
   }));
@@ -1016,6 +1032,9 @@ function renderPlayerDetail(p) {
       await post('/api/admin/player/delete', { player_id: p.player_id, display_name: typed });
       setStatus('Deleted ' + p.display_name, false);
       expanded.delete(p.player_id);
+      const result = playerKeyResults.get(p.player_id);
+      if (result) result.replaceChildren();
+      playerKeyResults.delete(p.player_id);
       await refreshAll();
     } catch (e) { setStatus('Failed: ' + e.message, true); b.disabled = false; }
   }));
@@ -2963,6 +2982,8 @@ async function refreshAll() {
 }
 
 function showNoAccess(message) {
+  playerKeyResults.forEach((host) => host.replaceChildren());
+  playerKeyResults.clear();
   myRole = null;
   panelLoaded = false;
   stopTrafficPolling(); // no panel on screen for it to update any more
