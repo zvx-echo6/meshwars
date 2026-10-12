@@ -172,3 +172,15 @@ def counting_conn(conn):
     code's.
     """
     return RowCountingConn(conn)
+
+
+@pytest.fixture(autouse=True)
+def _tmp_dump_threads_before_grid_memo(request):  # TEMPORARY DIAGNOSTIC
+    if request.node.name.startswith("test_cell_bounds_is_memoized"):
+        import sys, threading, traceback
+        names = {t.ident: t.name for t in threading.enumerate()}
+        print("THREADS:", sorted(names.values()))
+        for ident, frame in sys._current_frames().items():
+            print("---", names.get(ident, ident))
+            print("".join(traceback.format_stack(frame)[-6:]))
+    yield
