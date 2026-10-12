@@ -58,6 +58,17 @@ def _no_stray_legacy_places_seed(monkeypatch, tmp_path):
     """
     from app import places_seed
     monkeypatch.setattr(places_seed, "_LEGACY_DATA_PATH", str(tmp_path / "no-stray-legacy-seed.csv.gz"))
+    # Same guard for the CONFIGURED location. On the DEV test runner
+    # (mw-test) the real worldwide seed is bind-mounted at the default
+    # places_seed_path, so any test that runs init_db() with
+    # run_background_tasks on (a TestClient lifespan, say) used to start a
+    # "places-seed-load" thread that kept loading it, calling
+    # grid.cell_bounds, for minutes after that test ended -- long enough
+    # to land a cell_bounds call between cache_clear() and the assertions
+    # of tests/test_grid.py's memoization test (serial runs only;
+    # reproduced on main). Tests that exercise the loader point
+    # _DATA_PATH at their own file, which overrides this default.
+    monkeypatch.setattr(places_seed, "_DATA_PATH", str(tmp_path / "no-stray-seed.csv.gz"))
 
 
 @pytest.fixture
