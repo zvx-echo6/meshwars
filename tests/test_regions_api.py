@@ -817,13 +817,14 @@ def test_a_group_is_served_from_the_published_row_and_built_inline_only_if_missi
     assert calls == ["scores"]
     # a published row older than its allowed age is not trusted either
     asyncio.run(mc_api_module._publish_group_regionals_once())
+    calls.clear()      # the publisher legitimately builds scores AND top for both boards; only count what a request builds
     c = sqlite3.connect(seeded["path"])
     c.execute("UPDATE board_cache SET built_at = built_at - 10000")
     c.commit()
     c.close()
     mc_api_module._BOARD_CACHE.clear()
     client.get("/api/mc/scores", params={"region": "treasure-valley"})
-    assert calls == ["scores", "scores"]
+    assert calls == ["scores"]                            # exactly one inline scores build, no top
 
 
 def test_an_unchanged_group_row_still_has_its_age_refreshed_each_cycle(seeded):
