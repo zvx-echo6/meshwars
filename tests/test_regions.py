@@ -683,3 +683,126 @@ def test_map_batch_redone_when_a_region_changes_mid_batch(db_path, monkeypatch):
     assert c.execute("SELECT COUNT(*) FROM region_cell WHERE region_code='BOI'").fetchone()[0] == 0
     assert c.execute("SELECT COUNT(*) FROM region_cell_mapped").fetchone()[0] == 1
     c.close()
+
+
+# ---- remap writes in small transactions ------------------------------------
+
+
+def _box(lat0, lat1, lon0, lon1):
+    return {"rings": [[(lat0, lon0), (lat0, lon1), (lat1, lon1), (lat1, lon0)]], "radius_km": None,
+            "center_lat": (lat0 + lat1) / 2, "center_lon": (lon0 + lon1) / 2, "shape": "polygon"}
+
+
+def _seed_box_cells(c, lat0, lat1, lon0, lon1):
+    from app.grid import cell_indices
+    la0, lo0 = cell_indices(grid_cell_id(lat0, lon0))
+    la1, lo1 = cell_indices(grid_cell_id(lat1, lon1))
+    n = 0
+    for la in range(la0 - 2, la1 + 3):
+        for lo in range(lo0 - 2, lo1 + 3):
+            _insert_tile(c, 1, f"{la}_{lo}")
+            n += 1
+    return n
+
+
+def test_remap_writes_in_bounded_transactions_and_yields_between_them(db_path, monkeypatch, caplog):
+    import logging
+    monkeypatch.setattr(regions, "_TXN_ROWS", 5)
+    c = _conn(db_path)
+    c.execute("BEGIN IMMEDIATE")
+    regions.store_region(c, "BOX", "Box", _box(43.00, 43.02, -116.00, -115.97), now=1000)
+    regions.store_region(c, "TWO", "Two", _box(43.00, 43.02, -116.00, -115.97), now=1000)
+    c.execute("COMMIT")
+    _seed_box_cells(c, 43.00, 43.02, -116.00, -115.97)
+    regions.map_new_cells()
+    before = {r[0] for r in c.execute("SELECT cell_id FROM region_cell WHERE region_code='BOX'")}
+    assert len(before) > 20
+
+    # the BOX region moves east, so many rows change; TWO stays put
+    c.execute("BEGIN IMMEDIATE")
+    regions.store_region(c, "BOX", "Box", _box(43.00, 43.02, -115.985, -115.955), now=2000)
+    c.execute("COMMIT")
+
+    sizes, free_between = [], []
+    real_apply = regions._apply_chunk
+
+    def counting_apply(conn, ops):
+        sizes.append(len(ops))
+        return real_apply(conn, ops)
+
+    monkeypatch.setattr(regions, "_apply_chunk", counting_apply)
+    monkeypatch.setattr(regions.time, "sleep", lambda s: free_between.append(_write_lock_is_free(db_path)))
+    with caplog.at_level(logging.INFO, logger="regions"):
+        written = regions.remap_regions(["BOX", "TWO"])
+
+    assert sizes and max(sizes) <= 5 and len(sizes) >= 3          # bounded, and split into several txns
+    assert sum(sizes) == written
+    assert free_between and all(free_between)                      # an ingest writer can get in between txns
+    # the result is exactly the new geometry's membership
+    index = regions._build_index(c, ["BOX"])
+    expect = {cid for (cid,) in c.execute("SELECT cell_id FROM region_cell_mapped")
+              if "BOX" in index.codes_for_cell(cid)}
+    assert {r[0] for r in c.execute("SELECT cell_id FROM region_cell WHERE region_code='BOX'")} == expect
+    assert expect != before
+    # TWO's boundary did not change: nothing of it was rewritten
+    assert all(r.getMessage().count("longest lock hold") for r in caplog.records if "remapped" in r.getMessage())
+    assert any("remapped 2 region(s)" in r.getMessage() and "longest lock hold" in r.getMessage()
+               for r in caplog.records)
+    c.close()
+
+
+def test_remap_of_an_unchanged_boundary_writes_nothing(db_path, monkeypatch):
+    c = _conn(db_path)
+    c.execute("BEGIN IMMEDIATE")
+    regions.store_region(c, "BOX", "Box", _box(43.00, 43.02, -116.00, -115.97), now=1000)
+    c.execute("COMMIT")
+    _seed_box_cells(c, 43.00, 43.02, -116.00, -115.97)
+    regions.map_new_cells()
+    calls = []
+    monkeypatch.setattr(regions, "_apply_chunk", lambda conn, ops: calls.append(len(ops)))
+    assert regions.remap_regions(["BOX"]) == 0 and calls == []
+    c.close()
+
+
+def test_remap_skips_a_region_refetched_since_the_work_was_computed(db_path, monkeypatch):
+    c = _conn(db_path)
+    c.execute("BEGIN IMMEDIATE")
+    regions.store_region(c, "BOX", "Box", _box(43.00, 43.02, -116.00, -115.97), now=1000)
+    c.execute("COMMIT")
+    _seed_box_cells(c, 43.00, 43.02, -116.00, -115.97)
+    regions.map_new_cells()
+    real = regions._membership
+
+    def meanwhile(index, cells):
+        out = real(index, cells)
+        c.execute("BEGIN IMMEDIATE")
+        regions.store_region(c, "BOX", "Box", _box(10, 11, 10, 11), now=9000)   # re-fetched mid-remap
+        c.execute("COMMIT")
+        return out
+
+    monkeypatch.setattr(regions, "_membership", meanwhile)
+    n_before = c.execute("SELECT COUNT(*) FROM region_cell WHERE region_code='BOX'").fetchone()[0]
+    assert regions.remap_regions(["BOX"]) == 0     # the newer fetch owns it; nothing written from stale work
+    assert c.execute("SELECT COUNT(*) FROM region_cell WHERE region_code='BOX'").fetchone()[0] == n_before
+    c.close()
+
+
+def test_map_new_cells_batches_are_bounded_and_yield(db_path, monkeypatch):
+    c = _conn(db_path)
+    c.execute("BEGIN IMMEDIATE")
+    regions.store_region(c, "BOX", "Box", _box(43.00, 43.02, -116.00, -115.97), now=1000)
+    c.execute("COMMIT")
+    n = _seed_box_cells(c, 43.00, 43.02, -116.00, -115.97)
+    sizes, free = [], []
+    real_apply = regions._apply_membership
+
+    def counting(conn, rows, *, mark_mapped):
+        sizes.append(len(rows))
+        return real_apply(conn, rows, mark_mapped=mark_mapped)
+
+    monkeypatch.setattr(regions, "_apply_membership", counting)
+    monkeypatch.setattr(regions.time, "sleep", lambda s: free.append(_write_lock_is_free(db_path)))
+    assert regions.map_new_cells(batch=10) == n
+    assert max(sizes) <= 10 and len(sizes) == -(-n // 10)
+    assert free and all(free)
+    c.close()

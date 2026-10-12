@@ -329,7 +329,17 @@ def store_region(conn, code: str, name: str, parsed: dict, now: int | None = Non
 # fetches.
 _MAP_LOCK = threading.Lock()
 _INDEX_CACHE: tuple[tuple, RegionIndex] | None = None
-_BATCH = 5000
+# Rows/cells per write transaction, and the pause after each. Sized so one
+# transaction holds the write lock for a small fraction of a second even on
+# the slow shared-CPU hosts this runs on: 2,000 inserts into region_cell
+# (a WITHOUT ROWID table with one extra index) is on the order of 0.1 s at a
+# pessimistic 20k rows/s, an order of magnitude under the 15 s busy_timeout
+# ingest writers wait with, and the pause lets any waiting writer in
+# between two of ours. A map_new_cells batch writes up to ~3 rows per cell
+# (mapped marker + memberships), so it uses a smaller cell count.
+_TXN_ROWS = 2000
+_BATCH = 700
+_PAUSE_S = 0.05
 
 # app/db.py gives every connection PRAGMA busy_timeout=15000, and no other
 # background writer in the app retries beyond that. A import that runs for
@@ -495,61 +505,102 @@ def map_new_cells(batch: int = _BATCH) -> int:
             total += n
             if n < batch:
                 return total
+            time.sleep(_PAUSE_S)  # let waiting writers in between batches
+
+
+def _apply_chunk(conn, ops: list[tuple[str, str, str]]) -> None:
+    """ops: ("i"|"d", region_code, cell_id). One short transaction's worth."""
+    ins = [(c, k) for op, c, k in ops if op == "i"]
+    dele = [(c, k) for op, c, k in ops if op == "d"]
+    if ins:
+        conn.executemany("INSERT OR IGNORE INTO region_cell(region_code, cell_id) VALUES (?,?)", ins)
+    if dele:
+        conn.executemany("DELETE FROM region_cell WHERE region_code = ? AND cell_id = ?", dele)
+
+
+def _write_chunk(code: str, sig: int, ops: list[tuple[str, str, str]]) -> float | None:
+    """One write transaction applying `ops` for one region. Returns how
+    long the write lock was held (BEGIN IMMEDIATE acquired -> COMMIT), or
+    None, having written nothing, if the region was re-fetched since the
+    work was computed (a newer remap owns it then)."""
+    wc = connect()
+    try:
+        wc.execute("BEGIN IMMEDIATE")
+        t0 = time.monotonic()
+        try:
+            row = wc.execute("SELECT fetched_at FROM region WHERE code = ?", (code,)).fetchone()
+            if row is None or row[0] != sig:
+                wc.execute("ROLLBACK")
+                return None
+            _apply_chunk(wc, ops)
+            wc.execute("COMMIT")
+        except BaseException:
+            try:
+                wc.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        return time.monotonic() - t0
+    finally:
+        wc.close()
 
 
 def remap_regions(codes: Iterable[str]) -> int:
     """Recompute membership of the given regions over every cell already
-    mapped, replacing their old rows in ONE short transaction (so a reader
-    sees the old membership or the new one, never a half-built region).
-    The testing of every cell happens first, with no transaction open; the
-    transaction deletes the regions' old rows, inserts the new ones, and
-    also tests any cell that was mapped in the meantime. Returns the number
-    of membership rows written."""
+    mapped. Returns the number of membership rows inserted or deleted.
+
+    All the polygon testing and the comparison with the stored rows happen
+    with NO transaction open. What remains is a difference (rows to add,
+    rows to remove) per region, written in transactions of at most
+    _TXN_ROWS rows each, with a short pause between them so ingest writers
+    get the lock. A region whose difference fits in one transaction
+    changes atomically; a bigger one is applied inserts-first in several,
+    so it only ever grows and then shrinks, never disappears for a moment.
+    A boundary that did not change produces an empty difference and no
+    writes at all. Cells outside the snapshot taken here are left alone
+    (map_new_cells tested them against the current regions itself).
+    """
     codes = sorted({c.upper() for c in codes})
     if not codes:
         return 0
-    marks = ",".join("?" * len(codes))
+    started = time.monotonic()
+    txns = rows = 0
+    longest = 0.0
     with _MAP_LOCK:
-        for _ in range(5):
-            conn = connect()
+        conn = connect()
+        try:
+            sigs = {r[0]: r[1] for r in conn.execute(
+                "SELECT code, fetched_at FROM region WHERE code IN (%s)" % ",".join("?" * len(codes)), codes)}
+            index = _build_index(conn, list(sigs))
+            cells = [r[0] for r in conn.execute("SELECT cell_id FROM region_cell_mapped")]
+        finally:
+            conn.close()
+        new_by_code: dict[str, set[str]] = {c: set() for c in sigs}
+        for cid, hit in _membership(index, cells):
+            for code in hit:
+                new_by_code[code].add(cid)
+        snapshot = set(cells)
+        for code, sig in sigs.items():
+            rc = connect()
             try:
-                sig = _codes_signature(conn, codes)
-                index = _build_index(conn, codes)
-                cells = [r[0] for r in conn.execute("SELECT cell_id FROM region_cell_mapped")]
+                old = {r[0] for r in rc.execute(
+                    "SELECT cell_id FROM region_cell WHERE region_code = ?", (code,))} & snapshot
             finally:
-                conn.close()
-            computed = _membership(index, cells)
-            seen = set(cells)
-
-            def write() -> int | None:
-                wc = connect()
-                try:
-                    wc.execute("BEGIN IMMEDIATE")
-                    try:
-                        if _codes_signature(wc, codes) != sig:
-                            wc.execute("ROLLBACK")
-                            return None
-                        late = [r[0] for r in wc.execute("SELECT cell_id FROM region_cell_mapped")
-                                if r[0] not in seen]
-                        rows = computed + (_membership(index, late) if late else [])
-                        wc.execute(f"DELETE FROM region_cell WHERE region_code IN ({marks})", codes)
-                        _apply_membership(wc, rows, mark_mapped=False)
-                        wc.execute("COMMIT")
-                    except BaseException:
-                        try:
-                            wc.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                        raise
-                finally:
-                    wc.close()
-                return sum(len(c) for _, c in rows)
-
-            n = _retry_busy(write)
-            if n is not None:
-                return n
-        log.warning("regions: remap gave up, the boundaries kept changing")
-        return 0
+                rc.close()
+            new = new_by_code[code]
+            ops = [("i", code, c) for c in sorted(new - old)] + [("d", code, c) for c in sorted(old - new)]
+            for i in range(0, len(ops), _TXN_ROWS):
+                chunk = ops[i:i + _TXN_ROWS]
+                held = _retry_busy(lambda: _write_chunk(code, sig, chunk))
+                if held is None:
+                    break
+                txns += 1
+                rows += len(chunk)
+                longest = max(longest, held)
+                time.sleep(_PAUSE_S)
+    log.info("regions: remapped %d region(s): %.1f s total, %d write txn(s), longest lock hold %.3f s, %d row(s)",
+             len(codes), time.monotonic() - started, txns, longest, rows)
+    return rows
 
 
 # ---- groups -------------------------------------------------------------
