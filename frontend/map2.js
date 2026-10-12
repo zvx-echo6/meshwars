@@ -863,7 +863,7 @@ window.__mwBoardStats = { fetches: 0, notModified: 0, setDataCalls: 0 };
 
 async function fetchBoard(c) {
   const headers = lastBoardEtag ? { 'If-None-Match': lastBoardEtag } : undefined;
-  const res = await fetch(c.boardEndpoint, headers ? { headers } : undefined);
+  const res = await fetch(withRegion(c.boardEndpoint), headers ? { headers } : undefined);
   window.__mwBoardStats.fetches += 1;
 
   // 304: the board we already hold is current. Return null rather than an
@@ -1227,6 +1227,9 @@ function teamBreakdown(t) {
   const tiles = t.tiles ?? 0;
   const pts = t.checkin_points ?? 0;
   const explorer = t.explorer_points ?? 0;
+  if (t.checkin_points === null) { // region view: a check-in has no location, so it is left out
+    return `${tiles} ${tiles === 1 ? 'square' : 'squares'} + ${explorer} exploration ${explorer === 1 ? 'point' : 'points'}`;
+  }
   const squareWord = tiles === 1 ? 'square' : 'squares';
   const pointWord = pts === 1 ? 'point' : 'points';
   const explorerWord = explorer === 1 ? 'point' : 'points';
@@ -1237,6 +1240,7 @@ function teamBreakdownCompact(t) {
   const tiles = t.tiles ?? 0;
   const pts = t.checkin_points ?? 0;
   const explorer = t.explorer_points ?? 0;
+  if (t.checkin_points === null) return `${tiles}+${explorer}`;
   return `${tiles}+${pts}+${explorer}`;
 }
 
@@ -1320,7 +1324,7 @@ function tickCountdown() {
 
 async function loadScoreboard() {
   try {
-    const res = await fetch(cfg().scoresEndpoint);
+    const res = await fetch(withRegion(cfg().scoresEndpoint));
     if (!res.ok) return;
     const data = await res.json();
     renderScoreboard(data);
@@ -1574,7 +1578,7 @@ async function openBreakdownModal() {
   const c = cfg();
   const body = openMcModal('Score Breakdown');
   try {
-    const res = await fetch(c.scoresEndpoint);
+    const res = await fetch(withRegion(c.scoresEndpoint));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const teams = (data && Array.isArray(data.teams) && data.teams.length)
@@ -1589,12 +1593,12 @@ async function openBreakdownModal() {
     const rows = ordered.map((t) => `<tr>
         <td><span class="mc-dot" style="background:${TEAM_COLORS[t.team] || '#888'}"></span>${teamName(t.team, t.team)}</td>
         <td>${escapeHtml(t.tiles ?? 0)}</td>
-        <td>${escapeHtml(t.checkin_points ?? 0)}</td>
+        ${selectedRegion ? '' : `<td>${escapeHtml(t.checkin_points ?? 0)}</td>`}
         <td>${escapeHtml(t.explorer_points ?? 0)}</td>
         <td><strong>${escapeHtml(teamTotal(t))}</strong></td>
       </tr>`).join('');
     body.innerHTML = `<table class="mc-history-table">
-      <thead><tr><th>Team</th><th>Squares</th><th>Check-in</th><th>Exploration</th><th>Total</th></tr></thead>
+      <thead><tr><th>Team</th><th>Squares</th>${selectedRegion ? '' : '<th>Check-in</th>'}<th>Exploration</th><th>Total</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   } catch (err) {
@@ -1609,7 +1613,7 @@ function topTabSpecs() {
   return {
     captures: {
       label: c.topCaptureLabel,
-      endpoint: c.topEndpoint,
+      endpoint: withRegion(c.topEndpoint),
       valueKey: 'captures',
       valueHeader: 'Captures',
       emptyText: 'No capture activity yet.',
@@ -1790,6 +1794,10 @@ function buildScoreboardControl(map) {
       <button type="button" id="mc-toggle-meshtastic" class="mc-switch-btn">Meshtastic</button>
       <button type="button" id="mc-toggle-meshcore" class="mc-switch-btn">MeshCore</button>
     </div>
+    <div class="mw-region-row" id="mw-region-row" hidden>
+      <label class="mw-region-label" for="mw-region-select">Region:</label>
+      <select id="mw-region-select" class="mw-region-select"><option value="">All regions</option></select>
+    </div>
     <button type="button" class="mc-row mc-title mc-header-btn" id="mc-header-btn" aria-expanded="true">
       <span class="mc-header-title-text" id="mc-header-title-text"></span>
       <span class="mc-header-right">
@@ -1967,6 +1975,167 @@ function setBoardMode(newMode, map) {
   // is easy to add above this line later (an addLayer, a style swap)
   // without remembering it would silently reset a viewer's own choice.
   applyBoardFillOpacity(map);
+}
+
+// ===== Regions (app/regions.py) =====
+//
+// A region (a MeshMapper region, or an operator-made group of them) is a
+// VIEW filter: it narrows which squares, standings and captures this page
+// loads and never changes scoring. selectedRegion is null for "All
+// regions", which behaves exactly as the page did before regions existed;
+// otherwise every board, scores and top-captures fetch carries
+// ?region=<key>, so a region view loads less than the full board. The
+// board refetch REPLACES the source's data, so squares outside the region
+// are simply gone rather than dimmed. Top check-ins and Explorer are not
+// region-aware and stay unfiltered.
+//
+// The choice lives in the URL: /map/<code-or-slug> (pushState; the back
+// button restores the previous choice) and / for All regions. The server
+// puts a validated preselection in <meta name="mw-region">.
+let selectedRegion = null; // null | { key } -- key is a region code or a group slug
+let regionList = { regions: [], groups: [] };
+
+function withRegion(url) {
+  if (!selectedRegion) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'region=' + encodeURIComponent(selectedRegion.key);
+}
+
+function regionKeyFromLocation() {
+  const m = window.location.pathname.match(/^\/map\/([^/]+)\/?$/);
+  if (m) return decodeURIComponent(m[1]);
+  return new URLSearchParams(window.location.search).get('region') || null;
+}
+
+// The key as the list spells it (BOI, treasure-valley), or null when the
+// list is loaded and does not know it. Before the list arrives, accept it.
+function canonicalRegionKey(raw) {
+  if (!raw) return null;
+  if (!regionList.regions.length && !regionList.groups.length) return raw;
+  const up = raw.toUpperCase();
+  const r = regionList.regions.find((x) => x.code === up);
+  if (r) return r.code;
+  const g = regionList.groups.find((x) => x.slug === raw.toLowerCase());
+  return g ? g.slug : null;
+}
+
+function regionOptionLabel(r, stripCountry) {
+  const name = stripCountry ? r.name.replace(/,\s*[A-Za-z]{2}$/, '') : r.name;
+  return `${r.code}  ${name}`;
+}
+
+function populateRegionSelect() {
+  const sel = document.getElementById('mw-region-select');
+  const row = document.getElementById('mw-region-row');
+  if (!sel || !row) return;
+  const { regions, groups } = regionList;
+  if (!regions.length && !groups.length) { row.hidden = true; return; }
+  row.hidden = false;
+  // Strip ", US"-style country suffixes only when EVERY name has one.
+  const stripCountry = regions.length > 0 && regions.every((r) => /,\s*[A-Za-z]{2}$/.test(r.name));
+  const byCode = new Map(regions.map((r) => [r.code, r]));
+  const byId = new Map(groups.map((g) => [g.id, g]));
+  const childIds = new Set(groups.flatMap((g) => g.groups));
+  sel.replaceChildren();
+  const add = (value, text) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = text;
+    sel.appendChild(o);
+  };
+  add('', 'All regions');
+  const indent = (d) => '  '.repeat(d);
+  const walk = (g, depth, seen) => {
+    add(g.slug, indent(depth) + g.name);
+    const next = new Set(seen).add(g.id); // a cycle cannot be written, but never loop on one
+    g.groups.forEach((id) => { const c = byId.get(id); if (c && !next.has(id)) walk(c, depth + 1, next); });
+    g.regions.forEach((code) => {
+      const r = byCode.get(code);
+      if (r) add(r.code, indent(depth + 1) + regionOptionLabel(r, stripCountry));
+    });
+  };
+  groups.filter((g) => !childIds.has(g.id)).forEach((g) => walk(g, 0, new Set()));
+  regions.slice().sort((a, b) => (a.code < b.code ? -1 : 1))
+    .forEach((r) => add(r.code, regionOptionLabel(r, stripCountry)));
+  selectedRegion = selectedRegion && canonicalRegionKey(selectedRegion.key)
+    ? { key: canonicalRegionKey(selectedRegion.key) } : null;
+  sel.value = selectedRegion ? selectedRegion.key : '';
+}
+
+function setupRegionControl(map) {
+  const meta = document.querySelector('meta[name="mw-region"]');
+  const preset = meta ? meta.getAttribute('content') : null;
+  if (preset) selectedRegion = { key: preset };
+  const sel = document.getElementById('mw-region-select');
+  if (sel) {
+    sel.addEventListener('change', () => {
+      changeRegion(sel.value || null, map, { push: true, fit: true });
+    });
+  }
+  window.addEventListener('popstate', () => {
+    changeRegion(canonicalRegionKey(regionKeyFromLocation()), map, { push: false, fit: true });
+  });
+  fetch('/api/regions')
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data) => {
+      if (!data) return;
+      regionList = { regions: data.regions || [], groups: data.groups || [] };
+      populateRegionSelect();
+    })
+    .catch((err) => console.warn('MeshWars map2: region list failed', err));
+}
+
+function regionPath(key) {
+  const params = new URLSearchParams(window.location.search);
+  params.delete('region');
+  const qs = params.toString();
+  const path = key ? '/map/' + encodeURIComponent(key.toLowerCase()) : '/';
+  return path + (qs ? '?' + qs : '');
+}
+
+function changeRegion(key, map, opts) {
+  const same = (selectedRegion ? selectedRegion.key : null) === key;
+  selectedRegion = key ? { key } : null;
+  const sel = document.getElementById('mw-region-select');
+  if (sel) sel.value = key || '';
+  if (opts.push && !same) history.pushState({ region: key }, '', regionPath(key));
+  if (!mapLoaded) return; // main()'s load handler loads the board with this region
+  loadBoardData(map, true);
+  loadScoreboard();
+  applyRegionOutline(map, opts.fit);
+}
+
+let regionOutlineSeq = 0;
+
+// Draws the selected region's boundary (a group: every member's) and
+// optionally fits the map to it. GeoJSON from the API is already lon,lat.
+async function applyRegionOutline(map, fit) {
+  const src = map.getSource && map.getSource('region-outline');
+  if (!src) return;
+  const mine = ++regionOutlineSeq; // a slower, older response must not win
+  if (!selectedRegion) {
+    src.setData({ type: 'FeatureCollection', features: [] });
+    return;
+  }
+  try {
+    const res = await fetch('/api/regions/' + encodeURIComponent(selectedRegion.key) + '/boundary');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const fc = await res.json();
+    if (mine !== regionOutlineSeq) return;
+    src.setData(fc);
+    if (!fit) return;
+    let w = 180, s = 90, e = -180, n = -90;
+    const visit = (c) => {
+      if (typeof c[0] === 'number') {
+        w = Math.min(w, c[0]); e = Math.max(e, c[0]); s = Math.min(s, c[1]); n = Math.max(n, c[1]);
+      } else {
+        c.forEach(visit);
+      }
+    };
+    (fc.features || []).forEach((f) => visit(f.geometry.coordinates));
+    if (e >= w) map.fitBounds([[w, s], [e, n]], { padding: 24 });
+  } catch (err) {
+    console.warn('MeshWars map2: region outline failed', err);
+  }
 }
 
 // ===== First-visit board choice =====
@@ -5183,7 +5352,7 @@ async function main() {
   if (navigator.geolocation && typeof navigator.geolocation.getCurrentPosition === 'function') {
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        if (mapViewerInteracted) return;
+        if (mapViewerInteracted || selectedRegion) return;
         const lng = pos.coords.longitude;
         const lat = pos.coords.latitude;
         // A fix outside the configured play area is not somewhere the
@@ -5223,6 +5392,7 @@ async function main() {
   // all-zero rows are on screen the instant the page paints instead of
   // popping in once tiles start arriving.
   buildScoreboardControl(map);
+  setupRegionControl(map);
   renderScoreboard(null); // seed all-zero rows immediately, before the first fetch
 
   // First-visit board choice: only when needsBoardChoice (computed
@@ -5358,6 +5528,19 @@ async function main() {
         'line-opacity': 0.9,
       },
     }, 'board-line');
+
+    // Region outline (see "Regions" section): empty until a region is
+    // chosen. Drawn above the board so the boundary reads over the squares.
+    map.addSource('region-outline', {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] },
+    });
+    map.addLayer({
+      id: 'region-outline-line',
+      type: 'line',
+      source: 'region-outline',
+      paint: { 'line-color': '#f5c542', 'line-width': 2.5, 'line-opacity': 0.9 },
+    });
 
     // An award highlight sits ON TOP of the board: same squares, drawn
     // again opaque with a bright outline so the shape reads through the
@@ -5543,6 +5726,7 @@ async function main() {
     // what happens to the exception itself.
     try {
       setBoardMode(mode, map);
+      applyRegionOutline(map, true);
       // Deliberately OUTSIDE the call above in effect: it is async and
       // never awaited, so a slow or failing award fetch cannot delay or
       // break the board coming up. It only ever runs when /results

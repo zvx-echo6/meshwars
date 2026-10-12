@@ -826,3 +826,31 @@
 @media (max-width: 560px) {
   .award-banner { bottom: 12px; font-size: 0.82rem; padding: 8px 10px; }
 }
+
+/* Region dropdown: second row of the board card, directly under the
+   Meshtastic/MeshCore switch (buildScoreboardControl). Hidden until the
+   region list has loaded and holds at least one region. */
+.mw-region-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--mw-raised);
+}
+.mw-region-row[hidden] { display: none; }
+.mw-region-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--mw-text-2);
+}
+.mw-region-select {
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--mw-raised);
+  color: var(--mw-text-2);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 3px;
+  padding: 5px 6px;
+  font-size: 12px;
+}
