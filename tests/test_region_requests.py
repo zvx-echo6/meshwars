@@ -292,5 +292,7 @@ def test_the_email_fragment_renders_in_the_shell():
     html = email_login._render_html(email_login.PURPOSE_REGION_REQUEST, "logo-cid",
                                     details_html="<b>DETAILS</b>", cta_url="https://x.invalid/admin#regions")
     assert "Region group request" in html and "<b>DETAILS</b>" in html
-    assert html.count("https://x.invalid/admin#regions") == 2
+    # Three, by design and identical to sign_in.html / security_notice.html: the button's href, the
+    # plain-text fallback link's href, and that link's visible text.
+    assert html.count("https://x.invalid/admin#regions") == 3
     assert "{details_html}" not in html and "{cta_url}" not in html and "{logo_cid}" not in html
