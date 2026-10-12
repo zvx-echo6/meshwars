@@ -330,7 +330,10 @@ def _build_get_nodes(*, include_attribution: bool, region_codes=None) -> dict:
     `repeaters` again, at which point it will already degrade to an
     unattributed marker instead of a wrong one.
     """
-    return _shape_get_nodes(_build_get_nodes_base(region_codes), include_attribution=include_attribution)
+    # The unfiltered call keeps its original no-argument form (tests wrap
+    # _build_get_nodes_base by name and count its calls).
+    base = _build_get_nodes_base() if region_codes is None else _build_get_nodes_base(region_codes)
+    return _shape_get_nodes(base, include_attribution=include_attribution)
 
 
 class _GetNodesBase(NamedTuple):
