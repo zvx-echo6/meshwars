@@ -771,6 +771,9 @@ def test_remap_skips_a_region_refetched_since_the_work_was_computed(db_path, mon
     c.execute("COMMIT")
     _seed_box_cells(c, 43.00, 43.02, -116.00, -115.97)
     regions.map_new_cells()
+    c.execute("BEGIN IMMEDIATE")
+    regions.store_region(c, "BOX", "Box", _box(43.00, 43.02, -115.985, -115.955), now=2000)  # moved: remap has work
+    c.execute("COMMIT")
     real = regions._membership
 
     def meanwhile(index, cells):
