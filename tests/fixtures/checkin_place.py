@@ -7,8 +7,9 @@ CS_MESSAGES = {
         {"packetId": 102, "packetHash": "HASH_DIRECT", "sender": "Direct Dan", "timestamp": "2026-10-07T01:11:00Z"},
         {"packetId": 103, "packetHash": "HASH_AMBIG", "sender": "Ambig Amy", "timestamp": "2026-10-07T01:12:00Z"},
         {"packetId": 104, "packetHash": "HASH_BESTHOPS", "sender": "Hops Hank", "timestamp": "2026-10-07T01:13:00Z"},
+        {"packetId": 105, "packetHash": "HASH_NOPOS", "sender": "Dark Dan", "timestamp": "2026-10-07T01:14:00Z"},
     ],
-    "total": 4,
+    "total": 5,
 }
 
 CS_TRACES = {
@@ -21,6 +22,9 @@ CS_TRACES = {
     "HASH_AMBIG": {"traces": [
         {"observer": "obsA", "observer_name": "Obs A", "path_json": "[\"AA11\"]", "snr": 5, "rssi": -90, "time": "t"},
         {"observer": "obsB", "observer_name": "Obs B", "path_json": "[\"AA11\",\"BB22\"]", "snr": 5, "rssi": -90, "time": "t"},
+    ]},
+    "HASH_NOPOS": {"traces": [
+        {"observer": "obsA", "observer_name": "Obs A", "path_json": "[\"BB22\"]", "snr": 5, "rssi": -90, "time": "t"},
     ]},
     # two observations: the longer one listed first; the 1-hop one must win
     "HASH_BESTHOPS": {"traces": [
@@ -48,14 +52,16 @@ CS_RESOLVE = {
 
 BEACON_CHANNELS = {"items": [{"id": 7, "name": "#central-oregon", "keyKnown": True}, {"id": 8, "keyKnown": False}]}
 
-BEACON_PAGE_1 = {"items": [
+# The channel's messages. Ordered by ID, newest id first, like the real feed -- and ids are NOT
+# chronological: 5004 is a 2024 message that only got its id (and became readable) recently.
+BEACON_ITEMS = [
+    {"id": 5004, "packetHash": "BH_STRAY", "senderName": "Old Ollie", "content": "x", "sentAt": 1_715_770_000_000},
     {"id": 5003, "packetHash": "BH_DIRECT", "senderName": "Direct Dee", "content": "x", "sentAt": 1_791_000_300_000},
     {"id": 5002, "packetHash": "BH_HIGH", "senderName": "High Hal", "content": "x", "sentAt": 1_791_000_200_000},
-], "nextCursor": "c2", "hasMore": True}
-BEACON_PAGE_2 = {"items": [
     {"id": 5001, "packetHash": "BH_AMBIG", "senderName": "Amb Al", "content": "x", "sentAt": 1_791_000_100_000},
+    {"id": 5000, "packetHash": "BH_NOPOS", "senderName": "Nopos Nat", "content": "x", "sentAt": 1_790_999_000_000},
     {"id": 4999, "packetHash": "BH_NONE", "senderName": "None Nan", "content": "x", "sentAt": 1_790_000_000_000},
-], "nextCursor": None, "hasMore": False}
+]
 
 BEACON_PACKETS = {
     "BH_DIRECT": {"observations": [
@@ -66,6 +72,11 @@ BEACON_PACKETS = {
          "resolvedPath": [{"confidence": "high", "nodes": [{"name": "Far", "publicKey": "ffff0000", "latitude": 1.0, "longitude": 1.0}]}]},
         {"observerName": "O2", "iata": "BOI", "pathLength": {"hopCount": 1},
          "resolvedPath": [{"confidence": "high", "nodes": [{"name": "Near", "publicKey": "abcd1234ef", "latitude": 43.6, "longitude": -116.3}]}]},
+    ]},
+    "BH_NOPOS": {"observations": [
+        {"observerName": "O1", "iata": "BOI", "pathLength": {"hopCount": 2},
+         "resolvedPath": [{"confidence": "high", "nodes": [{"name": "Dark", "publicKey": "dd", "id": "x"}]},
+                          {"confidence": "high", "nodes": [{"name": "Lit", "publicKey": "ee", "latitude": 1.0, "longitude": 1.0}]}]},
     ]},
     "BH_AMBIG": {"observations": [
         {"observerName": "O1", "iata": "BOI", "pathLength": {"hopCount": 1},

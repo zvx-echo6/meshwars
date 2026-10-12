@@ -835,15 +835,27 @@ def resolve(conn, value: str | None) -> Resolved | None:
     return Resolved(grp["slug"], "group", grp["name"], tuple(sorted(codes)))
 
 
-def cell_filter_sql(codes: Iterable[str], column: str = "cell_id") -> tuple[str, list]:
-    """An SQL condition: `<column>` is a cell in any of the given
-    regions. A cell in two of the regions still counts once (it is an IN
-    test, not a join). `column` is a trusted identifier from the caller."""
+def cell_filter_sql(codes: Iterable[str], column: str) -> tuple[str, list]:
+    """An SQL condition: the cell in `column` belongs to any of the given
+    regions. `column` must be QUALIFIED (`mc_tile.cell_id`, `pc.cell_id`):
+    inside the subquery an unqualified name would resolve to region_cell's
+    own column and match everything. A cell in two of the regions still
+    counts once (EXISTS, not a join).
+
+    Written as a correlated EXISTS probing idx_region_cell_cell, with the
+    code list applied as a filter (`+` keeps SQLite from turning every code
+    into its own index seek). The earlier `cell IN (SELECT cell_id FROM
+    region_cell WHERE region_code IN (...))` made SQLite build the whole
+    member-cell set of the group first -- a few hundred thousand rows for a
+    big group, once per query, and it was most of a 40 s response. This
+    form does one index probe per candidate row, however many regions the
+    group has. tests/test_regions_perf.py pins the plan."""
     codes = list(codes)
     if not codes:
         return "0", []
     return (
-        f"{column} IN (SELECT cell_id FROM region_cell WHERE region_code IN ({','.join('?' * len(codes))}))",
+        f"EXISTS (SELECT 1 FROM region_cell rc WHERE rc.cell_id = {column} "
+        f"AND +rc.region_code IN ({','.join('?' * len(codes))}))",
         codes,
     )
 

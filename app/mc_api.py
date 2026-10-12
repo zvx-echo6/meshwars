@@ -791,7 +791,7 @@ def board_for(
                 (season["id"],),
             ).fetchall()
         else:
-            cond, cparams = regions.cell_filter_sql(region_codes)
+            cond, cparams = regions.cell_filter_sql(region_codes, "mc_tile.cell_id")
             rows = conn.execute(
                 "SELECT cell_id, owner_team, last_report_ts, paint_count "
                 "  FROM mc_tile WHERE season_id = ? AND owner_team IS NOT NULL"
@@ -1368,12 +1368,18 @@ async def mc_chunks(z: float = 12.0, ids: str = "") -> Response:
 
 
 @router.get("/api/mc/scores")
-async def mc_scores(region: str | None = None):
+async def mc_scores(request: Request, region: str | None = None):
     """Active season id/window plus every team's current tile count for
-    MeshCore. See scores_for(). ?region= gives the regional standing."""
+    MeshCore. See scores_for(). ?region= gives the regional standing,
+    served through the same per-key cache as the board so repeat viewers
+    share one build (the unfiltered figure is a few indexed counts and
+    stays uncached, as it always was)."""
     resolved, err = resolve_region_param(region)
     if err is not None:
         return err
+    if resolved is not None:
+        return cached_json_response(f"mc_scores:region:{resolved.key}",
+                                    lambda: scores_for(MC_PROTOCOL, resolved), request)
     return scores_for(MC_PROTOCOL, resolved)
 
 
@@ -1719,7 +1725,7 @@ def top_for(protocol: str, region_codes: tuple[str, ...] | None = None) -> list[
 
 
 @router.get("/api/mc/top")
-async def mc_top(region: str | None = None):
+async def mc_top(request: Request, region: str | None = None):
     """Players ranked by capture-event count in the active MeshCore
     season. See top_for(). Request path, request shape, and response
     shape are unchanged by the addition of top_for()'s `protocol`
@@ -1730,7 +1736,10 @@ async def mc_top(region: str | None = None):
     resolved, err = resolve_region_param(region)
     if err is not None:
         return err
-    return top_for(MC_PROTOCOL, resolved.codes if resolved is not None else None)
+    if resolved is not None:
+        return cached_json_response(f"mc_top:region:{resolved.key}",
+                                    lambda: top_for(MC_PROTOCOL, resolved.codes), request)
+    return top_for(MC_PROTOCOL, None)
 
 
 def top_checkin_for(protocol: str) -> list[dict]:

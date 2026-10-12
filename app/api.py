@@ -218,7 +218,7 @@ def _cell_score_map(conn, season_id: int, region_codes=None) -> dict[str, dict[s
             (season_id,),
         ).fetchall()
     else:
-        cond, cparams = regions.cell_filter_sql(region_codes)
+        cond, cparams = regions.cell_filter_sql(region_codes, "mc_tile_score.cell_id")
         rows = conn.execute(
             f"SELECT cell_id, team, score FROM mc_tile_score WHERE season_id = ? AND {cond}",
             (season_id, *cparams),
@@ -239,7 +239,7 @@ def _cell_capture_map(conn, season_id: int, region_codes=None) -> dict[str, int]
             (season_id,),
         ).fetchall()
     else:
-        cond, cparams = regions.cell_filter_sql(region_codes)
+        cond, cparams = regions.cell_filter_sql(region_codes, "mc_tile_capture.cell_id")
         rows = conn.execute(
             f"SELECT cell_id, captured_at FROM mc_tile_capture WHERE season_id = ? AND {cond}",
             (season_id, *cparams),
@@ -601,7 +601,7 @@ async def live_tracks_stream(request: Request):
 
 
 @router.get("/scores")
-async def scores(region: str | None = None):
+async def scores(request: Request, region: str | None = None):
     """Seven-team tile counts for the active Meshtastic season. See
     app/mc_api.py's scores_for(), which this calls directly with
     protocol='mt' rather than duplicating its query logic -- this is the
@@ -611,6 +611,9 @@ async def scores(region: str | None = None):
     resolved, err = mc_api.resolve_region_param(region)
     if err is not None:
         return err
+    if resolved is not None:
+        return mc_api.cached_json_response(f"mt_scores:region:{resolved.key}",
+                                           lambda: mc_api.scores_for(MT_PROTOCOL, resolved), request)
     return mc_api.scores_for(MT_PROTOCOL, resolved)
 
 
@@ -807,7 +810,7 @@ async def find_player(
 
 
 @router.get("/top")
-async def top_players(region: str | None = None):
+async def top_players(request: Request, region: str | None = None):
     """Players ranked by capture-event count in the active Meshtastic
     season -- the Meshtastic counterpart of /api/mc/top. See
     app/mc_api.py's top_for(); response shape is identical to
@@ -816,7 +819,10 @@ async def top_players(region: str | None = None):
     resolved, err = mc_api.resolve_region_param(region)
     if err is not None:
         return err
-    return mc_api.top_for(MT_PROTOCOL, resolved.codes if resolved is not None else None)
+    if resolved is not None:
+        return mc_api.cached_json_response(f"mt_top:region:{resolved.key}",
+                                           lambda: mc_api.top_for(MT_PROTOCOL, resolved.codes), request)
+    return mc_api.top_for(MT_PROTOCOL, None)
 
 
 @router.get("/top-checkins")

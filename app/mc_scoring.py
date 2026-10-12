@@ -713,7 +713,7 @@ def team_tile_counts(
     as before, and scoring itself never passes it.
     """
     if region_codes is not None:
-        cond, params = cell_filter_sql(region_codes)
+        cond, params = cell_filter_sql(region_codes, "mc_tile.cell_id")
         rows = conn.execute(
             "SELECT owner_team, COUNT(*) AS c FROM mc_tile "
             f" WHERE season_id = ? AND {cond} GROUP BY owner_team",

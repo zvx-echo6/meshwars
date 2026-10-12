@@ -2446,23 +2446,26 @@ function changeRegion(key, map, opts) {
 let regionOutlineSeq = 0;
 
 // A group's outline is ONE merged border, never its members' own borders:
-// the member polygons are unioned here with polygon-clipping (vendored at
-// /static/vendor, loaded by map2.html as window.polygonClipping), including
-// groups nested inside groups, since the API already expands them to the
-// member regions. A union does the right thing with borders that nearly
-// meet; real gaps between members stay as holes. The result is kept per key
-// for this page's lifetime, so reselecting a group is instant. A single
-// region is drawn as served.
+// the member polygons are cleaned (snapped to ~11 m, simplified to ~220 m),
+// unioned with polygon-clipping (vendored at /static/vendor) and stripped of
+// holes and pieces under 100 km2 by /static/region-outline.js -- see that
+// file for why the cleaning is needed (without it the border nearly-but-not-
+// quite meeting between neighbours leaves hairline slivers inside the merged
+// shape, and the union takes seconds). Nested groups are covered because the
+// API already expands them to member regions. The result is kept per key for
+// this page's lifetime, and in localStorage next to the boundary response's
+// ETag, so the next visit costs one revalidating request and no union. A
+// single region is drawn as served.
 const regionOutlineCache = new Map();
+const OUTLINE_STORE_PREFIX = 'mwOutline:v2:';
 
 function unionedOutline(key, fc) {
   const feats = (fc && fc.features) || [];
-  if (feats.length < 2 || !window.polygonClipping) return fc;
+  if (feats.length < 2 || !window.polygonClipping || !window.MWRegionOutline) return fc;
   if (regionOutlineCache.has(key)) return regionOutlineCache.get(key);
   let merged;
   try {
-    const geoms = feats.map((f) => f.geometry.coordinates);
-    merged = window.polygonClipping.union(geoms[0], ...geoms.slice(1));
+    merged = window.MWRegionOutline.buildOutline(feats, window.polygonClipping);
   } catch (err) {
     console.warn('MeshWars map2: could not merge the region outline', err);
     return fc; // better the member borders than nothing
@@ -2473,6 +2476,21 @@ function unionedOutline(key, fc) {
   };
   regionOutlineCache.set(key, out);
   return out;
+}
+
+function readStoredOutline(key) {
+  try {
+    const raw = window.localStorage.getItem(OUTLINE_STORE_PREFIX + key);
+    const v = raw ? JSON.parse(raw) : null;
+    return v && v.etag && v.fc ? v : null;
+  } catch (err) { return null; }
+}
+
+function storeOutline(key, etag, fc) {
+  if (!etag) return;
+  try {
+    window.localStorage.setItem(OUTLINE_STORE_PREFIX + key, JSON.stringify({ etag, fc }));
+  } catch (err) { /* private mode or quota: the outline just is not remembered */ }
 }
 
 // Draws the selected region's boundary (a group: every member's) and
@@ -2486,9 +2504,22 @@ async function applyRegionOutline(map, fit) {
     return;
   }
   try {
-    const res = await fetch('/api/regions/' + encodeURIComponent(selectedRegion.key) + '/boundary');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const fc = unionedOutline(selectedRegion.key, await res.json());
+    const key = selectedRegion.key;
+    // A group seen before: ask with its stored ETag; a 304 means the stored,
+    // already-merged outline is current and nothing is parsed or unioned.
+    const stored = readStoredOutline(key);
+    const res = await fetch('/api/regions/' + encodeURIComponent(key) + '/boundary',
+      stored ? { headers: { 'If-None-Match': stored.etag } } : undefined);
+    let fc;
+    if (res.status === 304 && stored) {
+      fc = stored.fc;
+      regionOutlineCache.set(key, fc);
+    } else {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      fc = unionedOutline(key, body);
+      if (fc !== body) storeOutline(key, res.headers.get('ETag'), fc); // only merged group outlines are worth keeping
+    }
     if (mine !== regionOutlineSeq) return;
     src.setData(fc);
     if (!fit) return;

@@ -156,6 +156,8 @@ class CoreScopeSource:
         self._loaded_at = 0.0
         self._observers: list[dict] | None = None
         self._hops: dict[str, tuple[float, float, str] | None] = {}
+        self._hop_miss: dict[str, str] = {}
+        self.miss: str | None = None
 
     async def messages(self, max_age_s: float = 300.0) -> dict[int, dict]:
         if self._messages is not None and time.monotonic() - self._loaded_at < max_age_s:
@@ -205,50 +207,75 @@ class CoreScopeSource:
         resolved = data.get("resolved") if isinstance(data, dict) else None
         if isinstance(resolved, dict):
             entry = resolved.get(key) or resolved.get(prefix) or resolved.get(key.lower())
-        if isinstance(entry, dict):
+        if not isinstance(entry, dict):
+            self._hop_miss[key] = "first hop prefix unknown to the feed"
+        else:
             cands = entry.get("candidates")
             conflicts = entry.get("conflicts")
             conf = str(entry.get("confidence") or "")
             # Unambiguous only: no conflicting nodes, exactly one candidate,
             # and the feed itself calls the prefix unique.
-            if not conflicts and isinstance(cands, list) and len(cands) == 1 and conf.startswith("unique") \
-                    and isinstance(cands[0], dict):
+            if conflicts or not isinstance(cands, list) or len(cands) != 1 or not conf.startswith("unique") \
+                    or not isinstance(cands[0], dict):
+                self._hop_miss[key] = "first hop prefix ambiguous"
+            else:
                 pt = usable_point(cands[0].get("lat"), cands[0].get("lon"))
                 if pt:
                     pub = str(entry.get("pubkey") or "")[:8]
                     result = (pt[0], pt[1], f"{entry.get('name') or key} {key} {pub} {conf}".strip())
+                else:
+                    self._hop_miss[key] = "first hop repeater publishes no position"
         self._hops[key] = result
         return result
 
     async def resolve(self, message_id: str) -> PlaceResult | None:
-        """None: the message is gone or has no usable trace."""
+        """None: the message is gone or has no usable trace; self.miss says why."""
+        self.miss = None
         try:
             pid = int(message_id)
         except (TypeError, ValueError):
+            self.miss = "message id is not a number"
             return None
         msg = (await self.messages()).get(pid)
-        if not msg or not msg.get("packetHash"):
+        if not msg:
+            self.miss = "message not in the feed's retained messages"
+            return None
+        if not msg.get("packetHash"):
+            self.miss = "message has no packet hash"
             return None
         phash = str(msg["packetHash"])
         data = await self.host.get(f"/api/traces/{quote(phash, safe='')}")
+        if data is None:
+            self.miss = "trace not found"
+            return None
         traces = data.get("traces") if isinstance(data, dict) else None
-        if not isinstance(traces, list):
+        if not isinstance(traces, list) or not traces:
+            self.miss = "trace has no observations"
             return None
         obs = []
         for t in traces:
             path = _hex_prefixes(t.get("path_json")) if isinstance(t, dict) else None
             if path is not None:
                 obs.append((len(path), t, path))
+        if not obs:
+            self.miss = "trace has no usable path"
+            return None
         obs.sort(key=lambda x: x[0])  # fewest hops first: closest to the sender
+        reasons: set[str] = set()
         for hops, t, path in obs:
             if hops == 0:
                 got = await self._observer_point(t)
                 method = "observer"
+                if not got:
+                    reasons.add("heard directly, observer has no position")
             else:
                 got = await self._first_hop_point(path[0])
                 method = "first_hop"
+                if not got:
+                    reasons.add(self._hop_miss.get(path[0].upper(), "first hop unresolved"))
             if got:
                 return PlaceResult(method, got[0], got[1], None, got[2], phash)
+        self.miss = "; ".join(sorted(reasons))
         return None
 
 
@@ -256,19 +283,24 @@ class CoreScopeSource:
 
 
 class BeaconSource:
-    """One Beacon channel. History is long (back to 2024) and cursor-paged
-    newest first, so an index of pages already read is kept and extended
-    only as far back as the award being looked up."""
+    """One Beacon channel.
+
+    A message is found by its id directly: the channel's message list is
+    ordered by message id, newest id first, and `cursor=N` means "ids below
+    N", so `limit=1&cursor=<id>+1` returns the message itself (or the next
+    lower id if it is not in the channel). Do NOT page back looking for a
+    time: ids are not chronological -- a message sent in 2024 can carry an
+    id from this month (it got one when its key became known) -- and an
+    earlier version that stopped paging once it saw a message older than the
+    award stopped at the first such stray and found nothing for any award
+    older than it."""
 
     def __init__(self, host: HostClient, channel: str) -> None:
         self.host = host
         self.channel = channel
+        self.miss: str | None = None
         self._channel_id: int | None = None
         self._index: dict[int, dict] = {}
-        self._cursor: str | None = None
-        self._started = False
-        self._exhausted = False
-        self._oldest_ms: float | None = None
 
     async def _channel(self) -> int | None:
         if self._channel_id is None:
@@ -279,55 +311,42 @@ class BeaconSource:
                     self._channel_id = it["id"]
         return self._channel_id
 
-    async def _page(self) -> bool:
-        cid = await self._channel()
-        if cid is None or self._exhausted:
-            return False
-        params: dict = {"limit": 100}
-        if self._cursor:
-            params["cursor"] = self._cursor
-        data = await self.host.get(f"/api/v1/channels/{cid}/messages", params)
-        items = data.get("items") if isinstance(data, dict) else None
-        self._started = True
-        if not isinstance(items, list) or not items:
-            self._exhausted = True
-            return False
-        for it in items:
-            if isinstance(it, dict) and isinstance(it.get("id"), int):
-                self._index[it["id"]] = it
-                sent = it.get("sentAt")
-                if isinstance(sent, (int, float)):
-                    self._oldest_ms = sent if self._oldest_ms is None else min(self._oldest_ms, sent)
-        nxt = data.get("nextCursor")
-        if not data.get("hasMore") or not nxt:
-            self._exhausted = True
-        else:
-            self._cursor = str(nxt)
-        return True
-
-    async def message(self, message_id: str, ts: int | None) -> dict | None:
+    async def message(self, message_id: str, ts: int | None = None) -> dict | None:
         try:
             mid = int(message_id)
         except (TypeError, ValueError):
+            self.miss = "message id is not a number"
             return None
-        for _ in range(400):
-            if mid in self._index:
-                return self._index[mid]
-            # Stop once we are well past the award's own time.
-            if ts is not None and self._oldest_ms is not None and self._oldest_ms < (ts - 3600) * 1000:
-                return None
-            if not await self._page():
-                return None
-        return self._index.get(mid)
+        if mid in self._index:
+            return self._index[mid]
+        cid = await self._channel()
+        if cid is None:
+            self.miss = "channel not found on the feed"
+            return None
+        data = await self.host.get(f"/api/v1/channels/{cid}/messages", {"limit": 1, "cursor": mid + 1})
+        for it in (data.get("items") if isinstance(data, dict) else None) or []:
+            if isinstance(it, dict) and it.get("id") == mid:
+                self._index[mid] = it
+                return it
+        self.miss = "message not in the channel's history"
+        return None
 
     async def resolve(self, message_id: str, ts: int | None = None) -> PlaceResult | None:
+        self.miss = None
         msg = await self.message(message_id, ts)
-        if not msg or not msg.get("packetHash"):
+        if not msg:
+            return None
+        if not msg.get("packetHash"):
+            self.miss = "message has no packet hash"
             return None
         phash = str(msg["packetHash"])
         data = await self.host.get(f"/api/v1/packets/{quote(phash, safe='')}")
+        if data is None:
+            self.miss = "packet not found"
+            return None
         observations = data.get("observations") if isinstance(data, dict) else None
-        if not isinstance(observations, list):
+        if not isinstance(observations, list) or not observations:
+            self.miss = "packet has no observations"
             return None
         obs = []
         for o in observations:
@@ -338,25 +357,32 @@ class BeaconSource:
             if isinstance(hops, int) and hops >= 0:
                 obs.append((hops, o))
         obs.sort(key=lambda x: x[0])
+        reasons: set[str] = set()
         for hops, o in obs:
             if hops == 0:
                 iata = str(o.get("iata") or "").strip().upper()
                 if iata:
                     return PlaceResult("observer_iata", None, None, iata,
                                        f"{o.get('observerName') or '?'} (observer, {iata})", phash)
+                reasons.add("heard directly, observer has no airport code")
                 continue
             rp = o.get("resolvedPath")
             first = rp[0] if isinstance(rp, list) and rp and isinstance(rp[0], dict) else None
-            if not first or first.get("confidence") != "high":
-                continue  # ambiguous or unresolved: never guess
+            if not first:
+                reasons.add("path not resolved")
+                continue
             nodes = first.get("nodes")
-            if not isinstance(nodes, list) or len(nodes) != 1 or not isinstance(nodes[0], dict):
+            if first.get("confidence") != "high" or not isinstance(nodes, list) or len(nodes) != 1 \
+                    or not isinstance(nodes[0], dict):
+                reasons.add("first hop ambiguous")   # never guessed
                 continue
             pt = usable_point(nodes[0].get("latitude"), nodes[0].get("longitude"))
             if pt:
                 n = nodes[0]
                 return PlaceResult("first_hop", pt[0], pt[1], None,
                                    f"{n.get('name') or '?'} {str(n.get('publicKey') or '')[:8]} high", phash)
+            reasons.add("first hop repeater publishes no position")
+        self.miss = "; ".join(sorted(reasons)) or "no usable observation"
         return None
 
 
@@ -383,11 +409,17 @@ class Placer:
             self._sources[key] = cls(self._host(url), channel)
         return self._sources[key]
 
+    last_miss: str | None = None
+
     async def trace(self, award: sqlite3.Row | dict) -> PlaceResult | None:
+        """The placement, or None with `last_miss` saying why not."""
         src = self.source(award["kind"], award["connector_url"], award["channel"])
         if award["kind"] == "corescope":
-            return await src.resolve(award["message_id"])
-        return await src.resolve(award["message_id"], award["message_ts"])
+            result = await src.resolve(award["message_id"])
+        else:
+            result = await src.resolve(award["message_id"], award["message_ts"])
+        self.last_miss = None if result else src.miss
+        return result
 
     def requests(self) -> int:
         return sum(h.requests for h in self._hosts.values())
@@ -533,6 +565,9 @@ async def place_one(placer: Placer, award, *, final_after: int | None) -> tuple[
     attempts += 1
     if final_after is None or attempts >= final_after:
         est = await asyncio.to_thread(_estimate_sync, award)
+        miss = getattr(placer, "last_miss", None)
+        if miss:
+            est = est._replace(detail=f"{est.detail} [no trace: {miss}]")
         await asyncio.to_thread(write_placement, award, est, attempts=attempts)
         return est.method, est.detail
     await asyncio.to_thread(write_placement, award,

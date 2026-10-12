@@ -54,6 +54,8 @@ async def run(*, dry_run: bool = False, net_id: int | None = None, season_id: in
         lambda: _select_sync(net_id=net_id, season_id=season_id, replace=replace, limit=limit))
     stats: dict[int, collections.Counter] = collections.defaultdict(collections.Counter)
     failed: list = []
+    reasons: dict[tuple, str | None] = {}
+    why: collections.Counter = collections.Counter()
     started = time.monotonic()
     try:
         # Phase 1: trace.
@@ -68,6 +70,8 @@ async def run(*, dry_run: bool = False, net_id: int | None = None, season_id: in
                 continue
             if result is None:
                 failed.append(row)
+                reasons[(row["season_id"], row["player_id"], row["net_date"])] = placer.last_miss
+                why[(row["net_id"], placer.last_miss or "unknown")] += 1
             else:
                 st[result.method] += 1
                 if not dry_run:
@@ -78,6 +82,9 @@ async def run(*, dry_run: bool = False, net_id: int | None = None, season_id: in
         # Phase 2: estimate what could not be traced.
         for row in failed:
             est = await asyncio.to_thread(_estimate_sync, row)
+            miss = reasons.get((row["season_id"], row["player_id"], row["net_date"]))
+            if miss:
+                est = est._replace(detail=f"{est.detail} [no trace: {miss}]")
             stats[row["net_id"]][est.method] += 1
             if not dry_run:
                 await asyncio.to_thread(write_placement, row, est, attempts=(row["p_attempts"] or 0) + 1)
@@ -85,6 +92,11 @@ async def run(*, dry_run: bool = False, net_id: int | None = None, season_id: in
         if own:
             await placer.aclose()
     print_summary(stats, out, dry_run=dry_run, requests=placer.requests())
+    if why:
+        labels = _net_labels()
+        print("\nwhy awards could not be traced:", file=out)
+        for (nid, reason), n in sorted(why.items(), key=lambda kv: (kv[0][0], -kv[1])):
+            print(f"  {labels.get(nid, nid)}: {n} x {reason}", file=out)
     return stats
 
 

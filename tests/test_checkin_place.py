@@ -42,7 +42,7 @@ def _handler(log: list):
         log.append((host, path, q))
         if host == CS_URL:
             if path.startswith("/api/channels/") and path.endswith("/messages"):
-                return httpx.Response(200, json=fx.CS_MESSAGES if q.get("offset") == "0" else {"messages": [], "total": 4})
+                return httpx.Response(200, json=fx.CS_MESSAGES if q.get("offset") == "0" else {"messages": [], "total": 5})
             if path.startswith("/api/traces/"):
                 t = fx.CS_TRACES.get(path.rsplit("/", 1)[1])
                 return httpx.Response(200, json=t) if t else httpx.Response(404)
@@ -54,7 +54,11 @@ def _handler(log: list):
             if path == "/api/v1/channels":
                 return httpx.Response(200, json=fx.BEACON_CHANNELS)
             if path == "/api/v1/channels/7/messages":
-                return httpx.Response(200, json=fx.BEACON_PAGE_2 if q.get("cursor") == "c2" else fx.BEACON_PAGE_1)
+                # like the real feed: ids below the cursor, newest id first, at most `limit`
+                below = [i for i in fx.BEACON_ITEMS if "cursor" not in q or i["id"] < int(q["cursor"])]
+                below.sort(key=lambda i: -i["id"])
+                return httpx.Response(200, json={"items": below[: int(q.get("limit", 100))], "hasMore": len(below) > int(q.get("limit", 100)),
+                                                 "nextCursor": None})
             if path.startswith("/api/v1/packets/"):
                 p = fx.BEACON_PACKETS.get(path.rsplit("/", 1)[1])
                 return httpx.Response(200, json=p) if p else httpx.Response(404)
@@ -103,7 +107,18 @@ def test_corescope_heard_directly_uses_the_observer_position():
 
 
 def test_corescope_never_guesses_an_ambiguous_prefix():
-    assert trace(award(message_id="103")) is None
+    p, _ = make_placer()
+    assert asyncio.run(p.trace(award(message_id="103"))) is None
+    assert p.last_miss == "first hop prefix ambiguous"
+
+
+def test_corescope_says_why_nothing_was_placed():
+    p, _ = make_placer()
+    assert asyncio.run(p.trace(award(message_id="105"))) is None
+    assert p.last_miss == "first hop repeater publishes no position"
+    assert asyncio.run(p.trace(award(message_id="999"))) is None
+    assert p.last_miss == "message not in the feed's retained messages"
+    assert asyncio.run(p.trace(award(message_id="101"))).method == "first_hop" and p.last_miss is None
 
 
 def test_corescope_takes_the_observation_with_the_fewest_hops():
@@ -155,22 +170,41 @@ def test_beacon_ambiguous_first_hop_is_refused():
     assert trace(award("beacon", "5001")) is None        # 1-hop is ambiguous; 2-hop first node is ambiguous too (2 nodes)
 
 
-def test_beacon_pages_back_through_the_cursor_and_stops_past_the_award_time():
+def test_beacon_looks_a_message_up_by_id_in_one_request_not_by_paging_through_time():
     log = []
     p, _ = make_placer(log)
+    # 5001 is older than the stray 2024 message that sits above it in id order. Paging back "until
+    # a message older than the award" used to stop at that stray and find nothing.
     r = asyncio.run(p.trace(award("beacon", "5001", ts=1_791_000_100)))
-    assert r is None
-    pages = [q.get("cursor") for _, path, q in log if path.endswith("/messages")]
-    assert pages == [None, "c2"]                          # found on page 2 via the cursor
-    # an id from before the oldest page is not searched for forever
-    log.clear()
-    assert asyncio.run(p.trace(award("beacon", "1", ts=1_791_000_000))) is None
-    assert [q.get("cursor") for _, path, q in log if path.endswith("/messages")] == []   # index already covers it
+    assert r is None and p.last_miss == "first hop ambiguous"          # found; its path is just ambiguous
+    msg_reqs = [q for _, path, q in log if path.endswith("/messages")]
+    assert msg_reqs == [{"limit": "1", "cursor": "5002"}]
+
+
+def test_beacon_message_ids_are_found_whatever_their_age():
+    for mid in ("5003", "5002", "4999"):
+        p, log = make_placer()
+        src = p.source("beacon", BC_URL, "#central-oregon")
+        got = asyncio.run(src.message(mid, 1))
+        assert got is not None and got["id"] == int(mid)
+
+
+def test_beacon_message_not_in_the_channel():
+    p, _ = make_placer()
+    assert asyncio.run(p.trace(award("beacon", "4000"))) is None
+    assert p.last_miss == "message not in the channel's history"       # 4000 is absent: the next lower id came back
+
+
+def test_beacon_first_hop_without_a_position_is_reported_as_such():
+    p, _ = make_placer()
+    assert asyncio.run(p.trace(award("beacon", "5000"))) is None
+    assert p.last_miss == "first hop repeater publishes no position"
 
 
 def test_beacon_unknown_channel():
     p, _ = make_placer()
     assert asyncio.run(p.trace(award("beacon", "5003", channel="#nope"))) is None
+    assert p.last_miss == "channel not found on the feed"
 
 
 def test_host_client_spaces_requests():
