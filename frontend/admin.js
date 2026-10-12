@@ -2416,6 +2416,271 @@ async function saveNotice(b, overrideActive) {
   b.disabled = false;
 }
 
+// ---- regions (app/regions.py, app/regions_api.py) -----------------------
+//
+// Regions are a view and standings filter for the map and never touch
+// scoring. This section lists what the MeshMapper import has stored,
+// starts that import, and edits groups: a group holds regions and/or other
+// groups, to any depth. The API rejects a cycle and a slug that is taken;
+// its message is shown as-is.
+
+let regionsData = { regions: [], groups: [], sync: {} };
+let regionGroupDraft = null; // null, or { id (null while new), name, slug, regions: [codes], groups: [ids] }
+let regionSyncTimer = null;
+
+function regionSyncLine(sync) {
+  if (!sync) return '';
+  if (sync.running) {
+    return 'running ' + (sync.done || 0) + ' / ' + (sync.total || 0) + ', failures ' + (sync.failures || 0);
+  }
+  if (!sync.finished_at) return 'last run: never';
+  return 'last run ' + fmtTs(sync.finished_at) + ', failures ' + (sync.failures || 0)
+    + (sync.last_error ? ' (' + sync.last_error + ')' : '');
+}
+
+function renderRegionSync(sync) {
+  regionsData.sync = sync || {};
+  document.getElementById('rg-sync-status').textContent = regionSyncLine(sync);
+  document.getElementById('rg-sync').disabled = !!(sync && sync.running);
+  if (regionSyncTimer) { clearTimeout(regionSyncTimer); regionSyncTimer = null; }
+  if (sync && sync.running) {
+    regionSyncTimer = setTimeout(pollRegionSync, 3000);
+  }
+}
+
+async function pollRegionSync() {
+  regionSyncTimer = null;
+  try {
+    const was = regionsData.sync && regionsData.sync.running;
+    const sync = await api('/api/admin/regions/sync');
+    renderRegionSync(sync);
+    if (was && !sync.running) await loadRegions(); // finished: show the new boundaries
+  } catch (e) {
+    document.getElementById('rg-sync-status').textContent = 'status failed: ' + e.message;
+  }
+}
+
+async function loadRegions() {
+  try {
+    regionsData = await api('/api/admin/regions');
+  } catch (e) {
+    document.getElementById('rg-sync-result').textContent = 'Could not load: ' + e.message;
+    return;
+  }
+  renderRegionRows();
+  renderRegionGroups();
+  renderRegionSync(regionsData.sync);
+}
+
+function renderRegionRows() {
+  const body = document.getElementById('rg-rows');
+  body.replaceChildren();
+  const list = document.getElementById('rg-region-list');
+  list.replaceChildren();
+  regionsData.regions.forEach((r) => {
+    const tr = el('tr');
+    tr.appendChild(el('td', { text: r.code }));
+    tr.appendChild(el('td', { text: r.name }));
+    tr.appendChild(el('td', { text: fmtTs(r.fetched_at) }));
+    body.appendChild(tr);
+    const o = document.createElement('option');
+    o.value = r.code + '  ' + r.name;
+    list.appendChild(o);
+  });
+}
+
+function regionGroupById(id) {
+  return regionsData.groups.find((g) => g.id === id);
+}
+
+function renderRegionGroups() {
+  const host = document.getElementById('rg-groups');
+  const count = document.getElementById('rg-groups-count');
+  host.replaceChildren();
+  const groups = regionsData.groups;
+  count.textContent = groups.length ? String(groups.length) : '';
+  if (regionGroupDraft && regionGroupDraft.id === null) host.appendChild(renderRegionGroupEditor());
+  groups.forEach((g) => {
+    if (regionGroupDraft && regionGroupDraft.id === g.id) {
+      host.appendChild(renderRegionGroupEditor());
+      return;
+    }
+    const wrap = el('div', { className: 'adm-net' });
+    const row = el('div', { className: 'adm-net-row' });
+    const info = el('div', { className: 'adm-net-info' });
+    info.appendChild(el('strong', { text: g.name }));
+    const parts = [el('span', { text: g.slug })];
+    parts.push(el('span', { text: g.regions.length ? g.regions.join(', ') : 'no regions' }));
+    if (g.groups.length) {
+      parts.push(el('span', { text: g.groups.map((id) => (regionGroupById(id) || { name: '#' + id }).name).join(', ') }));
+    }
+    const line = el('div', { className: 'adm-hint' });
+    appendFacts(line, parts);
+    info.appendChild(line);
+    row.appendChild(info);
+    const actions = el('div', { className: 'adm-row-actions' });
+    actions.appendChild(btn('Edit', 'adm-btn-quiet', () => {
+      regionGroupDraft = { id: g.id, name: g.name, slug: g.slug, regions: g.regions.slice(), groups: g.groups.slice() };
+      renderRegionGroups();
+    }));
+    actions.appendChild(btn('Delete', 'adm-btn-danger', (b) => deleteRegionGroup(b, g)));
+    row.appendChild(actions);
+    wrap.appendChild(row);
+    host.appendChild(wrap);
+  });
+  if (!groups.length && !regionGroupDraft) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No groups yet.' }));
+  }
+}
+
+function renderRegionGroupEditor() {
+  const d = regionGroupDraft;
+  const wrap = el('div', { className: 'adm-net' });
+  const form = el('div', { className: 'adm-form' });
+  const nameLabel = el('label', { className: 'adm-field-label', text: 'Name' });
+  const name = el('input', { type: 'text', value: d.name });
+  name.maxLength = 80;
+  name.addEventListener('input', () => { d.name = name.value; });
+  nameLabel.appendChild(name);
+  const slugLabel = el('label', { className: 'adm-field-label', text: 'Slug' });
+  const slug = el('input', { type: 'text', value: d.slug, placeholder: 'from the name if blank' });
+  slug.maxLength = 63;
+  slug.addEventListener('input', () => { d.slug = slug.value; });
+  slugLabel.appendChild(slug);
+  form.appendChild(nameLabel);
+  form.appendChild(slugLabel);
+  wrap.appendChild(form);
+
+  // Members: one removable chip each, regions first, then groups.
+  const members = el('div', { className: 'adm-form' });
+  const nameOf = (code) => {
+    const r = regionsData.regions.find((x) => x.code === code);
+    return r ? r.code + '  ' + r.name : code;
+  };
+  d.regions.forEach((code) => {
+    const chip = el('span', { className: 'adm-badge', text: nameOf(code) + ' ' });
+    chip.appendChild(btn('Remove', 'adm-btn-quiet', () => {
+      d.regions = d.regions.filter((c) => c !== code);
+      renderRegionGroups();
+    }));
+    members.appendChild(chip);
+  });
+  d.groups.forEach((id) => {
+    const g = regionGroupById(id);
+    const chip = el('span', { className: 'adm-badge', text: (g ? g.name : '#' + id) + ' ' });
+    chip.appendChild(btn('Remove', 'adm-btn-quiet', () => {
+      d.groups = d.groups.filter((x) => x !== id);
+      renderRegionGroups();
+    }));
+    members.appendChild(chip);
+  });
+  if (!d.regions.length && !d.groups.length) {
+    members.appendChild(el('span', { className: 'adm-hint', text: 'No members yet.' }));
+  }
+  wrap.appendChild(members);
+
+  // Add a region: type a code or part of a name, pick from the list.
+  const addRegion = el('div', { className: 'adm-form' });
+  const rInput = el('input', { type: 'text', placeholder: 'code or name' });
+  rInput.setAttribute('list', 'rg-region-list');
+  rInput.autocomplete = 'off';
+  addRegion.appendChild(rInput);
+  const rMsg = el('span', { className: 'adm-hint' });
+  addRegion.appendChild(btn('Add region', 'adm-btn-quiet', () => {
+    const code = matchRegionCode(rInput.value);
+    if (!code) { rMsg.textContent = 'No single region matches.'; return; }
+    if (!d.regions.includes(code)) d.regions.push(code);
+    d.regions.sort();
+    renderRegionGroups();
+  }));
+  addRegion.appendChild(rMsg);
+  wrap.appendChild(addRegion);
+
+  // Add a group (any other group; the API refuses a cycle).
+  const addGroup = el('div', { className: 'adm-form' });
+  const sel = document.createElement('select');
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '';
+  sel.appendChild(none);
+  regionsData.groups.filter((g) => g.id !== d.id && !d.groups.includes(g.id)).forEach((g) => {
+    const o = document.createElement('option');
+    o.value = String(g.id);
+    o.textContent = g.name;
+    sel.appendChild(o);
+  });
+  addGroup.appendChild(sel);
+  addGroup.appendChild(btn('Add group', 'adm-btn-quiet', () => {
+    if (!sel.value) return;
+    d.groups.push(parseInt(sel.value, 10));
+    renderRegionGroups();
+  }));
+  wrap.appendChild(addGroup);
+
+  const result = el('div', { className: 'adm-result' });
+  const actions = el('div', { className: 'adm-form' });
+  actions.appendChild(btn('Save', '', (b) => saveRegionGroup(b, result)));
+  actions.appendChild(btn('Cancel', 'adm-btn-quiet', () => { regionGroupDraft = null; renderRegionGroups(); }));
+  wrap.appendChild(actions);
+  wrap.appendChild(result);
+  return wrap;
+}
+
+// "BOI  Boise, US", "boi" or "boise" -> "BOI"; null unless exactly one region fits.
+function matchRegionCode(text) {
+  const t = (text || '').trim();
+  if (!t) return null;
+  const first = t.split(/\s+/)[0].toUpperCase();
+  if (regionsData.regions.some((r) => r.code === first)) return first;
+  const low = t.toLowerCase();
+  const hits = regionsData.regions.filter((r) => r.name.toLowerCase().includes(low));
+  return hits.length === 1 ? hits[0].code : null;
+}
+
+async function saveRegionGroup(b, result) {
+  const d = regionGroupDraft;
+  result.textContent = '';
+  b.disabled = true;
+  try {
+    const payload = { name: d.name, slug: d.slug, regions: d.regions, groups: d.groups };
+    if (d.id === null) {
+      await post('/api/admin/regions/groups/create', payload);
+    } else {
+      await post('/api/admin/regions/groups/update', Object.assign({ id: d.id }, payload));
+    }
+    regionGroupDraft = null;
+    await loadRegions();
+  } catch (e) {
+    result.textContent = 'Failed: ' + e.message;
+    b.disabled = false;
+  }
+}
+
+async function deleteRegionGroup(b, g) {
+  if (!window.confirm('Delete the group "' + g.name + '"?')) return;
+  b.disabled = true;
+  try {
+    await post('/api/admin/regions/groups/delete', { id: g.id, name: g.name });
+    await loadRegions();
+  } catch (e) {
+    document.getElementById('rg-sync-result').textContent = 'Failed: ' + e.message;
+    b.disabled = false;
+  }
+}
+
+async function startRegionSync(b) {
+  const out = document.getElementById('rg-sync-result');
+  out.textContent = '';
+  b.disabled = true;
+  try {
+    await post('/api/admin/regions/sync', {});
+    renderRegionSync(await api('/api/admin/regions/sync'));
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+    b.disabled = false;
+  }
+}
+
 // ---- discord announcements ----------------------------------------------
 //
 // Same "whole singleton, one POST" shape savePaint()/saveNotice() above
@@ -2969,7 +3234,7 @@ async function refreshAll() {
   const loads = [
     loadPlayers(), loadAccounts(), loadOverview(), loadApiClients(), loadNotice(),
     loadCommunities(), loadNets(), loadSources(),
-    loadPaint(), loadTileRelease(), loadDiscord(), loadTraffic(), loadCheckinAwards(),
+    loadPaint(), loadTileRelease(), loadDiscord(), loadTraffic(), loadCheckinAwards(), loadRegions(),
   ];
   await Promise.all(loads);
   badge('nav-players', allPlayers.length, false);
@@ -3139,6 +3404,12 @@ document.getElementById('conn-new').addEventListener('click', function () {
 });
 document.getElementById('mo-freeze').addEventListener('click', function () { freezeMonth(this); });
 document.getElementById('pl-preview').addEventListener('click', function () { previewPlaces(this); });
+document.getElementById('rg-sync').addEventListener('click', function () { startRegionSync(this); });
+document.getElementById('rg-group-new').addEventListener('click', function () {
+  if (regionGroupDraft && regionGroupDraft.id === null) return; // one blank draft at a time
+  regionGroupDraft = { id: null, name: '', slug: '', regions: [], groups: [] };
+  renderRegionGroups();
+});
 document.getElementById('apikey-create').addEventListener('click', function () { createApiClient(this); });
 document.getElementById('nt-save').addEventListener('click', function () { saveNotice(this); });
 // Resends whatever is currently in the form with active forced off --

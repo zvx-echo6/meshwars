@@ -140,6 +140,7 @@
           <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
           <button type="button" class="adm-nav-item" data-section="months">Months</button>
           <button type="button" class="adm-nav-item" data-section="places">Places</button>
+          <button type="button" class="adm-nav-item" data-section="regions">Regions</button>
           <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
           <button type="button" class="adm-nav-item" data-section="discord">Discord</button>
           <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
@@ -402,6 +403,29 @@
           <div id="pl-result" class="adm-result"></div>
         </section>
 
+        <section class="adm-section" data-section="regions" hidden>
+          <h2 class="adm-h2">Regions</h2>
+          <div class="adm-form">
+            <button type="button" id="rg-sync" class="adm-btn">Update from MeshMapper</button>
+            <span class="adm-hint" id="rg-sync-status"></span>
+          </div>
+          <div id="rg-sync-result" class="adm-result"></div>
+
+          <div class="adm-table-wrap">
+            <table class="adm-table">
+              <thead><tr><th>Code</th><th>Name</th><th>Last updated</th></tr></thead>
+              <tbody id="rg-rows"></tbody>
+            </table>
+          </div>
+          <datalist id="rg-region-list"></datalist>
+
+          <h3 class="adm-h3">Groups <span class="adm-count" id="rg-groups-count"></span></h3>
+          <div class="adm-form">
+            <button type="button" id="rg-group-new" class="adm-btn">New group</button>
+          </div>
+          <div id="rg-groups"></div>
+        </section>
+
         <section class="adm-section" data-section="notice" hidden>
           <h2 class="adm-h2">Notice</h2>
           <details class="adm-about">
@@ -558,7 +582,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20261009-key-reveal"></script>
+  <script src="/static/admin.js?v=20261012-1"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>
