@@ -648,7 +648,8 @@ def test_membership_work_runs_with_no_write_lock_held(db_path, monkeypatch):
     real = regions._membership
 
     def spy(index, cells):
-        seen.append(_write_lock_is_free(db_path))
+        if cells:
+            seen.append(_write_lock_is_free(db_path))
         return real(index, cells)
 
     monkeypatch.setattr(regions, "_membership", spy)

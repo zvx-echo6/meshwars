@@ -528,7 +528,7 @@ def remap_regions(codes: Iterable[str]) -> int:
                             return None
                         late = [r[0] for r in wc.execute("SELECT cell_id FROM region_cell_mapped")
                                 if r[0] not in seen]
-                        rows = computed + _membership(index, late)
+                        rows = computed + (_membership(index, late) if late else [])
                         wc.execute(f"DELETE FROM region_cell WHERE region_code IN ({marks})", codes)
                         _apply_membership(wc, rows, mark_mapped=False)
                         wc.execute("COMMIT")
