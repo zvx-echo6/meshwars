@@ -1126,6 +1126,90 @@ CREATE TABLE IF NOT EXISTS mc_tile_capture_log (
 );
 CREATE INDEX IF NOT EXISTS idx_mc_capture_log_cell ON mc_tile_capture_log(season_id, cell_id);
 
+-- ---- Regions (app/regions.py) ----------------------------------------
+-- MeshMapper-derived regions are a VIEW and STANDINGS filter only: they
+-- never touch scoring. A region is a boundary polygon; a square belongs
+-- to every region whose polygon holds the square's centre point (two
+-- regions can overlap, e.g. SMN and IDA, so a square can be in both).
+--
+-- polygon_json is the source geometry exactly as MeshMapper keeps it:
+-- a JSON list of rings, each ring a list of [lat, lon] pairs -- LAT
+-- FIRST. GeoJSON wants lon,lat, so app/regions.py flips on the way out;
+-- nothing else should read this column directly. A region listed without
+-- a usable polygon is stored as a circle ring around its centre (see
+-- app/regions.py's circle_ring()), so this column is never empty.
+-- south/west/north/east are the bbox of that geometry, kept as columns
+-- so the membership pass and the client's fit-to-region need no parse.
+-- fetched_at is when the boundary was last fetched OK (epoch s).
+CREATE TABLE IF NOT EXISTS region (
+    code         TEXT PRIMARY KEY,           -- uppercase, MeshMapper's own code
+    name         TEXT NOT NULL,
+    center_lat   REAL NOT NULL,
+    center_lon   REAL NOT NULL,
+    polygon_json TEXT NOT NULL,
+    radius_km    REAL,
+    south        REAL NOT NULL,
+    west         REAL NOT NULL,
+    north        REAL NOT NULL,
+    east         REAL NOT NULL,
+    fetched_at   INTEGER NOT NULL
+);
+
+-- An operator-made grouping of regions (and of other groups, to any
+-- depth). slug is the url-safe lowercase handle used in /map/<slug> and
+-- ?region=; it may never equal a region code in lowercase (regions win
+-- the lookup, so such a group would be unreachable) -- enforced on write
+-- in app/regions.py, not here.
+CREATE TABLE IF NOT EXISTS region_group (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    slug        TEXT NOT NULL UNIQUE,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+-- Exactly one of region_code / child_group_id is set per row. Cycles
+-- (a group that contains itself, directly or through children) are
+-- rejected on write by app/regions.py; the table cannot express that.
+CREATE TABLE IF NOT EXISTS region_group_member (
+    group_id        INTEGER NOT NULL,
+    region_code     TEXT,
+    child_group_id  INTEGER,
+    FOREIGN KEY (group_id) REFERENCES region_group(id) ON DELETE CASCADE,
+    FOREIGN KEY (child_group_id) REFERENCES region_group(id) ON DELETE CASCADE,
+    CHECK ((region_code IS NULL) != (child_group_id IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_region_group_member_region
+    ON region_group_member(group_id, region_code) WHERE region_code IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_region_group_member_child
+    ON region_group_member(group_id, child_group_id) WHERE child_group_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_region_group_member_child_of
+    ON region_group_member(child_group_id) WHERE child_group_id IS NOT NULL;
+
+-- Precomputed square -> region membership. NEVER computed per request:
+-- filled for every known square after a boundary import, and for new
+-- squares by a cheap periodic job (app/regions.py's map_new_cells()),
+-- not by the ingest write path. cell_id is app/grid.py's id, shared by
+-- BOTH boards (the Meshtastic and MeshCore boards use the same grid and
+-- the same mc_tile table, told apart by season_id), so membership is
+-- keyed on the cell alone.
+CREATE TABLE IF NOT EXISTS region_cell (
+    region_code TEXT NOT NULL,
+    cell_id     TEXT NOT NULL,
+    PRIMARY KEY (region_code, cell_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_region_cell_cell ON region_cell(cell_id, region_code);
+
+-- Every cell that has been tested against the region set, whether or not
+-- it landed in a region. Without it, a cell in no region would look
+-- "not yet mapped" forever and be re-tested every cycle. Cells enter
+-- here when a square first exists in mc_tile or when a place's cell is
+-- credited in place_activation (Explorer points are scoped by region
+-- through the place's cells).
+CREATE TABLE IF NOT EXISTS region_cell_mapped (
+    cell_id TEXT PRIMARY KEY
+) WITHOUT ROWID;
+
 -- Singleton, same upsert-by-fixed-id shape as `checkin_config`/
 -- `freqmapper_config`/`discord_config` above -- read FRESH by
 -- app/mc_ingest.py's McIngestor._release_expired_tiles_sync on every
