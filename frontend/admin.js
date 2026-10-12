@@ -2312,6 +2312,335 @@ async function loadSources() {
 }
 
 
+// ---- paint source: meshview vs FreqMapper ------------------------------
+//
+// One combined form (source + connector + scoring), one Save button --
+// same "whole singleton, one POST" shape the Nets settings form above
+// uses for checkin_config. The paint-source SELECT is the one field
+// that gets its own confirmation before that POST goes out (see
+// savePaint below): switching it changes where live Meshtastic
+// territory comes from, the same kind of consequence the delete
+// buttons elsewhere in this file already guard with a typed prompt.
+
+// The mt_paint_source the form was last loaded/saved WITH -- compared
+// against the select's current value at save time so the confirmation
+// only fires on an actual switch, not on saving connector/scoring
+// changes while leaving the source alone.
+let loadedPaintSource = null;
+
+function renderPaintForm(cfg) {
+  document.getElementById('pt-source').value = cfg.mt_paint_source;
+  document.getElementById('pt-enabled').checked = !!cfg.enabled;
+  document.getElementById('pt-base-url').value = cfg.base_url || '';
+  // Never pre-filled with the real key -- GET /api/admin/paint never
+  // returns it (see app/admin_ops.py's _scrub_freqmapper_secrets); the
+  // hint span is the only signal of whether one is set.
+  document.getElementById('pt-api-key').value = '';
+  document.getElementById('pt-clear-api-key').checked = false;
+  document.getElementById('pt-api-key-hint').textContent = cfg.has_api_key ? 'currently set' : 'not set';
+  document.getElementById('pt-poll-interval').value = cfg.poll_interval_seconds;
+  document.getElementById('pt-page-limit').value = cfg.page_limit;
+  document.getElementById('pt-paint-from').value = cfg.paint_from || '';
+  document.getElementById('pt-points-per-event').value = cfg.points_per_event;
+  document.getElementById('pt-unique-painter-bonus').value = cfg.unique_painter_bonus;
+  loadedPaintSource = cfg.mt_paint_source;
+}
+
+function renderPaintStatus(cfg, cursor, verificationCount) {
+  const host = document.getElementById('pt-status');
+  host.replaceChildren();
+
+  const pollP = el('p', {
+    className: 'adm-net-health' + (cfg.last_poll_error ? ' adm-status-bad' : ''),
+  });
+  pollP.appendChild(el('span', {
+    text: cfg.last_poll_error ? ('poll error: ' + cfg.last_poll_error)
+      : (cfg.last_poll_at ? ('last polled ' + ago(cfg.last_poll_at)) : 'never polled yet'),
+  }));
+  host.appendChild(pollP);
+
+  const countP = el('p', { className: 'adm-net-health' });
+  countP.appendChild(el('span', {
+    text: verificationCount + (verificationCount === 1 ? ' event consumed' : ' events consumed'),
+  }));
+  host.appendChild(countP);
+
+  const cursorP = el('p', { className: 'adm-net-health' });
+  cursorP.appendChild(el('span', { text: 'cursor:' }));
+  host.appendChild(cursorP);
+
+  // The cursor is an opaque base64 blob with no whitespace of its own,
+  // so unlike the other .adm-mono values in this panel (a hash prefix,
+  // a connector URL) it can't just sit inline -- there is nowhere for
+  // it to wrap, and left alone it pushes the line out to whatever width
+  // it needs, ignoring the section around it. Boxing it as its own
+  // block with overflow-x scoped to that block keeps the value intact
+  // and copyable (drag-select still grabs the whole string) without
+  // ever letting it set the panel's width.
+  host.appendChild(el('div', {
+    className: 'adm-mono adm-mono-block',
+    text: cursor || '(none yet)',
+  }));
+}
+
+async function loadPaint() {
+  try {
+    const d = await api('/api/admin/paint');
+    renderPaintForm(d.config);
+    renderPaintStatus(d.config, d.cursor, d.verification_count);
+  } catch (e) {
+    setStatus('Paint config load failed: ' + e.message, true);
+  }
+}
+
+async function savePaint(b) {
+  const out = document.getElementById('pt-result');
+  out.replaceChildren();
+
+  const source = document.getElementById('pt-source').value;
+  if (source !== loadedPaintSource) {
+    // Switching which source(s) paint the Meshtastic board -- named
+    // confirmation, same "type it to confirm" shape every destructive
+    // action in this file already uses, not a bare OK/Cancel a tired
+    // operator could click through without reading.
+    //
+    // Wording differs for "both" versus the two exclusive values,
+    // since the consequence is different: switching INTO both starts a
+    // second painter alongside whichever one was already running (no
+    // source stops); switching OUT of both to a single value stops
+    // whichever painter is being left. Neither case has a "which one
+    // wins" question to explain -- there is no arbitration between the
+    // two, the board's existing capture cooldowns handle any overlap.
+    const PAINT_LABELS = { meshview: 'Meshview', freqmapper: 'FreqMapper', both: 'Both' };
+    const label = PAINT_LABELS[source] || source;
+    const detail = source === 'both'
+      ? 'This starts both Meshview and FreqMapper painting live Meshtastic territory at once.'
+      : loadedPaintSource === 'both'
+        ? ('This stops the other source and leaves only ' + label + ' painting live Meshtastic territory.')
+        : ('This switches which source paints live Meshtastic territory to ' + label + '.');
+    const typed = window.prompt(
+      detail + '\n\n' + 'Type ' + label + ' to confirm switching to it.'
+    );
+    if (typed !== label) {
+      out.textContent = typed === null ? '' : 'Not confirmed -- no change made.';
+      return;
+    }
+  }
+
+  const payload = {
+    mt_paint_source: source,
+    enabled: document.getElementById('pt-enabled').checked,
+    base_url: document.getElementById('pt-base-url').value.trim(),
+    poll_interval_seconds: parseInt(document.getElementById('pt-poll-interval').value, 10),
+    page_limit: parseInt(document.getElementById('pt-page-limit').value, 10),
+    paint_from: document.getElementById('pt-paint-from').value,
+    points_per_event: parseFloat(document.getElementById('pt-points-per-event').value),
+    unique_painter_bonus: parseFloat(document.getElementById('pt-unique-painter-bonus').value),
+  };
+  // Blank means keep the existing key -- see app/admin_ops.py's
+  // admin_paint_update, the same convention checkin_net's
+  // broker_password/channel_key already use. clear_api_key is the
+  // explicit way to actually blank it.
+  if (document.getElementById('pt-clear-api-key').checked) {
+    payload.clear_api_key = true;
+  } else {
+    const apiKey = document.getElementById('pt-api-key').value;
+    if (apiKey) payload.api_key = apiKey;
+  }
+
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/paint', payload);
+    renderPaintForm(r.config);
+    out.textContent = 'Saved.';
+    setStatus('Paint config saved', false);
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function clearPaintCursor(b) {
+  const out = document.getElementById('pt-clear-result');
+  out.replaceChildren();
+  const typed = window.prompt(
+    'This makes the next FreqMapper poll re-walk its feed from the beginning.\n\n' +
+    'Already-seen events are skipped (deduped by their own id), never double-scored.\n\n' +
+    'Type CLEAR to confirm.'
+  );
+  if (typed !== 'CLEAR') {
+    out.textContent = typed === null ? '' : 'Not confirmed -- cursor left alone.';
+    return;
+  }
+  b.disabled = true;
+  try {
+    await post('/api/admin/paint/clear-cursor', {});
+    out.textContent = 'Cursor cleared.';
+    await loadPaint();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+// ---- tile release: app/db.py's tile_release_config ---------------------
+//
+// Same "whole singleton, one POST" shape the Nets/Paint sections above
+// use for their own config. The one field that gets its own
+// confirmation before that POST goes out is dry_run switching from
+// true to false -- see saveTileRelease below -- the same "type a value
+// to confirm" shape savePaint/clearPaintCursor/the delete buttons all
+// use elsewhere in this file, except what has to be typed here is the
+// exact projected release count, not a fixed word, so an operator has
+// to actually look at the number before confirming it.
+
+// The dry_run the form was last loaded/saved WITH -- compared against
+// the checkbox's current value at save time so the confirmation only
+// fires on an actual true->false switch, not on saving zero_hours/
+// max_per_sweep/enabled changes while dry_run stays wherever it
+// already was.
+let loadedTileReleaseDryRun = true;
+let tileReleaseBounds = { zero_hours_floor: 168, max_per_sweep_floor: 1, max_per_sweep_ceiling: 2000 };
+
+function renderTileReleaseForm(cfg) {
+  document.getElementById('tr-enabled').checked = !!cfg.enabled;
+  document.getElementById('tr-zero-hours').value = cfg.zero_hours;
+  document.getElementById('tr-zero-hours').min = cfg.zero_hours_floor;
+  document.getElementById('tr-max-per-sweep').value = cfg.max_per_sweep;
+  document.getElementById('tr-max-per-sweep').min = cfg.max_per_sweep_floor;
+  document.getElementById('tr-max-per-sweep').max = cfg.max_per_sweep_ceiling;
+  document.getElementById('tr-dry-run').checked = !!cfg.dry_run;
+  document.getElementById('tr-dry-run-hint').hidden = !!cfg.dry_run;
+  loadedTileReleaseDryRun = !!cfg.dry_run;
+  tileReleaseBounds = {
+    zero_hours_floor: cfg.zero_hours_floor,
+    max_per_sweep_floor: cfg.max_per_sweep_floor,
+    max_per_sweep_ceiling: cfg.max_per_sweep_ceiling,
+  };
+}
+
+async function loadTileRelease() {
+  try {
+    const cfg = await api('/api/admin/tile_release/config');
+    renderTileReleaseForm(cfg);
+  } catch (e) {
+    setStatus('Tile release config load failed: ' + e.message, true);
+  }
+}
+
+function renderTileReleaseProjection(p) {
+  const host = document.getElementById('tr-projection');
+  host.replaceChildren();
+  if (p.season_id === null) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No active MeshCore season -- nothing to project.' }));
+    return;
+  }
+  const tiles = el('div', { className: 'adm-tiles' });
+  tiles.appendChild(tile(p.count, 'would release at ' + p.zero_hours + 'h'));
+  tiles.appendChild(tile(p.board_pct.toFixed(1) + '%', 'of the whole board', p.board_pct >= 25 ? 'bad' : (p.board_pct >= 10 ? 'warn' : null)));
+  host.appendChild(tiles);
+  if (p.by_team.length) {
+    const list = el('div', { className: 'adm-hint' });
+    list.appendChild(el('span', {
+      text: p.by_team.map((t) => t.team + ': ' + t.count + ' of ' + t.team_total + ' (' + t.pct.toFixed(1) + '%)').join('  |  '),
+    }));
+    host.appendChild(list);
+  }
+}
+
+let lastTileReleaseProjection = null;
+
+async function previewTileRelease(b) {
+  const out = document.getElementById('tr-result');
+  out.replaceChildren();
+  const zeroHours = parseInt(document.getElementById('tr-zero-hours').value, 10);
+  if (!Number.isFinite(zeroHours) || zeroHours <= 0) {
+    out.textContent = 'Enter a positive number of hours first.';
+    return;
+  }
+  b.disabled = true;
+  try {
+    const p = await post('/api/admin/tile_release/projection', { zero_hours: zeroHours });
+    lastTileReleaseProjection = p;
+    renderTileReleaseProjection(p);
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
+async function saveTileRelease(b) {
+  const out = document.getElementById('tr-result');
+  out.replaceChildren();
+
+  const enabled = document.getElementById('tr-enabled').checked;
+  const zeroHours = parseInt(document.getElementById('tr-zero-hours').value, 10);
+  const maxPerSweep = parseInt(document.getElementById('tr-max-per-sweep').value, 10);
+  const dryRun = document.getElementById('tr-dry-run').checked;
+
+  if (!Number.isFinite(zeroHours) || zeroHours < tileReleaseBounds.zero_hours_floor) {
+    out.textContent = 'Abandonment window must be at least ' + tileReleaseBounds.zero_hours_floor + ' hours.';
+    return;
+  }
+  if (!Number.isFinite(maxPerSweep) || maxPerSweep < tileReleaseBounds.max_per_sweep_floor
+      || maxPerSweep > tileReleaseBounds.max_per_sweep_ceiling) {
+    out.textContent = 'Max releases per sweep must be between ' + tileReleaseBounds.max_per_sweep_floor
+      + ' and ' + tileReleaseBounds.max_per_sweep_ceiling + '.';
+    return;
+  }
+
+  const payload = { enabled, zero_hours: zeroHours, dry_run: dryRun, max_per_sweep: maxPerSweep };
+
+  if (loadedTileReleaseDryRun && !dryRun) {
+    // The destructive transition -- fetch the freshest possible
+    // projection for the window about to be saved (not whatever is
+    // sitting in the panel from an earlier click, which may be stale)
+    // and require it be typed back before this goes out. The server
+    // re-checks this exact number itself, fresh, inside its own write
+    // transaction, and 409s on any mismatch -- this client-side check
+    // only saves a round trip for the common case of an operator who
+    // simply never looked.
+    let fresh;
+    try {
+      fresh = await post('/api/admin/tile_release/projection', { zero_hours: zeroHours });
+    } catch (e) {
+      out.textContent = 'Could not fetch a fresh projection: ' + e.message;
+      return;
+    }
+    lastTileReleaseProjection = fresh;
+    renderTileReleaseProjection(fresh);
+    const typed = window.prompt(
+      'Turning dry run off starts deleting abandoned tiles on the next sweep.\n\n' +
+      'At ' + fresh.zero_hours + 'h this releases ' + fresh.count + ' cells (' + fresh.board_pct.toFixed(1) + '% of the board) right now.\n\n' +
+      'Type ' + fresh.count + ' to confirm.'
+    );
+    if (typed === null) {
+      out.textContent = '';
+      return;
+    }
+    if (parseInt(typed, 10) !== fresh.count || String(parseInt(typed, 10)) !== typed.trim()) {
+      out.textContent = 'Not confirmed -- no change made.';
+      return;
+    }
+    payload.confirm_release_count = fresh.count;
+  }
+
+  b.disabled = true;
+  try {
+    const cfg = await post('/api/admin/tile_release/config', payload);
+    // The save response carries the four saved fields, not the
+    // floor/ceiling GET /api/admin/tile_release/config also returns --
+    // reuse tileReleaseBounds (unchanged by a save) rather than a
+    // second round trip just to redraw the same form.
+    renderTileReleaseForm(Object.assign({}, cfg, tileReleaseBounds));
+    out.textContent = 'Saved.';
+    setStatus('Tile release config saved', false);
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 // ---- places rotation preview -------------------------------------------
 
 async function previewPlaces(b) {
