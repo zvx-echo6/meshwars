@@ -508,7 +508,7 @@ async def get_nodes(
         return mc_api.cached_json_response(
             f"{cache_key}:region:{resolved.key}",
             lambda: _build_get_nodes(include_attribution=session is not None, region_codes=resolved.codes),
-            request,
+            request, shared_ttl=mc_api.REGION_SHARED_TTL_S,
         )
     return mc_api.cached_json_response(
         cache_key,
@@ -613,7 +613,8 @@ async def scores(request: Request, region: str | None = None):
         return err
     if resolved is not None:
         return mc_api.cached_json_response(f"mt_scores:region:{resolved.key}",
-                                           lambda: mc_api.scores_for(MT_PROTOCOL, resolved), request)
+                                           lambda: mc_api.scores_for(MT_PROTOCOL, resolved), request,
+                                           shared_ttl=mc_api.REGION_SHARED_TTL_S)
     return mc_api.scores_for(MT_PROTOCOL, resolved)
 
 
@@ -821,7 +822,8 @@ async def top_players(request: Request, region: str | None = None):
         return err
     if resolved is not None:
         return mc_api.cached_json_response(f"mt_top:region:{resolved.key}",
-                                           lambda: mc_api.top_for(MT_PROTOCOL, resolved.codes), request)
+                                           lambda: mc_api.top_for(MT_PROTOCOL, resolved.codes), request,
+                                           shared_ttl=mc_api.REGION_SHARED_TTL_S)
     return mc_api.top_for(MT_PROTOCOL, None)
 
 

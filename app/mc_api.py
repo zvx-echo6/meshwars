@@ -536,7 +536,19 @@ def _wants_gzip(request: Request | None) -> bool:
     return "gzip" in request.headers.get("accept-encoding", "")
 
 
-def cached_json_response(key: str, build, request: Request | None = None) -> Response:
+# Regional responses (?region=) are built by whichever web worker gets the
+# request and shared with the others through board_cache for this long. The
+# web role runs several uvicorn worker PROCESSES, each with its own
+# _BOARD_CACHE, so without a shared copy a repeat request lands on a worker
+# that has not built the key yet and pays the full cost again -- which is why
+# only some regional keys ever looked cached. Nothing publishes these keys
+# (the worker role only publishes the unfiltered boards), so a shared row is
+# trusted only while it is younger than this.
+REGION_SHARED_TTL_S = 20.0
+
+
+def cached_json_response(key: str, build, request: Request | None = None, *,
+                         shared_ttl: float | None = None) -> Response:
     """Serve `build()`'s result as JSON, reusing the bytes for up to
     settings.board_cache_seconds.
 
@@ -629,7 +641,7 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
         if hit is not None and now - hit.built_at < ttl:
             return answer(hit)
 
-        row_entry = _read_board_cache_row(key)
+        row_entry = _read_board_cache_row(key, max_age=shared_ttl)
         if row_entry is not None:
             _BOARD_CACHE[key] = row_entry
             return answer(row_entry)
@@ -642,10 +654,40 @@ def cached_json_response(key: str, build, request: Request | None = None) -> Res
     entry = _CachedBody(now, body, etag)
     if ttl > 0:
         _BOARD_CACHE[key] = entry
+        if shared_ttl is not None:
+            _write_board_cache_row(key, entry)
     return answer(entry)
 
 
-def _read_board_cache_row(key: str) -> _CachedBody | None:
+def _write_board_cache_row(key: str, entry: _CachedBody) -> None:
+    """Share a freshly built entry with the other worker processes through
+    board_cache (see REGION_SHARED_TTL_S). Best effort and short: a busy or
+    failing database just means the other workers build it themselves."""
+    try:
+        gz = entry.gzipped()
+        conn = connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "INSERT INTO board_cache(cache_key, body, gzip_body, etag, built_at) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(cache_key) DO UPDATE SET body = excluded.body, gzip_body = excluded.gzip_body, "
+                    " etag = excluded.etag, built_at = excluded.built_at",
+                    (key, b"", gz, entry.etag, int(time.time())))
+                conn.execute("COMMIT")
+            except BaseException:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        finally:
+            conn.close()
+    except Exception:
+        log.debug("board_cache: could not share %s", key, exc_info=True)
+
+
+def _read_board_cache_row(key: str, max_age: float | None = None) -> _CachedBody | None:
     """board_cache (app/db.py) read for cached_json_response's tier-2
     fallback -- see that function's own docstring for when this is
     reached. A plain connect()/SELECT, not WriteSession: this only ever
@@ -694,7 +736,7 @@ def _read_board_cache_row(key: str) -> _CachedBody | None:
         conn = connect()
         try:
             row = conn.execute(
-                "SELECT body, gzip_body, etag FROM board_cache WHERE cache_key = ?",
+                "SELECT body, gzip_body, etag, built_at FROM board_cache WHERE cache_key = ?",
                 (key,),
             ).fetchone()
         finally:
@@ -704,6 +746,8 @@ def _read_board_cache_row(key: str) -> _CachedBody | None:
         return None
     if row is None:
         return None
+    if max_age is not None and time.time() - row["built_at"] > max_age:
+        return None   # a shared row nothing refreshes: only trusted while young
     body = bytes(row["body"]) if row["body"] else None
     gzip_body = bytes(row["gzip_body"]) if row["gzip_body"] else None
     if body is None and gzip_body is None:
@@ -841,7 +885,7 @@ async def mc_board(request: Request, region: str | None = None) -> Response:
         return cached_json_response(
             f"mc_board:region:{resolved.key}",
             lambda: board_for(MC_PROTOCOL, include_meta=False, region_codes=resolved.codes),
-            request,
+            request, shared_ttl=REGION_SHARED_TTL_S,
         )
     return cached_json_response(
         "mc_board", lambda: board_for(MC_PROTOCOL, include_meta=False), request
@@ -1379,7 +1423,8 @@ async def mc_scores(request: Request, region: str | None = None):
         return err
     if resolved is not None:
         return cached_json_response(f"mc_scores:region:{resolved.key}",
-                                    lambda: scores_for(MC_PROTOCOL, resolved), request)
+                                    lambda: scores_for(MC_PROTOCOL, resolved), request,
+                                    shared_ttl=REGION_SHARED_TTL_S)
     return scores_for(MC_PROTOCOL, resolved)
 
 
@@ -1738,7 +1783,8 @@ async def mc_top(request: Request, region: str | None = None):
         return err
     if resolved is not None:
         return cached_json_response(f"mc_top:region:{resolved.key}",
-                                    lambda: top_for(MC_PROTOCOL, resolved.codes), request)
+                                    lambda: top_for(MC_PROTOCOL, resolved.codes), request,
+                                    shared_ttl=REGION_SHARED_TTL_S)
     return top_for(MC_PROTOCOL, None)
 
 

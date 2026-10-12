@@ -17,23 +17,38 @@ test('two neighbours whose borders miss by less than the snap grid merge into on
   assert.equal(holes(out).length, 0);
 });
 
-test('a small hole left between members is dropped as a sliver', () => {
-  // four members around a 0.005 x 0.005 degree (~0.3 km2) gap
-  const members = [box(-117, 42, -116.0025, 44), box(-115.9975, 42, -115, 44),
-                   box(-116.0025, 42, -115.9975, 42.9975), box(-116.0025, 43.0025, -115.9975, 44)];
-  const raw = pc.union(...members.map((f) => f.geometry.coordinates));
-  assert.equal(holes(raw).length, 1);                 // the library alone keeps it
-  const out = ro.buildOutline(members, pc);
-  assert.equal(out.length, 1);
-  assert.equal(holes(out).length, 0);
+test('the outline is the outer edge only: a hole between members is dropped, small or large', () => {
+  const small = [box(-117, 42, -116.0025, 44), box(-115.9975, 42, -115, 44),
+                 box(-116.0025, 42, -115.9975, 42.9975), box(-116.0025, 43.0025, -115.9975, 44)];   // ~0.3 km2 gap
+  const large = [box(-117, 42, -113, 43), box(-117, 45, -113, 46), box(-117, 43, -116, 45), box(-114, 43, -113, 45)];
+  for (const members of [small, large]) {
+    assert.equal(holes(pc.union(...members.map((f) => f.geometry.coordinates))).length, 1);   // the library keeps it
+    const out = ro.buildOutline(members, pc);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].length, 1);                                                          // one ring: the outer edge
+  }
 });
 
-test('a real gap between members stays as a hole', () => {
-  const ring = [box(-117, 42, -113, 43), box(-117, 45, -113, 46), box(-117, 43, -116, 45), box(-114, 43, -113, 45)];
-  const out = ro.buildOutline(ring, pc);
+test('a narrow inlet between members is closed, a wide one is left', () => {
+  const frame = (gap) => [box(-117, 42, -116 - gap / 2, 44), box(-116 + gap / 2, 42, -115, 44), box(-117, 42, -115, 42.5)];
+  const narrow = ro.buildOutline(frame(0.004), pc, { close: 0 });
+  assert.ok(!ro.pointInRing([-116, 43], narrow[0][0]));           // without closing, the channel is cut into the outline
+  const closed = ro.buildOutline(frame(0.004), pc);
+  assert.ok(ro.pointInRing([-116, 43], closed[0][0]));            // closing fills it
+  const wide = ro.buildOutline(frame(0.5), pc);
+  assert.ok(!ro.pointInRing([-116, 43], wide[0][0]));             // a 50 km channel is a real feature
+});
+
+test('a piece lying inside another is dropped', () => {
+  const out = ro.outerOnly([[[[-117, 42], [-115, 42], [-115, 44], [-117, 44], [-117, 42]]],
+                            [[[-116.5, 42.5], [-116, 42.5], [-116, 43], [-116.5, 43], [-116.5, 42.5]]]], 1);
   assert.equal(out.length, 1);
-  assert.equal(holes(out).length, 1);
-  assert.ok(ro.ringAreaKm2(holes(out)[0]) > 1000);
+});
+
+test('if the union library fails while closing, the unclosed outline is returned', () => {
+  const flaky = { union: (...a) => { if (a.length > 5) throw new Error('degenerate input'); return pc.union(...a); } };
+  const out = ro.buildOutline([box(-116, 43, -115, 44), box(-115, 43, -114, 44)], flaky);
+  assert.equal(out.length, 1);
 });
 
 test('tiny separate pieces are dropped, big ones kept', () => {

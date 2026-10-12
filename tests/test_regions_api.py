@@ -732,3 +732,36 @@ def test_existing_groups_take_creation_order_from_the_migration(tmp_path):
             conn.execute(stmt) if stmt.startswith("UPDATE") else None
     assert [r[0] for r in conn.execute("SELECT slug FROM region_group ORDER BY display_order, id")] == ["b", "a"]
     conn.close()
+
+
+# ---- regional responses are shared between worker processes ---------------------
+
+
+def test_regional_scores_are_shared_across_workers_through_board_cache(seeded, client, monkeypatch):
+    """The web role runs several uvicorn worker processes, each with its own in-memory cache. A key built
+    by one must not be rebuilt by the others, or only some regional keys ever look cached."""
+    calls = []
+    real = mc_api_module.scores_for
+    monkeypatch.setattr(mc_api_module, "scores_for", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    first = client.get("/api/mc/scores", params={"region": "boi"})
+    assert calls == [1]
+    mc_api_module._BOARD_CACHE.clear()            # another worker process: empty memory, same database
+    second = client.get("/api/mc/scores", params={"region": "boi"})
+    assert calls == [1] and second.content == first.content
+    # a shared row older than its allowed age is not trusted
+    c = sqlite3.connect(seeded["path"])
+    c.execute("UPDATE board_cache SET built_at = built_at - 1000")
+    c.commit()
+    c.close()
+    mc_api_module._BOARD_CACHE.clear()
+    client.get("/api/mc/scores", params={"region": "boi"})
+    assert calls == [1, 1]
+
+
+def test_each_region_has_its_own_shared_row(seeded, client):
+    for r in ("boi", "pih", "idaho"):
+        client.get("/api/mc/top", params={"region": r})
+    c = sqlite3.connect(seeded["path"])
+    keys = {row[0] for row in c.execute("SELECT cache_key FROM board_cache")}
+    c.close()
+    assert {"mc_top:region:BOI", "mc_top:region:PIH"} <= keys

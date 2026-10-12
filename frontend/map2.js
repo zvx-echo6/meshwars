@@ -2457,7 +2457,7 @@ let regionOutlineSeq = 0;
 // ETag, so the next visit costs one revalidating request and no union. A
 // single region is drawn as served.
 const regionOutlineCache = new Map();
-const OUTLINE_STORE_PREFIX = 'mwOutline:v2:';
+const OUTLINE_STORE_PREFIX = 'mwOutline:v3:';   // v3: outer edge only, inlets closed; older entries are never read
 
 function unionedOutline(key, fc) {
   const feats = (fc && fc.features) || [];
@@ -2489,6 +2489,9 @@ function readStoredOutline(key) {
 function storeOutline(key, etag, fc) {
   if (!etag) return;
   try {
+    // Outlines kept by the earlier merge (v2: holes and slivers) are dead weight.
+    Object.keys(window.localStorage).filter((k) => k.startsWith('mwOutline:v2:'))
+      .forEach((k) => window.localStorage.removeItem(k));
     window.localStorage.setItem(OUTLINE_STORE_PREFIX + key, JSON.stringify({ etag, fc }));
   } catch (err) { /* private mode or quota: the outline just is not remembered */ }
 }
@@ -3912,6 +3915,7 @@ function applyBasemapTheme(map) {
   // those tokens are swapped for the literal, basemap-mode-only colours
   // above instead (GRID_LINE_COLOR_LIGHT/MY_LOCATION_STROKE_LIGHT) --
   // neither skin's token reads on a light ground, see their own comment.
+  applyRegionOutlineStyle(map);
   const light = mode === 'light';
   map.setPaintProperty('cell-grid-lines', 'line-color', light ? GRID_LINE_COLOR_LIGHT : themeColor('--mw-text-6'));
   applyMyLocationColors(map);
@@ -4163,6 +4167,39 @@ function setupOverlayLayers(map) {
 // the map's own load-failure banner (see this file's own header
 // comment on bootCheckpoint) is the honest way to surface that, not a
 // silently invented colour standing in for it.
+// Region / group outline. Not any team colour (red, green, blue, purple,
+// yellow, orange, pink): the gold skin uses the brand gold (--mw-gold,
+// #A9885B, a muted bronze that cannot be mistaken for the saturated
+// YELLOW #ffdc00 or ORANGE #ff8a00 squares) and the neon skin its cyan
+// accent (--mw-gold under data-theme="neon", #2BE8E0, between the GREEN
+// #2ecc40 and BLUE #3d8bfd squares and brighter than either). On the light
+// basemap neither token holds against the pale ground, so a deeper literal
+// of the same hue is used, as the grid lines and my-location do.
+const REGION_OUTLINE_LIGHT = { gold: '#7A5C2E', neon: '#0A8F8A' };
+const REGION_OUTLINE_Z_LO = 4, REGION_OUTLINE_W_LO = 2.5;   // line width in px at z4 ...
+const REGION_OUTLINE_Z_HI = 10, REGION_OUTLINE_W_HI = 4;    // ... and at z10, interpolated between
+
+function applyRegionOutlineStyle(map) {
+  if (!map.getLayer || !map.getLayer('region-outline-line')) return;
+  const theme = currentTheme();
+  const light = currentBasemapMode() === 'light';
+  const line = light ? REGION_OUTLINE_LIGHT[theme] : themeColor('--mw-gold');
+  const width = (extra) => ['interpolate', ['linear'], ['zoom'],
+    REGION_OUTLINE_Z_LO, REGION_OUTLINE_W_LO + extra, REGION_OUTLINE_Z_HI, REGION_OUTLINE_W_HI + extra];
+  // casing: [colour, opacity, blur, extra width]
+  let casing;
+  if (light) casing = ['#ffffff', 0.85, 0, 2];
+  else if (theme === 'neon') casing = [line, 0.35, 4, 5];          // a glow
+  else casing = ['#000000', 0.6, 0, 2];
+  map.setPaintProperty('region-outline-line', 'line-color', line);
+  map.setPaintProperty('region-outline-line', 'line-width', width(0));
+  map.setPaintProperty('region-outline-line', 'line-opacity', 1);
+  map.setPaintProperty('region-outline-casing', 'line-color', casing[0]);
+  map.setPaintProperty('region-outline-casing', 'line-opacity', casing[1]);
+  map.setPaintProperty('region-outline-casing', 'line-blur', casing[2]);
+  map.setPaintProperty('region-outline-casing', 'line-width', width(casing[3]));
+}
+
 function themeColor(varName) {
   return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
 }
@@ -5935,12 +5972,15 @@ async function main() {
       type: 'geojson',
       data: { type: 'FeatureCollection', features: [] },
     });
-    map.addLayer({
-      id: 'region-outline-line',
-      type: 'line',
-      source: 'region-outline',
-      paint: { 'line-color': '#f5c542', 'line-width': 2.5, 'line-opacity': 0.9 },
-    });
+    // A casing under the line (dark on the dark basemap, white on the light
+    // one, a soft glow under the neon skin) so the border reads over any
+    // team colour; colours and widths are set by applyRegionOutlineStyle,
+    // which every theme / basemap flip re-runs.
+    map.addLayer({ id: 'region-outline-casing', type: 'line', source: 'region-outline',
+                   layout: { 'line-join': 'round' }, paint: {} });
+    map.addLayer({ id: 'region-outline-line', type: 'line', source: 'region-outline',
+                   layout: { 'line-join': 'round' }, paint: {} });
+    applyRegionOutlineStyle(map);
 
     // An award highlight sits ON TOP of the board: same squares, drawn
     // again opaque with a bright outline so the shape reads through the

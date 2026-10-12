@@ -9,8 +9,11 @@
  * border) and takes seconds. So, before the union, every ring is snapped to
  * a ~11 m grid and simplified (Douglas-Peucker, ~220 m), which closes the
  * hairline gaps and cuts the vertex count by an order of magnitude; after
- * it, holes and separate pieces under MIN_AREA_KM2 are dropped, so only
- * real gaps between members survive as holes.
+ * it, the result is reduced to its OUTER EDGE ONLY: every interior ring is
+ * dropped (the outline is a border, not a map of the gaps between members),
+ * and so is any separate piece lying inside another. Finally narrow inlets --
+ * thin channels where a gap between members opens to the outside and would
+ * draw a line deep into the shape -- are closed (closeInlets, below).
  *
  * Coordinates are GeoJSON [lon, lat]. Areas use an equal-area
  * approximation (degrees scaled to km at the ring's mean latitude).
@@ -23,7 +26,8 @@
 
   const SNAP_DEG = 1e-4;          // ~11 m
   const SIMPLIFY_DEG = 0.002;     // ~220 m
-  const MIN_AREA_KM2 = 100;       // holes and pieces smaller than this are dropped
+  const MIN_AREA_KM2 = 100;       // separate pieces smaller than this are dropped
+  const CLOSE_DEG = 0.01;         // ~1.1 km: inlets narrower than twice this are closed
   const KM_PER_DEG = 111.32;
 
   function snapValue(v) {
@@ -138,29 +142,93 @@
     return out;
   }
 
-  // Drops holes and whole pieces smaller than minKm2 from a MultiPolygon.
-  function dropSlivers(multi, minKm2) {
+  function pointInRing(pt, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if ((yi > pt[1]) !== (yj > pt[1]) && pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  }
+
+  // Outer rings only: no holes at all, no piece smaller than minKm2, and no
+  // piece lying entirely inside another piece's outer ring.
+  function outerOnly(multi, minKm2) {
+    const pieces = multi.map((p) => [p[0]]).filter((p) => ringAreaKm2(p[0]) >= minKm2);
+    return pieces.filter((p, i) => !pieces.some((q, j) => j !== i && ringAreaKm2(q[0]) > ringAreaKm2(p[0])
+      && p[0].every((pt) => pointInRing(pt, q[0]))));
+  }
+
+  // The polygon shifted by `r` degrees in each of eight directions. Their
+  // union is the polygon dilated by a small square (a Minkowski sum with the
+  // square's corners and edge midpoints, which is all a gap narrower than 2r
+  // needs to be filled whatever its direction).
+  function shifted(multi, r) {
     const out = [];
-    for (const poly of multi) {
-      if (ringAreaKm2(poly[0]) < minKm2) continue;
-      out.push([poly[0]].concat(poly.slice(1).filter((hole) => ringAreaKm2(hole) >= minKm2)));
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    for (const [dx, dy] of dirs) {
+      for (const p of multi) out.push([p[0].map((c) => [c[0] + dx * r, c[1] + dy * r])]);
     }
     return out;
   }
 
   /**
+   * Closes narrow inlets: the shape is dilated by `r` (~1 km) -- unioned with
+   * eight copies of itself shifted by r -- so two borders facing each other
+   * across a gap narrower than 2r merge and the gap fills, while the rest of
+   * the border only moves outward by about r, invisible at map scale. Interior
+   * rings the closing leaves behind are dropped again. If the union library
+   * cannot do it (it can throw on degenerate input), the unclosed outline is
+   * returned rather than nothing.
+   */
+  function closeInlets(multi, polygonClipping, r, minKm2) {
+    const parts = multi.concat(shifted(multi, r));
+    try {
+      return outerOnly(polygonClipping.union(parts[0], ...parts.slice(1)), minKm2);
+    } catch (err) {
+      return multi;
+    }
+  }
+
+  /**
    * The merged border of a group's member features (polygonClipping is the
-   * vendored library). Returns MultiPolygon coordinates; [] if nothing
-   * survives.
+   * vendored library). Returns MultiPolygon coordinates, outer rings only;
+   * [] if nothing survives.
    */
   function buildOutline(features, polygonClipping, opts) {
-    const o = Object.assign({ tol: SIMPLIFY_DEG, minKm2: MIN_AREA_KM2 }, opts || {});
+    const o = Object.assign({ tol: SIMPLIFY_DEG, minKm2: MIN_AREA_KM2, close: CLOSE_DEG }, opts || {});
     const polys = prepare(features, o.tol);
     if (!polys.length) return [];
     const merged = polys.length === 1 ? [polys[0]] : polygonClipping.union(polys[0], ...polys.slice(1));
-    return dropSlivers(merged, o.minKm2);
+    const outer = outerOnly(merged, o.minKm2);
+    return o.close > 0 ? closeInlets(outer, polygonClipping, o.close, o.minKm2) : outer;
   }
 
-  return { buildOutline, prepare, cleanRing, simplifyLine, ringAreaKm2, dropSlivers,
-           SNAP_DEG, SIMPLIFY_DEG, MIN_AREA_KM2 };
+  /**
+   * Narrowest place where a ring faces itself: the smallest distance, in km,
+   * between two of its segments that are far apart ALONG the ring (more than
+   * `minArcKm` of border between them). A narrow inlet shows up as a small
+   * value; a plain smooth border never does. For verification, not drawing.
+   */
+  function narrowestGapKm(ring, minArcKm) {
+    const kx = KM_PER_DEG * Math.cos(ring[0][1] * Math.PI / 180);
+    const P = ring.map((c) => [c[0] * kx, c[1] * KM_PER_DEG]);
+    const arc = [0];
+    for (let i = 1; i < P.length; i++) arc.push(arc[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]));
+    const total = arc[arc.length - 1];
+    let best = Infinity;
+    for (let i = 0; i < P.length - 1; i++) {
+      for (let j = i + 2; j < P.length - 1; j++) {
+        const sep = Math.min(arc[j] - arc[i + 1], total - (arc[j + 1] - arc[i]));
+        if (sep < minArcKm) continue;
+        const d = Math.sqrt(Math.min(segDist2(P[i], P[j], P[j + 1]), segDist2(P[i + 1], P[j], P[j + 1]),
+                                     segDist2(P[j], P[i], P[i + 1]), segDist2(P[j + 1], P[i], P[i + 1])));
+        if (d < best) best = d;
+      }
+    }
+    return best;
+  }
+
+  return { buildOutline, prepare, cleanRing, simplifyLine, ringAreaKm2, outerOnly, closeInlets, narrowestGapKm, pointInRing,
+           SNAP_DEG, SIMPLIFY_DEG, MIN_AREA_KM2, CLOSE_DEG };
 }));
