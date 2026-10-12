@@ -849,16 +849,82 @@
   font-size: 12px;
   color: var(--mw-text-2);
 }
+.mw-region-picker { flex: 1 1 0; min-width: 0; }
 .mw-region-select {
-  flex: 1 1 0;
-  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
   background: var(--mw-raised);
   color: var(--mw-text-2);
   border: 1px solid var(--mw-line-strong);
   border-radius: 3px;
   padding: 5px 6px;
+  font: inherit;
   font-size: 12px;
+  cursor: pointer;
 }
+.mw-region-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mw-region-caret { flex: none; color: var(--mw-text-4); }
+
+/* The open panel is fixed (positioned by map2.js) so the board card's own
+   overflow cannot clip it. */
+.mw-region-panel {
+  position: fixed;
+  z-index: 2050;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  background: var(--mw-panel);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  padding: 8px;
+  gap: 6px;
+}
+.mw-region-panel[hidden] { display: none; }
+.mw-region-filter {
+  box-sizing: border-box;
+  width: 100%;
+  background: var(--mw-raised);
+  color: var(--mw-text-1);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 3px;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 16px; /* 16px or more: iOS Safari zooms the page on focus below that */
+}
+.mw-region-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.mw-region-list [hidden] { display: none; }
+.mw-region-opt {
+  padding: 6px 8px;
+  font-size: 13px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mw-region-opt[aria-selected="true"] { color: var(--mw-accent); }
+.mw-region-opt-active { background: var(--mw-accent-active); }
+.mw-region-head {
+  padding: 8px 8px 2px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mw-text-4);
+}
+.mw-region-empty { padding: 8px; font-size: 13px; color: var(--mw-text-4); }
 
 /* "Join neighboring regions" modal form. */
 .mw-join-form { display: flex; flex-direction: column; gap: 10px; }

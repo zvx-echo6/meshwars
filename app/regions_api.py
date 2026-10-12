@@ -213,38 +213,6 @@ async def admin_group_update(request: Request):
     return JSONResponse(group)
 
 
-@router.post("/api/admin/regions/groups/move")
-async def admin_group_move(request: Request):
-    """Body: {id, direction: "up"|"down"}. Moves the group one place in the
-    order the map's Region dropdown lists joined regions."""
-    guard = await _role_guard(request)
-    if isinstance(guard, JSONResponse):
-        return guard
-    session = guard
-    body = await _json_body(request)
-    gid = body.get("id") if body else None
-    if not isinstance(gid, int) or isinstance(gid, bool):
-        return JSONResponse({"error": "id is required"}, status_code=400)
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            regions.move_group(conn, gid, body.get("direction"))
-            _log_admin_action(conn, actor_account_id=session.account_id, action="region_group_move",
-                              detail=f"group_id={gid} {body.get('direction')}")
-            conn.execute("COMMIT")
-        except regions.RegionError as exc:
-            conn.execute("ROLLBACK")
-            return JSONResponse({"error": exc.message}, status_code=exc.status)
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        groups = regions.list_groups(conn)
-    finally:
-        conn.close()
-    return JSONResponse({"groups": groups})
-
-
 @router.post("/api/admin/regions/groups/delete")
 async def admin_group_delete(request: Request):
     """Body: {id, name}; the exact name is the confirmation, like every

@@ -741,33 +741,37 @@ def _set_members(conn, group_id: int, codes: list[str], ids: list[int]) -> None:
         conn.execute("INSERT INTO region_group_member(group_id, child_group_id) VALUES (?,?)", (group_id, g))
 
 
-def move_group(conn, group_id: int, direction: str) -> None:
-    """Swap a group with its neighbour in the display order ('up' = earlier)
-    and renumber every group 1..n, so the order is always gap-free. Caller
-    owns the transaction."""
-    if direction not in ("up", "down"):
-        raise RegionError("direction must be up or down")
-    ids = [r[0] for r in conn.execute("SELECT id FROM region_group ORDER BY display_order, id")]
-    if group_id not in ids:
-        raise RegionError("group not found", 404)
-    i = ids.index(group_id)
-    j = i - 1 if direction == "up" else i + 1
-    if 0 <= j < len(ids):
-        ids[i], ids[j] = ids[j], ids[i]
-    for pos, gid in enumerate(ids, start=1):
-        conn.execute("UPDATE region_group SET display_order = ? WHERE id = ?", (pos, gid))
-
-
 def delete_group(conn, group_id: int) -> bool:
     cur = conn.execute("DELETE FROM region_group WHERE id = ?", (group_id,))
     return cur.rowcount > 0
 
 
 def list_groups(conn) -> list[dict]:
+    """Every group with its direct members and `region_count`: the number of
+    DISTINCT individual regions it contains, through child groups to any
+    depth. Largest first, ties by name A-Z -- the order the map lists joined
+    regions in. (region_group.display_order is no longer read.)"""
+    rows = conn.execute("SELECT id, name, slug FROM region_group").fetchall()
+    members = {r["id"]: _member_rows(conn, r["id"]) for r in rows}
+    memo: dict[int, frozenset[str]] = {}
+
+    def leaves(gid: int, path: frozenset[int]) -> frozenset[str]:
+        if gid in memo:
+            return memo[gid]
+        regions_, children = members.get(gid, ([], []))
+        out = set(regions_)
+        for child in children:
+            if child not in path and child != gid:  # a cycle cannot be written, but never loop on one
+                out |= leaves(child, path | {gid})
+        memo[gid] = frozenset(out)
+        return memo[gid]
+
     out = []
-    for g in conn.execute("SELECT id, name, slug FROM region_group ORDER BY display_order, id"):
-        regions, groups = _member_rows(conn, g["id"])
-        out.append({"id": g["id"], "name": g["name"], "slug": g["slug"], "regions": regions, "groups": groups})
+    for g in rows:
+        regs, kids = members[g["id"]]
+        out.append({"id": g["id"], "name": g["name"], "slug": g["slug"], "regions": regs, "groups": kids,
+                    "region_count": len(leaves(g["id"], frozenset()))})
+    out.sort(key=lambda d: (-d["region_count"], d["name"].lower(), d["id"]))
     return out
 
 

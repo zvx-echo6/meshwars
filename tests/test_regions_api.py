@@ -666,43 +666,56 @@ def test_fetch_route_needs_a_role(seeded):
     assert TestClient(app).post("/api/admin/regions/fetch", json={"link": "twf"}).status_code in (401, 404)
 
 
-# ---- group display order -----------------------------------------------------
+# ---- group order: by number of regions, largest first ------------------------
 
 
 def _slugs(client):
     return [g["slug"] for g in client.get("/api/regions").json()["groups"]]
 
 
-def test_groups_list_in_creation_order_not_alphabetical(admin, client):
-    for name in ("Zulu", "Alpha", "Mike"):
-        assert admin.post("/api/admin/regions/groups/create", json={"name": name, "regions": ["BOI"]}).status_code == 201
-    assert _slugs(client) == ["zulu", "alpha", "mike"]
-    assert [g["slug"] for g in admin.get("/api/admin/regions").json()["groups"]] == ["zulu", "alpha", "mike"]
+def _mk(admin, name, regs=(), groups=()):
+    r = admin.post("/api/admin/regions/groups/create", json={"name": name, "regions": list(regs), "groups": list(groups)})
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
 
 
-def test_move_group_up_and_down_and_at_the_ends(admin, client):
-    ids = {}
-    for name in ("One", "Two", "Three"):
-        ids[name] = admin.post("/api/admin/regions/groups/create", json={"name": name, "regions": ["BOI"]}).json()["id"]
-    mv = lambda name, d: admin.post("/api/admin/regions/groups/move", json={"id": ids[name], "direction": d})
-    r = mv("Three", "up")
-    assert r.status_code == 200 and [g["slug"] for g in r.json()["groups"]] == ["one", "three", "two"]
-    assert _slugs(client) == ["one", "three", "two"]
-    mv("One", "down")
-    assert _slugs(client) == ["three", "one", "two"]
-    mv("Three", "up")                       # already first: nothing moves
-    mv("Two", "down")                       # already last
-    assert _slugs(client) == ["three", "one", "two"]
-    # a new group goes to the end, after the reorder
-    admin.post("/api/admin/regions/groups/create", json={"name": "Four", "regions": ["BOI"]})
-    assert _slugs(client) == ["three", "one", "two", "four"]
+def test_groups_are_listed_largest_first_with_a_region_count(admin, client):
+    _mk(admin, "Small", ["BOI", "PIH"])
+    _mk(admin, "Big", ["BOI", "PIH", "IDA", "SMN"])
+    _mk(admin, "Medium", ["BOI", "PIH", "IDA"])
+    body = client.get("/api/regions").json()["groups"]
+    assert [(g["slug"], g["region_count"]) for g in body] == [("big", 4), ("medium", 3), ("small", 2)]
 
 
-def test_move_group_validation(admin):
-    assert admin.post("/api/admin/regions/groups/move", json={"id": 999, "direction": "up"}).status_code == 404
-    assert admin.post("/api/admin/regions/groups/move", json={"direction": "up"}).status_code == 400
-    gid = admin.post("/api/admin/regions/groups/create", json={"name": "G", "regions": ["BOI"]}).json()["id"]
-    assert admin.post("/api/admin/regions/groups/move", json={"id": gid, "direction": "sideways"}).status_code == 400
+def test_ties_break_by_name_a_to_z_ignoring_case(admin, client):
+    _mk(admin, "zulu", ["BOI", "PIH"])
+    _mk(admin, "Alpha", ["IDA", "SMN"])
+    _mk(admin, "mike", ["BOI", "SMN"])
+    assert _slugs(client) == ["alpha", "mike", "zulu"]
+
+
+def test_count_is_recursive_and_distinct(admin, client):
+    inner = _mk(admin, "Inner", ["BOI", "PIH"])
+    mid = _mk(admin, "Mid", ["PIH", "IDA"], [inner])           # PIH is in both: 3 distinct, not 4
+    _mk(admin, "Outer", ["SMN"], [mid, inner])                  # BOI PIH IDA SMN = 4, inner counted once
+    counts = {g["slug"]: g["region_count"] for g in client.get("/api/regions").json()["groups"]}
+    assert counts == {"inner": 2, "mid": 3, "outer": 4}
+    assert _slugs(client) == ["outer", "mid", "inner"]
+    # the admin list uses the same order
+    assert [g["slug"] for g in admin.get("/api/admin/regions").json()["groups"]] == ["outer", "mid", "inner"]
+
+
+def test_reordering_follows_edits_not_creation_order(admin, client):
+    a = _mk(admin, "A", ["BOI", "PIH", "IDA"])
+    _mk(admin, "B", ["BOI", "PIH"])
+    assert _slugs(client) == ["a", "b"]
+    admin.post("/api/admin/regions/groups/update", json={"id": a, "name": "A", "regions": ["BOI"], "groups": []})
+    assert _slugs(client) == ["b", "a"]
+
+
+def test_the_move_route_is_gone(admin):
+    gid = _mk(admin, "G", ["BOI", "PIH"])
+    assert admin.post("/api/admin/regions/groups/move", json={"id": gid, "direction": "up"}).status_code in (404, 405)
 
 
 def test_existing_groups_take_creation_order_from_the_migration(tmp_path):

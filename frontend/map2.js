@@ -1796,7 +1796,19 @@ function buildScoreboardControl(map) {
     </div>
     <div class="mw-region-row" id="mw-region-row" hidden>
       <label class="mw-region-label" for="mw-region-select">Region:</label>
-      <select id="mw-region-select" class="mw-region-select"><option value="">All regions</option></select>
+      <div class="mw-region-picker" id="mw-region-picker">
+        <button type="button" id="mw-region-select" class="mw-region-select" role="combobox"
+                aria-haspopup="listbox" aria-expanded="false" aria-controls="mw-region-list">
+          <span class="mw-region-current" id="mw-region-current">All regions</span>
+          <span class="mw-region-caret" aria-hidden="true">&#9662;</span>
+        </button>
+        <div class="mw-region-panel" id="mw-region-panel" hidden>
+          <input type="text" id="mw-region-filter" class="mw-region-filter" placeholder="Filter regions"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Filter regions"
+                 aria-controls="mw-region-list" aria-autocomplete="list" />
+          <ul id="mw-region-list" class="mw-region-list" role="listbox" aria-label="Regions"></ul>
+        </div>
+      </div>
     </div>
     <div class="mw-region-join-row" id="mw-region-join-row" hidden>
       <a href="#" id="mw-region-join-link">Join neighboring regions</a>
@@ -2026,55 +2038,256 @@ function regionOptionLabel(r, stripCountry) {
   return `${r.code}  ${name}`;
 }
 
+// ---- Region picker (replaces the native <select>) ----------------------
+//
+// A button that looks like the old select, opening a panel with a filter
+// input, then All regions, "Joined Regions" (groups, names only) and
+// "Individual Regions" (every region A-Z). The list is built ONCE per
+// region-list load; typing only toggles `hidden` on the existing nodes.
+// Choosing runs exactly what the select's change handler used to
+// (changeRegion: URL, fit, outline, refetches).
+let regionPicker = null; // { opts, headJoined, headIndividual, allOpt, empty, active, open, strip }
+
+function regionLabelFor(key) {
+  if (!key) return 'All regions';
+  const up = key.toUpperCase();
+  const r = regionList.regions.find((x) => x.code === up);
+  if (r) return regionOptionLabel(r, regionPicker ? regionPicker.strip : false);
+  const g = regionList.groups.find((x) => x.slug === key.toLowerCase());
+  return g ? g.name : key;
+}
+
+function setRegionPickerLabel(key) {
+  const cur = document.getElementById('mw-region-current');
+  if (cur) cur.textContent = regionLabelFor(key);
+  if (regionPicker) {
+    const val = key ? canonicalRegionKey(key) : '';
+    regionPicker.opts.forEach((o) => o.el.setAttribute('aria-selected', String(o.value === val)));
+  }
+}
+
 function populateRegionSelect() {
-  const sel = document.getElementById('mw-region-select');
   const row = document.getElementById('mw-region-row');
-  if (!sel || !row) return;
+  const list = document.getElementById('mw-region-list');
+  if (!list || !row) return;
   const { regions, groups } = regionList;
   const joinRow = document.getElementById('mw-region-join-row');
   if (!regions.length && !groups.length) { row.hidden = true; if (joinRow) joinRow.hidden = true; return; }
   row.hidden = false;
   if (joinRow) joinRow.hidden = false;
   // Strip ", US"-style country suffixes only when EVERY name has one.
-  const stripCountry = regions.length > 0 && regions.every((r) => /,\s*[A-Za-z]{2}$/.test(r.name));
-  sel.replaceChildren();
-  const add = (parent, value, text) => {
-    const o = document.createElement('option');
-    o.value = value;
-    o.textContent = text;
-    parent.appendChild(o);
+  const strip = regions.length > 0 && regions.every((r) => /,\s*[A-Za-z]{2}$/.test(r.name));
+  list.replaceChildren();
+  const opts = [];
+  let n = 0;
+  const li = (cls, text, role) => {
+    const el = document.createElement('li');
+    el.className = cls;
+    el.textContent = text;
+    el.setAttribute('role', role);
+    list.appendChild(el);
+    return el;
   };
-  add(sel, '', 'All regions');
-  // Joined regions: the groups, flat (no members listed under them), in the
-  // order the admin set; /api/regions already returns them that way.
-  if (groups.length) {
-    const og = document.createElement('optgroup');
-    og.label = 'Joined Regions';
-    groups.forEach((g) => add(og, g.slug, g.name));
-    sel.appendChild(og);
-  }
-  if (regions.length) {
-    const og = document.createElement('optgroup');
-    og.label = 'Individual Regions';
-    regions.slice().sort((a, b) => (a.code < b.code ? -1 : 1))
-      .forEach((r) => add(og, r.code, regionOptionLabel(r, stripCountry)));
-    sel.appendChild(og);
-  }
+  const option = (kind, value, text, hay) => {
+    const el = li('mw-region-opt', text, 'option');
+    el.id = 'mw-region-opt-' + (n++);
+    el.dataset.value = value;
+    const o = { el, kind, value, text, hay: hay.toLowerCase(), hidden: false };
+    opts.push(o);
+    return o;
+  };
+  const allOpt = option('all', '', 'All regions', '');
+  const headJoined = groups.length ? li('mw-region-head', 'Joined Regions', 'presentation') : null;
+  // Groups arrive from /api/regions already ordered (most regions first).
+  groups.forEach((g) => option('group', g.slug, g.name, g.name));
+  const headIndividual = regions.length ? li('mw-region-head', 'Individual Regions', 'presentation') : null;
+  regions.slice().sort((a, b) => (a.code < b.code ? -1 : 1))
+    .forEach((r) => option('region', r.code, regionOptionLabel(r, strip), r.code + ' ' + r.name));
+  const empty = li('mw-region-empty', 'No matches', 'presentation');
+  empty.hidden = true;
+  regionPicker = { opts, headJoined, headIndividual, allOpt, empty, active: null, open: false, strip };
   selectedRegion = selectedRegion && canonicalRegionKey(selectedRegion.key)
     ? { key: canonicalRegionKey(selectedRegion.key) } : null;
-  sel.value = selectedRegion ? selectedRegion.key : '';
+  setRegionPickerLabel(selectedRegion ? selectedRegion.key : null);
+}
+
+function visibleRegionOpts() {
+  return regionPicker.opts.filter((o) => !o.hidden);
+}
+
+function setRegionActive(opt) {
+  const rp = regionPicker;
+  if (rp.active) rp.active.el.classList.remove('mw-region-opt-active');
+  rp.active = opt || null;
+  const input = document.getElementById('mw-region-filter');
+  const btn = document.getElementById('mw-region-select');
+  if (opt) {
+    opt.el.classList.add('mw-region-opt-active');
+    opt.el.scrollIntoView({ block: 'nearest' });
+    input.setAttribute('aria-activedescendant', opt.el.id);
+    btn.setAttribute('aria-activedescendant', opt.el.id);
+  } else {
+    input.removeAttribute('aria-activedescendant');
+    btn.removeAttribute('aria-activedescendant');
+  }
+}
+
+function filterRegionPicker(query) {
+  const rp = regionPicker;
+  const q = query.trim().toLowerCase();
+  let joined = 0;
+  let individual = 0;
+  rp.opts.forEach((o) => {
+    const hide = o.kind === 'all' ? q !== '' : (q !== '' && !o.hay.includes(q));
+    if (hide !== o.hidden) { o.hidden = hide; o.el.hidden = hide; }
+    if (!hide && o.kind === 'group') joined += 1;
+    if (!hide && o.kind === 'region') individual += 1;
+  });
+  if (rp.headJoined) rp.headJoined.hidden = joined === 0;
+  if (rp.headIndividual) rp.headIndividual.hidden = individual === 0;
+  const vis = visibleRegionOpts();
+  rp.empty.hidden = vis.length > 0;
+  const cur = selectedRegion ? canonicalRegionKey(selectedRegion.key) : '';
+  setRegionActive(q === '' ? (vis.find((o) => o.value === cur) || vis[0]) : vis[0]);
+}
+
+function positionRegionPanel() {
+  const btn = document.getElementById('mw-region-select');
+  const panel = document.getElementById('mw-region-panel');
+  const rect = btn.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth;
+  const gutter = 16; // same side gutter as the board panel on a phone
+  let width;
+  let left;
+  if (vw <= 520) {
+    width = vw - 2 * gutter;
+    left = gutter;
+  } else {
+    width = Math.min(Math.max(rect.width, 280), vw - 2 * gutter);
+    left = Math.min(Math.max(gutter, rect.left), vw - gutter - width);
+  }
+  const top = rect.bottom + 4;
+  panel.style.left = left + 'px';
+  panel.style.width = width + 'px';
+  panel.style.top = top + 'px';
+  // 60vh at most, and never past the bottom of the viewport.
+  document.getElementById('mw-region-list').style.maxHeight =
+    Math.max(120, Math.min(window.innerHeight * 0.6, window.innerHeight - top - 70)) + 'px';
+}
+
+function onRegionScroll(e) {
+  // Scrolling the list itself must not re-run the layout.
+  if (e.target && e.target.id === 'mw-region-list') return;
+  positionRegionPanel();
+}
+
+function onRegionOutside(e) {
+  const picker = document.getElementById('mw-region-picker');
+  if (picker && !picker.contains(e.target)) closeRegionPicker(false);
+}
+
+function openRegionPicker() {
+  const rp = regionPicker;
+  if (!rp || rp.open) return;
+  rp.open = true;
+  const btn = document.getElementById('mw-region-select');
+  const panel = document.getElementById('mw-region-panel');
+  const input = document.getElementById('mw-region-filter');
+  input.value = '';
+  filterRegionPicker('');
+  panel.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+  positionRegionPanel();
+  input.focus();
+  if (rp.active) rp.active.el.scrollIntoView({ block: 'nearest' });
+  // Capture phase: the board panel stops clicks from bubbling, so a plain
+  // document listener would never see a click on the rest of the card.
+  document.addEventListener('mousedown', onRegionOutside, true);
+  document.addEventListener('touchstart', onRegionOutside, true);
+  window.addEventListener('resize', positionRegionPanel);
+  window.addEventListener('scroll', onRegionScroll, true);
+}
+
+function closeRegionPicker(refocus) {
+  const rp = regionPicker;
+  if (!rp || !rp.open) return;
+  rp.open = false;
+  document.getElementById('mw-region-panel').hidden = true;
+  const btn = document.getElementById('mw-region-select');
+  btn.setAttribute('aria-expanded', 'false');
+  btn.removeAttribute('aria-activedescendant');
+  document.removeEventListener('mousedown', onRegionOutside, true);
+  document.removeEventListener('touchstart', onRegionOutside, true);
+  window.removeEventListener('resize', positionRegionPanel);
+  window.removeEventListener('scroll', onRegionScroll, true);
+  if (refocus) btn.focus();
+}
+
+function wireRegionPicker(map) {
+  const btn = document.getElementById('mw-region-select');
+  const input = document.getElementById('mw-region-filter');
+  const list = document.getElementById('mw-region-list');
+  if (!btn || !input || !list) return;
+  const choose = (opt) => {
+    closeRegionPicker(true);
+    changeRegion(opt.value || null, map, { push: true, fit: true });
+  };
+  btn.addEventListener('click', () => {
+    if (regionPicker && regionPicker.open) closeRegionPicker(true);
+    else openRegionPicker();
+  });
+  btn.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openRegionPicker(); }
+  });
+  input.addEventListener('input', () => filterRegionPicker(input.value));
+  input.addEventListener('keydown', (e) => {
+    const rp = regionPicker;
+    if (!rp) return;
+    const vis = visibleRegionOpts();
+    const i = vis.indexOf(rp.active);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (vis.length) setRegionActive(vis[Math.min(vis.length - 1, i + 1)]);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (vis.length) setRegionActive(vis[Math.max(0, i - 1)]);
+    } else if (e.key === 'Home' && e.ctrlKey) {
+      e.preventDefault();
+      if (vis.length) setRegionActive(vis[0]);
+    } else if (e.key === 'End' && e.ctrlKey) {
+      e.preventDefault();
+      if (vis.length) setRegionActive(vis[vis.length - 1]);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (rp.active) choose(rp.active);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation(); // do not also close a modal underneath
+      closeRegionPicker(true);
+    } else if (e.key === 'Tab') {
+      closeRegionPicker(false);
+    }
+  });
+  list.addEventListener('mousedown', (e) => e.preventDefault()); // keep focus in the filter
+  list.addEventListener('click', (e) => {
+    const el = e.target.closest('.mw-region-opt');
+    if (!el || !regionPicker) return;
+    const opt = regionPicker.opts.find((o) => o.el === el);
+    if (opt) choose(opt);
+  });
+  list.addEventListener('mousemove', (e) => {
+    const el = e.target.closest('.mw-region-opt');
+    const opt = el && regionPicker ? regionPicker.opts.find((o) => o.el === el) : null;
+    if (opt && opt !== regionPicker.active) setRegionActive(opt);
+  });
 }
 
 function setupRegionControl(map) {
   const meta = document.querySelector('meta[name="mw-region"]');
   const preset = meta ? meta.getAttribute('content') : null;
   if (preset) selectedRegion = { key: preset };
-  const sel = document.getElementById('mw-region-select');
-  if (sel) {
-    sel.addEventListener('change', () => {
-      changeRegion(sel.value || null, map, { push: true, fit: true });
-    });
-  }
+  wireRegionPicker(map);
+  setRegionPickerLabel(selectedRegion ? selectedRegion.key : null);
   const joinLink = document.getElementById('mw-region-join-link');
   if (joinLink) {
     joinLink.addEventListener('click', (e) => { e.preventDefault(); openJoinRegionsModal(); });
@@ -2221,8 +2434,7 @@ function regionPath(key) {
 function changeRegion(key, map, opts) {
   const same = (selectedRegion ? selectedRegion.key : null) === key;
   selectedRegion = key ? { key } : null;
-  const sel = document.getElementById('mw-region-select');
-  if (sel) sel.value = key || '';
+  setRegionPickerLabel(key);
   if (opts.push && !same) history.pushState({ region: key }, '', regionPath(key));
   if (!mapLoaded) return; // main()'s load handler loads the board with this region
   loadBoardData(map, true);

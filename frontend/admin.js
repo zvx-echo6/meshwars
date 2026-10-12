@@ -2931,15 +2931,6 @@ function renderRegionGroups() {
     info.appendChild(line);
     row.appendChild(info);
     const actions = el('div', { className: 'adm-row-actions' });
-    // Order in the map's Region dropdown ("Joined Regions"), top to bottom.
-    const pos = groups.indexOf(g);
-    const mv = (label, dir, disabled) => {
-      const b = btn(label, 'adm-btn-quiet', (bb) => moveRegionGroup(bb, g, dir));
-      b.disabled = disabled;
-      return b;
-    };
-    actions.appendChild(mv('Up', 'up', pos === 0));
-    actions.appendChild(mv('Down', 'down', pos === groups.length - 1));
     actions.appendChild(btn('Edit', 'adm-btn-quiet', () => {
       regionGroupDraft = { id: g.id, name: g.name, slug: g.slug, regions: g.regions.slice(), groups: g.groups.slice() };
       renderRegionGroups();
@@ -3073,18 +3064,6 @@ async function saveRegionGroup(b, result) {
     await loadRegions();
   } catch (e) {
     result.textContent = 'Failed: ' + e.message;
-    b.disabled = false;
-  }
-}
-
-async function moveRegionGroup(b, g, direction) {
-  b.disabled = true;
-  try {
-    const r = await post('/api/admin/regions/groups/move', { id: g.id, direction });
-    regionsData.groups = r.groups;
-    renderRegionGroups();
-  } catch (e) {
-    document.getElementById('rg-sync-result').textContent = 'Failed: ' + e.message;
     b.disabled = false;
   }
 }

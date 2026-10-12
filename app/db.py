@@ -3299,8 +3299,9 @@ MIGRATIONS = [
     # admin panel. Both tables already exist on every deployed DB
     # (unlike `community` itself, which is brand new), so this needs a
     # real ALTER rather than just being part of CREATE TABLE.
-    # Region groups are shown in the map's Region dropdown in this order
-    # (app/regions.py). Existing groups take their creation order; the
+    # NOT READ any more: joined regions are ordered by how many regions they
+    # contain (app/regions.py list_groups). Kept, not dropped, so no
+    # destructive migration. Existing groups took their creation order; the
     # UPDATE only touches rows still at the 0 default, and every order
     # app/regions.py assigns is >= 1, so re-running it each boot is a no-op.
     "ALTER TABLE region_group ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0",
