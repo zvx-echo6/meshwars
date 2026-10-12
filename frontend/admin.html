@@ -140,7 +140,9 @@
           <button type="button" class="adm-nav-item" data-section="seasons">Seasons</button>
           <button type="button" class="adm-nav-item" data-section="months">Months</button>
           <button type="button" class="adm-nav-item" data-section="places">Places</button>
-          <button type="button" class="adm-nav-item" data-section="regions">Regions</button>
+          <button type="button" class="adm-nav-item" data-section="regions">
+            Regions <span class="adm-nav-badge" id="nav-regions"></span>
+          </button>
           <button type="button" class="adm-nav-item" data-section="notice">Notice</button>
           <button type="button" class="adm-nav-item" data-section="discord">Discord</button>
           <button type="button" class="adm-nav-item" data-section="keys">API keys</button>
@@ -425,6 +427,9 @@
           </div>
           <datalist id="rg-region-list"></datalist>
 
+          <h3 class="adm-h3">Requests <span class="adm-count" id="rg-requests-count"></span></h3>
+          <div id="rg-requests"></div>
+
           <h3 class="adm-h3">Groups <span class="adm-count" id="rg-groups-count"></span></h3>
           <div class="adm-form">
             <button type="button" id="rg-group-new" class="adm-btn">New group</button>
@@ -588,7 +593,7 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20261012-3"></script>
+  <script src="/static/admin.js?v=20261012-4"></script>
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
 </body>

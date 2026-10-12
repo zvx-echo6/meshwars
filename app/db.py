@@ -1200,6 +1200,27 @@ CREATE TABLE IF NOT EXISTS region_cell (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_region_cell_cell ON region_cell(cell_id, region_code);
 
+-- A signed-in player's request to group neighbouring regions (the map's
+-- "Join neighboring regions"). Stored first, mailed second: a mail failure
+-- never loses a request. region_codes is a JSON list of uppercase codes.
+-- decided_by is the deciding admin's account_id (0 when admin auth is off);
+-- group_id is the group an approval created.
+CREATE TABLE IF NOT EXISTS region_join_request (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id    INTEGER NOT NULL,
+    account_id   INTEGER NOT NULL,
+    group_name   TEXT NOT NULL,
+    region_codes TEXT NOT NULL,
+    note         TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'approved' | 'declined'
+    created_at   INTEGER NOT NULL,
+    decided_at   INTEGER,
+    decided_by   INTEGER,
+    group_id     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_region_join_request_player ON region_join_request(player_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_region_join_request_status ON region_join_request(status, created_at);
+
 -- Every cell that has been tested against the region set, whether or not
 -- it landed in a region. Without it, a cell in no region would look
 -- "not yet mapped" forever and be re-tested every cycle. Cells enter

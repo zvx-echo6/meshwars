@@ -1798,6 +1798,9 @@ function buildScoreboardControl(map) {
       <label class="mw-region-label" for="mw-region-select">Region:</label>
       <select id="mw-region-select" class="mw-region-select"><option value="">All regions</option></select>
     </div>
+    <div class="mw-region-join-row" id="mw-region-join-row" hidden>
+      <a href="#" id="mw-region-join-link">Join neighboring regions</a>
+    </div>
     <button type="button" class="mc-row mc-title mc-header-btn" id="mc-header-btn" aria-expanded="true">
       <span class="mc-header-title-text" id="mc-header-title-text"></span>
       <span class="mc-header-right">
@@ -2028,8 +2031,10 @@ function populateRegionSelect() {
   const row = document.getElementById('mw-region-row');
   if (!sel || !row) return;
   const { regions, groups } = regionList;
-  if (!regions.length && !groups.length) { row.hidden = true; return; }
+  const joinRow = document.getElementById('mw-region-join-row');
+  if (!regions.length && !groups.length) { row.hidden = true; if (joinRow) joinRow.hidden = true; return; }
   row.hidden = false;
+  if (joinRow) joinRow.hidden = false;
   // Strip ", US"-style country suffixes only when EVERY name has one.
   const stripCountry = regions.length > 0 && regions.every((r) => /,\s*[A-Za-z]{2}$/.test(r.name));
   const byCode = new Map(regions.map((r) => [r.code, r]));
@@ -2071,6 +2076,10 @@ function setupRegionControl(map) {
       changeRegion(sel.value || null, map, { push: true, fit: true });
     });
   }
+  const joinLink = document.getElementById('mw-region-join-link');
+  if (joinLink) {
+    joinLink.addEventListener('click', (e) => { e.preventDefault(); openJoinRegionsModal(); });
+  }
   window.addEventListener('popstate', () => {
     changeRegion(canonicalRegionKey(regionKeyFromLocation()), map, { push: false, fit: true });
   });
@@ -2082,6 +2091,124 @@ function setupRegionControl(map) {
       populateRegionSelect();
     })
     .catch((err) => console.warn('MeshWars map2: region list failed', err));
+}
+
+// "Join neighboring regions": a signed-in player asks an operator to group
+// regions. POST /api/regions/join-request (app/region_requests.py) stores it
+// and mails the operator; 3 a day per player.
+function matchJoinRegionCode(text) {
+  const t = (text || '').trim();
+  if (!t) return null;
+  const first = t.split(/\s+/)[0].toUpperCase();
+  if (regionList.regions.some((r) => r.code === first)) return first;
+  const low = t.toLowerCase();
+  const hits = regionList.regions.filter((r) => r.name.toLowerCase().includes(low));
+  return hits.length === 1 ? hits[0].code : null;
+}
+
+async function openJoinRegionsModal() {
+  const body = openMcModal('Join neighboring regions');
+  let signedIn = false;
+  try {
+    signedIn = (await fetch('/api/account')).ok;
+  } catch (err) { /* treated as signed out */ }
+  body.replaceChildren();
+  if (!signedIn) {
+    const msg = document.createElement('div');
+    msg.className = 'mc-modal-empty';
+    msg.textContent = 'Sign in to request';
+    const link = document.createElement('a');
+    link.href = '/account';
+    link.textContent = 'Sign in';
+    const wrap = document.createElement('div');
+    wrap.className = 'mc-modal-empty';
+    wrap.appendChild(link);
+    body.append(msg, wrap);
+    return;
+  }
+
+  const picked = [];
+  const form = document.createElement('div');
+  form.className = 'mw-join-form';
+  const field = (label, control) => {
+    const l = document.createElement('label');
+    l.className = 'mw-join-label';
+    l.textContent = label;
+    l.appendChild(control);
+    form.appendChild(l);
+    return control;
+  };
+  const nameIn = field('Group name', Object.assign(document.createElement('input'), { type: 'text', maxLength: 80 }));
+
+  const regionIn = Object.assign(document.createElement('input'), { type: 'text', placeholder: 'code or name' });
+  regionIn.setAttribute('list', 'mw-join-region-list');
+  regionIn.autocomplete = 'off';
+  const list = document.createElement('datalist');
+  list.id = 'mw-join-region-list';
+  const stripCountry = regionList.regions.length > 0 && regionList.regions.every((r) => /,\s*[A-Za-z]{2}$/.test(r.name));
+  regionList.regions.forEach((r) => {
+    const o = document.createElement('option');
+    o.value = regionOptionLabel(r, stripCountry);
+    list.appendChild(o);
+  });
+  const chips = document.createElement('div');
+  chips.className = 'mw-join-chips';
+  const renderChips = () => {
+    chips.replaceChildren();
+    picked.forEach((code) => {
+      const c = document.createElement('span');
+      c.className = 'mw-join-chip';
+      c.textContent = code + ' ';
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '\u00d7';
+      x.setAttribute('aria-label', 'Remove ' + code);
+      x.addEventListener('click', () => { picked.splice(picked.indexOf(code), 1); renderChips(); });
+      c.appendChild(x);
+      chips.appendChild(c);
+    });
+  };
+  const addRegion = () => {
+    const code = matchJoinRegionCode(regionIn.value);
+    if (code && !picked.includes(code)) { picked.push(code); renderChips(); }
+    if (code) regionIn.value = '';
+  };
+  regionIn.addEventListener('change', addRegion);
+  regionIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addRegion(); } });
+  const regionLabel = field('Regions', regionIn);
+  regionLabel.parentNode.append(list, chips);
+
+  const noteIn = field('Note', Object.assign(document.createElement('textarea'), { rows: 3, maxLength: 1000 }));
+  const send = document.createElement('button');
+  send.type = 'button';
+  send.textContent = 'Send request';
+  const result = document.createElement('div');
+  result.className = 'mw-join-result';
+  send.addEventListener('click', async () => {
+    result.textContent = '';
+    addRegion();
+    send.disabled = true;
+    try {
+      const res = await fetch('/api/regions/join-request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_name: nameIn.value, regions: picked, note: noteIn.value }),
+      });
+      let data = null;
+      try { data = await res.json(); } catch (err) { /* no body */ }
+      if (res.ok) {
+        result.textContent = 'Request sent.';
+        return; // stays disabled: one request per submit
+      }
+      if (res.status === 401) result.textContent = 'Sign in to request';
+      else result.textContent = (data && data.error) || `Failed (${res.status}).`;
+    } catch (err) {
+      result.textContent = 'Failed to send.';
+    }
+    send.disabled = false;
+  });
+  form.append(send, result);
+  body.appendChild(form);
 }
 
 function regionPath(key) {

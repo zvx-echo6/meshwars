@@ -68,6 +68,7 @@ from .oauth_api import router as oauth_router
 from .totp_api import router as totp_router
 from .places_api import router as places_router
 from .public_api import router as public_router
+from .region_requests import router as region_requests_router
 from .regions_api import router as regions_router
 from .sessions import SessionPrincipal, optional_session, require_session
 
@@ -1298,6 +1299,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(public_router)
     app.include_router(places_router)
     app.include_router(regions_router)
+    app.include_router(region_requests_router)
     app.include_router(notice_router)
     app.include_router(clientlog_router)
     app.include_router(discord_interactions_router)

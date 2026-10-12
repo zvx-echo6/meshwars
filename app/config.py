@@ -1663,6 +1663,10 @@ class Settings(BaseSettings):
     # opens the map with that region chosen. Empty (the default) turns the
     # feature off. App side only; DNS and the proxy are not set up here.
     regions_host_suffix: str = ""
+    # Where a player's "Join neighboring regions" request is mailed. Empty
+    # turns the mail off (the request is still stored and logged). The mail
+    # also needs smtp_host, like every other mail this app sends.
+    regions_request_email: str = "admin@meshwars.com"
 
     @property
     def teams_list(self) -> list[str]:

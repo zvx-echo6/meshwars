@@ -1,0 +1,26 @@
+<!--
+  Body fragment for PURPOSE_REGION_REQUEST (a player asking to group
+  neighbouring regions), composed into _shell.html by
+  app/email_login.py the same way sign_in.html is. {details_html} is a
+  ready-made, already HTML-escaped block built by app/region_requests.py;
+  {cta_url} is the admin Regions section, substituted last so one replace
+  covers the button href and the plaintext fallback below it.
+-->
+<!--heading-->
+Region group request
+<!--body-->
+{details_html}
+<!--cta-->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px auto 0 auto;">
+  <tr>
+    <td align="center" bgcolor="#A9885B" style="border-radius:4px;">
+      <a href="{cta_url}" target="_blank" style="display:inline-block; padding:14px 32px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:bold; color:#17130C; text-decoration:none; border-radius:4px;">Review request</a>
+    </td>
+  </tr>
+</table>
+<p style="margin:20px 0 0 0; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:18px; color:#888888; text-align:center;">
+  Or paste this into your browser<br>
+  <a href="{cta_url}" style="color:#A9885B; word-break:break-all;">{cta_url}</a>
+</p>
+<!--footer-->
+Approve or decline it in the admin panel, under Regions.

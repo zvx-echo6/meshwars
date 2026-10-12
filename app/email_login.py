@@ -160,6 +160,7 @@ PURPOSE_VERIFY_CONTACT = "verify_contact"
 # never selected from a fixed table the way PURPOSE_SIGN_IN/
 # PURPOSE_VERIFY_CONTACT's copy is.
 PURPOSE_SECURITY_NOTICE = "security_notice"
+PURPOSE_REGION_REQUEST = "region_request"
 
 _MAIL_COPY = {
     PURPOSE_SIGN_IN: (
@@ -180,6 +181,7 @@ _MAIL_TEMPLATES = {
     PURPOSE_SIGN_IN: "sign_in.html",
     PURPOSE_VERIFY_CONTACT: "verify_contact.html",
     PURPOSE_SECURITY_NOTICE: "security_notice.html",
+    PURPOSE_REGION_REQUEST: "region_request.html",
 }
 
 # Same directory-derivation shape app/api.py's own top-level page routes
@@ -446,6 +448,32 @@ def _send_notice_sync(
         cta_label=cta_label, cta_url=cta_url, footer=footer,
     )
     _deliver(msg, from_address, to_address)
+
+
+def _send_region_request_sync(
+    to_address: str, subject: str, text: str, details_html: str, cta_url: str
+) -> None:
+    """The operator mail about a player's region-group request
+    (app/region_requests.py). Same header block, shell and logo as every
+    other mail here; the details block arrives already built and escaped.
+    Never call directly from async code -- see _deliver()."""
+    msg, from_address, from_domain = _build_message(subject, to_address)
+    msg.set_content(text)
+    _attach_html(msg, PURPOSE_REGION_REQUEST, from_domain, details_html=details_html, cta_url=cta_url)
+    _deliver(msg, from_address, to_address)
+
+
+async def send_region_request_email(
+    to_address: str, *, subject: str, text: str, details_html: str, cta_url: str
+) -> None:
+    """Sends the region-request mail off the event loop. Raises
+    EmailSendError on failure after logging; the caller (a request that is
+    already stored) must carry on regardless."""
+    try:
+        await asyncio.to_thread(_send_region_request_sync, to_address, subject, text, details_html, cta_url)
+    except Exception as e:
+        log.exception("email_login: failed to send region request mail to %s", _mask_for_log(to_address))
+        raise EmailSendError(str(e)) from e
 
 
 async def send_magic_link_email(

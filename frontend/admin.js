@@ -2799,6 +2799,89 @@ async function loadRegions() {
   renderRegionRows();
   renderRegionGroups();
   renderRegionSync(regionsData.sync);
+  await loadRegionRequests();
+}
+
+// Players' "Join neighboring regions" requests (app/region_requests.py).
+// Pending first. Approving creates the group; if its slug is taken the
+// server says so and a name field appears so the admin can rename it
+// before approving again.
+async function loadRegionRequests() {
+  let d;
+  try {
+    d = await api('/api/admin/regions/requests');
+  } catch (e) {
+    document.getElementById('rg-requests').textContent = 'Could not load: ' + e.message;
+    return;
+  }
+  badge('nav-regions', d.pending || '', d.pending > 0);
+  const host = document.getElementById('rg-requests');
+  host.replaceChildren();
+  document.getElementById('rg-requests-count').textContent = d.pending ? d.pending + ' pending' : '';
+  if (!d.requests.length) {
+    host.appendChild(el('p', { className: 'adm-hint', text: 'No requests.' }));
+    return;
+  }
+  d.requests.forEach((r) => host.appendChild(renderRegionRequest(r)));
+}
+
+function renderRegionRequest(r) {
+  const wrap = el('div', { className: 'adm-net' });
+  const info = el('div', { className: 'adm-net-info' });
+  const head = el('div');
+  head.appendChild(el('strong', { text: r.group_name }));
+  head.appendChild(document.createTextNode(' '));
+  head.appendChild(el('span', {
+    className: 'adm-badge' + (r.status === 'approved' ? ' adm-badge-ok' : r.status === 'declined' ? ' adm-badge-bad' : ''),
+    text: r.status,
+  }));
+  info.appendChild(head);
+  const lines = [
+    'Regions: ' + r.regions.map((x) => (x.code + ' ' + x.name).trim()).join(', '),
+    'Requested by: ' + (r.player || '?') + ' (' + (r.team || 'no team') + ')',
+    'Account email: ' + (r.email || 'none on file'),
+    'Note: ' + (r.note || '-'),
+    'Submitted: ' + fmtTs(r.created_at),
+  ];
+  if (r.decided_at) lines.push('Decided: ' + fmtTs(r.decided_at));
+  lines.forEach((t) => info.appendChild(el('div', { className: 'adm-hint', text: t })));
+  wrap.appendChild(info);
+  if (r.status !== 'pending') return wrap;
+
+  const nameRow = el('div', { className: 'adm-form' });
+  nameRow.hidden = true;
+  const nameLabel = el('label', { className: 'adm-field-label', text: 'Group name' });
+  const nameIn = el('input', { type: 'text', value: r.group_name });
+  nameIn.maxLength = 80;
+  nameLabel.appendChild(nameIn);
+  nameRow.appendChild(nameLabel);
+  const out = el('div', { className: 'adm-result' });
+  const actions = el('div', { className: 'adm-form' });
+  actions.appendChild(btn('Approve', '', async (b) => {
+    out.textContent = '';
+    b.disabled = true;
+    try {
+      await post('/api/admin/regions/requests/approve', { id: r.id, group_name: nameIn.value });
+      await loadRegions();
+    } catch (e) {
+      out.textContent = 'Failed: ' + e.message;
+      nameRow.hidden = false;
+      b.disabled = false;
+    }
+  }));
+  actions.appendChild(btn('Decline', 'adm-btn-quiet', async (b) => {
+    out.textContent = '';
+    b.disabled = true;
+    try {
+      await post('/api/admin/regions/requests/decline', { id: r.id });
+      await loadRegions();
+    } catch (e) {
+      out.textContent = 'Failed: ' + e.message;
+      b.disabled = false;
+    }
+  }));
+  wrap.append(actions, nameRow, out);
+  return wrap;
 }
 
 function renderRegionRows() {
