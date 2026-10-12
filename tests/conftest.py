@@ -183,3 +183,22 @@ def counting_conn(conn):
     code's.
     """
     return RowCountingConn(conn)
+
+
+_tmp_seen_threads: set = set()
+
+
+@pytest.fixture(autouse=True)
+def _tmp_thread_watch(request):  # TEMPORARY DIAGNOSTIC
+    yield
+    import sys
+    import threading
+    import traceback
+    tr = request.config.pluginmanager.get_plugin("terminalreporter")
+    frames = sys._current_frames()
+    for t in threading.enumerate():
+        if t is threading.main_thread() or t.ident in _tmp_seen_threads:
+            continue
+        _tmp_seen_threads.add(t.ident)
+        stack = "".join(traceback.format_stack(frames[t.ident])[-3:]) if t.ident in frames else "?"
+        tr.write_line(f"\nTHREADWATCH new thread {t.name!r} alive after {request.node.nodeid}\n{stack}")
