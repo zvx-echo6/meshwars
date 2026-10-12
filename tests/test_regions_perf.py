@@ -64,9 +64,16 @@ def big(tmp_path_factory):
                   "VALUES (1,?,?,2.0,'mc','m',?)", (1 + i % 3, f"d{i}", NOW))
         c.execute("INSERT INTO checkin_award_place(season_id, player_id, net_date, cell_id, method) VALUES (1,?,?,?,'first_hop')",
                   (1 + i % 3, f"d{i}", f"{rng.randrange(N_REGIONS)}_{rng.randrange(PER_REGION)}"))
+    ts = 0
+    capture_rows = []
+    for _ in range(50000):
+        ts += 1
+        capture_rows.append((f"{rng.randrange(N_REGIONS)}_{rng.randrange(PER_REGION)}", ts, 1 + ts % 3))
+    c.executemany("INSERT INTO mc_tile_capture_log(season_id, cell_id, ts, by_player_id, by_team) VALUES (1,?,?,?, 'RED')",
+                  capture_rows)
     c.execute("COMMIT")
     c.execute("ANALYZE")
-    yield {"conn": c, "codes": tuple(codes[:GROUP_SIZE]), "tiles": tiles}
+    yield {"conn": c, "codes": tuple(codes[:GROUP_SIZE]), "tiles": tiles, "path": path}
     c.close()
 
 
@@ -135,3 +142,49 @@ def test_filter_sql_shape_and_empty_group():
     cond, params = regions.cell_filter_sql(["A", "B"], "mc_tile.cell_id")
     assert "rc.cell_id = mc_tile.cell_id" in cond and "+rc.region_code IN (?,?)" in cond and params == ["A", "B"]
     assert regions.cell_filter_sql([], "mc_tile.cell_id") == ("0", [])
+
+
+class _KeepOpen:
+    """Hands the module-scoped connection to code that closes what it opens."""
+
+    def __init__(self, conn):
+        self._c = conn
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def close(self):
+        pass
+
+
+def test_the_group_batch_reads_each_figure_once_through_the_index(big, monkeypatch):
+    """Fifteen groups on production-sized data: the batch makes a handful of
+    index-driven passes (squares, activations, check-ins, captures) per board
+    instead of one pass per group and figure."""
+    from app import regional_standings
+    c = big["conn"]
+    codes = [f"R{i:03d}" for i in range(N_REGIONS)]
+    targets = [(f"g{i}", regions.Resolved(f"g{i}", "group", f"G{i}", tuple(codes[i * 30:(i + 1) * 30 + 10])))
+               for i in range(15)]
+    monkeypatch.setattr(regional_standings, "connect", lambda: _KeepOpen(c))
+    monkeypatch.setattr(db.settings, "db_path", big["path"])
+    t0 = time.monotonic()
+    built, stmts = _captured(c, lambda: regional_standings.build_group_standings(targets))
+    elapsed = time.monotonic() - t0
+    assert elapsed < 10, elapsed                      # generous: the point is the plans below, not the stopwatch
+    _assert_plan_is_indexed_probe(c, stmts)
+    assert len(stmts) == 4                            # one pass per figure on the one active board
+    assert len(built) == 15 * 4
+    # the squares tally agrees with the per-request count for a group
+    from app import mc_scoring
+    for slug, resolved in targets[:3]:
+        want = mc_scoring.team_tile_counts(c, 1, resolved.codes)
+        got = {t["team"]: t["tiles"] for t in built[f"mc_scores:region:{slug}"]["teams"]}
+        assert {k: v for k, v in want.items() if v} == {k: v for k, v in got.items() if v}
+
+
+def _assert_plan_is_indexed_probe(conn, stmts):
+    for sql in stmts:
+        plan = "\n".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql))
+        assert "idx_region_cell_cell" in plan or "region_cell" in plan, plan
+        assert "SCAN rc" not in plan and "SCAN region_cell" not in plan, plan

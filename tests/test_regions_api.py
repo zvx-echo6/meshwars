@@ -844,3 +844,60 @@ def test_a_single_region_is_not_published_only_cached_on_demand(seeded):
     c = sqlite3.connect(seeded["path"])
     assert c.execute("SELECT COUNT(*) FROM board_cache").fetchone()[0] == 0
     c.close()
+
+
+# ---- the batch builder gives exactly the per-request answers ---------------------------
+
+
+def _targets(path, specs):
+    c = sqlite3.connect(path, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("BEGIN IMMEDIATE")
+    ids = {}
+    for name, regs, kids in specs:
+        ids[name] = regions.create_group(c, name, None, list(regs), [ids[k] for k in kids])
+    c.execute("COMMIT")
+    out = mc_api_module._group_regional_targets()
+    c.close()
+    return out
+
+
+def test_batch_standings_equal_the_per_request_standings(seeded):
+    from app import regional_standings
+    c = sqlite3.connect(seeded["path"], isolation_level=None)
+    cells = seeded["cells"]
+    # placements: Boise on the Meshtastic board, an airport-code-only one on the MeshCore board
+    c.execute("INSERT INTO checkin_award_place(season_id, player_id, net_date, lat, lon, cell_id, method) "
+              "VALUES (?,1,'2026-10-01',43.61,-116.2,?, 'first_hop')", (MT, cells["boise"]))
+    c.execute("INSERT INTO checkin_award_place(season_id, player_id, net_date, region_code, method) "
+              "VALUES (?,1,'2026-10-01','PIH','observer_iata')", (MC,))
+    c.close()
+    targets = _targets(seeded["path"], [
+        ("Treasure Valley", ("BOI", "PIH"), ()),
+        ("Idaho Mix", ("SMN", "IDA"), ()),                 # SMN and IDA overlap: the shared square counts once
+        ("Everything", ("BOI",), ("Treasure Valley", "Idaho Mix")),
+        ("Nothing Here", ("PIH",), ()),
+    ])
+    assert len(targets) == 4
+    built = regional_standings.build_group_standings(targets)
+    assert len(built) == 4 * 4
+    for slug, resolved in targets:
+        for tag, protocol in (("mc", "mc"), ("mt", "mt")):
+            want = json.loads(json.dumps(mc_api_module.scores_for(protocol, resolved)))
+            assert json.loads(json.dumps(built[f"{tag}_scores:region:{slug}"])) == want, (slug, tag)
+            top_want = mc_api_module.top_for(protocol, resolved.codes)
+            top_got = built[f"{tag}_top:region:{slug}"]
+            key = lambda r: (-r["captures"], r["display_name"])
+            assert sorted(top_got, key=key) == sorted(top_want, key=key), (slug, tag)
+
+
+def test_batch_standings_for_a_board_with_no_season(seeded):
+    from app import regional_standings
+    c = sqlite3.connect(seeded["path"])
+    c.execute("UPDATE mc_season SET status = 'closed' WHERE protocol = 'mt'")
+    c.commit()
+    c.close()
+    targets = _targets(seeded["path"], [("TV", ("BOI", "PIH"), ())])
+    built = regional_standings.build_group_standings(targets)
+    assert built["mt_top:region:tv"] == [] and built["mt_scores:region:tv"]["season_id"] is None
+    assert built["mc_scores:region:tv"]["season_id"] == MC

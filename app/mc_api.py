@@ -551,8 +551,10 @@ REGION_SHARED_TTL_S = 20.0
 # GROUP_PUBLISH_EVERY_S and keeps each row's built_at fresh, and the web side
 # serves that row as long as it is younger than this. Only if the publisher
 # is down (or has not reached a new group yet) does a request build inline.
-GROUP_PUBLISHED_TTL_S = 150.0
-GROUP_PUBLISH_EVERY_S = 30.0
+#
+# Both are set by REGIONS_GROUP_PUBLISH_SECONDS (default 300): the publisher
+# rebuilds every group's standings that often, and the web side trusts a
+# published row for three intervals.
 
 
 def cached_json_response(key: str, build, request: Request | None = None, *,
@@ -769,7 +771,10 @@ def _shared_ttl_for(resolved) -> float:
     """How long a shared board_cache row of this region's standings is
     trusted: a group's rows are kept fresh by the worker's publisher, a
     single region's are written by whichever web worker built them last."""
-    return GROUP_PUBLISHED_TTL_S if resolved.kind == "group" else REGION_SHARED_TTL_S
+    interval = settings.regions_group_publish_seconds
+    if resolved.kind == "group" and interval > 0:
+        return 3.0 * interval
+    return REGION_SHARED_TTL_S
 
 
 def resolve_region_param(region: str | None) -> tuple["regions.Resolved | None", JSONResponse | None]:
@@ -1153,27 +1158,29 @@ def _group_regional_targets() -> list[tuple[str, "regions.Resolved"]]:
 async def _publish_group_regionals_once() -> int:
     """Build and publish every group's regional scores and top captures, for
     both boards, into board_cache under the same keys the web routes read
-    (mc_scores:region:<slug>, mt_scores:..., mc_top:..., mt_top:...). The
-    builds are plain reads run in worker threads, so a slow one never
-    blocks the loop or the ingest writers; only the row writes take the
-    write lock. Returns how many keys were handled. A failure costs only
-    its own key for this cycle (the old row stays, and ages out for the
-    readers after GROUP_PUBLISHED_TTL_S)."""
+    (mc_scores:region:<slug>, mt_scores:..., mc_top:..., mt_top:...).
+
+    All groups are built in ONE batch (app/regional_standings.py): each
+    board's squares, activations, check-ins and captures are read once, each
+    with its region membership joined in, and tallied per group in Python,
+    instead of a separate SQL pass per group and kind. The batch runs in a
+    worker thread; between row writes the loop is yielded to. A failure
+    costs only its own key for this cycle (the old row stays and ages out
+    for readers after three intervals). Returns how many keys were handled.
+    """
+    from . import regional_standings
     targets = await asyncio.to_thread(_group_regional_targets)
+    if not targets:
+        return 0
+    payloads = await asyncio.to_thread(regional_standings.build_group_standings, targets)
     handled = 0
-    for slug, resolved in targets:
-        for tag, protocol in (("mc", MC_PROTOCOL), ("mt", MT_PROTOCOL)):
-            for kind, build in (
-                ("scores", lambda p=protocol, r=resolved: scores_for(p, r)),
-                ("top", lambda p=protocol, r=resolved: top_for(p, r.codes)),
-            ):
-                key = f"{tag}_{kind}:region:{slug}"
-                try:
-                    payload = await asyncio.to_thread(build)
-                    await _publish_board_payload(key, payload, touch=True)
-                    handled += 1
-                except Exception:
-                    log.exception("board_cache: failed to publish group key %s", key)
+    for key, payload in payloads.items():
+        try:
+            await _publish_board_payload(key, payload, touch=True)
+            handled += 1
+        except Exception:
+            log.exception("board_cache: failed to publish group key %s", key)
+        await asyncio.sleep(0)      # never hold the loop (and with it the ingest) for the whole batch
     return handled
 
 
@@ -1220,7 +1227,8 @@ async def run_forever() -> None:
     later web-role read) from ever seeing a fresh board again.
     """
     log.info("board cache publisher loop starting (cache_key(s): %s)", ", ".join(_published_board_keys()))
-    last_groups = -GROUP_PUBLISH_EVERY_S
+    interval = float(settings.regions_group_publish_seconds)
+    last_groups = -interval
     while True:
         try:
             await _publish_board_once()
@@ -1228,7 +1236,7 @@ async def run_forever() -> None:
             raise
         except Exception:
             log.exception("board cache publisher: cycle failed")
-        if time.monotonic() - last_groups >= GROUP_PUBLISH_EVERY_S:
+        if interval > 0 and time.monotonic() - last_groups >= interval:
             last_groups = time.monotonic()
             try:
                 t0 = time.monotonic()
@@ -1240,6 +1248,28 @@ async def run_forever() -> None:
             except Exception:
                 log.exception("board cache publisher: group standings cycle failed")
         await asyncio.sleep(max(settings.board_cache_seconds, 1))
+
+
+def regional_scores_payload(season, key: str, tile_counts: dict, checkin_points: dict, explorer_points: dict) -> dict:
+    """The /scores body for one region or group, from its three per-team
+    figures. Shared by scores_for() and the group publisher
+    (app/regional_standings.py), so the two can never disagree about shape."""
+    return {
+        "season_id": season["id"],
+        "started_at": season["started_at"],
+        "ends_at": season["ends_at"],
+        "region": key,
+        "teams": [
+            {
+                "team": t,
+                "tiles": tile_counts.get(t, 0),
+                "checkin_points": checkin_points.get(t, 0.0),
+                "explorer_points": explorer_points.get(t, 0.0),
+                "total": (tile_counts.get(t, 0) + checkin_points.get(t, 0.0) + explorer_points.get(t, 0.0)),
+            }
+            for t in team_list()
+        ],
+    }
 
 
 def scores_for(protocol: str, region: "regions.Resolved | None" = None) -> dict:
@@ -1287,23 +1317,7 @@ def scores_for(protocol: str, region: "regions.Resolved | None" = None) -> dict:
             tile_counts = team_tile_counts(conn, season["id"], region.codes)
             checkin_points = team_checkin_points(conn, season["id"], region.codes)
             explorer_points = team_place_points(conn, season["id"], protocol, region.codes)
-            return {
-                "season_id": season["id"],
-                "started_at": season["started_at"],
-                "ends_at": season["ends_at"],
-                "region": region.key,
-                "teams": [
-                    {
-                        "team": t,
-                        "tiles": tile_counts.get(t, 0),
-                        "checkin_points": checkin_points.get(t, 0.0),
-                        "explorer_points": explorer_points.get(t, 0.0),
-                        "total": (tile_counts.get(t, 0) + checkin_points.get(t, 0.0)
-                                  + explorer_points.get(t, 0.0)),
-                    }
-                    for t in team_list()
-                ],
-            }
+            return regional_scores_payload(season, region.key, tile_counts, checkin_points, explorer_points)
         tile_counts = team_tile_counts(conn, season["id"])
         checkin_points = team_checkin_points(conn, season["id"])
         explorer_points = team_place_points(conn, season["id"], protocol)

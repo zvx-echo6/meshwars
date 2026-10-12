@@ -1667,6 +1667,13 @@ class Settings(BaseSettings):
     # turns the mail off (the request is still stored and logged). The mail
     # also needs smtp_host, like every other mail this app sends.
     regions_request_email: str = "admin@meshwars.com"
+    # How often the worker's board publisher rebuilds the standings and top
+    # captures of every joined region (group) for both boards. The web side
+    # serves the published row for three of these intervals, then builds
+    # inline. Standings in a region view may be this many seconds late.
+    # 0 turns the publisher off (requests then build and share as for a
+    # single region).
+    regions_group_publish_seconds: int = 300
 
     @property
     def teams_list(self) -> list[str]:
