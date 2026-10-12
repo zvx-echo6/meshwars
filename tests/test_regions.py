@@ -585,3 +585,100 @@ def test_host_region_key(monkeypatch):
     assert regions.host_region_key("a.b.meshwars.com") is None
     assert regions.host_region_key("boi.example.com") is None
     assert regions.host_region_key(None) is None
+
+
+# ---- write-lock behaviour -------------------------------------------------
+
+
+def test_retry_busy_retries_locked_then_succeeds(monkeypatch):
+    monkeypatch.setattr(regions.time, "sleep", lambda s: None)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return "ok"
+
+    assert regions._retry_busy(flaky) == "ok" and len(calls) == 3
+
+
+def test_retry_busy_gives_up_and_ignores_other_errors(monkeypatch):
+    monkeypatch.setattr(regions.time, "sleep", lambda s: None)
+    n = []
+
+    def always_locked():
+        n.append(1)
+        raise sqlite3.OperationalError("database table is locked")
+
+    with pytest.raises(sqlite3.OperationalError):
+        regions._retry_busy(always_locked)
+    assert len(n) == regions._BUSY_ATTEMPTS
+
+    m = []
+
+    def other():
+        m.append(1)
+        raise sqlite3.OperationalError("no such table: x")
+
+    with pytest.raises(sqlite3.OperationalError):
+        regions._retry_busy(other)
+    assert len(m) == 1
+
+
+def _write_lock_is_free(path: str) -> bool:
+    other = sqlite3.connect(path, timeout=0.2, isolation_level=None)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("ROLLBACK")
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        other.close()
+
+
+def test_membership_work_runs_with_no_write_lock_held(db_path, monkeypatch):
+    """The polygon testing is the slow part; it must happen with no write
+    transaction open so ingest writers are never kept waiting behind it."""
+    load_fixture_regions(db_path)
+    c = _conn(db_path)
+    _insert_tile(c, 1, grid_cell_id(43.61, -116.20))
+    seen = []
+    real = regions._membership
+
+    def spy(index, cells):
+        seen.append(_write_lock_is_free(db_path))
+        return real(index, cells)
+
+    monkeypatch.setattr(regions, "_membership", spy)
+    assert regions.map_new_cells() == 1
+    regions.remap_regions(["BOI"])
+    assert seen and all(seen)
+    c.close()
+
+
+def test_map_batch_redone_when_a_region_changes_mid_batch(db_path, monkeypatch):
+    load_fixture_regions(db_path, codes=("boi",))
+    c = _conn(db_path)
+    boise = grid_cell_id(43.61, -116.20)
+    _insert_tile(c, 1, boise)
+    real = regions._membership
+    fired = []
+
+    def change_then_compute(index, cells):
+        if not fired:
+            fired.append(1)
+            far = {"rings": [[(10, 10), (10, 11), (11, 11), (11, 10)]], "radius_km": None,
+                   "center_lat": 10.5, "center_lon": 10.5, "shape": "polygon"}
+            c.execute("BEGIN IMMEDIATE")
+            regions.store_region(c, "BOI", "Boise, US", far, now=5000)
+            c.execute("COMMIT")
+        return real(index, cells)
+
+    monkeypatch.setattr(regions, "_membership", change_then_compute)
+    regions.map_new_cells()
+    # the stale first pass wrote nothing; the redo used the moved boundary
+    assert c.execute("SELECT COUNT(*) FROM region_cell WHERE region_code='BOI'").fetchone()[0] == 0
+    assert c.execute("SELECT COUNT(*) FROM region_cell_mapped").fetchone()[0] == 1
+    c.close()

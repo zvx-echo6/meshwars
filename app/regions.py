@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import threading
 import time
 from typing import Iterable, NamedTuple
@@ -308,19 +309,55 @@ def store_region(conn, code: str, name: str, parsed: dict, now: int | None = Non
     )
 
 
-# One process-wide lock around the membership writers (map_new_cells,
-# remap_regions). Across processes (the web role's admin button vs the
-# worker's loop) SQLite's own BEGIN IMMEDIATE serializes them, and both
-# read the region set INSIDE their write transaction, so neither can
-# write rows from a region set that has since changed.
+# One process-wide lock serialising the membership jobs against each other
+# (map_new_cells, remap_regions). Across processes (the web role's admin
+# button vs the worker's loop) the write transaction's own staleness check
+# (below) keeps them correct.
+#
+# WRITE TRANSACTIONS ARE SHORT BY DESIGN. Both jobs do all their reading and
+# all their Python work (building the polygon index, testing thousands of
+# squares) with NO transaction open -- WAL readers never block the ingest
+# writers -- and then take BEGIN IMMEDIATE only to apply a precomputed
+# batch of INSERT/DELETE rows. If a region changed while the work was done
+# (its fetched_at moved), the transaction notices, rolls back and the job
+# redoes that batch from fresh data. Nothing here ever holds the write lock
+# across a network fetch either: every write below is its own transaction,
+# opened and closed inside one helper, and run_import() calls them between
+# fetches.
 _MAP_LOCK = threading.Lock()
 _INDEX_CACHE: tuple[tuple, RegionIndex] | None = None
 _BATCH = 5000
+
+# app/db.py gives every connection PRAGMA busy_timeout=15000, and no other
+# background writer in the app retries beyond that. A import that runs for
+# twenty minutes should survive one unlucky stretch of write-lock
+# contention though (the preview import lost a region to "database is
+# locked" next to mc_ingest's own claim failing), so each write below is
+# retried a few times, with a growing pause, when SQLite reports the
+# database busy or locked. Nothing else is retried.
+_BUSY_ATTEMPTS = 6
+
+
+def _retry_busy(fn):
+    for attempt in range(1, _BUSY_ATTEMPTS + 1):
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            msg = str(exc).lower()
+            if ("locked" not in msg and "busy" not in msg) or attempt == _BUSY_ATTEMPTS:
+                raise
+            log.warning("regions: database busy (%s), retry %d/%d", exc, attempt, _BUSY_ATTEMPTS - 1)
+            time.sleep(min(5.0, 0.5 * attempt))
 
 
 def _region_signature(conn) -> tuple:
     r = conn.execute("SELECT COUNT(*), COALESCE(MAX(fetched_at),0), COALESCE(SUM(fetched_at),0) FROM region").fetchone()
     return (r[0], r[1], r[2])
+
+
+def _codes_signature(conn, codes: list[str]) -> tuple:
+    return tuple(tuple(r) for r in conn.execute(
+        "SELECT code, fetched_at FROM region WHERE code IN (%s) ORDER BY code" % ",".join("?" * len(codes)), codes))
 
 
 def _build_index(conn, codes: Iterable[str] | None = None) -> RegionIndex:
@@ -338,18 +375,18 @@ def _build_index(conn, codes: Iterable[str] | None = None) -> RegionIndex:
     return RegionIndex(shapes)
 
 
-def _full_index(conn) -> RegionIndex:
-    """Index over every region, rebuilt only when the region set changed
-    (a polygon parse of ~550 regions is not something to repeat per
-    batch)."""
+def _full_index(conn) -> tuple[tuple, RegionIndex]:
+    """(signature, index over every region). Rebuilt only when the region
+    set changed -- parsing ~550 polygons is seconds of work, which is why
+    it must never run inside a write transaction."""
     global _INDEX_CACHE
     sig = _region_signature(conn)
     cached = _INDEX_CACHE
     if cached is not None and cached[0] == sig:
-        return cached[1]
+        return sig, cached[1]
     idx = _build_index(conn)
     _INDEX_CACHE = (sig, idx)
-    return idx
+    return sig, idx
 
 
 def _unmapped_cells(conn, limit: int) -> list[str]:
@@ -372,26 +409,71 @@ def _unmapped_cells(conn, limit: int) -> list[str]:
     return list(cells)
 
 
-def _write_membership(conn, index: RegionIndex, cells: Iterable[str], *, mark_mapped: bool) -> int:
-    n = 0
+def _membership(index: RegionIndex, cells: Iterable[str]) -> list[tuple[str, list[str]]]:
+    """[(cell_id, [region codes])] -- pure computation, no database."""
+    out = []
     for cid in cells:
         try:
             codes = index.codes_for_cell(cid)
         except ValueError:
             codes = []  # not a grid id: in no region, but still marked tested
-        if mark_mapped:
-            conn.execute("INSERT OR IGNORE INTO region_cell_mapped(cell_id) VALUES (?)", (cid,))
-        for code in codes:
-            conn.execute("INSERT OR IGNORE INTO region_cell(region_code, cell_id) VALUES (?,?)", (code, cid))
-            n += 1
-    return n
+        out.append((cid, codes))
+    return out
+
+
+def _apply_membership(conn, rows: list[tuple[str, list[str]]], *, mark_mapped: bool) -> None:
+    if mark_mapped:
+        conn.executemany("INSERT OR IGNORE INTO region_cell_mapped(cell_id) VALUES (?)", [(c,) for c, _ in rows])
+    conn.executemany(
+        "INSERT OR IGNORE INTO region_cell(region_code, cell_id) VALUES (?,?)",
+        [(code, cid) for cid, codes in rows for code in codes])
+
+
+def _map_one_batch(batch: int) -> int | None:
+    """Map one batch of untested cells. None: nothing to do (no regions or
+    no untested cells). -1: a region changed meanwhile, nothing written, call
+    again. Otherwise the number of cells mapped."""
+    conn = connect()
+    try:
+        if conn.execute("SELECT 1 FROM region LIMIT 1").fetchone() is None:
+            return None
+        sig, index = _full_index(conn)
+        cells = _unmapped_cells(conn, batch)
+    finally:
+        conn.close()
+    if not cells:
+        return None
+    rows = _membership(index, cells)
+
+    def write() -> int:
+        wc = connect()
+        try:
+            wc.execute("BEGIN IMMEDIATE")
+            try:
+                if _region_signature(wc) != sig:
+                    wc.execute("ROLLBACK")
+                    return -1
+                _apply_membership(wc, rows, mark_mapped=True)
+                wc.execute("COMMIT")
+            except BaseException:
+                try:
+                    wc.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        finally:
+            wc.close()
+        return len(rows)
+
+    return _retry_busy(write)
 
 
 def map_new_cells(batch: int = _BATCH) -> int:
     """Map every square (and credited place cell) not yet tested against
     the region set. Returns how many cells were mapped. A no-op when no
-    region is stored. Runs in batches, each its own short write
-    transaction, so ingest writers are never kept waiting for long.
+    region is stored. Batches of `batch` cells; the polygon work for each
+    batch happens before its write transaction opens, which then only
+    inserts the computed rows.
 
     A periodic job rather than an ingest hook: the squares are written by
     several writers (MeshCore ingest, the Meshtastic ingestors, tile
@@ -401,61 +483,70 @@ def map_new_cells(batch: int = _BATCH) -> int:
     """
     total = 0
     with _MAP_LOCK:
-        conn = connect()
-        try:
-            while True:
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    if conn.execute("SELECT 1 FROM region LIMIT 1").fetchone() is None:
-                        conn.execute("ROLLBACK")
-                        return total
-                    cells = _unmapped_cells(conn, batch)
-                    if not cells:
-                        conn.execute("COMMIT")
-                        return total
-                    _write_membership(conn, _full_index(conn), cells, mark_mapped=True)
-                    conn.execute("COMMIT")
-                except BaseException:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                    raise
-                total += len(cells)
-                if len(cells) < batch:
-                    return total
-        finally:
-            conn.close()
+        while True:
+            n = _map_one_batch(batch)
+            if n is None:
+                return total
+            if n < 0:
+                continue
+            total += n
+            if n < batch:
+                return total
 
 
 def remap_regions(codes: Iterable[str]) -> int:
     """Recompute membership of the given regions over every cell already
-    mapped, replacing their old rows in one transaction (so a reader sees
-    the old membership or the new one, never a half-built region).
-    Returns the number of membership rows written."""
+    mapped, replacing their old rows in ONE short transaction (so a reader
+    sees the old membership or the new one, never a half-built region).
+    The testing of every cell happens first, with no transaction open; the
+    transaction deletes the regions' old rows, inserts the new ones, and
+    also tests any cell that was mapped in the meantime. Returns the number
+    of membership rows written."""
     codes = sorted({c.upper() for c in codes})
     if not codes:
         return 0
+    marks = ",".join("?" * len(codes))
     with _MAP_LOCK:
-        conn = connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
+        for _ in range(5):
+            conn = connect()
             try:
+                sig = _codes_signature(conn, codes)
                 index = _build_index(conn, codes)
-                marks = ",".join("?" * len(codes))
-                conn.execute(f"DELETE FROM region_cell WHERE region_code IN ({marks})", codes)
                 cells = [r[0] for r in conn.execute("SELECT cell_id FROM region_cell_mapped")]
-                n = _write_membership(conn, index, cells, mark_mapped=False)
-                conn.execute("COMMIT")
-            except BaseException:
+            finally:
+                conn.close()
+            computed = _membership(index, cells)
+            seen = set(cells)
+
+            def write() -> int | None:
+                wc = connect()
                 try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
-        finally:
-            conn.close()
-    return n
+                    wc.execute("BEGIN IMMEDIATE")
+                    try:
+                        if _codes_signature(wc, codes) != sig:
+                            wc.execute("ROLLBACK")
+                            return None
+                        late = [r[0] for r in wc.execute("SELECT cell_id FROM region_cell_mapped")
+                                if r[0] not in seen]
+                        rows = computed + _membership(index, late)
+                        wc.execute(f"DELETE FROM region_cell WHERE region_code IN ({marks})", codes)
+                        _apply_membership(wc, rows, mark_mapped=False)
+                        wc.execute("COMMIT")
+                    except BaseException:
+                        try:
+                            wc.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                        raise
+                finally:
+                    wc.close()
+                return sum(len(c) for _, c in rows)
+
+            n = _retry_busy(write)
+            if n is not None:
+                return n
+        log.warning("regions: remap gave up, the boundaries kept changing")
+        return 0
 
 
 # ---- groups -------------------------------------------------------------
@@ -754,17 +845,21 @@ def _read_state() -> dict:
 
 def _write_state(state: dict) -> None:
     state = dict(state, updated_at=int(time.time()))
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+
+    def write() -> None:
+        conn = connect()
         try:
-            set_cursor(conn, _STATE_KEY, json.dumps(state))
-            conn.execute("COMMIT")
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
-    finally:
-        conn.close()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                set_cursor(conn, _STATE_KEY, json.dumps(state))
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+
+    _retry_busy(write)
 
 
 def sync_status() -> dict:
@@ -787,17 +882,20 @@ def sync_status() -> dict:
 
 
 def _store_one(code: str, name: str, parsed: dict) -> None:
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    def write() -> None:
+        conn = connect()
         try:
-            store_region(conn, code, name, parsed)
-            conn.execute("COMMIT")
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
-    finally:
-        conn.close()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                store_region(conn, code, name, parsed)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+
+    _retry_busy(write)
 
 
 def _stored_codes() -> dict[str, int]:
@@ -809,19 +907,22 @@ def _stored_codes() -> dict[str, int]:
 
 
 def _stamp(keys: list[str]) -> None:
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    def write() -> None:
+        conn = connect()
         try:
-            now = str(int(time.time()))
-            for k in keys:
-                set_cursor(conn, k, now)
-            conn.execute("COMMIT")
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
-    finally:
-        conn.close()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                now = str(int(time.time()))
+                for k in keys:
+                    set_cursor(conn, k, now)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
+
+    _retry_busy(write)
 
 
 async def _get(client: httpx.AsyncClient, url: str) -> str:
@@ -892,7 +993,7 @@ async def run_import(mode: str = "all", client: httpx.AsyncClient | None = None)
             state["done"] = i + 1
             await asyncio.to_thread(_write_state, state)
         if affected:
-            await asyncio.to_thread(remap_regions, affected)
+            await asyncio.to_thread(_retry_busy, lambda: remap_regions(affected))
         return state
     finally:
         state["state"] = "idle"
