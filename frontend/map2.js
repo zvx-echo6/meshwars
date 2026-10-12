@@ -2037,30 +2037,29 @@ function populateRegionSelect() {
   if (joinRow) joinRow.hidden = false;
   // Strip ", US"-style country suffixes only when EVERY name has one.
   const stripCountry = regions.length > 0 && regions.every((r) => /,\s*[A-Za-z]{2}$/.test(r.name));
-  const byCode = new Map(regions.map((r) => [r.code, r]));
-  const byId = new Map(groups.map((g) => [g.id, g]));
-  const childIds = new Set(groups.flatMap((g) => g.groups));
   sel.replaceChildren();
-  const add = (value, text) => {
+  const add = (parent, value, text) => {
     const o = document.createElement('option');
     o.value = value;
     o.textContent = text;
-    sel.appendChild(o);
+    parent.appendChild(o);
   };
-  add('', 'All regions');
-  const indent = (d) => '  '.repeat(d);
-  const walk = (g, depth, seen) => {
-    add(g.slug, indent(depth) + g.name);
-    const next = new Set(seen).add(g.id); // a cycle cannot be written, but never loop on one
-    g.groups.forEach((id) => { const c = byId.get(id); if (c && !next.has(id)) walk(c, depth + 1, next); });
-    g.regions.forEach((code) => {
-      const r = byCode.get(code);
-      if (r) add(r.code, indent(depth + 1) + regionOptionLabel(r, stripCountry));
-    });
-  };
-  groups.filter((g) => !childIds.has(g.id)).forEach((g) => walk(g, 0, new Set()));
-  regions.slice().sort((a, b) => (a.code < b.code ? -1 : 1))
-    .forEach((r) => add(r.code, regionOptionLabel(r, stripCountry)));
+  add(sel, '', 'All regions');
+  // Joined regions: the groups, flat (no members listed under them), in the
+  // order the admin set; /api/regions already returns them that way.
+  if (groups.length) {
+    const og = document.createElement('optgroup');
+    og.label = 'Joined Regions';
+    groups.forEach((g) => add(og, g.slug, g.name));
+    sel.appendChild(og);
+  }
+  if (regions.length) {
+    const og = document.createElement('optgroup');
+    og.label = 'Individual Regions';
+    regions.slice().sort((a, b) => (a.code < b.code ? -1 : 1))
+      .forEach((r) => add(og, r.code, regionOptionLabel(r, stripCountry)));
+    sel.appendChild(og);
+  }
   selectedRegion = selectedRegion && canonicalRegionKey(selectedRegion.key)
     ? { key: canonicalRegionKey(selectedRegion.key) } : null;
   sel.value = selectedRegion ? selectedRegion.key : '';
@@ -2233,6 +2232,36 @@ function changeRegion(key, map, opts) {
 
 let regionOutlineSeq = 0;
 
+// A group's outline is ONE merged border, never its members' own borders:
+// the member polygons are unioned here with polygon-clipping (vendored at
+// /static/vendor, loaded by map2.html as window.polygonClipping), including
+// groups nested inside groups, since the API already expands them to the
+// member regions. A union does the right thing with borders that nearly
+// meet; real gaps between members stay as holes. The result is kept per key
+// for this page's lifetime, so reselecting a group is instant. A single
+// region is drawn as served.
+const regionOutlineCache = new Map();
+
+function unionedOutline(key, fc) {
+  const feats = (fc && fc.features) || [];
+  if (feats.length < 2 || !window.polygonClipping) return fc;
+  if (regionOutlineCache.has(key)) return regionOutlineCache.get(key);
+  let merged;
+  try {
+    const geoms = feats.map((f) => f.geometry.coordinates);
+    merged = window.polygonClipping.union(geoms[0], ...geoms.slice(1));
+  } catch (err) {
+    console.warn('MeshWars map2: could not merge the region outline', err);
+    return fc; // better the member borders than nothing
+  }
+  const out = {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: { key }, geometry: { type: 'MultiPolygon', coordinates: merged } }],
+  };
+  regionOutlineCache.set(key, out);
+  return out;
+}
+
 // Draws the selected region's boundary (a group: every member's) and
 // optionally fits the map to it. GeoJSON from the API is already lon,lat.
 async function applyRegionOutline(map, fit) {
@@ -2246,7 +2275,7 @@ async function applyRegionOutline(map, fit) {
   try {
     const res = await fetch('/api/regions/' + encodeURIComponent(selectedRegion.key) + '/boundary');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const fc = await res.json();
+    const fc = unionedOutline(selectedRegion.key, await res.json());
     if (mine !== regionOutlineSeq) return;
     src.setData(fc);
     if (!fit) return;

@@ -3299,6 +3299,12 @@ MIGRATIONS = [
     # admin panel. Both tables already exist on every deployed DB
     # (unlike `community` itself, which is brand new), so this needs a
     # real ALTER rather than just being part of CREATE TABLE.
+    # Region groups are shown in the map's Region dropdown in this order
+    # (app/regions.py). Existing groups take their creation order; the
+    # UPDATE only touches rows still at the 0 default, and every order
+    # app/regions.py assigns is >= 1, so re-running it each boot is a no-op.
+    "ALTER TABLE region_group ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0",
+    "UPDATE region_group SET display_order = id WHERE display_order = 0",
     "ALTER TABLE checkin_net ADD COLUMN community_id INTEGER",
     "ALTER TABLE observation_source ADD COLUMN community_id INTEGER",
     # Nullable on purpose, both of them: every award written before these

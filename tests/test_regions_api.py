@@ -664,3 +664,57 @@ def test_fetch_route_needs_a_role(seeded):
     app.include_router(admin_api_router)
     app.include_router(regions_router)
     assert TestClient(app).post("/api/admin/regions/fetch", json={"link": "twf"}).status_code in (401, 404)
+
+
+# ---- group display order -----------------------------------------------------
+
+
+def _slugs(client):
+    return [g["slug"] for g in client.get("/api/regions").json()["groups"]]
+
+
+def test_groups_list_in_creation_order_not_alphabetical(admin, client):
+    for name in ("Zulu", "Alpha", "Mike"):
+        assert admin.post("/api/admin/regions/groups/create", json={"name": name, "regions": ["BOI"]}).status_code == 201
+    assert _slugs(client) == ["zulu", "alpha", "mike"]
+    assert [g["slug"] for g in admin.get("/api/admin/regions").json()["groups"]] == ["zulu", "alpha", "mike"]
+
+
+def test_move_group_up_and_down_and_at_the_ends(admin, client):
+    ids = {}
+    for name in ("One", "Two", "Three"):
+        ids[name] = admin.post("/api/admin/regions/groups/create", json={"name": name, "regions": ["BOI"]}).json()["id"]
+    mv = lambda name, d: admin.post("/api/admin/regions/groups/move", json={"id": ids[name], "direction": d})
+    r = mv("Three", "up")
+    assert r.status_code == 200 and [g["slug"] for g in r.json()["groups"]] == ["one", "three", "two"]
+    assert _slugs(client) == ["one", "three", "two"]
+    mv("One", "down")
+    assert _slugs(client) == ["three", "one", "two"]
+    mv("Three", "up")                       # already first: nothing moves
+    mv("Two", "down")                       # already last
+    assert _slugs(client) == ["three", "one", "two"]
+    # a new group goes to the end, after the reorder
+    admin.post("/api/admin/regions/groups/create", json={"name": "Four", "regions": ["BOI"]})
+    assert _slugs(client) == ["three", "one", "two", "four"]
+
+
+def test_move_group_validation(admin):
+    assert admin.post("/api/admin/regions/groups/move", json={"id": 999, "direction": "up"}).status_code == 404
+    assert admin.post("/api/admin/regions/groups/move", json={"direction": "up"}).status_code == 400
+    gid = admin.post("/api/admin/regions/groups/create", json={"name": "G", "regions": ["BOI"]}).json()["id"]
+    assert admin.post("/api/admin/regions/groups/move", json={"id": gid, "direction": "sideways"}).status_code == 400
+
+
+def test_existing_groups_take_creation_order_from_the_migration(tmp_path):
+    path = str(tmp_path / "old.db")
+    conn = sqlite3.connect(path)
+    conn.executescript("CREATE TABLE region_group (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+                       "slug TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);")
+    for n in ("b", "a"):
+        conn.execute("INSERT INTO region_group(name, slug, created_at, updated_at) VALUES (?,?,0,0)", (n, n))
+    for stmt in MIGRATIONS:
+        if "region_group" in stmt:
+            conn.execute(stmt)
+            conn.execute(stmt) if stmt.startswith("UPDATE") else None
+    assert [r[0] for r in conn.execute("SELECT slug FROM region_group ORDER BY display_order, id")] == ["b", "a"]
+    conn.close()

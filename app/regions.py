@@ -713,9 +713,10 @@ def create_group(conn, name, slug, regions, groups, now: int | None = None) -> i
     now = int(time.time()) if now is None else now
     name, slug = _check_name_slug(conn, None, name, slug)
     codes, ids = _clean_members(conn, None, regions, groups)
+    nxt = conn.execute("SELECT COALESCE(MAX(display_order), 0) + 1 FROM region_group").fetchone()[0]
     cur = conn.execute(
-        "INSERT INTO region_group(name, slug, created_at, updated_at) VALUES (?,?,?,?)",
-        (name, slug, now, now))
+        "INSERT INTO region_group(name, slug, created_at, updated_at, display_order) VALUES (?,?,?,?,?)",
+        (name, slug, now, now, nxt))
     gid = cur.lastrowid
     _set_members(conn, gid, codes, ids)
     return gid
@@ -740,6 +741,23 @@ def _set_members(conn, group_id: int, codes: list[str], ids: list[int]) -> None:
         conn.execute("INSERT INTO region_group_member(group_id, child_group_id) VALUES (?,?)", (group_id, g))
 
 
+def move_group(conn, group_id: int, direction: str) -> None:
+    """Swap a group with its neighbour in the display order ('up' = earlier)
+    and renumber every group 1..n, so the order is always gap-free. Caller
+    owns the transaction."""
+    if direction not in ("up", "down"):
+        raise RegionError("direction must be up or down")
+    ids = [r[0] for r in conn.execute("SELECT id FROM region_group ORDER BY display_order, id")]
+    if group_id not in ids:
+        raise RegionError("group not found", 404)
+    i = ids.index(group_id)
+    j = i - 1 if direction == "up" else i + 1
+    if 0 <= j < len(ids):
+        ids[i], ids[j] = ids[j], ids[i]
+    for pos, gid in enumerate(ids, start=1):
+        conn.execute("UPDATE region_group SET display_order = ? WHERE id = ?", (pos, gid))
+
+
 def delete_group(conn, group_id: int) -> bool:
     cur = conn.execute("DELETE FROM region_group WHERE id = ?", (group_id,))
     return cur.rowcount > 0
@@ -747,7 +765,7 @@ def delete_group(conn, group_id: int) -> bool:
 
 def list_groups(conn) -> list[dict]:
     out = []
-    for g in conn.execute("SELECT id, name, slug FROM region_group ORDER BY name COLLATE NOCASE, id"):
+    for g in conn.execute("SELECT id, name, slug FROM region_group ORDER BY display_order, id"):
         regions, groups = _member_rows(conn, g["id"])
         out.append({"id": g["id"], "name": g["name"], "slug": g["slug"], "regions": regions, "groups": groups})
     return out

@@ -809,3 +809,14 @@ def test_map_new_cells_batches_are_bounded_and_yield(db_path, monkeypatch):
     assert max(sizes) <= 10 and len(sizes) == -(-n // 10)
     assert free and all(free)
     c.close()
+
+
+def test_vendored_polygon_clipping_is_pinned_licensed_and_loaded_before_the_map():
+    root = Path(__file__).parent.parent / "frontend"
+    lib = (root / "vendor" / "polygon-clipping.0.15.7.umd.min.js").read_text(encoding="utf-8")
+    head = lib[:3000]
+    assert lib.startswith("/*!") and "0.15.7" in head and "The MIT License" in head
+    assert "polygonClipping" in lib
+    html = (root / "map2.html").read_text(encoding="utf-8")
+    assert html.index("vendor/polygon-clipping.0.15.7.umd.min.js") < html.index("/static/map2.js")
+    assert "cdn" not in html[html.index("polygon-clipping"):html.index("polygon-clipping") + 200].lower().replace("cdn.jsdelivr", "")
