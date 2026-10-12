@@ -546,6 +546,14 @@ def _wants_gzip(request: Request | None) -> bool:
 # trusted only while it is younger than this.
 REGION_SHARED_TTL_S = 20.0
 
+# Joined regions (groups) are never built on a request: the worker's board
+# publisher builds their scores and top captures for both boards every
+# GROUP_PUBLISH_EVERY_S and keeps each row's built_at fresh, and the web side
+# serves that row as long as it is younger than this. Only if the publisher
+# is down (or has not reached a new group yet) does a request build inline.
+GROUP_PUBLISHED_TTL_S = 150.0
+GROUP_PUBLISH_EVERY_S = 30.0
+
 
 def cached_json_response(key: str, build, request: Request | None = None, *,
                          shared_ttl: float | None = None) -> Response:
@@ -755,6 +763,13 @@ def _read_board_cache_row(key: str, max_age: float | None = None) -> _CachedBody
     entry = _CachedBody(time.monotonic(), body, row["etag"])
     entry.gzip_body = gzip_body
     return entry
+
+
+def _shared_ttl_for(resolved) -> float:
+    """How long a shared board_cache row of this region's standings is
+    trusted: a group's rows are kept fresh by the worker's publisher, a
+    single region's are written by whichever web worker built them last."""
+    return GROUP_PUBLISHED_TTL_S if resolved.kind == "group" else REGION_SHARED_TTL_S
 
 
 def resolve_region_param(region: str | None) -> tuple["regions.Resolved | None", JSONResponse | None]:
@@ -1019,7 +1034,7 @@ def _stored_board_etag(key: str) -> str | None:
     return row["etag"] if row is not None else None
 
 
-async def _publish_board_payload(key: str, payload: list[dict] | dict) -> None:
+async def _publish_board_payload(key: str, payload: list[dict] | dict, *, touch: bool = False) -> None:
     """Publish ONE key's already-built `payload`: serialize it, hash it,
     and upsert its board_cache row unless the stored etag already equals
     that hash -- see _publish_board_once() for why each step is the way it
@@ -1030,6 +1045,11 @@ async def _publish_board_payload(key: str, payload: list[dict] | dict) -> None:
     etag = '"%s"' % hashlib.sha256(body).hexdigest()[:32]
     if _stored_board_etag(key) == etag:
         log.debug("board_cache: key %s unchanged (etag %s), skipping publish", key, etag)
+        if touch:
+            # a reader that trusts this row only while it is young (the group
+            # standings) needs to see that it was re-checked, not rewritten
+            async with WriteSession() as conn:
+                conn.execute("UPDATE board_cache SET built_at = ? WHERE cache_key = ?", (int(time.time()), key))
         return
     gzip_body = gzip.compress(body, compresslevel=_GZIP_COMPRESSLEVEL)
     async with WriteSession() as conn:
@@ -1114,6 +1134,49 @@ async def _publish_board_once() -> None:
                 log.exception("board_cache: failed to publish key %s", key)
 
 
+def _group_regional_targets() -> list[tuple[str, "regions.Resolved"]]:
+    """(slug, resolved) for every group that holds at least one region."""
+    conn = connect()
+    try:
+        out = []
+        for g in regions.list_groups(conn):
+            if not g["region_count"]:
+                continue
+            resolved = regions.resolve(conn, g["slug"])
+            if resolved is not None and resolved.kind == "group" and resolved.codes:
+                out.append((resolved.key, resolved))
+        return out
+    finally:
+        conn.close()
+
+
+async def _publish_group_regionals_once() -> int:
+    """Build and publish every group's regional scores and top captures, for
+    both boards, into board_cache under the same keys the web routes read
+    (mc_scores:region:<slug>, mt_scores:..., mc_top:..., mt_top:...). The
+    builds are plain reads run in worker threads, so a slow one never
+    blocks the loop or the ingest writers; only the row writes take the
+    write lock. Returns how many keys were handled. A failure costs only
+    its own key for this cycle (the old row stays, and ages out for the
+    readers after GROUP_PUBLISHED_TTL_S)."""
+    targets = await asyncio.to_thread(_group_regional_targets)
+    handled = 0
+    for slug, resolved in targets:
+        for tag, protocol in (("mc", MC_PROTOCOL), ("mt", MT_PROTOCOL)):
+            for kind, build in (
+                ("scores", lambda p=protocol, r=resolved: scores_for(p, r)),
+                ("top", lambda p=protocol, r=resolved: top_for(p, r.codes)),
+            ):
+                key = f"{tag}_{kind}:region:{slug}"
+                try:
+                    payload = await asyncio.to_thread(build)
+                    await _publish_board_payload(key, payload, touch=True)
+                    handled += 1
+                except Exception:
+                    log.exception("board_cache: failed to publish group key %s", key)
+    return handled
+
+
 async def run_forever() -> None:
     """Background loop that keeps board_cache (app/db.py) fresh --
     started UNCONDITIONALLY (subject to settings.run_background_tasks) by
@@ -1157,6 +1220,7 @@ async def run_forever() -> None:
     later web-role read) from ever seeing a fresh board again.
     """
     log.info("board cache publisher loop starting (cache_key(s): %s)", ", ".join(_published_board_keys()))
+    last_groups = -GROUP_PUBLISH_EVERY_S
     while True:
         try:
             await _publish_board_once()
@@ -1164,6 +1228,17 @@ async def run_forever() -> None:
             raise
         except Exception:
             log.exception("board cache publisher: cycle failed")
+        if time.monotonic() - last_groups >= GROUP_PUBLISH_EVERY_S:
+            last_groups = time.monotonic()
+            try:
+                t0 = time.monotonic()
+                n = await _publish_group_regionals_once()
+                if n:
+                    log.info("board cache publisher: %d group standing(s) published in %.1f s", n, time.monotonic() - t0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("board cache publisher: group standings cycle failed")
         await asyncio.sleep(max(settings.board_cache_seconds, 1))
 
 
@@ -1424,7 +1499,7 @@ async def mc_scores(request: Request, region: str | None = None):
     if resolved is not None:
         return cached_json_response(f"mc_scores:region:{resolved.key}",
                                     lambda: scores_for(MC_PROTOCOL, resolved), request,
-                                    shared_ttl=REGION_SHARED_TTL_S)
+                                    shared_ttl=_shared_ttl_for(resolved))
     return scores_for(MC_PROTOCOL, resolved)
 
 
@@ -1784,7 +1859,7 @@ async def mc_top(request: Request, region: str | None = None):
     if resolved is not None:
         return cached_json_response(f"mc_top:region:{resolved.key}",
                                     lambda: top_for(MC_PROTOCOL, resolved.codes), request,
-                                    shared_ttl=REGION_SHARED_TTL_S)
+                                    shared_ttl=_shared_ttl_for(resolved))
     return top_for(MC_PROTOCOL, None)
 
 

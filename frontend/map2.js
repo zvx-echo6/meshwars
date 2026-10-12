@@ -2457,7 +2457,7 @@ let regionOutlineSeq = 0;
 // ETag, so the next visit costs one revalidating request and no union. A
 // single region is drawn as served.
 const regionOutlineCache = new Map();
-const OUTLINE_STORE_PREFIX = 'mwOutline:v3:';   // v3: outer edge only, inlets closed; older entries are never read
+const OUTLINE_STORE_PREFIX = 'mwOutline:v4:';   // v4: opening (spikes removed) added; older entries are never read
 
 function unionedOutline(key, fc) {
   const feats = (fc && fc.features) || [];
@@ -2490,7 +2490,7 @@ function storeOutline(key, etag, fc) {
   if (!etag) return;
   try {
     // Outlines kept by the earlier merge (v2: holes and slivers) are dead weight.
-    Object.keys(window.localStorage).filter((k) => k.startsWith('mwOutline:v2:'))
+    Object.keys(window.localStorage).filter((k) => k.startsWith('mwOutline:v2:') || k.startsWith('mwOutline:v3:'))
       .forEach((k) => window.localStorage.removeItem(k));
     window.localStorage.setItem(OUTLINE_STORE_PREFIX + key, JSON.stringify({ etag, fc }));
   } catch (err) { /* private mode or quota: the outline just is not remembered */ }

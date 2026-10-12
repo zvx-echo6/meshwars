@@ -765,3 +765,81 @@ def test_each_region_has_its_own_shared_row(seeded, client):
     keys = {row[0] for row in c.execute("SELECT cache_key FROM board_cache")}
     c.close()
     assert {"mc_top:region:BOI", "mc_top:region:PIH"} <= keys
+
+
+# ---- group standings are published by the worker, never built cold on a request ------
+
+
+def _make_group(path, name="Treasure Valley", regs=("BOI", "PIH")):
+    c = sqlite3.connect(path, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("BEGIN IMMEDIATE")
+    gid = regions.create_group(c, name, None, list(regs), [])
+    c.execute("COMMIT")
+    c.close()
+    return gid
+
+
+def test_the_publisher_writes_every_groups_standings_for_both_boards(seeded):
+    _make_group(seeded["path"])
+    assert asyncio.run(mc_api_module._publish_group_regionals_once()) == 4
+    c = sqlite3.connect(seeded["path"])
+    keys = {r[0] for r in c.execute("SELECT cache_key FROM board_cache")}
+    c.close()
+    assert keys >= {"mc_scores:region:treasure-valley", "mt_scores:region:treasure-valley",
+                    "mc_top:region:treasure-valley", "mt_top:region:treasure-valley"}
+
+
+def test_a_group_is_served_from_the_published_row_and_built_inline_only_if_missing(seeded, client, monkeypatch):
+    _make_group(seeded["path"])
+    asyncio.run(mc_api_module._publish_group_regionals_once())
+    mc_api_module._BOARD_CACHE.clear()
+    calls = []
+    real_s, real_t = mc_api_module.scores_for, mc_api_module.top_for
+    monkeypatch.setattr(mc_api_module, "scores_for", lambda *a, **k: (calls.append("scores"), real_s(*a, **k))[1])
+    monkeypatch.setattr(mc_api_module, "top_for", lambda *a, **k: (calls.append("top"), real_t(*a, **k))[1])
+    rc = sqlite3.connect(seeded["path"])
+    rc.row_factory = sqlite3.Row
+    expect = real_s("mc", regions.resolve(rc, "treasure-valley"))
+    rc.close()
+    got = client.get("/api/mc/scores", params={"region": "treasure-valley"}).json()
+    assert got == expect
+    for path in ("/scores", "/top", "/api/mc/top"):
+        assert client.get(path, params={"region": "Treasure-Valley"}).status_code == 200
+    assert calls == []                                    # nothing was built on a request
+    # a missing row falls back to an inline build (and shares it)
+    c = sqlite3.connect(seeded["path"])
+    c.execute("DELETE FROM board_cache")
+    c.commit()
+    c.close()
+    mc_api_module._BOARD_CACHE.clear()
+    client.get("/api/mc/scores", params={"region": "treasure-valley"})
+    assert calls == ["scores"]
+    # a published row older than its allowed age is not trusted either
+    asyncio.run(mc_api_module._publish_group_regionals_once())
+    c = sqlite3.connect(seeded["path"])
+    c.execute("UPDATE board_cache SET built_at = built_at - 10000")
+    c.commit()
+    c.close()
+    mc_api_module._BOARD_CACHE.clear()
+    client.get("/api/mc/scores", params={"region": "treasure-valley"})
+    assert calls == ["scores", "scores"]
+
+
+def test_an_unchanged_group_row_still_has_its_age_refreshed_each_cycle(seeded):
+    _make_group(seeded["path"])
+    asyncio.run(mc_api_module._publish_group_regionals_once())
+    c = sqlite3.connect(seeded["path"])
+    c.execute("UPDATE board_cache SET built_at = 1")
+    c.commit()
+    asyncio.run(mc_api_module._publish_group_regionals_once())      # same content: no rewrite, but re-stamped
+    ages = [r[0] for r in c.execute("SELECT built_at FROM board_cache")]
+    c.close()
+    assert ages and all(a > 1000 for a in ages)
+
+
+def test_a_single_region_is_not_published_only_cached_on_demand(seeded):
+    asyncio.run(mc_api_module._publish_group_regionals_once())      # no groups at all
+    c = sqlite3.connect(seeded["path"])
+    assert c.execute("SELECT COUNT(*) FROM board_cache").fetchone()[0] == 0
+    c.close()

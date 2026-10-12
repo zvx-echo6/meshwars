@@ -31,7 +31,7 @@ test('the outline is the outer edge only: a hole between members is dropped, sma
 
 test('a narrow inlet between members is closed, a wide one is left', () => {
   const frame = (gap) => [box(-117, 42, -116 - gap / 2, 44), box(-116 + gap / 2, 42, -115, 44), box(-117, 42, -115, 42.5)];
-  const narrow = ro.buildOutline(frame(0.004), pc, { close: 0 });
+  const narrow = ro.buildOutline(frame(0.004), pc, { close: 0, open: 0 });
   assert.ok(!ro.pointInRing([-116, 43], narrow[0][0]));           // without closing, the channel is cut into the outline
   const closed = ro.buildOutline(frame(0.004), pc);
   assert.ok(ro.pointInRing([-116, 43], closed[0][0]));            // closing fills it
@@ -70,4 +70,28 @@ test('a ring that collapses is dropped', () => {
 test('area is in km2', () => {
   const a = ro.ringAreaKm2([[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]);
   assert.ok(Math.abs(a - 111.32 * 111.32) < 1);
+});
+
+test('a thin spike on the border is removed by the opening, broad shapes keep their extent', () => {
+  // a 1 degree square with a 0.01 x 0.06 degree (1.1 x 6.7 km) spike on its top edge
+  const member = { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[
+    [-116, 43], [-115, 43], [-115, 44], [-115.495, 44], [-115.495, 44.06], [-115.505, 44.06], [-115.505, 44], [-116, 44], [-116, 43]]] } };
+  const withSpike = ro.buildOutline([member], pc, { open: 0, close: 0 });
+  assert.ok(Math.max(...withSpike[0][0].map((c) => c[1])) > 44.05);        // without the opening the spike is there
+  const out = ro.buildOutline([member], pc);
+  assert.ok(Math.max(...out[0][0].map((c) => c[1])) < 44.03);               // with it, gone
+  assert.ok(ro.ringAreaKm2(out[0][0]) > 0.97 * ro.ringAreaKm2(withSpike[0][0]));   // and the square is still a square
+});
+
+test('the needle filter removes a sharp tip between short edges', () => {
+  const ring = [[0, 0], [1, 0], [1, 1], [0.5, 1], [0.5003, 1.01], [0.4997, 1], [0, 1], [0, 0]];
+  const out = ro.removeNeedles(ring, 0.015);
+  assert.ok(!out.some((c) => c[1] > 1.005));
+});
+
+test('a wedge-shaped inlet narrower than the closing width is closed up to its mouth', () => {
+  // two members leaving a 0.03 degree (3.3 km) wide channel that runs 0.3 degrees in from the north edge
+  const members = [box(-117, 42, -116.015, 44), box(-115.985, 42, -115, 44), box(-117, 42, -115, 43.7)];
+  const out = ro.buildOutline(members, pc);
+  assert.ok(ro.pointInRing([-116, 43.9], out[0][0]));
 });
