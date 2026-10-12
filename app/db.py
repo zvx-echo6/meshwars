@@ -1200,6 +1200,32 @@ CREATE TABLE IF NOT EXISTS region_cell (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_region_cell_cell ON region_cell(cell_id, region_code);
 
+-- Where a CoreScope/Beacon check-in award was heard (app/checkin_place.py),
+-- keyed like mc_checkin_award's own PRIMARY KEY. lat/lon/cell_id are the
+-- first repeater that heard the sender (or the observer, when heard
+-- directly); region_code is set instead when only an airport (IATA) code
+-- is known. method says how it was got, including the honest estimates
+-- (est_recent_checkin, est_recent_square) and 'unplaced'. Regions count a
+-- check-in's points where it was placed; an award with no row, or an
+-- 'unplaced' one, counts only in All regions.
+CREATE TABLE IF NOT EXISTS checkin_award_place (
+    season_id       INTEGER NOT NULL,
+    player_id       INTEGER NOT NULL,
+    net_date        TEXT NOT NULL,
+    lat             REAL,
+    lon             REAL,
+    cell_id         TEXT,
+    region_code     TEXT,
+    method          TEXT NOT NULL,   -- 'first_hop' | 'observer' | 'observer_iata' | 'est_recent_checkin' | 'est_recent_square' | 'unplaced'
+    detail          TEXT NOT NULL DEFAULT '',
+    source_hash     TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    placed_at       INTEGER,
+    last_attempt_at INTEGER,
+    PRIMARY KEY (season_id, player_id, net_date)
+);
+CREATE INDEX IF NOT EXISTS idx_checkin_award_place_cell ON checkin_award_place(cell_id) WHERE cell_id IS NOT NULL;
+
 -- A signed-in player's request to group neighbouring regions (the map's
 -- "Join neighboring regions"). Stored first, mailed second: a mail failure
 -- never loses a request. region_codes is a JSON list of uppercase codes.

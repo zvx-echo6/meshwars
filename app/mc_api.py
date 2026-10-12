@@ -1144,10 +1144,10 @@ def scores_for(protocol: str, region: "regions.Resolved | None" = None) -> dict:
 
     `region` (app/regions.py) gives the REGIONAL standing: tiles counted
     only for squares inside the region, explorer_points only for places
-    inside it, and checkin_points null -- a check-in has no location, so
-    it is left out of a regional total rather than invented. The total is
-    tiles + explorer_points. The response also carries "region" (its code
-    or slug). Without it, the response is exactly what it always was.
+    inside it, and checkin_points only for check-ins PLACED there
+    (app/checkin_place.py; a check-in with no placement counts only in All
+    regions). The total is tiles + check-in + explorer points, as in All.
+    The response also carries "region" (its code or slug). Without it, the response is exactly what it always was.
     """
 
     def run(conn):
@@ -1166,6 +1166,7 @@ def scores_for(protocol: str, region: "regions.Resolved | None" = None) -> dict:
         # wire it back in here.
         if region is not None:
             tile_counts = team_tile_counts(conn, season["id"], region.codes)
+            checkin_points = team_checkin_points(conn, season["id"], region.codes)
             explorer_points = team_place_points(conn, season["id"], protocol, region.codes)
             return {
                 "season_id": season["id"],
@@ -1176,9 +1177,10 @@ def scores_for(protocol: str, region: "regions.Resolved | None" = None) -> dict:
                     {
                         "team": t,
                         "tiles": tile_counts.get(t, 0),
-                        "checkin_points": None,
+                        "checkin_points": checkin_points.get(t, 0.0),
                         "explorer_points": explorer_points.get(t, 0.0),
-                        "total": tile_counts.get(t, 0) + explorer_points.get(t, 0.0),
+                        "total": (tile_counts.get(t, 0) + checkin_points.get(t, 0.0)
+                                  + explorer_points.get(t, 0.0)),
                     }
                     for t in team_list()
                 ],

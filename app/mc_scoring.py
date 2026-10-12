@@ -727,7 +727,9 @@ def team_tile_counts(
     return {r["owner_team"]: r["c"] for r in rows}
 
 
-def team_checkin_points(conn: sqlite3.Connection, season_id: int) -> dict[str, float]:
+def team_checkin_points(
+    conn: sqlite3.Connection, season_id: int, region_codes: tuple[str, ...] | None = None
+) -> dict[str, float]:
     """Net check-in points (app/checkin.py) earned per team for a
     season, summed by each awarded player's CURRENT team -- player.team
     is not season-scoped and can change (self-service once per calendar
@@ -743,7 +745,25 @@ def team_checkin_points(conn: sqlite3.Connection, season_id: int) -> dict[str, f
     (see ensure_active_season), so a MeshCore season's id and a
     Meshtastic season's id never collide and never need a second filter
     here, matching every other season-scoped query in this module.
+
+    region_codes (app/regions.py) counts only awards PLACED in those
+    regions (app/checkin_place.py's checkin_award_place: the award's cell is
+    a cell of one of the regions, or its region_code is one of them).
+    Awards with no placement count only when region_codes is None -- a view
+    filter only; scoring itself never passes it.
     """
+    if region_codes is not None:
+        cond, cparams = cell_filter_sql(region_codes, "cp.cell_id")
+        marks = ",".join("?" * len(region_codes)) or "NULL"
+        rows = conn.execute(
+            "SELECT p.team AS team, SUM(a.points) AS pts "
+            "  FROM mc_checkin_award a JOIN player p ON p.player_id = a.player_id "
+            "  JOIN checkin_award_place cp ON cp.season_id = a.season_id AND cp.player_id = a.player_id "
+            "                              AND cp.net_date = a.net_date "
+            f" WHERE a.season_id = ? AND ({cond} OR cp.region_code IN ({marks})) GROUP BY p.team",
+            (season_id, *cparams, *region_codes),
+        ).fetchall()
+        return {r["team"]: (r["pts"] or 0.0) for r in rows}
     rows = conn.execute(
         "SELECT p.team AS team, SUM(a.points) AS pts "
         "  FROM mc_checkin_award a JOIN player p ON p.player_id = a.player_id "

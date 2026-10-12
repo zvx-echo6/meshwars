@@ -1227,7 +1227,7 @@ function teamBreakdown(t) {
   const tiles = t.tiles ?? 0;
   const pts = t.checkin_points ?? 0;
   const explorer = t.explorer_points ?? 0;
-  if (t.checkin_points === null) { // region view: a check-in has no location, so it is left out
+  if (t.checkin_points === null) { // defensive: a response without a check-in figure
     return `${tiles} ${tiles === 1 ? 'square' : 'squares'} + ${explorer} exploration ${explorer === 1 ? 'point' : 'points'}`;
   }
   const squareWord = tiles === 1 ? 'square' : 'squares';
@@ -1593,12 +1593,12 @@ async function openBreakdownModal() {
     const rows = ordered.map((t) => `<tr>
         <td><span class="mc-dot" style="background:${TEAM_COLORS[t.team] || '#888'}"></span>${teamName(t.team, t.team)}</td>
         <td>${escapeHtml(t.tiles ?? 0)}</td>
-        ${selectedRegion ? '' : `<td>${escapeHtml(t.checkin_points ?? 0)}</td>`}
+        <td>${escapeHtml(t.checkin_points ?? 0)}</td>
         <td>${escapeHtml(t.explorer_points ?? 0)}</td>
         <td><strong>${escapeHtml(teamTotal(t))}</strong></td>
       </tr>`).join('');
     body.innerHTML = `<table class="mc-history-table">
-      <thead><tr><th>Team</th><th>Squares</th>${selectedRegion ? '' : '<th>Check-in</th>'}<th>Exploration</th><th>Total</th></tr></thead>
+      <thead><tr><th>Team</th><th>Squares</th><th>Check-in</th><th>Exploration</th><th>Total</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   } catch (err) {
@@ -1999,7 +1999,8 @@ function setBoardMode(newMode, map) {
 // loads and never changes scoring. selectedRegion is null for "All
 // regions", which behaves exactly as the page did before regions existed;
 // otherwise every board, scores and top-captures fetch carries
-// ?region=<key>, so a region view loads less than the full board. The
+// ?region=<key>, so a region view loads less than the full board. Check-in
+// points in a region view are those placed there (app/checkin_place.py). The
 // board refetch REPLACES the source's data, so squares outside the region
 // are simply gone rather than dimmed. Top check-ins and Explorer are not
 // region-aware and stay unfiltered.

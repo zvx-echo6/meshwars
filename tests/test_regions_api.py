@@ -292,7 +292,8 @@ def test_scores_for_a_region_count_only_inside_and_leave_out_checkins(seeded, cl
     red_tiles = 1 if seeded["cells"]["boise"] in inside else 0
     assert teams["RED"]["tiles"] == red_tiles
     assert teams["BLUE"]["tiles"] == 0
-    assert teams["RED"]["checkin_points"] is None and teams["BLUE"]["checkin_points"] is None
+    # the seeded check-in award has no placement, so it counts only in All regions
+    assert teams["RED"]["checkin_points"] == 0.0 and teams["BLUE"]["checkin_points"] == 0.0
     assert teams["RED"]["explorer_points"] == 100.0       # the Boise place only
     assert teams["BLUE"]["explorer_points"] == 0.0        # bob's place is in Seattle
     assert teams["RED"]["total"] == red_tiles + 100.0
@@ -303,7 +304,7 @@ def test_scores_for_a_region_count_only_inside_and_leave_out_checkins(seeded, cl
 def test_scores_region_with_no_activity_is_all_zero(seeded, client):
     body = client.get("/api/mc/scores", params={"region": "pih"}).json()
     teams = {t["team"]: t for t in body["teams"]}
-    assert teams["RED"]["explorer_points"] == 0.0 and teams["RED"]["checkin_points"] is None
+    assert teams["RED"]["explorer_points"] == 0.0 and teams["RED"]["checkin_points"] == 0.0
 
 
 def test_exploration_follows_the_place_cell_not_the_player(seeded, client):

@@ -15,7 +15,7 @@ from .auth import http_exception_as_error_body
 from .checkin import CheckinPoller
 from .config import settings
 from .db import connect, init_db
-from . import discord_interactions, discord_notify, mc_api, regions
+from . import checkin_place, discord_interactions, discord_notify, mc_api, regions
 from .freqmapper_ingest import FreqMapperIngestor, load_freqmapper_config
 from .ingest import Ingestor
 from .log_redact import DiscordWebhookRedactionFilter
@@ -184,8 +184,12 @@ async def lifespan(app: FastAPI):
     # every minute (DB only) and, only when REGIONS_SYNC_ENABLED, fetches
     # boundaries daily/weekly. Worker role only, like every loop above.
     regions_task = None
+    checkin_place_task = None
     if settings.run_background_tasks:
         regions_task = asyncio.create_task(regions.run_forever(), name="regions")
+        # Places new CoreScope/Beacon check-ins on the map (app/checkin_place.py),
+        # in the background, never in the poller's path.
+        checkin_place_task = asyncio.create_task(checkin_place.run_forever(), name="checkin-place")
 
     app.state.client = client
     app.state.ingestor = ingestor
@@ -237,12 +241,13 @@ async def lifespan(app: FastAPI):
                 await board_publisher_task
             except (asyncio.CancelledError, Exception):
                 pass
-        if regions_task is not None:
-            regions_task.cancel()
-            try:
-                await regions_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        for t in (regions_task, checkin_place_task):
+            if t is not None:
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
         # /claimnode's own background watchers (app/discord_interactions.py)
         # -- each one otherwise keeps polling and PATCHing a Discord
         # message for up to five minutes after whatever started it;

@@ -419,6 +419,16 @@ def _unmapped_cells(conn, limit: int) -> list[str]:
             " GROUP BY pc.cell_id LIMIT ?", (limit - len(cells),)
         ):
             cells.add(r[0])
+        # Cells where a check-in was heard (app/checkin_place.py): check-in
+        # points are scoped by region through these.
+    if len(cells) < limit:
+        for r in conn.execute(
+            "SELECT c.cell_id FROM checkin_award_place c "
+            " WHERE c.cell_id IS NOT NULL "
+            "   AND NOT EXISTS (SELECT 1 FROM region_cell_mapped m WHERE m.cell_id = c.cell_id) "
+            " GROUP BY c.cell_id LIMIT ?", (limit - len(cells),)
+        ):
+            cells.add(r[0])
     return list(cells)
 
 
