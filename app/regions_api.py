@@ -6,10 +6,12 @@ and top routes lives with those routes (app/mc_api.py, app/api.py).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from . import regions
 from .admin_api import _log_admin_action, _role_guard
@@ -20,8 +22,20 @@ log = logging.getLogger("regions_api")
 router = APIRouter()
 
 
+def _revalidated(request: Request, body: dict) -> Response:
+    """JSON that browsers and proxies may keep but must revalidate (ETag
+    plus 304), so a region fetched from the admin panel shows up on the very
+    next map load while an unchanged list still costs no body."""
+    raw = json.dumps(body, separators=(",", ":")).encode()
+    etag = '"%s"' % hashlib.sha256(raw).hexdigest()[:32]
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=raw, media_type="application/json", headers=headers)
+
+
 @router.get("/api/regions")
-async def list_regions() -> JSONResponse:
+async def list_regions(request: Request) -> Response:
     """Every region (code, name, centre, bbox) and every group with its
     direct member regions and child groups. No polygons -- those are one
     request each, below. Small and slow-changing, so cacheable."""
@@ -30,11 +44,11 @@ async def list_regions() -> JSONResponse:
         body = {"regions": regions.list_regions(conn), "groups": regions.list_groups(conn)}
     finally:
         conn.close()
-    return JSONResponse(body, headers={"Cache-Control": "public, max-age=300"})
+    return _revalidated(request, body)
 
 
 @router.get("/api/regions/{key}/boundary")
-async def region_boundary(key: str) -> JSONResponse:
+async def region_boundary(request: Request, key: str) -> Response:
     """GeoJSON (lon,lat) of one region's boundary, or for a group a
     FeatureCollection of every member region's boundary (children
     included). `key` is a region code or a group slug, case-insensitive."""
@@ -46,7 +60,7 @@ async def region_boundary(key: str) -> JSONResponse:
         body = regions.geojson_for_regions(conn, resolved.codes)
     finally:
         conn.close()
-    return JSONResponse(body, headers={"Cache-Control": "public, max-age=3600"})
+    return _revalidated(request, body)
 
 
 # ---- admin --------------------------------------------------------------
@@ -95,6 +109,35 @@ async def admin_regions_sync(request: Request):
     finally:
         conn.close()
     return JSONResponse({"started": True}, status_code=202)
+
+
+@router.post("/api/admin/regions/fetch")
+async def admin_region_fetch(request: Request):
+    """Body: {link}. Fetches one region from MeshMapper by pasted link or
+    code (see regions.fetch_region) and stores it; works for a new region
+    and updates an existing one in place."""
+    guard = await _role_guard(request)
+    if isinstance(guard, JSONResponse):
+        return guard
+    session = guard
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    link = body.get("link") if isinstance(body, dict) else None
+    try:
+        result = await regions.fetch_region(link)
+    except regions.RegionError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _log_admin_action(conn, actor_account_id=session.account_id, action="region_fetch",
+                          detail=f"code={result['code']} {result['new_or_updated']}")
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    return JSONResponse(result)
 
 
 async def _json_body(request: Request):

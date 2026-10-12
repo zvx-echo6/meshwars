@@ -33,6 +33,7 @@ import re
 import sqlite3
 import threading
 import time
+from urllib.parse import urlsplit
 from typing import Iterable, NamedTuple
 
 import httpx
@@ -285,7 +286,9 @@ def parse_region_page(html: str, code: str, fallback_lat: float | None = None,
     if lat is None or lon is None:
         s, w, n, e = bbox_of(rings)
         lat, lon = (s + n) / 2.0, (w + e) / 2.0
-    return {"rings": rings, "radius_km": radius, "center_lat": lat, "center_lon": lon, "shape": shape}
+    name = entry.get("name")
+    return {"rings": rings, "radius_km": radius, "center_lat": lat, "center_lon": lon, "shape": shape,
+            "name": name.strip() if isinstance(name, str) and name.strip() else None}
 
 
 # ---- storage ------------------------------------------------------------
@@ -1007,6 +1010,95 @@ async def run_import(mode: str = "all", client: httpx.AsyncClient | None = None)
             log.exception("regions: could not record the end of the import")
         if own_client:
             await client.aclose()
+
+
+_HOST_RE = re.compile(r"^([a-z0-9]{1,10})\.meshmapper\.net$")
+
+
+def normalize_region_link(text) -> str | None:
+    """A pasted MeshMapper region link or code -> the uppercase code, or
+    None when it is neither. Accepts `twf.meshmapper.net`, any http(s) URL
+    of that host (path, query and case ignored), and a bare code (`twf`).
+    The host must be exactly <code>.meshmapper.net: nothing else is ever
+    turned into a request, so a link to another host (or one that merely
+    starts with a MeshMapper name) is refused, not fetched."""
+    if not isinstance(text, str):
+        return None
+    t = text.strip()
+    if not t or len(t) > 300:
+        return None
+    if _CODE_RE.match(t):
+        return t.upper()
+    if "://" not in t:
+        t = "https://" + t
+    try:
+        parts = urlsplit(t)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or parts.username or parts.password or port not in (None, 80, 443):
+        return None
+    m = _HOST_RE.match(host or "")
+    return m.group(1).upper() if m else None
+
+
+def _page_failure(code: str, html: str) -> RegionError:
+    zones = _json_after(html, "allZones")
+    has_entry = isinstance(zones, list) and any(
+        isinstance(z, dict) and str(z.get("code", "")).upper() == code for z in zones)
+    if not has_entry:
+        return RegionError("No MeshMapper region found for that link", 404)
+    return RegionError("That region has no boundary or radius to fetch", 422)
+
+
+async def fetch_region(link: str, client: httpx.AsyncClient | None = None) -> dict:
+    """Fetch ONE region page (from a pasted link or code), store its
+    boundary, recompute that region's square membership, and report what
+    happened. Only https://<code>.meshmapper.net/ is ever requested, built
+    from the validated code. Safe alongside a running full import: both
+    are upserts of the same row and the membership jobs serialise on
+    _MAP_LOCK, so the later write simply wins. Raises RegionError with a
+    status the API layer passes on (400 not a link, 404 no such region,
+    422 no boundary, 502/504 MeshMapper trouble)."""
+    code = normalize_region_link(link)
+    if code is None:
+        raise RegionError("Not a MeshMapper region link", 400)
+    own = client is None
+    if own:
+        client = make_client()
+    try:
+        try:
+            html = await _get(client, region_page_url(code))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise RegionError("No MeshMapper region found for that link", 404)
+            raise RegionError(f"MeshMapper answered {exc.response.status_code}", 502)
+        except httpx.TimeoutException:
+            raise RegionError("MeshMapper did not answer in time", 504)
+        except httpx.HTTPError:
+            raise RegionError("Could not reach MeshMapper", 502)
+    finally:
+        if own:
+            await client.aclose()
+    parsed = parse_region_page(html, code)
+    if parsed is None:
+        raise _page_failure(code, html)
+    name = parsed.get("name") or code
+    existed = code in await asyncio.to_thread(_stored_codes)
+    await asyncio.to_thread(_store_one, code, name, parsed)
+    await asyncio.to_thread(_retry_busy, lambda: remap_regions([code]))
+
+    def count() -> int:
+        conn = connect()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM region_cell WHERE region_code = ?", (code,)).fetchone()[0]
+        finally:
+            conn.close()
+
+    return {"code": code, "name": name, "points": sum(len(r) for r in parsed["rings"]),
+            "squares_in_region": await asyncio.to_thread(count),
+            "new_or_updated": "updated" if existed else "new"}
 
 
 def start_import(mode: str = "all") -> bool:

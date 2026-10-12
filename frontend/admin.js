@@ -2997,6 +2997,25 @@ async function deleteRegionGroup(b, g) {
   }
 }
 
+async function fetchRegionByLink(b) {
+  const out = document.getElementById('rg-fetch-result');
+  const input = document.getElementById('rg-fetch-link');
+  out.textContent = '';
+  if (!input.value.trim()) return;
+  b.disabled = true;
+  try {
+    const r = await post('/api/admin/regions/fetch', { link: input.value.trim() });
+    const name = (r.name || '').replace(/,\s*[A-Za-z]{2}$/, '');
+    out.textContent = r.code + ' ' + name + ': ' + r.points.toLocaleString() + ' points, '
+      + r.squares_in_region.toLocaleString() + ' squares' + (r.new_or_updated === 'new' ? ' (new)' : ' (updated)');
+    input.value = '';
+    await loadRegions();
+  } catch (e) {
+    out.textContent = 'Failed: ' + e.message;
+  }
+  b.disabled = false;
+}
+
 async function startRegionSync(b) {
   const out = document.getElementById('rg-sync-result');
   out.textContent = '';
@@ -3733,6 +3752,10 @@ document.getElementById('conn-new').addEventListener('click', function () {
 });
 document.getElementById('mo-freeze').addEventListener('click', function () { freezeMonth(this); });
 document.getElementById('pl-preview').addEventListener('click', function () { previewPlaces(this); });
+document.getElementById('rg-fetch').addEventListener('click', function () { fetchRegionByLink(this); });
+document.getElementById('rg-fetch-link').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') document.getElementById('rg-fetch').click();
+});
 document.getElementById('rg-sync').addEventListener('click', function () { startRegionSync(this); });
 document.getElementById('rg-group-new').addEventListener('click', function () {
   if (regionGroupDraft && regionGroupDraft.id === null) return; // one blank draft at a time

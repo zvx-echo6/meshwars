@@ -355,7 +355,10 @@ def test_regions_list_and_boundary(seeded, client):
     r0 = body["regions"][0]
     assert set(r0) == {"code", "name", "lat", "lon", "bbox"} and len(r0["bbox"]) == 4
     assert body["groups"] == []
-    assert client.get("/api/regions").headers["cache-control"].startswith("public")
+    # revalidated, never kept blind: a region fetched from the admin panel must show at once
+    first = client.get("/api/regions")
+    assert first.headers["cache-control"] == "no-cache" and first.headers["etag"]
+    assert client.get("/api/regions", headers={"If-None-Match": first.headers["etag"]}).status_code == 304
     b = client.get("/api/regions/boi/boundary")
     assert b.status_code == 200
     fc = b.json()
@@ -527,3 +530,121 @@ def test_admin_sync_starts_in_the_background_and_refuses_a_second(admin, monkeyp
     assert admin.post("/api/admin/regions/sync").status_code == 202
     assert admin.post("/api/admin/regions/sync").status_code == 409
     assert started == ["all", "all"]
+
+
+# ---- fetch one region by pasted link --------------------------------------
+
+import httpx
+
+TWF_LINKS = ["twf.meshmapper.net", "https://twf.meshmapper.net/", "http://TWF.meshmapper.net/anything?x=1",
+             "twf", "TWF", "  Twf.MeshMapper.net  ", "https://twf.meshmapper.net:443/", "twf.meshmapper.net/a/b#frag"]
+
+
+@pytest.mark.parametrize("link", TWF_LINKS)
+def test_link_normalizes_to_the_code(link):
+    assert regions.normalize_region_link(link) == "TWF"
+
+
+@pytest.mark.parametrize("link", [
+    "evil.com", "twf.meshmapper.net.evil.com", "https://evil.com/twf.meshmapper.net", "../", "../etc/passwd",
+    "meshmapper.net", "a.b.meshmapper.net", "https://user@twf.meshmapper.net@evil.com/", "ftp://twf.meshmapper.net/",
+    "twf.meshmapper.net:8080", "https://twf.meshmapper.net:9999/", "", "   ", None, 7, "twf meshmapper", "tw f",
+    "http://169.254.169.254/", "http://localhost/", "x" * 400, "twf.meshmapper.org", "evilmeshmapper.net",
+])
+def test_link_rejects_anything_else(link):
+    assert regions.normalize_region_link(link) is None
+
+
+def _page_client(monkeypatch, handler):
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"User-Agent": regions.USER_AGENT})
+    monkeypatch.setattr(regions, "make_client", lambda: client)
+
+
+def _twf_site(seen=None):
+    page = (FIX / "twf.html").read_text()
+
+    def handler(request):
+        if seen is not None:
+            seen.append(str(request.url))
+        if request.url.host == "twf.meshmapper.net":
+            return httpx.Response(200, text=page)
+        return httpx.Response(404)
+
+    return handler
+
+
+def test_fetch_route_adds_a_new_region_then_updates_it(admin, monkeypatch, seeded):
+    seen = []
+    _page_client(monkeypatch, _twf_site(seen))
+    r = admin.post("/api/admin/regions/fetch", json={"link": "https://TWF.meshmapper.net/whatever?x"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["code"] == "TWF" and body["name"].startswith("Twin Falls")
+    assert body["points"] > 10 and body["new_or_updated"] == "new"
+    assert body["squares_in_region"] >= 0
+    assert seen == ["https://twf.meshmapper.net/"]          # built from the code, not the pasted URL
+    # it is in the admin table and the public list straight away
+    assert "TWF" in [x["code"] for x in admin.get("/api/admin/regions").json()["regions"]]
+    assert "TWF" in [x["code"] for x in admin.get("/api/regions").json()["regions"]]
+    # second time: updated in place, no duplicate row
+    _page_client(monkeypatch, _twf_site())
+    again = admin.post("/api/admin/regions/fetch", json={"link": "twf"}).json()
+    assert again["new_or_updated"] == "updated"
+    assert [x["code"] for x in admin.get("/api/regions").json()["regions"]].count("TWF") == 1
+
+
+def test_fetch_route_maps_existing_squares_into_the_new_region(admin, monkeypatch, seeded):
+    from app.grid import cell_center
+    c = sqlite3.connect(seeded["path"], isolation_level=None)
+    c.row_factory = sqlite3.Row
+    page = regions.parse_region_page((FIX / "twf.html").read_text(), "TWF")
+    shape = regions.Shape(page["rings"])
+    cid = grid_cell_id(*[(shape.south + shape.north) / 2, (shape.west + shape.east) / 2])
+    ok = shape.contains(*cell_center(cid))
+    la, lo = cell_indices(cid)
+    c.execute("INSERT OR IGNORE INTO mc_tile(season_id, cell_id, owner_team, last_player_id, last_report_ts, "
+              "paint_count, lat_idx, lon_idx) VALUES (?,?, 'RED', 1, ?, 1, ?, ?)", (MC, cid, NOW, la, lo))
+    regions.map_new_cells()
+    _page_client(monkeypatch, _twf_site())
+    body = admin.post("/api/admin/regions/fetch", json={"link": "twf"}).json()
+    assert body["squares_in_region"] == (1 if ok else 0)
+    c.close()
+
+
+def test_fetch_route_errors(admin, monkeypatch, seeded):
+    for bad in ("evil.com", "twf.meshmapper.net.evil.com", "../", ""):
+        r = admin.post("/api/admin/regions/fetch", json={"link": bad})
+        assert r.status_code == 400 and r.json() == {"error": "Not a MeshMapper region link"}
+    assert admin.post("/api/admin/regions/fetch", json={}).status_code == 400
+    # the page does not exist
+    _page_client(monkeypatch, lambda req: httpx.Response(404))
+    r = admin.post("/api/admin/regions/fetch", json={"link": "zzz"})
+    assert r.status_code == 404 and "No MeshMapper region" in r.json()["error"]
+    # the page exists but has no allZones entry for that code
+    other = (FIX / "boi.html").read_text()
+    _page_client(monkeypatch, lambda req: httpx.Response(200, text=other))
+    assert admin.post("/api/admin/regions/fetch", json={"link": "zzz"}).status_code == 404
+    # entry without a polygon or radius
+    nob = '<script>var allZones = [{"code":"ZZZ","name":"Z, US","lat":1,"lon":2}];</script>'
+    _page_client(monkeypatch, lambda req: httpx.Response(200, text=nob))
+    r = admin.post("/api/admin/regions/fetch", json={"link": "zzz"})
+    assert r.status_code == 422 and "no boundary" in r.json()["error"]
+    # MeshMapper down / slow
+    _page_client(monkeypatch, lambda req: httpx.Response(503))
+    assert admin.post("/api/admin/regions/fetch", json={"link": "zzz"}).status_code == 502
+
+    def slow(req):
+        raise httpx.ReadTimeout("slow", request=req)
+
+    _page_client(monkeypatch, slow)
+    r = admin.post("/api/admin/regions/fetch", json={"link": "zzz"})
+    assert r.status_code == 504 and "in time" in r.json()["error"]
+    # nothing was stored by any failure
+    assert "ZZZ" not in [x["code"] for x in admin.get("/api/admin/regions").json()["regions"]]
+
+
+def test_fetch_route_needs_a_role(seeded):
+    app = FastAPI()
+    app.include_router(admin_api_router)
+    app.include_router(regions_router)
+    assert TestClient(app).post("/api/admin/regions/fetch", json={"link": "twf"}).status_code in (401, 404)
