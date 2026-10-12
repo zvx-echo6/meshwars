@@ -58,6 +58,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from .grid import cell_indices
+from .regions import cell_filter_sql
 from .config import settings
 
 log = logging.getLogger("mc_scoring")
@@ -699,12 +700,26 @@ def release_tile(
     log.info("mc scoring: cell %s released from %s (zero score expired)", cell_id, team)
 
 
-def team_tile_counts(conn: sqlite3.Connection, season_id: int) -> dict[str, int]:
+def team_tile_counts(
+    conn: sqlite3.Connection, season_id: int, region_codes: tuple[str, ...] | None = None
+) -> dict[str, int]:
     """Tile count per team for a season -- squares held only, no
     check-in points folded in. Used by the API wherever the raw square
     count is shown on its own, and internally by team_totals() below.
     Not "the" team score by itself any more -- see team_totals().
+
+    region_codes (app/regions.py) narrows the count to squares inside
+    those regions, a view filter only: None is the whole board, exactly
+    as before, and scoring itself never passes it.
     """
+    if region_codes is not None:
+        cond, params = cell_filter_sql(region_codes)
+        rows = conn.execute(
+            "SELECT owner_team, COUNT(*) AS c FROM mc_tile "
+            f" WHERE season_id = ? AND {cond} GROUP BY owner_team",
+            (season_id, *params),
+        ).fetchall()
+        return {r["owner_team"]: r["c"] for r in rows}
     rows = conn.execute(
         "SELECT owner_team, COUNT(*) AS c FROM mc_tile WHERE season_id = ? GROUP BY owner_team",
         (season_id,),
@@ -738,7 +753,10 @@ def team_checkin_points(conn: sqlite3.Connection, season_id: int) -> dict[str, f
     return {r["team"]: (r["pts"] or 0.0) for r in rows}
 
 
-def team_place_points(conn: sqlite3.Connection, season_id: int, protocol: str) -> dict[str, float]:
+def team_place_points(
+    conn: sqlite3.Connection, season_id: int, protocol: str,
+    region_codes: tuple[str, ...] | None = None,
+) -> dict[str, float]:
     """Places Worth Going points (app/place_scoring.py) earned per team
     for a season, summed the same way team_checkin_points() is: by each
     activation's player's CURRENT team.
@@ -758,12 +776,30 @@ def team_place_points(conn: sqlite3.Connection, season_id: int, protocol: str) -
     a protocol column, and a missing filter here used to make both
     boards report an identical, doubled exploration figure. A default
     value would just make that bug easy to reintroduce silently.
+
+    region_codes (app/regions.py) narrows the sum to activations of
+    places inside those regions -- a view filter only; None is the whole
+    board. A place is "inside" when any of its own cells (place_cell) is a
+    cell of one of the regions, via the precomputed region_cell table, so
+    this is an indexed lookup per activation and no geometry at request
+    time. Scoring itself never passes it.
     """
     season = conn.execute(
         "SELECT started_at, ends_at FROM mc_season WHERE id = ?", (season_id,)
     ).fetchone()
     if season is None:
         return {}
+    if region_codes is not None:
+        cond, params = cell_filter_sql(region_codes, "pc.cell_id")
+        rows = conn.execute(
+            "SELECT p.team AS team, SUM(a.points) AS pts "
+            "  FROM place_activation a JOIN player p ON p.player_id = a.player_id "
+            " WHERE a.protocol = ? AND a.awarded_at >= ? AND a.awarded_at <= ? "
+            f"   AND EXISTS (SELECT 1 FROM place_cell pc WHERE pc.place_id = a.place_id AND {cond}) "
+            " GROUP BY p.team",
+            (protocol, season["started_at"], season["ends_at"], *params),
+        ).fetchall()
+        return {r["team"]: (r["pts"] or 0.0) for r in rows}
     rows = conn.execute(
         "SELECT p.team AS team, SUM(a.points) AS pts "
         "  FROM place_activation a JOIN player p ON p.player_id = a.player_id "

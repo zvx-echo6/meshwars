@@ -45,7 +45,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import mc_api
+from . import mc_api, regions
 from .account_api import router as account_router
 from .admin_api import router as admin_router
 from .admin_ops import router as admin_ops_router
@@ -55,6 +55,7 @@ from .client_ip import get_client_ip
 from .clientlog_api import router as clientlog_router
 from .config import settings
 from .db import connect
+from .grid import cell_id as grid_cell_id
 from .discord_interactions import router as discord_interactions_router
 from .join_api import router as join_router
 from .mc_api import router as mc_router
@@ -67,6 +68,7 @@ from .oauth_api import router as oauth_router
 from .totp_api import router as totp_router
 from .places_api import router as places_router
 from .public_api import router as public_router
+from .regions_api import router as regions_router
 from .sessions import SessionPrincipal, optional_session, require_session
 
 log = logging.getLogger("api")
@@ -200,7 +202,7 @@ def _derive_map_center(conn, season_id: int | None) -> tuple[list[float], int]:
     return ([center_lat, center_lon], zoom)
 
 
-def _cell_score_map(conn, season_id: int) -> dict[str, dict[str, float]]:
+def _cell_score_map(conn, season_id: int, region_codes=None) -> dict[str, dict[str, float]]:
     """cell_id -> {team: score} for every scored cell in a season, in one
     batch query -- enriches /get-nodes' coverage list with the same
     per-team scores mc_api.cell_detail_for() exposes for a single cell,
@@ -209,24 +211,38 @@ def _cell_score_map(conn, season_id: int) -> dict[str, dict[str, float]]:
     function already doesn't decay a single cell's scores, so this batch
     version stays consistent with it rather than "fixing" it here.
     """
-    rows = conn.execute(
-        "SELECT cell_id, team, score FROM mc_tile_score WHERE season_id = ?",
-        (season_id,),
-    ).fetchall()
+    if region_codes is None:
+        rows = conn.execute(
+            "SELECT cell_id, team, score FROM mc_tile_score WHERE season_id = ?",
+            (season_id,),
+        ).fetchall()
+    else:
+        cond, cparams = regions.cell_filter_sql(region_codes)
+        rows = conn.execute(
+            f"SELECT cell_id, team, score FROM mc_tile_score WHERE season_id = ? AND {cond}",
+            (season_id, *cparams),
+        ).fetchall()
     out: dict[str, dict[str, float]] = {}
     for r in rows:
         out.setdefault(r["cell_id"], {})[r["team"]] = r["score"]
     return out
 
 
-def _cell_capture_map(conn, season_id: int) -> dict[str, int]:
+def _cell_capture_map(conn, season_id: int, region_codes=None) -> dict[str, int]:
     """cell_id -> captured_at for every captured cell in a season, in one
     batch query -- same field mc_api.cell_detail_for() reads per-cell.
     """
-    rows = conn.execute(
-        "SELECT cell_id, captured_at FROM mc_tile_capture WHERE season_id = ?",
-        (season_id,),
-    ).fetchall()
+    if region_codes is None:
+        rows = conn.execute(
+            "SELECT cell_id, captured_at FROM mc_tile_capture WHERE season_id = ?",
+            (season_id,),
+        ).fetchall()
+    else:
+        cond, cparams = regions.cell_filter_sql(region_codes)
+        rows = conn.execute(
+            f"SELECT cell_id, captured_at FROM mc_tile_capture WHERE season_id = ? AND {cond}",
+            (season_id, *cparams),
+        ).fetchall()
     return {r["cell_id"]: r["captured_at"] for r in rows}
 
 
@@ -253,7 +269,7 @@ def _mt_node_teams(conn) -> dict[int, str]:
     return out
 
 
-def _build_get_nodes(*, include_attribution: bool) -> dict:
+def _build_get_nodes(*, include_attribution: bool, region_codes=None) -> dict:
     """Build the map's main data payload.
 
     Split from the route below so it can be served through
@@ -314,7 +330,7 @@ def _build_get_nodes(*, include_attribution: bool) -> dict:
     `repeaters` again, at which point it will already degrade to an
     unattributed marker instead of a wrong one.
     """
-    return _shape_get_nodes(_build_get_nodes_base(), include_attribution=include_attribution)
+    return _shape_get_nodes(_build_get_nodes_base(region_codes), include_attribution=include_attribution)
 
 
 class _GetNodesBase(NamedTuple):
@@ -334,7 +350,7 @@ class _GetNodesBase(NamedTuple):
     repeaters: list[tuple[int, dict]]
 
 
-def _build_get_nodes_base() -> _GetNodesBase:
+def _build_get_nodes_base(region_codes=None) -> _GetNodesBase:
     """The part of /get-nodes' payload that does not depend on who is
     asking, and where all of its cost is: the active season, the owned
     cells (mc_api.board_for) and the per-cell score and capture maps they
@@ -346,6 +362,14 @@ def _build_get_nodes_base() -> _GetNodesBase:
     no `team` key on a repeater -- which is what makes the result safe to
     share between variants. Run once per publish cycle on the worker,
     however many variants are then cut from it.
+
+    region_codes (app/regions.py) narrows the whole payload to those
+    regions: only their squares (and those squares' scores and capture
+    times), and only the repeaters whose own cell is a cell of one of the
+    regions. A repeater sitting in a cell that holds no square is not in
+    region_cell and so is left out of a regional payload. None is the
+    unfiltered board, unchanged; the worker's published rows are always
+    unfiltered.
     """
     conn = connect()
     try:
@@ -354,9 +378,10 @@ def _build_get_nodes_base() -> _GetNodesBase:
             return _GetNodesBase([], [])
         season_id = active["id"]
 
-        cells = mc_api.board_for(MT_PROTOCOL)
-        score_map = _cell_score_map(conn, season_id)
-        cap_map = _cell_capture_map(conn, season_id)
+        cells = mc_api.board_for(MT_PROTOCOL, region_codes=region_codes)
+        score_map = _cell_score_map(conn, season_id, region_codes)
+        cap_map = _cell_capture_map(conn, season_id, region_codes)
+        region_cell_set = None if region_codes is None else regions.region_cells(conn, region_codes)
         teams = mc_api.team_list()
 
         coverage = []
@@ -383,6 +408,8 @@ def _build_get_nodes_base() -> _GetNodesBase:
         ).fetchall()
         repeaters = []
         for r in node_rows:
+            if region_cell_set is not None and grid_cell_id(r["lat"], r["lon"]) not in region_cell_set:
+                continue
             repeaters.append((
                 r["node_id"],
                 {
@@ -436,7 +463,8 @@ def _shape_get_nodes(base: _GetNodesBase, *, include_attribution: bool) -> dict:
 
 @router.get("/get-nodes")
 async def get_nodes(
-    request: Request, session: SessionPrincipal | None = Depends(optional_session)
+    request: Request, session: SessionPrincipal | None = Depends(optional_session),
+    region: str | None = None,
 ) -> Response:
     """The map's main data route. See _build_get_nodes() above.
 
@@ -466,6 +494,18 @@ async def get_nodes(
     fallback, as for /api/mc/board.
     """
     cache_key = "mt_board_authed" if session is not None else "mt_board_public"
+    resolved, err = mc_api.resolve_region_param(region)
+    if err is not None:
+        return err
+    if resolved is not None:
+        # ?region=: only that region's squares. Its own cache key per known
+        # region/group and per auth state (same privacy split as above),
+        # built inline -- the worker only publishes the unfiltered pair.
+        return mc_api.cached_json_response(
+            f"{cache_key}:region:{resolved.key}",
+            lambda: _build_get_nodes(include_attribution=session is not None, region_codes=resolved.codes),
+            request,
+        )
     return mc_api.cached_json_response(
         cache_key,
         lambda: _build_get_nodes(include_attribution=session is not None),
@@ -557,13 +597,17 @@ async def live_tracks_stream(request: Request):
 
 
 @router.get("/scores")
-async def scores() -> dict:
+async def scores(region: str | None = None):
     """Seven-team tile counts for the active Meshtastic season. See
     app/mc_api.py's scores_for(), which this calls directly with
     protocol='mt' rather than duplicating its query logic -- this is the
     exact same shape /api/mc/scores returns for the MeshCore board.
+    ?region= gives the regional standing (see scores_for()).
     """
-    return mc_api.scores_for(MT_PROTOCOL)
+    resolved, err = mc_api.resolve_region_param(region)
+    if err is not None:
+        return err
+    return mc_api.scores_for(MT_PROTOCOL, resolved)
 
 
 @router.get("/history")
@@ -759,13 +803,16 @@ async def find_player(
 
 
 @router.get("/top")
-async def top_players() -> list[dict]:
+async def top_players(region: str | None = None):
     """Players ranked by capture-event count in the active Meshtastic
     season -- the Meshtastic counterpart of /api/mc/top. See
     app/mc_api.py's top_for(); response shape is identical to
     /api/mc/top's.
     """
-    return mc_api.top_for(MT_PROTOCOL)
+    resolved, err = mc_api.resolve_region_param(region)
+    if err is not None:
+        return err
+    return mc_api.top_for(MT_PROTOCOL, resolved.codes if resolved is not None else None)
 
 
 @router.get("/top-checkins")
@@ -1160,7 +1207,9 @@ def _inject_head(html: str) -> str:
     return html.replace("</head>", tag + "</head>", 1)
 
 
-def _templated_html_page(request: Request, path: Path, missing_message: str) -> Response:
+def _templated_html_page(
+    request: Request, path: Path, missing_message: str, extra_head: str = ""
+) -> Response:
     """Like _html_page, for a top-level page that also needs _inject_head()
     run over it (the map, /results, /rules, /join, /about -- everywhere the verification
     tag can appear).
@@ -1179,7 +1228,10 @@ def _templated_html_page(request: Request, path: Path, missing_message: str) -> 
     if not path.exists():
         return HTMLResponse(f"<h1>meshwars</h1><p>{missing_message}</p>", status_code=404)
 
-    content = _inject_head(path.read_text(encoding="utf-8")).encode("utf-8")
+    html = _inject_head(path.read_text(encoding="utf-8"))
+    if extra_head:
+        html = html.replace("</head>", extra_head + "</head>", 1)
+    content = html.encode("utf-8")
     last_modified = formatdate(path.stat().st_mtime, usegmt=True)
     etag = f'"{hashlib.md5(content, usedforsecurity=False).hexdigest()}"'
 
@@ -1203,6 +1255,32 @@ def _templated_html_page(request: Request, path: Path, missing_message: str) -> 
     )
 
 
+def _map_page(request: Request, path: Path, region_in_path: str | None = None) -> Response:
+    """The map page with an optional preselected region. The region comes
+    from /map/<code-or-slug>, else ?region=, else a <code-or-slug>.<suffix>
+    host (settings.regions_host_suffix). It is checked against the stored
+    regions and groups here, and only a known one is handed to the page
+    (as <meta name="mw-region">, the canonical code or slug); anything
+    unknown, or a failed lookup, serves the plain map with All regions.
+    """
+    candidate = region_in_path or request.query_params.get("region") or regions.host_region_key(
+        request.headers.get("host"))
+    extra = ""
+    if candidate:
+        try:
+            conn = connect()
+            try:
+                resolved = regions.resolve(conn, candidate)
+            finally:
+                conn.close()
+        except Exception:
+            log.warning("map page: region lookup failed", exc_info=True)
+            resolved = None
+        if resolved is not None:
+            extra = f'  <meta name="mw-region" content="{resolved.key}">\n'
+    return _templated_html_page(request, path, "map page not bundled", extra)
+
+
 def mount(app: FastAPI) -> None:
     app.include_router(router)
     app.include_router(mc_router)
@@ -1216,6 +1294,7 @@ def mount(app: FastAPI) -> None:
     app.include_router(checkin_router)
     app.include_router(public_router)
     app.include_router(places_router)
+    app.include_router(regions_router)
     app.include_router(notice_router)
     app.include_router(clientlog_router)
     app.include_router(discord_interactions_router)
@@ -1252,7 +1331,13 @@ def mount(app: FastAPI) -> None:
         # that port did and did not carry forward.
         @app.get("/", response_class=HTMLResponse, include_in_schema=False)
         async def index(request: Request):
-            return _templated_html_page(request, frontend_dir / "map2.html", "map page not bundled")
+            return _map_page(request, frontend_dir / "map2.html")
+
+        # The same page with a region (or region group) preselected --
+        # case-insensitive, unknown values just show All regions.
+        @app.get("/map/{region_key}", response_class=HTMLResponse, include_in_schema=False)
+        async def map_region_page(request: Request, region_key: str):
+            return _map_page(request, frontend_dir / "map2.html", region_key)
 
         # The original Leaflet map, kept reachable for side-by-side
         # comparison now that / serves the MapLibre map instead. noindex
@@ -1344,7 +1429,7 @@ def mount(app: FastAPI) -> None:
         # front page.
         @app.get("/map2", response_class=HTMLResponse, include_in_schema=False)
         async def map2_page(request: Request):
-            return _templated_html_page(request, frontend_dir / "map2.html", "map2 page not bundled")
+            return _map_page(request, frontend_dir / "map2.html")
 
         # Not in the nav bar on purpose -- this is a reference for the
         # handful of people building against the API, linked from the

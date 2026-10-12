@@ -54,7 +54,7 @@ from .mc_ingest import PROTOCOL as MC_PROTOCOL
 from .mc_scoring import team_checkin_points, team_place_points, team_tile_counts
 from .places_api import _stable_tiebreak
 from .sessions import SessionPrincipal, optional_session, require_session
-from . import results
+from . import regions, results
 
 log = logging.getLogger("mc_api")
 
@@ -713,7 +713,27 @@ def _read_board_cache_row(key: str) -> _CachedBody | None:
     return entry
 
 
-def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
+def resolve_region_param(region: str | None) -> tuple["regions.Resolved | None", JSONResponse | None]:
+    """The optional ?region= query parameter of the board, scores and top
+    routes (both boards). (None, None) when it is absent or empty -- the
+    unfiltered board, byte-for-byte as before; (resolved, None) for a
+    known region code or group slug (case-insensitive); (None, 404
+    response) for anything else."""
+    if region is None or not region.strip():
+        return None, None
+    conn = connect()
+    try:
+        resolved = regions.resolve(conn, region)
+    finally:
+        conn.close()
+    if resolved is None:
+        return None, JSONResponse({"error": "unknown region"}, status_code=404)
+    return resolved, None
+
+
+def board_for(
+    protocol: str, include_meta: bool = True, region_codes: tuple[str, ...] | None = None
+) -> list[dict]:
     """Every owned cell in the active season for `protocol`, with bounds
     computed server-side so the browser never has to reimplement the
     grid maths in app.grid.
@@ -736,6 +756,11 @@ def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
     The SELECT below still fetches both columns either way -- /get-nodes
     needs them, and the cost being removed here is JSON serialisation and
     the client's parse and heap, not the query.
+
+    region_codes (app/regions.py) returns only the squares inside those
+    regions, via the precomputed region_cell table -- the region view's
+    whole point is to load less than the full board. None is the whole
+    board, unchanged.
     """
 
     def run(conn):
@@ -758,12 +783,22 @@ def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
         # index delivers exactly this order for a season_id equality, so this
         # is a sorted scan and not a sort step -- EXPLAIN QUERY PLAN shows
         # SEARCH ... USING INDEX idx_mc_tile_grid with no TEMP B-TREE.
-        rows = conn.execute(
-            "SELECT cell_id, owner_team, last_report_ts, paint_count "
-            "  FROM mc_tile WHERE season_id = ? AND owner_team IS NOT NULL"
-            "  ORDER BY lat_idx, lon_idx",
-            (season["id"],),
-        ).fetchall()
+        if region_codes is None:
+            rows = conn.execute(
+                "SELECT cell_id, owner_team, last_report_ts, paint_count "
+                "  FROM mc_tile WHERE season_id = ? AND owner_team IS NOT NULL"
+                "  ORDER BY lat_idx, lon_idx",
+                (season["id"],),
+            ).fetchall()
+        else:
+            cond, cparams = regions.cell_filter_sql(region_codes)
+            rows = conn.execute(
+                "SELECT cell_id, owner_team, last_report_ts, paint_count "
+                "  FROM mc_tile WHERE season_id = ? AND owner_team IS NOT NULL"
+                f"   AND {cond}"
+                "  ORDER BY lat_idx, lon_idx",
+                (season["id"], *cparams),
+            ).fetchall()
         out = []
         for r in rows:
             south, west, north, east = cell_bounds(r["cell_id"])
@@ -786,13 +821,28 @@ def board_for(protocol: str, include_meta: bool = True) -> list[dict]:
 
 
 @router.get("/api/mc/board")
-async def mc_board(request: Request) -> Response:
+async def mc_board(request: Request, region: str | None = None) -> Response:
     """Every owned cell in the active MeshCore season. See board_for().
 
     The heaviest route on the site by an order of magnitude, and the one
     every open map tab re-fetches on a timer -- served through
     cached_json_response so viewers share one build.
+
+    ?region=<code or group slug> returns only that region's squares, cached
+    under its own key (one entry per known region or group, never per
+    request value: the parameter is resolved first and unknown values are a
+    404). Not published by the worker; built inline like any key nothing
+    publishes.
     """
+    resolved, err = resolve_region_param(region)
+    if err is not None:
+        return err
+    if resolved is not None:
+        return cached_json_response(
+            f"mc_board:region:{resolved.key}",
+            lambda: board_for(MC_PROTOCOL, include_meta=False, region_codes=resolved.codes),
+            request,
+        )
     return cached_json_response(
         "mc_board", lambda: board_for(MC_PROTOCOL, include_meta=False), request
     )
@@ -1073,7 +1123,7 @@ async def run_forever() -> None:
         await asyncio.sleep(max(settings.board_cache_seconds, 1))
 
 
-def scores_for(protocol: str) -> dict:
+def scores_for(protocol: str, region: "regions.Resolved | None" = None) -> dict:
     """Active season id/window plus every team's current standing for
     `protocol`. Always returns all seven teams (zero-filled) so the
     scoreboard doesn't jump around as teams appear on the board.
@@ -1091,6 +1141,13 @@ def scores_for(protocol: str) -> dict:
     Factored out of mc_scores() below so app/api.py's Meshtastic /scores
     route returns the exact same shape for its own board instead of a
     hand-copied near-duplicate.
+
+    `region` (app/regions.py) gives the REGIONAL standing: tiles counted
+    only for squares inside the region, explorer_points only for places
+    inside it, and checkin_points null -- a check-in has no location, so
+    it is left out of a regional total rather than invented. The total is
+    tiles + explorer_points. The response also carries "region" (its code
+    or slug). Without it, the response is exactly what it always was.
     """
 
     def run(conn):
@@ -1107,6 +1164,25 @@ def scores_for(protocol: str) -> dict:
         # board. mc_season_team_tally is still the correct source for
         # historical (closed) season standings -- leave it alone, don't
         # wire it back in here.
+        if region is not None:
+            tile_counts = team_tile_counts(conn, season["id"], region.codes)
+            explorer_points = team_place_points(conn, season["id"], protocol, region.codes)
+            return {
+                "season_id": season["id"],
+                "started_at": season["started_at"],
+                "ends_at": season["ends_at"],
+                "region": region.key,
+                "teams": [
+                    {
+                        "team": t,
+                        "tiles": tile_counts.get(t, 0),
+                        "checkin_points": None,
+                        "explorer_points": explorer_points.get(t, 0.0),
+                        "total": tile_counts.get(t, 0) + explorer_points.get(t, 0.0),
+                    }
+                    for t in team_list()
+                ],
+            }
         tile_counts = team_tile_counts(conn, season["id"])
         checkin_points = team_checkin_points(conn, season["id"])
         explorer_points = team_place_points(conn, season["id"], protocol)
@@ -1290,10 +1366,13 @@ async def mc_chunks(z: float = 12.0, ids: str = "") -> Response:
 
 
 @router.get("/api/mc/scores")
-async def mc_scores() -> dict:
+async def mc_scores(region: str | None = None):
     """Active season id/window plus every team's current tile count for
-    MeshCore. See scores_for()."""
-    return scores_for(MC_PROTOCOL)
+    MeshCore. See scores_for(). ?region= gives the regional standing."""
+    resolved, err = resolve_region_param(region)
+    if err is not None:
+        return err
+    return scores_for(MC_PROTOCOL, resolved)
 
 
 @router.get("/api/mc/players")
@@ -1598,7 +1677,7 @@ async def mc_find(
     return result
 
 
-def top_for(protocol: str) -> list[dict]:
+def top_for(protocol: str, region_codes: tuple[str, ...] | None = None) -> list[dict]:
     """Players ranked by capture-event count in `protocol`'s active
     season, from mc_tile_capture_log. Top 20, empty list if there's no
     data (or no active season).
@@ -1607,22 +1686,26 @@ def top_for(protocol: str) -> list[dict]:
     route returns the exact same shape instead of a hand-copied
     near-duplicate, following the same *_for() pattern as
     board_for/scores_for/history_for/cell_detail_for/find_for above.
+
+    region_codes (app/regions.py) counts only captures of squares inside
+    those regions; None counts them all, as before.
     """
 
     def run(conn):
         season = active_season(conn, protocol)
         if not season:
             return []
+        cond, cparams = ("1", []) if region_codes is None else regions.cell_filter_sql(region_codes, "l.cell_id")
         rows = conn.execute(
             "SELECT p.display_name AS display_name, p.team AS team, "
             "       COUNT(*) AS captures "
             "  FROM mc_tile_capture_log l "
             "  JOIN player p ON p.player_id = l.by_player_id "
-            " WHERE l.season_id = ? "
+            f" WHERE l.season_id = ? AND {cond} "
             " GROUP BY l.by_player_id "
             " ORDER BY captures DESC "
             " LIMIT 20",
-            (season["id"],),
+            (season["id"], *cparams),
         ).fetchall()
         return [
             {"display_name": r["display_name"], "team": r["team"], "captures": r["captures"]}
@@ -1634,14 +1717,18 @@ def top_for(protocol: str) -> list[dict]:
 
 
 @router.get("/api/mc/top")
-async def mc_top() -> list[dict]:
+async def mc_top(region: str | None = None):
     """Players ranked by capture-event count in the active MeshCore
     season. See top_for(). Request path, request shape, and response
     shape are unchanged by the addition of top_for()'s `protocol`
     argument -- this route still always passes MC_PROTOCOL, same as
-    before this module had a second caller.
+    before this module had a second caller. ?region= counts only captures
+    of squares inside that region.
     """
-    return top_for(MC_PROTOCOL)
+    resolved, err = resolve_region_param(region)
+    if err is not None:
+        return err
+    return top_for(MC_PROTOCOL, resolved.codes if resolved is not None else None)
 
 
 def top_checkin_for(protocol: str) -> list[dict]:

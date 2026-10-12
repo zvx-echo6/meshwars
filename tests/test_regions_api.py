@@ -1,0 +1,529 @@
+"""Region filtering on the public routes of BOTH boards (board, scores,
+top captures), the regions read endpoints, the preselecting page routes
+and the admin routes. A region is a view filter only: every unfiltered
+response must be exactly what it was before regions existed.
+
+Real file-backed sqlite and a bare FastAPI app around the real routers
+(same shape as tests/test_get_nodes_cache.py). Region membership is made
+by the real importer fixtures and map_new_cells(), then every expectation
+is derived from region_cell itself rather than from hand-placed
+coordinates, so a thinned fixture polygon cannot make a test lie.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import sqlite3
+import time
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+
+import app.api as api_module
+import app.db as db
+import app.mc_api as mc_api_module
+from app import regions
+from app.admin_api import router as admin_api_router
+from app.auth import http_exception_as_error_body
+from app.config import settings
+from app.db import MIGRATIONS, SCHEMA
+from app.grid import cell_center, cell_id as grid_cell_id, cell_indices
+from app.regions_api import router as regions_router
+from app.sessions import SESSION_COOKIE_NAME, create_session
+
+NOW = int(time.time())
+FIX = Path(__file__).parent / "fixtures" / "meshmapper"
+
+MT, MC = 1, 2  # season ids: the Meshtastic board and the MeshCore board
+
+
+def _init_schema(path: str) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA)
+    for stmt in MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower() or "already exists" in str(e).lower():
+                continue
+            raise
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def db_path(tmp_path, monkeypatch):
+    path = str(tmp_path / "game.db")
+    _init_schema(path)
+    monkeypatch.setattr(db.settings, "db_path", path)
+    monkeypatch.setattr(regions, "_INDEX_CACHE", None)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _fresh_board_cache(monkeypatch):
+    monkeypatch.setattr(settings, "board_cache_seconds", 10)
+    mc_api_module._BOARD_CACHE.clear()
+    yield
+    mc_api_module._BOARD_CACHE.clear()
+
+
+def _overlap_cell(index) -> str:
+    smn = index.shapes["SMN"]
+    ida = index.shapes["IDA"]
+    lat0, lat1 = max(smn.south, ida.south), min(smn.north, ida.north)
+    lon0, lon1 = max(smn.west, ida.west), min(smn.east, ida.east)
+    for i in range(1, 60):
+        for j in range(1, 60):
+            lat = lat0 + (lat1 - lat0) * i / 60
+            lon = lon0 + (lon1 - lon0) * j / 60
+            cid = grid_cell_id(lat, lon)
+            if set(index.codes_for(*cell_center(cid))) >= {"SMN", "IDA"}:
+                return cid
+    raise AssertionError("no overlapping cell")
+
+
+@pytest.fixture
+def seeded(db_path):
+    """Regions BOI/PIH/IDA/SMN; two boards each holding the same four
+    squares (Boise, Pocatello, an SMN+IDA overlap, Seattle = no region);
+    capture logs, a check-in award and place credits on both boards."""
+    c = sqlite3.connect(db_path, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    zones = {z["code"]: z for z in regions.parse_zone_list((FIX / "index_zones.html").read_text())}
+    for code in ("boi", "pih", "ida", "smn"):
+        z = zones[code.upper()]
+        parsed = regions.parse_region_page((FIX / f"{code}.html").read_text(), code, z["lat"], z["lon"])
+        regions.store_region(c, code, z["name"], parsed, now=1000)
+    index = regions._build_index(c)
+    cells = {
+        "boise": grid_cell_id(43.61, -116.20),
+        "poca": grid_cell_id(42.87, -112.45),
+        "overlap": _overlap_cell(index),
+        "seattle": grid_cell_id(47.60, -122.30),
+    }
+    c.execute("INSERT INTO mc_season(id, protocol, started_at, ends_at, status) VALUES (?, 'mt', ?, ?, 'active')",
+              (MT, NOW - 1000, NOW + 10**6))
+    c.execute("INSERT INTO mc_season(id, protocol, started_at, ends_at, status) VALUES (?, 'mc', ?, ?, 'active')",
+              (MC, NOW - 1000, NOW + 10**6))
+    c.execute("INSERT INTO player(player_id, display_name, team, created_at) VALUES (1,'ann','RED',?)", (NOW,))
+    c.execute("INSERT INTO player(player_id, display_name, team, created_at) VALUES (2,'bob','BLUE',?)", (NOW,))
+    owners = {"boise": "RED", "poca": "BLUE", "overlap": "RED", "seattle": "BLUE"}
+    for season in (MT, MC):
+        for name, cid in cells.items():
+            la, lo = cell_indices(cid)
+            c.execute(
+                "INSERT INTO mc_tile(season_id, cell_id, owner_team, last_player_id, last_report_ts, paint_count, "
+                "lat_idx, lon_idx) VALUES (?,?,?,1,?,1,?,?)", (season, cid, owners[name], NOW, la, lo))
+            c.execute("INSERT INTO mc_tile_score(season_id, cell_id, team, score, last_update) VALUES (?,?,?,5,?)",
+                      (season, cid, owners[name], NOW))
+        # captures: ann x3 in Boise, bob x2 in Pocatello, bob x5 in Seattle, ann x1 in the overlap
+        ts = NOW - 500
+        for name, pid, team, n in (("boise", 1, "RED", 3), ("poca", 2, "BLUE", 2),
+                                   ("seattle", 2, "BLUE", 5), ("overlap", 1, "RED", 1)):
+            for _ in range(n):
+                ts += 1
+                c.execute("INSERT INTO mc_tile_capture_log(season_id, cell_id, ts, by_player_id, by_team) "
+                          "VALUES (?,?,?,?,?)", (season, cells[name], ts, pid, team))
+        c.execute("INSERT INTO mc_checkin_award(season_id, player_id, net_date, points, protocol, message_id, "
+                  "awarded_at) VALUES (?,?,?,?,?,?,?)",
+                  (season, 1, "2026-10-01", 7.0, "mt" if season == MT else "mc", "m1", NOW))
+    # places: one in Boise (ann), one in Seattle (bob); credited on both boards
+    for pid, (lat, lon) in ((1, (43.61, -116.20)), (2, (47.60, -122.30))):
+        c.execute("INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, rotates, active, "
+                  "created_at) VALUES (?,?,?,?,?,?,?,?,0,1,?)",
+                  (pid, "summit", f"r{pid}", f"p{pid}", lat, lon, 100, "TEST", NOW))
+        c.execute("INSERT INTO place_cell(place_id, cell_id) VALUES (?,?)", (pid, grid_cell_id(lat, lon)))
+    for proto in ("mt", "mc"):
+        c.execute("INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+                  "VALUES (1, 1, ?, 100, ?, ?)", (f"2026-10-0{1 if proto == 'mt' else 2}", NOW, proto))
+        c.execute("INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+                  "VALUES (2, 2, ?, 100, ?, ?)", (f"2026-10-0{1 if proto == 'mt' else 2}", NOW, proto))
+    # node_seen for the Meshtastic payload: one in Boise, one in Seattle
+    c.execute("INSERT INTO node_seen(season_id, node_id, name, lat, lon, elev, last_seen) "
+              "VALUES (?,?,?,?,?,0,?)", (MT, 1, "boise-node", 43.61, -116.20, NOW))
+    c.execute("INSERT INTO node_seen(season_id, node_id, name, lat, lon, elev, last_seen) "
+              "VALUES (?,?,?,?,?,0,?)", (MT, 2, "seattle-node", 47.60, -122.30, NOW))
+    regions.map_new_cells()
+    members = {}
+    for r in c.execute("SELECT region_code, cell_id FROM region_cell"):
+        members.setdefault(r["region_code"], set()).add(r["cell_id"])
+    c.close()
+    return {"cells": cells, "members": members, "path": db_path}
+
+
+@pytest.fixture
+def client(db_path):
+    app = FastAPI()
+    app.include_router(api_module.router)
+    app.include_router(mc_api_module.router)
+    app.include_router(regions_router)
+    return TestClient(app)
+
+
+def _cell_ids_mc(client, region=None):
+    r = client.get("/api/mc/board", params={"region": region} if region else None)
+    assert r.status_code == 200
+    return {c["cell_id"] for c in r.json()}, r
+
+
+def _cell_ids_mt(client, region=None):
+    r = client.get("/get-nodes", params={"region": region} if region else None)
+    assert r.status_code == 200
+    return {c["cell_id"] for c in r.json()["coverage"]}, r
+
+
+# ---- board ----------------------------------------------------------------
+
+
+def test_memberships_are_what_the_tests_assume(seeded):
+    cells, members = seeded["cells"], seeded["members"]
+    assert cells["boise"] in members["BOI"]
+    assert cells["seattle"] not in set().union(*members.values())
+    assert cells["overlap"] in members["SMN"] and cells["overlap"] in members["IDA"]
+    assert cells["poca"] in members["PIH"]
+
+
+@pytest.mark.parametrize("fetch", [_cell_ids_mc, _cell_ids_mt], ids=["mc", "mt"])
+def test_board_unfiltered_has_every_square_and_region_has_only_its_own(seeded, client, fetch):
+    cells, members = seeded["cells"], seeded["members"]
+    everything, _ = fetch(client)
+    assert everything == set(cells.values())
+    for code in ("BOI", "PIH", "SMN", "IDA"):
+        got, _ = fetch(client, code)
+        assert got == members[code] & set(cells.values())
+    boi, _ = fetch(client, "boi")      # case-insensitive
+    assert boi == members["BOI"] & set(cells.values())
+    # the overlap square is in both regions' boards
+    assert cells["overlap"] in fetch(client, "SMN")[0] and cells["overlap"] in fetch(client, "IDA")[0]
+    assert cells["seattle"] not in fetch(client, "BOI")[0]
+
+
+@pytest.mark.parametrize("path", ["/api/mc/board", "/get-nodes", "/scores", "/api/mc/scores", "/top", "/api/mc/top"])
+def test_unknown_region_is_a_json_404(seeded, client, path):
+    for bad in ("nope", "../x", "a b"):
+        r = client.get(path, params={"region": bad})
+        assert r.status_code == 404
+        assert r.json() == {"error": "unknown region"}
+
+
+def test_empty_region_param_means_unfiltered(seeded, client):
+    plain = client.get("/api/mc/board").content
+    assert client.get("/api/mc/board", params={"region": ""}).content == plain
+
+
+def test_region_board_is_smaller_than_the_full_board(seeded, client):
+    _, full = _cell_ids_mc(client)
+    _, one = _cell_ids_mc(client, "BOI")
+    assert len(one.content) < len(full.content)
+    _, full_mt = _cell_ids_mt(client)
+    _, one_mt = _cell_ids_mt(client, "BOI")
+    assert len(one_mt.content) < len(full_mt.content)
+
+
+def test_region_board_has_its_own_cache_entry(seeded, client):
+    a = client.get("/api/mc/board", params={"region": "BOI"})
+    b = client.get("/api/mc/board", params={"region": "PIH"})
+    full = client.get("/api/mc/board")
+    assert len({a.headers["etag"], b.headers["etag"], full.headers["etag"]}) == 3
+    again = client.get("/api/mc/board", params={"region": "BOI"}, headers={"If-None-Match": a.headers["etag"]})
+    assert again.status_code == 304
+
+
+def test_unfiltered_board_shape_unchanged(seeded, client):
+    rows = client.get("/api/mc/board").json()
+    assert set(rows[0]) == {"cell_id", "owner_team", "south", "west", "north", "east"}
+    cov = client.get("/get-nodes").json()
+    assert set(cov) == {"coverage", "repeaters"}
+    assert set(cov["coverage"][0]) == {"cell_id", "owner_team", "last_report_ts", "paint_count", "captured_at",
+                                       "scores", "south", "west", "north", "east"}
+    assert len(cov["repeaters"]) == 2
+
+
+def test_get_nodes_region_filters_repeaters_to_the_region(seeded, client):
+    boi = client.get("/get-nodes", params={"region": "BOI"}).json()
+    assert {r["name"] for r in boi["repeaters"]} == {"boise-node"}
+    assert {c["cell_id"] for c in boi["coverage"]} == seeded["members"]["BOI"] & set(seeded["cells"].values())
+
+
+def test_group_board_is_the_union_without_double_counting(seeded, client):
+    c = sqlite3.connect(seeded["path"], isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("BEGIN IMMEDIATE")
+    regions.create_group(c, "Idaho Mix", None, ["SMN", "IDA"], [])
+    inner = c.execute("SELECT id FROM region_group WHERE slug='idaho-mix'").fetchone()["id"]
+    regions.create_group(c, "Outer", None, ["BOI"], [inner])
+    c.execute("COMMIT")
+    c.close()
+    expect = set()
+    for code in ("SMN", "IDA", "BOI"):
+        expect |= seeded["members"][code]
+    expect &= set(seeded["cells"].values())
+    rows = client.get("/api/mc/board", params={"region": "outer"}).json()
+    ids = [r["cell_id"] for r in rows]
+    assert set(ids) == expect and len(ids) == len(set(ids))   # the overlap square appears once
+
+
+# ---- scores ---------------------------------------------------------------
+
+TEAM_KEYS = {"team", "tiles", "checkin_points", "explorer_points", "total"}
+
+
+@pytest.mark.parametrize("path,season", [("/scores", MT), ("/api/mc/scores", MC)])
+def test_scores_unfiltered_unchanged(seeded, client, path, season):
+    body = client.get(path).json()
+    assert set(body) == {"season_id", "started_at", "ends_at", "teams"}
+    teams = {t["team"]: t for t in body["teams"]}
+    assert set(teams["RED"]) == TEAM_KEYS
+    assert teams["RED"]["tiles"] == 2 and teams["BLUE"]["tiles"] == 2
+    assert teams["RED"]["checkin_points"] == 7.0
+    assert teams["RED"]["explorer_points"] == 100.0 and teams["BLUE"]["explorer_points"] == 100.0
+    assert teams["RED"]["total"] == 2 + 7.0 + 100.0
+
+
+@pytest.mark.parametrize("path", ["/scores", "/api/mc/scores"])
+def test_scores_for_a_region_count_only_inside_and_leave_out_checkins(seeded, client, path):
+    body = client.get(path, params={"region": "boi"}).json()
+    assert body["region"] == "BOI"
+    teams = {t["team"]: t for t in body["teams"]}
+    inside = seeded["members"]["BOI"] & set(seeded["cells"].values())
+    red_tiles = 1 if seeded["cells"]["boise"] in inside else 0
+    assert teams["RED"]["tiles"] == red_tiles
+    assert teams["BLUE"]["tiles"] == 0
+    assert teams["RED"]["checkin_points"] is None and teams["BLUE"]["checkin_points"] is None
+    assert teams["RED"]["explorer_points"] == 100.0       # the Boise place only
+    assert teams["BLUE"]["explorer_points"] == 0.0        # bob's place is in Seattle
+    assert teams["RED"]["total"] == red_tiles + 100.0
+    assert set(teams["RED"]) == TEAM_KEYS
+    assert len(body["teams"]) == 7                         # still zero-filled for every team
+
+
+def test_scores_region_with_no_activity_is_all_zero(seeded, client):
+    body = client.get("/api/mc/scores", params={"region": "pih"}).json()
+    teams = {t["team"]: t for t in body["teams"]}
+    assert teams["RED"]["explorer_points"] == 0.0 and teams["RED"]["checkin_points"] is None
+
+
+def test_exploration_follows_the_place_cell_not_the_player(seeded, client):
+    # Seattle belongs to no region: even the biggest group never sees bob's place.
+    c = sqlite3.connect(seeded["path"], isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("BEGIN IMMEDIATE")
+    regions.create_group(c, "All Four", None, ["BOI", "PIH", "IDA", "SMN"], [])
+    c.execute("COMMIT")
+    c.close()
+    teams = {t["team"]: t for t in client.get("/scores", params={"region": "all-four"}).json()["teams"]}
+    assert teams["BLUE"]["explorer_points"] == 0.0
+    assert teams["RED"]["explorer_points"] == 100.0
+
+
+# ---- top captures -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/top", "/api/mc/top"])
+def test_top_unfiltered_counts_everything(seeded, client, path):
+    rows = client.get(path).json()
+    assert [(r["display_name"], r["captures"]) for r in rows] == [("bob", 7), ("ann", 4)]
+    assert set(rows[0]) == {"display_name", "team", "captures"}
+
+
+@pytest.mark.parametrize("path", ["/top", "/api/mc/top"])
+def test_top_for_a_region_counts_only_its_squares(seeded, client, path):
+    cells, members = seeded["cells"], seeded["members"]
+    rows = client.get(path, params={"region": "BOI"}).json()
+    got = {r["display_name"]: r["captures"] for r in rows}
+    boi = members["BOI"]
+    expect_ann = (3 if cells["boise"] in boi else 0) + (1 if cells["overlap"] in boi else 0)
+    expect_bob = (2 if cells["poca"] in boi else 0) + (5 if cells["seattle"] in boi else 0)
+    assert got.get("ann", 0) == expect_ann and got.get("bob", 0) == expect_bob
+    assert "bob" not in got or got["bob"] != 7
+
+
+def test_top_checkins_endpoints_stay_unfiltered(seeded, client):
+    # A region parameter on them is simply ignored.
+    assert client.get("/top-checkins", params={"region": "BOI"}).json() == client.get("/top-checkins").json()
+
+
+# ---- regions endpoints ----------------------------------------------------
+
+
+def test_regions_list_and_boundary(seeded, client):
+    body = client.get("/api/regions").json()
+    assert [r["code"] for r in body["regions"]] == ["BOI", "IDA", "PIH", "SMN"]
+    r0 = body["regions"][0]
+    assert set(r0) == {"code", "name", "lat", "lon", "bbox"} and len(r0["bbox"]) == 4
+    assert body["groups"] == []
+    assert client.get("/api/regions").headers["cache-control"].startswith("public")
+    b = client.get("/api/regions/boi/boundary")
+    assert b.status_code == 200
+    fc = b.json()
+    assert fc["type"] == "FeatureCollection" and fc["features"][0]["properties"]["code"] == "BOI"
+    lon, lat = fc["features"][0]["geometry"]["coordinates"][0][0]
+    assert lon < 0 < lat                                   # GeoJSON order
+    assert client.get("/api/regions/nope/boundary").status_code == 404
+
+
+def test_group_boundary_is_a_feature_per_member_region(seeded, client):
+    c = sqlite3.connect(seeded["path"], isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("BEGIN IMMEDIATE")
+    regions.create_group(c, "Pair", None, ["BOI", "PIH"], [])
+    c.execute("COMMIT")
+    c.close()
+    fc = client.get("/api/regions/pair/boundary").json()
+    assert {f["properties"]["code"] for f in fc["features"]} == {"BOI", "PIH"}
+    tree = client.get("/api/regions").json()["groups"]
+    assert tree[0]["slug"] == "pair" and tree[0]["regions"] == ["BOI", "PIH"] and tree[0]["groups"] == []
+
+
+# ---- page routes ----------------------------------------------------------
+
+
+@pytest.fixture
+def page_client(seeded):
+    app = FastAPI()
+    api_module.mount(app)
+    return TestClient(app)
+
+
+def _meta(resp):
+    marker = '<meta name="mw-region" content="'
+    if marker not in resp.text:
+        return None
+    return resp.text.split(marker, 1)[1].split('"', 1)[0]
+
+
+def test_map_region_route_preselects_case_insensitively(page_client):
+    assert _meta(page_client.get("/map/boi")) == "BOI"
+    assert _meta(page_client.get("/map/BOI")) == "BOI"
+    assert page_client.get("/map/boi").status_code == 200
+
+
+def test_unknown_region_serves_the_plain_map(page_client):
+    r = page_client.get("/map/nowhere")
+    assert r.status_code == 200 and _meta(r) is None
+    assert 'id="mw-' in r.text or "<html" in r.text.lower()
+
+
+def test_query_param_on_root(page_client):
+    assert _meta(page_client.get("/", params={"region": "pih"})) == "PIH"
+    assert _meta(page_client.get("/", params={"region": "zzz"})) is None
+    assert _meta(page_client.get("/")) is None
+
+
+def test_group_slug_route(seeded, page_client):
+    c = sqlite3.connect(seeded["path"], isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("BEGIN IMMEDIATE")
+    regions.create_group(c, "Treasure Valley", None, ["BOI"], [])
+    c.execute("COMMIT")
+    c.close()
+    assert _meta(page_client.get("/map/Treasure-Valley")) == "treasure-valley"
+
+
+def test_host_based_preselection_is_off_by_default_and_on_with_a_suffix(page_client, monkeypatch):
+    assert _meta(page_client.get("/", headers={"host": "boi.meshwars.com"})) is None
+    monkeypatch.setattr(settings, "regions_host_suffix", "meshwars.com")
+    assert _meta(page_client.get("/", headers={"host": "boi.meshwars.com"})) == "BOI"
+    assert _meta(page_client.get("/", headers={"host": "www.meshwars.com"})) is None
+    # the path wins over the host
+    assert _meta(page_client.get("/map/pih", headers={"host": "boi.meshwars.com"})) == "PIH"
+
+
+def test_page_etag_differs_per_region(page_client):
+    a = page_client.get("/map/boi")
+    b = page_client.get("/map/pih")
+    assert a.headers["etag"] != b.headers["etag"]
+    assert page_client.get("/map/boi", headers={"If-None-Match": a.headers["etag"]}).status_code == 304
+
+
+# ---- admin ----------------------------------------------------------------
+
+
+@pytest.fixture
+def admin(seeded, monkeypatch):
+    app = FastAPI()
+    app.include_router(admin_api_router)
+    app.include_router(regions_router)
+    app.add_exception_handler(HTTPException, http_exception_as_error_body)
+    client = TestClient(app)
+    conn = sqlite3.connect(seeded["path"])
+    cur = conn.execute("INSERT INTO account(created_at, role) VALUES (?, 'admin')", (NOW,))
+    account_id = cur.lastrowid
+    conn.execute("INSERT INTO account_totp(account_id, secret_encrypted, created_at, activated_at) "
+                 "VALUES (?, 'unused', ?, ?)", (account_id, NOW, NOW))
+    conn.commit()
+    conn.close()
+    client.cookies.set(SESSION_COOKIE_NAME, asyncio.run(create_session(account_id, device_label=None)))
+    return client
+
+
+ADMIN_ROUTES = [
+    ("get", "/api/admin/regions"), ("get", "/api/admin/regions/sync"), ("post", "/api/admin/regions/sync"),
+    ("post", "/api/admin/regions/groups/create"), ("post", "/api/admin/regions/groups/update"),
+    ("post", "/api/admin/regions/groups/delete"),
+]
+
+
+@pytest.mark.parametrize("method,path", ADMIN_ROUTES)
+def test_admin_routes_need_a_role(seeded, method, path):
+    app = FastAPI()
+    app.include_router(admin_api_router)
+    app.include_router(regions_router)
+    anon = TestClient(app)
+    r = getattr(anon, method)(path, **({"json": {}} if method == "post" else {}))
+    assert r.status_code in (401, 404)
+
+
+def test_admin_lists_regions_with_fetch_time(admin):
+    body = admin.get("/api/admin/regions").json()
+    assert [r["code"] for r in body["regions"]] == ["BOI", "IDA", "PIH", "SMN"]
+    assert body["regions"][0]["fetched_at"] == 1000
+    assert body["sync"]["running"] is False
+
+
+def test_admin_group_crud_and_validation_errors(admin):
+    r = admin.post("/api/admin/regions/groups/create", json={"name": "Eastern", "regions": ["PIH", "ida"], "groups": []})
+    assert r.status_code == 201
+    g = r.json()
+    assert g["slug"] == "eastern" and g["regions"] == ["IDA", "PIH"]
+    # duplicate slug
+    dup = admin.post("/api/admin/regions/groups/create", json={"name": "Eastern", "regions": [], "groups": []})
+    assert dup.status_code == 409 and "slug" in dup.json()["error"]
+    # unknown member, bad slug, slug that is a region code
+    assert admin.post("/api/admin/regions/groups/create", json={"name": "X", "regions": ["NOPE"]}).status_code == 400
+    assert admin.post("/api/admin/regions/groups/create", json={"name": "X", "slug": "Bad Slug"}).status_code == 400
+    assert admin.post("/api/admin/regions/groups/create", json={"name": "X", "slug": "boi"}).status_code == 409
+    assert admin.post("/api/admin/regions/groups/create", json={"name": ""}).status_code == 400
+    # nest + cycle
+    top = admin.post("/api/admin/regions/groups/create",
+                     json={"name": "Top", "regions": ["BOI"], "groups": [g["id"]]}).json()
+    cyc = admin.post("/api/admin/regions/groups/update",
+                     json={"id": g["id"], "name": "Eastern", "regions": [], "groups": [top["id"]]})
+    assert cyc.status_code == 409 and "itself" in cyc.json()["error"]
+    # update members
+    up = admin.post("/api/admin/regions/groups/update",
+                    json={"id": g["id"], "name": "Eastern Idaho", "slug": "eastern", "regions": ["SMN"], "groups": []})
+    assert up.status_code == 200 and up.json()["regions"] == ["SMN"] and up.json()["name"] == "Eastern Idaho"
+    assert admin.post("/api/admin/regions/groups/update", json={"id": 999, "name": "x"}).status_code == 404
+    # delete needs the exact name
+    assert admin.post("/api/admin/regions/groups/delete", json={"id": g["id"], "name": "wrong"}).status_code == 409
+    assert admin.post("/api/admin/regions/groups/delete", json={"id": g["id"], "name": "Eastern Idaho"}).status_code == 200
+    assert admin.post("/api/admin/regions/groups/delete", json={"id": g["id"], "name": "Eastern Idaho"}).status_code == 404
+    groups = admin.get("/api/admin/regions").json()["groups"]
+    assert [x["slug"] for x in groups] == ["top"] and groups[0]["groups"] == []
+
+
+def test_admin_sync_starts_in_the_background_and_refuses_a_second(admin, monkeypatch):
+    started = []
+
+    def fake_start(mode="all"):
+        started.append(mode)
+        return len(started) == 1
+
+    monkeypatch.setattr(regions, "start_import", fake_start)
+    assert admin.post("/api/admin/regions/sync").status_code == 202
+    assert admin.post("/api/admin/regions/sync").status_code == 409
+    assert started == ["all", "all"]

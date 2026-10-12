@@ -15,7 +15,7 @@ from .auth import http_exception_as_error_body
 from .checkin import CheckinPoller
 from .config import settings
 from .db import connect, init_db
-from . import discord_interactions, discord_notify, mc_api
+from . import discord_interactions, discord_notify, mc_api, regions
 from .freqmapper_ingest import FreqMapperIngestor, load_freqmapper_config
 from .ingest import Ingestor
 from .log_redact import DiscordWebhookRedactionFilter
@@ -180,6 +180,13 @@ async def lifespan(app: FastAPI):
     if settings.run_background_tasks:
         board_publisher_task = asyncio.create_task(mc_api.run_forever(), name="board-cache-publisher")
 
+    # Regions (app/regions.py): maps new squares to MeshMapper regions
+    # every minute (DB only) and, only when REGIONS_SYNC_ENABLED, fetches
+    # boundaries daily/weekly. Worker role only, like every loop above.
+    regions_task = None
+    if settings.run_background_tasks:
+        regions_task = asyncio.create_task(regions.run_forever(), name="regions")
+
     app.state.client = client
     app.state.ingestor = ingestor
     app.state.ingest_task = task
@@ -228,6 +235,12 @@ async def lifespan(app: FastAPI):
             board_publisher_task.cancel()
             try:
                 await board_publisher_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if regions_task is not None:
+            regions_task.cancel()
+            try:
+                await regions_task
             except (asyncio.CancelledError, Exception):
                 pass
         # /claimnode's own background watchers (app/discord_interactions.py)
