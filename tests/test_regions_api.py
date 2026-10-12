@@ -581,7 +581,8 @@ def test_fetch_route_adds_a_new_region_then_updates_it(admin, monkeypatch, seede
     body = r.json()
     assert body["code"] == "TWF" and body["name"].startswith("Twin Falls")
     assert body["points"] > 10 and body["new_or_updated"] == "new"
-    assert body["squares_in_region"] >= 0
+    assert "squares_in_region" not in body
+    assert body["claimed_squares"] == body["claimed_meshcore"] + body["claimed_meshtastic"]
     assert seen == ["https://twf.meshmapper.net/"]          # built from the code, not the pasted URL
     # it is in the admin table and the public list straight away
     assert "TWF" in [x["code"] for x in admin.get("/api/admin/regions").json()["regions"]]
@@ -604,10 +605,25 @@ def test_fetch_route_maps_existing_squares_into_the_new_region(admin, monkeypatc
     la, lo = cell_indices(cid)
     c.execute("INSERT OR IGNORE INTO mc_tile(season_id, cell_id, owner_team, last_player_id, last_report_ts, "
               "paint_count, lat_idx, lon_idx) VALUES (?,?, 'RED', 1, ?, 1, ?, ?)", (MC, cid, NOW, la, lo))
+    # a credited place whose cell holds no claimed square: it becomes a region_cell row but must not be counted
+    pcid = f"{la + 1}_{lo}"
+    c.execute("INSERT INTO place(id, ref_type, ref_code, name, lat, lon, points, source, rotates, active, created_at) "
+              "VALUES (77, 'summit', 'r77', 'p77', 42.7, -114.5, 100, 'TEST', 0, 1, ?)", (NOW,))
+    c.execute("INSERT INTO place_cell(place_id, cell_id) VALUES (77, ?)", (pcid,))
+    c.execute("INSERT INTO place_activation(place_id, player_id, week_start, points, awarded_at, protocol) "
+              "VALUES (77, 1, '2026-10-05', 100, ?, 'mc')", (NOW,))
     regions.map_new_cells()
     _page_client(monkeypatch, _twf_site())
     body = admin.post("/api/admin/regions/fetch", json={"link": "twf"}).json()
-    assert body["squares_in_region"] == (1 if ok else 0)
+    # claimed squares only, per board, in ACTIVE seasons: the seeded four squares (both boards) that fall
+    # inside TWF's polygon, plus the one MeshCore square added here when its centre is inside
+    expect = {MC: 0, MT: 0}
+    for row in c.execute("SELECT season_id, cell_id FROM mc_tile WHERE owner_team IS NOT NULL"):
+        if shape.contains(*cell_center(row["cell_id"])):
+            expect[row["season_id"]] += 1
+    assert body["claimed_meshcore"] == expect[MC] and body["claimed_meshtastic"] == expect[MT]
+    assert body["claimed_squares"] == expect[MC] + expect[MT]
+    assert expect[MC] >= (1 if ok else 0)
     c.close()
 
 

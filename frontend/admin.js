@@ -3090,7 +3090,9 @@ async function fetchRegionByLink(b) {
     const r = await post('/api/admin/regions/fetch', { link: input.value.trim() });
     const name = (r.name || '').replace(/,\s*[A-Za-z]{2}$/, '');
     out.textContent = r.code + ' ' + name + ': ' + r.points.toLocaleString() + ' points, '
-      + r.squares_in_region.toLocaleString() + ' squares' + (r.new_or_updated === 'new' ? ' (new)' : ' (updated)');
+      + r.claimed_squares.toLocaleString() + ' claimed squares (MeshCore ' + r.claimed_meshcore.toLocaleString()
+      + ', Meshtastic ' + r.claimed_meshtastic.toLocaleString() + ')'
+      + (r.new_or_updated === 'new' ? ' (new)' : ' (updated)');
     input.value = '';
     await loadRegions();
   } catch (e) {

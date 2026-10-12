@@ -880,3 +880,9 @@
 }
 .mw-join-chip button { background: none; border: 0; color: inherit; cursor: pointer; padding: 0 0 0 2px; }
 .mw-join-result { font-size: 12px; min-height: 1em; }
+
+/* Links inside the board modals (the "Join neighboring regions" sign-in
+   link): the same accent-on-dark treatment as the links in the board
+   panel (.mc-scoreboard a), not the browser's blue underline. */
+.mc-modal a { color: var(--mw-accent); text-decoration: none; }
+.mc-modal a:hover { text-decoration: underline; }

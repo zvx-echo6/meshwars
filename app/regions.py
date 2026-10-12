@@ -1140,15 +1140,30 @@ async def fetch_region(link: str, client: httpx.AsyncClient | None = None) -> di
     await asyncio.to_thread(_store_one, code, name, parsed)
     await asyncio.to_thread(_retry_busy, lambda: remap_regions([code]))
 
-    def count() -> int:
+    def count() -> dict[str, int]:
+        """Squares actually claimed in the region on each board's ACTIVE
+        season (owned mc_tile rows). region_cell also holds cells that only
+        belong to a credited place, which are not squares anyone holds."""
         conn = connect()
         try:
-            return conn.execute("SELECT COUNT(*) FROM region_cell WHERE region_code = ?", (code,)).fetchone()[0]
+            out = {"mc": 0, "mt": 0}
+            for r in conn.execute(
+                "SELECT s.protocol AS protocol, COUNT(*) AS n FROM mc_tile t "
+                " JOIN mc_season s ON s.id = t.season_id AND s.status = 'active' "
+                " WHERE t.owner_team IS NOT NULL "
+                "   AND t.cell_id IN (SELECT cell_id FROM region_cell WHERE region_code = ?) "
+                " GROUP BY s.protocol", (code,)
+            ):
+                out[r["protocol"]] = r["n"]
+            return out
         finally:
             conn.close()
 
+    claimed = await asyncio.to_thread(count)
+
     return {"code": code, "name": name, "points": sum(len(r) for r in parsed["rings"]),
-            "squares_in_region": await asyncio.to_thread(count),
+            "claimed_squares": claimed["mc"] + claimed["mt"],
+            "claimed_meshcore": claimed["mc"], "claimed_meshtastic": claimed["mt"],
             "new_or_updated": "updated" if existed else "new"}
 
 

@@ -1133,3 +1133,17 @@ body {
      margin-left: auto, ending up an odd short line off to one side. */
   .adm-row-actions { margin-left: 0; width: 100%; }
 }
+
+/* A plain text input in an .adm-form row, styled like .adm-textarea (same
+   palette and radius) so it does not fall back to the browser's white
+   default on the dark panel. */
+.adm-input {
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--mw-text-1);
+  background: var(--mw-page);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 4px;
+}
+.adm-input::placeholder { color: var(--mw-text-6); }
