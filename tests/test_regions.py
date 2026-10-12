@@ -438,7 +438,7 @@ def test_empty_group_resolves_to_no_regions(db_path):
     c = _conn(db_path)
     _new_group(c, "Empty")
     assert regions.resolve(c, "empty").codes == ()
-    cond, params = regions.cell_filter_sql(())
+    cond, params = regions.cell_filter_sql((), "mc_tile.cell_id")
     assert cond == "0" and params == []
     c.close()
 
