@@ -4,8 +4,9 @@ The per-request builders (mc_scoring.team_tile_counts & co, mc_api.top_for)
 answer one region with one SQL pass per figure. Run for fifteen groups on
 both boards that is sixty passes over the same few hundred thousand rows --
 twelve seconds of a worker's time on production-sized data. Here each figure
-is read ONCE per board, with its region membership joined in (an index probe
-on region_cell per row), and tallied per group in Python:
+is computed by ONE query per board that joins the region membership in (an
+index probe on region_cell per row) and a small temporary table mapping
+region code -> group number, and is aggregated by the database:
 
   squares      owned mc_tile rows of the active season
   exploration  Places Worth Going credits in the season's window, through
@@ -16,30 +17,27 @@ on region_cell per row), and tallied per group in Python:
 A row belongs to a group when any of its cells is in any of the group's
 regions (a check-in placed by airport code: when that code is one of them),
 and counts ONCE per group however many of its regions match -- the same
-rules as the per-request queries, and tests/test_regional_standings.py holds
-the two to identical answers.
+rules as the per-request queries, and tests hold the two to identical
+answers.
+
+Memory: Python only ever sees the aggregated rows (a handful per group and
+team, or per group and player), never the rows being counted. The first
+version tallied every squares/captures row into dicts and sets in Python
+(tens of MB at production size, on top of the worker's other work); the
+database's own distinct/group sorters now do that, and temp_store is set to
+FILE for the batch so even those spill to disk rather than the process heap.
 """
 from __future__ import annotations
 
 import logging
 import time
-from collections import Counter, defaultdict
 
 from .db import connect
-from .mc_api import MC_PROTOCOL, MT_PROTOCOL, active_season, regional_scores_payload, scores_for, top_for
+from .mc_api import MC_PROTOCOL, MT_PROTOCOL, active_season, regional_scores_payload, scores_for
 
 log = logging.getLogger("regional_standings")
 
 TOP_LIMIT = 20   # the same cap top_for() applies
-
-
-def _groups_by_code(targets) -> dict[str, list[int]]:
-    """region code -> indexes (into targets) of the groups that contain it."""
-    out: dict[str, list[int]] = defaultdict(list)
-    for gi, (_slug, resolved) in enumerate(targets):
-        for code in resolved.codes:
-            out[code].append(gi)
-    return out
 
 
 def build_group_standings(targets) -> dict[str, dict | list]:
@@ -47,11 +45,16 @@ def build_group_standings(targets) -> dict[str, dict | list]:
     four keys per group the web routes read (mc_scores:region:<slug>,
     mt_scores:..., mc_top:..., mt_top:...)."""
     out: dict[str, dict | list] = {}
-    by_code = _groups_by_code(targets)
     conn = connect()
     try:
+        # BEFORE the temp table exists: changing temp_store drops temp objects.
+        conn.execute("PRAGMA temp_store=FILE")
+        conn.execute("CREATE TEMP TABLE _rg(code TEXT NOT NULL, gi INTEGER NOT NULL, PRIMARY KEY (code, gi)) WITHOUT ROWID")
+        conn.executemany("INSERT INTO _rg(code, gi) VALUES (?, ?)",
+                         [(code, gi) for gi, (_slug, resolved) in enumerate(targets) for code in resolved.codes])
         players = {r["player_id"]: (r["display_name"], r["team"])
                    for r in conn.execute("SELECT player_id, display_name, team FROM player")}
+        n = len(targets)
         for tag, protocol in (("mc", MC_PROTOCOL), ("mt", MT_PROTOCOL)):
             t0 = time.monotonic()
             season = active_season(conn, protocol)
@@ -61,123 +64,94 @@ def build_group_standings(targets) -> dict[str, dict | list]:
                     out[f"{tag}_top:region:{slug}"] = []
                 continue
             sid = season["id"]
-            tiles = _tile_counts(conn, sid, by_code, len(targets), players)
-            explorer = _explorer_points(conn, protocol, season, by_code, len(targets))
-            checkins = _checkin_points(conn, sid, by_code, len(targets))
-            tops = _top_captures(conn, sid, by_code, len(targets), players)
+            tiles = _per_group_team(conn, n, _TILES_SQL, (sid,))
+            explorer = _per_group_team(conn, n, _EXPLORER_SQL, (protocol, season["started_at"], season["ends_at"]))
+            checkins = _per_group_team(conn, n, _CHECKIN_SQL, (sid, sid))
+            tops = _tops(conn, n, sid, players)
             for gi, (slug, resolved) in enumerate(targets):
                 out[f"{tag}_scores:region:{slug}"] = regional_scores_payload(
-                    season, resolved.key, dict(tiles[gi]), dict(checkins[gi]), dict(explorer[gi]))
+                    season, resolved.key, tiles[gi], checkins[gi], explorer[gi])
                 out[f"{tag}_top:region:{slug}"] = tops[gi]
-            log.debug("group standings, %s board: %d groups in %.2f s", tag, len(targets), time.monotonic() - t0)
+            log.debug("group standings, %s board: %d groups in %.2f s", tag, n, time.monotonic() - t0)
     finally:
-        conn.close()
+        try:
+            conn.execute("PRAGMA temp_store=MEMORY")      # drops _rg and restores the pool's setting
+        finally:
+            conn.close()
     return out
 
 
-def _tile_counts(conn, season_id, by_code, n, players):
-    per_cell: dict[str, tuple[str, set[int]]] = {}
-    for r in conn.execute(
-        "SELECT t.cell_id AS cell, t.owner_team AS team, rc.region_code AS code "
-        "  FROM mc_tile t JOIN region_cell rc ON rc.cell_id = t.cell_id "
-        " WHERE t.season_id = ? AND t.owner_team IS NOT NULL", (season_id,)
-    ):
-        groups = by_code.get(r["code"])
-        if not groups:
-            continue
-        got = per_cell.get(r["cell"])
-        if got is None:
-            per_cell[r["cell"]] = (r["team"], set(groups))
-        else:
-            got[1].update(groups)
-    counts = [Counter() for _ in range(n)]
-    for team, groups in per_cell.values():
-        for gi in groups:
-            counts[gi][team] += 1
-    return counts
+# CROSS JOIN fixes the loop order: walk the rows being counted, probe
+# region_cell by cell (idx_region_cell_cell), then _rg by region code.
+_TILES_SQL = (
+    "SELECT g.gi AS gi, t.owner_team AS team, COUNT(DISTINCT t.cell_id) AS v "
+    "  FROM mc_tile t CROSS JOIN region_cell rc CROSS JOIN _rg g "
+    " WHERE t.season_id = ? AND t.owner_team IS NOT NULL "
+    "   AND rc.cell_id = t.cell_id AND g.code = rc.region_code "
+    " GROUP BY g.gi, t.owner_team"
+)
+
+_EXPLORER_SQL = (
+    "SELECT gi, team, SUM(pts) AS v FROM ("
+    " SELECT DISTINCT g.gi AS gi, a.id AS aid, p.team AS team, a.points AS pts "
+    "   FROM place_activation a CROSS JOIN player p CROSS JOIN place_cell pc CROSS JOIN region_cell rc CROSS JOIN _rg g "
+    "  WHERE a.protocol = ? AND a.awarded_at >= ? AND a.awarded_at <= ? "
+    "    AND p.player_id = a.player_id AND pc.place_id = a.place_id "
+    "    AND rc.cell_id = pc.cell_id AND g.code = rc.region_code"
+    ") GROUP BY gi, team"
+)
+
+# an award counts for a group through the cell it was placed in, or through
+# an airport-code placement; UNION (not ALL) so one award counts once
+_CHECKIN_SQL = (
+    "SELECT gi, team, SUM(pts) AS v FROM ("
+    " SELECT g.gi AS gi, a.player_id AS pid, a.net_date AS nd, p.team AS team, a.points AS pts "
+    "   FROM mc_checkin_award a CROSS JOIN player p CROSS JOIN checkin_award_place cp CROSS JOIN _rg g "
+    "  WHERE a.season_id = ? AND p.player_id = a.player_id "
+    "    AND cp.season_id = a.season_id AND cp.player_id = a.player_id AND cp.net_date = a.net_date "
+    "    AND g.code = cp.region_code "
+    " UNION "
+    " SELECT g.gi, a.player_id, a.net_date, p.team, a.points "
+    "   FROM mc_checkin_award a CROSS JOIN player p CROSS JOIN checkin_award_place cp "
+    "        CROSS JOIN region_cell rc CROSS JOIN _rg g "
+    "  WHERE a.season_id = ? AND p.player_id = a.player_id "
+    "    AND cp.season_id = a.season_id AND cp.player_id = a.player_id AND cp.net_date = a.net_date "
+    "    AND rc.cell_id = cp.cell_id AND g.code = rc.region_code"
+    ") GROUP BY gi, team"
+)
+
+_CAPTURES_SQL = (
+    "SELECT gi, pid, COUNT(*) AS v FROM ("
+    " SELECT DISTINCT g.gi AS gi, l.cell_id AS cell, l.ts AS ts, l.by_player_id AS pid "
+    "   FROM mc_tile_capture_log l CROSS JOIN region_cell rc CROSS JOIN _rg g "
+    "  WHERE l.season_id = ? AND l.by_player_id IS NOT NULL "
+    "    AND rc.cell_id = l.cell_id AND g.code = rc.region_code"
+    ") GROUP BY gi, pid"
+)
 
 
-def _explorer_points(conn, protocol, season, by_code, n):
-    per_act: dict[int, tuple[str, float, set[int]]] = {}
-    for r in conn.execute(
-        "SELECT a.id AS aid, a.points AS pts, p.team AS team, rc.region_code AS code "
-        "  FROM place_activation a JOIN player p ON p.player_id = a.player_id "
-        "  JOIN place_cell pc ON pc.place_id = a.place_id "
-        "  JOIN region_cell rc ON rc.cell_id = pc.cell_id "
-        " WHERE a.protocol = ? AND a.awarded_at >= ? AND a.awarded_at <= ?",
-        (protocol, season["started_at"], season["ends_at"]),
-    ):
-        groups = by_code.get(r["code"])
-        if not groups:
-            continue
-        got = per_act.get(r["aid"])
-        if got is None:
-            per_act[r["aid"]] = (r["team"], r["pts"] or 0.0, set(groups))
-        else:
-            got[2].update(groups)
-    sums = [Counter() for _ in range(n)]
-    for team, pts, groups in per_act.values():
-        for gi in groups:
-            sums[gi][team] += pts
-    return sums
+def _per_group_team(conn, n, sql, params) -> list[dict]:
+    out: list[dict] = [{} for _ in range(n)]
+    for r in conn.execute(sql, params):
+        out[r["gi"]][r["team"]] = r["v"] or 0
+    return out
 
 
-def _checkin_points(conn, season_id, by_code, n):
-    per_award: dict[tuple, tuple[str, float, set[int]]] = {}
-    for r in conn.execute(
-        "SELECT a.player_id AS pid, a.net_date AS nd, a.points AS pts, p.team AS team, "
-        "       cp.region_code AS rcode, rc.region_code AS code "
-        "  FROM mc_checkin_award a JOIN player p ON p.player_id = a.player_id "
-        "  JOIN checkin_award_place cp ON cp.season_id = a.season_id AND cp.player_id = a.player_id "
-        "                              AND cp.net_date = a.net_date "
-        "  LEFT JOIN region_cell rc ON rc.cell_id = cp.cell_id "
-        " WHERE a.season_id = ?", (season_id,)
-    ):
-        key = (r["pid"], r["nd"])
-        got = per_award.get(key)
-        if got is None:
-            got = per_award[key] = (r["team"], r["pts"] or 0.0, set())
-        for code in (r["code"], r["rcode"]):
-            if code:
-                got[2].update(by_code.get(code, ()))
-    sums = [Counter() for _ in range(n)]
-    for team, pts, groups in per_award.values():
-        for gi in groups:
-            sums[gi][team] += pts
-    return sums
-
-
-def _top_captures(conn, season_id, by_code, n, players):
-    per_log: dict[tuple, tuple[int, set[int]]] = {}
-    for r in conn.execute(
-        "SELECT l.cell_id AS cell, l.ts AS ts, l.by_player_id AS pid, rc.region_code AS code "
-        "  FROM mc_tile_capture_log l JOIN region_cell rc ON rc.cell_id = l.cell_id "
-        " WHERE l.season_id = ? AND l.by_player_id IS NOT NULL", (season_id,)
-    ):
-        groups = by_code.get(r["code"])
-        if not groups:
-            continue
-        key = (r["cell"], r["ts"])
-        got = per_log.get(key)
-        if got is None:
-            per_log[key] = (r["pid"], set(groups))
-        else:
-            got[1].update(groups)
-    counts: list[Counter] = [Counter() for _ in range(n)]
-    for pid, groups in per_log.values():
-        for gi in groups:
-            counts[gi][pid] += 1
+def _tops(conn, n, season_id, players) -> list[list[dict]]:
+    per_group: list[list[tuple[int, int]]] = [[] for _ in range(n)]
+    for r in conn.execute(_CAPTURES_SQL, (season_id,)):
+        per_group[r["gi"]].append((r["pid"], r["v"]))
     tops = []
-    for c in counts:
-        rows = []
+    for rows in per_group:
+        out = []
         # most captures first; equal counts in player id order (what the
         # per-request GROUP BY hands back)
-        for pid, caps in sorted(c.items(), key=lambda kv: (-kv[1], kv[0])):
+        for pid, caps in sorted(rows, key=lambda kv: (-kv[1], kv[0])):
             who = players.get(pid)
             if who is None:
                 continue      # the per-request query joins player, so a player row must exist
-            rows.append({"display_name": who[0], "team": who[1], "captures": caps})
-            if len(rows) == TOP_LIMIT:
+            out.append({"display_name": who[0], "team": who[1], "captures": caps})
+            if len(out) == TOP_LIMIT:
                 break
-        tops.append(rows)
+        tops.append(out)
     return tops

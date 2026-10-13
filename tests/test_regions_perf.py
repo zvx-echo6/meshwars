@@ -172,7 +172,11 @@ def test_the_group_batch_reads_each_figure_once_through_the_index(big, monkeypat
     built, stmts = _captured(c, lambda: regional_standings.build_group_standings(targets))
     elapsed = time.monotonic() - t0
     assert elapsed < 10, elapsed                      # generous: the point is the plans below, not the stopwatch
+    # the batch drops its temporary code -> group table when it finishes; rebuild it to explain its statements
+    c.execute("PRAGMA temp_store=FILE")
+    c.execute("CREATE TEMP TABLE IF NOT EXISTS _rg(code TEXT NOT NULL, gi INTEGER NOT NULL, PRIMARY KEY (code, gi)) WITHOUT ROWID")
     _assert_plan_is_indexed_probe(c, stmts)
+    c.execute("PRAGMA temp_store=MEMORY")
     assert len(stmts) == 4                            # one pass per figure on the one active board
     assert len(built) == 15 * 4
     # the squares tally agrees with the per-request count for a group

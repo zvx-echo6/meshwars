@@ -383,7 +383,21 @@ services:
     # below only makes that owner true for THIS container -- it says
     # nothing about how many processes are inside it, which is what
     # the missing --workers here actually guarantees.
-    mem_limit: 1g
+    # MEMORY SIZING -- see the web service's note above: CT 119 has 4.0 GiB
+    # total. The worker was 1g (a NEW ceiling when the web/worker split
+    # landed, sized for ~340-430 MiB of real use). Regions changed that: the
+    # worker holds the region polygon index (a few hundred MB while a full
+    # region set is being imported or re-mapped) and builds the joined
+    # regions' standings, and with 490k region_cell rows it reached 1.04 GB
+    # and was OOM-killed while 553 regions were imported. The worker is now
+    # 2g, web 2g: 2g + 2g = 4g, the whole container. These are CEILINGS, not
+    # reservations -- real combined use is about 2.5 GB (web ~1.5 GB across
+    # its three processes, worker ~0.7-1 GB), which is why there is still
+    # room for the container's own OS under the sum. See app/regions.py
+    # (the index is built only when there is something to map, and only once
+    # the region set has been stable) for what keeps the worker well below
+    # its ceiling.
+    mem_limit: 2g
     environment:
       <<: *meshwars-environment
       # Worker role: the one process fleet-wide that owns every

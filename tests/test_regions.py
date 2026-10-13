@@ -653,9 +653,17 @@ def test_membership_work_runs_with_no_write_lock_held(db_path, monkeypatch):
         return real(index, cells)
 
     monkeypatch.setattr(regions, "_membership", spy)
+    real_cells = regions._cells_in_shape
+
+    def spy_cells(shape, lats, lons, ids):
+        seen.append(_write_lock_is_free(db_path))
+        return real_cells(shape, lats, lons, ids)
+
+    monkeypatch.setattr(regions, "_cells_in_shape", spy_cells)
     assert regions.map_new_cells() == 1
+    n_map = len(seen)
     regions.remap_regions(["BOI"])
-    assert seen and all(seen)
+    assert n_map >= 1 and len(seen) > n_map and all(seen)      # the remap's testing was lock-free too
     c.close()
 
 
@@ -774,16 +782,16 @@ def test_remap_skips_a_region_refetched_since_the_work_was_computed(db_path, mon
     c.execute("BEGIN IMMEDIATE")
     regions.store_region(c, "BOX", "Box", _box(43.00, 43.02, -115.985, -115.955), now=2000)  # moved: remap has work
     c.execute("COMMIT")
-    real = regions._membership
+    real = regions._cells_in_shape
 
-    def meanwhile(index, cells):
-        out = real(index, cells)
+    def meanwhile(shape, lats, lons, ids):
+        out = real(shape, lats, lons, ids)
         c.execute("BEGIN IMMEDIATE")
         regions.store_region(c, "BOX", "Box", _box(10, 11, 10, 11), now=9000)   # re-fetched mid-remap
         c.execute("COMMIT")
         return out
 
-    monkeypatch.setattr(regions, "_membership", meanwhile)
+    monkeypatch.setattr(regions, "_cells_in_shape", meanwhile)
     n_before = c.execute("SELECT COUNT(*) FROM region_cell WHERE region_code='BOX'").fetchone()[0]
     assert regions.remap_regions(["BOX"]) == 0     # the newer fetch owns it; nothing written from stale work
     assert c.execute("SELECT COUNT(*) FROM region_cell WHERE region_code='BOX'").fetchone()[0] == n_before
@@ -820,3 +828,113 @@ def test_vendored_polygon_clipping_is_pinned_licensed_and_loaded_before_the_map(
     html = (root / "map2.html").read_text(encoding="utf-8")
     assert html.index("vendor/polygon-clipping.0.15.7.umd.min.js") < html.index("/static/map2.js")
     assert "cdn" not in html[html.index("polygon-clipping"):html.index("polygon-clipping") + 200].lower().replace("cdn.jsdelivr", "")
+
+
+# ---- the worker's memory: shapes are built lazily, cached per region, and imports are waited out ----------
+
+
+def test_nothing_to_map_builds_no_shape_and_parses_no_polygon(db_path, monkeypatch):
+    load_fixture_regions(db_path)
+    monkeypatch.setattr(regions, "_INDEX_CACHE", None)
+    loads = []
+    real = regions._load_shape
+    monkeypatch.setattr(regions, "_load_shape", lambda *a, **k: (loads.append(a), real(*a, **k))[1])
+    assert regions.map_new_cells() == 0
+    assert loads == [] and not regions._shape_cache()
+
+
+def test_only_the_regions_a_cell_falls_near_are_loaded_and_they_stay_cached(db_path, monkeypatch):
+    load_fixture_regions(db_path)
+    monkeypatch.setattr(regions, "_INDEX_CACHE", None)
+    c = _conn(db_path)
+    _insert_tile(c, 1, grid_cell_id(43.61, -116.20))           # Boise
+    assert regions.map_new_cells() == 1
+    assert {k[1] for k in regions._shape_cache()} == {"BOI"}    # not PIH, IDA, SMN
+    loads = []
+    real = regions._load_shape
+    monkeypatch.setattr(regions, "_load_shape", lambda *a, **k: (loads.append(a), real(*a, **k))[1])
+    _insert_tile(c, 1, grid_cell_id(43.62, -116.21))
+    assert regions.map_new_cells() == 1
+    assert loads == []                                           # the cached shape served it
+    c.close()
+
+
+def test_a_changed_region_drops_only_its_own_shape_before_loading_anything(db_path, monkeypatch):
+    load_fixture_regions(db_path)
+    monkeypatch.setattr(regions, "_INDEX_CACHE", None)
+    c = _conn(db_path)
+    _insert_tile(c, 1, grid_cell_id(43.61, -116.20))
+    _insert_tile(c, 1, grid_cell_id(42.87, -112.45))
+    regions.map_new_cells()
+    assert {k[1] for k in regions._shape_cache()} >= {"BOI", "PIH"}
+    c.execute("BEGIN IMMEDIATE")
+    parsed = regions.parse_region_page(_fx("boi.html"), "BOI")
+    regions.store_region(c, "BOI", "Boise, US", parsed, now=5000)
+    c.execute("COMMIT")
+    conn = db.connect()
+    try:
+        regions._lazy_index(conn)
+    finally:
+        conn.close()
+    assert {k[1] for k in regions._shape_cache()} >= {"PIH"} and "BOI" not in {k[1] for k in regions._shape_cache()}
+    c.close()
+
+
+def test_the_shape_cache_is_bounded(db_path, monkeypatch):
+    monkeypatch.setattr(regions, "_INDEX_CACHE", None)
+    monkeypatch.setattr(regions, "_SHAPE_CACHE_MAX", 2)
+    c = _conn(db_path)
+    c.execute("BEGIN IMMEDIATE")
+    for i in range(5):
+        regions.store_region(c, f"B{i}", f"B{i}", _box(40 + i, 40.5 + i, -110, -109), now=1000)
+    c.execute("COMMIT")
+    for i in range(5):
+        _insert_tile(c, 1, grid_cell_id(40.25 + i, -109.5))
+    regions.map_new_cells()
+    assert len(regions._shape_cache()) <= 2
+    c.close()
+
+
+def test_a_shape_keeps_no_ring_lists_and_agrees_with_the_naive_test():
+    rings = [[(0, 0), (0, 4), (2, 4), (2, 2), (4, 2), (4, 0)]]
+    shape = regions.Shape(rings)
+    assert not hasattr(shape, "rings") and not hasattr(shape, "__dict__")
+    for lat, lon, want in ((1, 1, True), (1, 3, True), (3, 1, True), (3, 3, False), (5, 5, False), (2, 2, False)):
+        if (lat, lon) != (2, 2):          # a point exactly on a corner is unspecified
+            assert shape.contains(lat, lon) is want
+
+
+def test_the_periodic_mapping_waits_for_a_still_region_set(db_path, monkeypatch):
+    load_fixture_regions(db_path)                           # fetched at epoch 1000: long ago
+    assert regions.region_set_is_stable()
+    c = _conn(db_path)
+    c.execute("BEGIN IMMEDIATE")
+    regions.store_region(c, "NEW", "New", _box(10, 11, 10, 11), now=int(time.time()))   # a region just arrived
+    c.execute("COMMIT")
+    assert not regions.region_set_is_stable()
+    c.execute("UPDATE region SET fetched_at = ?", (int(time.time()) - regions.REGION_SET_STABLE_S - 5,))
+    assert regions.region_set_is_stable()
+    regions._write_state({"state": "running", "mode": "all", "started_at": int(time.time())})
+    assert not regions.region_set_is_stable()               # an import is running
+    c.close()
+
+
+def test_remap_memory_stays_near_one_regions_cells(db_path):
+    """The remap holds the mapped cells once and one region's cell set at a time, not every region's."""
+    import tracemalloc
+    c = _conn(db_path)
+    c.execute("BEGIN IMMEDIATE")
+    for i in range(12):
+        regions.store_region(c, f"M{i:02d}", f"M{i}", _box(40 + i * 0.1, 40.09 + i * 0.1, -110, -109), now=1000)
+    c.execute("COMMIT")
+    for i in range(12):
+        for k in range(300):
+            _insert_tile(c, 1, grid_cell_id(40.045 + i * 0.1, -110 + k * 0.0033))
+    regions.map_new_cells()
+    codes = [f"M{i:02d}" for i in range(12)]
+    tracemalloc.start()
+    regions.remap_regions(codes)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 6_000_000, peak
+    c.close()

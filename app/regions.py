@@ -33,6 +33,9 @@ import re
 import sqlite3
 import threading
 import time
+from array import array
+from bisect import bisect_left, bisect_right
+from collections import OrderedDict
 from urllib.parse import urlsplit
 from typing import Iterable, NamedTuple
 
@@ -145,16 +148,24 @@ class Shape:
     Edges are bucketed into horizontal bands once, so contains() walks only
     the edges whose latitude span reaches the point's band instead of every
     edge of the boundary.
+
+    Stored compactly: one flat array of doubles for all edges (la1, lo1, la2,
+    lo2 each) and, per band, a slice of one flat array of edge numbers (CSR
+    layout). The earlier list-of-lists-of-tuples form held the same 553
+    production boundaries (1.5 million vertices) in ~320 MB; this is ~60 MB.
+    The source rings are not kept.
     """
 
+    __slots__ = ("south", "west", "north", "east", "_nb", "_h", "_edges", "_start", "_band_edges")
+
     def __init__(self, rings: list[list[tuple[float, float]]]):
-        self.rings = rings
         self.south, self.west, self.north, self.east = bbox_of(rings)
         n = sum(len(r) for r in rings)
         self._nb = max(1, min(2048, n // 4))
         span = self.north - self.south
         self._h = span / self._nb if span > 0 else 1.0
-        self._bands: list[list[tuple[float, float, float, float]]] = [[] for _ in range(self._nb)]
+        edges = array("d")
+        spans: list[tuple[int, int]] = []     # (first band, last band) of each stored edge
         for ring in rings:
             m = len(ring)
             for i in range(m):
@@ -162,11 +173,23 @@ class Shape:
                 la2, lo2 = ring[(i + 1) % m]
                 if la1 == la2:
                     continue  # a horizontal edge never crosses the ray
-                lo_b = self._band(min(la1, la2))
-                hi_b = self._band(max(la1, la2))
-                edge = (la1, lo1, la2, lo2)
-                for k in range(lo_b, hi_b + 1):
-                    self._bands[k].append(edge)
+                edges.extend((la1, lo1, la2, lo2))
+                spans.append((self._band(min(la1, la2)), self._band(max(la1, la2))))
+        counts = [0] * (self._nb + 1)
+        for lo_b, hi_b in spans:
+            for k in range(lo_b, hi_b + 1):
+                counts[k + 1] += 1
+        for k in range(self._nb):
+            counts[k + 1] += counts[k]
+        fill = counts[:-1]
+        band_edges = array("I", [0]) * counts[-1]
+        for e, (lo_b, hi_b) in enumerate(spans):
+            for k in range(lo_b, hi_b + 1):
+                band_edges[fill[k]] = e
+                fill[k] += 1
+        self._edges = edges
+        self._start = array("I", counts)
+        self._band_edges = band_edges
 
     def _band(self, lat: float) -> int:
         return min(self._nb - 1, max(0, int((lat - self.south) / self._h)))
@@ -174,10 +197,17 @@ class Shape:
     def contains(self, lat: float, lon: float) -> bool:
         if lat < self.south or lat > self.north or lon < self.west or lon > self.east:
             return False
+        k = self._band(lat)
+        edges = self._edges
+        band_edges = self._band_edges
         inside = False
-        for la1, lo1, la2, lo2 in self._bands[self._band(lat)]:
+        for j in range(self._start[k], self._start[k + 1]):
+            e = band_edges[j] * 4
+            la1 = edges[e]
+            la2 = edges[e + 2]
             if (la1 > lat) != (la2 > lat):
-                x = lo1 + (lat - la1) * (lo2 - lo1) / (la2 - la1)
+                lo1 = edges[e + 1]
+                x = lo1 + (lat - la1) * (edges[e + 3] - lo1) / (la2 - la1)
                 if x > lon:
                     inside = not inside
         return inside
@@ -190,21 +220,31 @@ def point_in_rings(lat: float, lon: float, rings: list[list[tuple[float, float]]
 
 class RegionIndex:
     """Which regions contain a point. A coarse one-degree bucket prefilter
-    picks the few candidate shapes; each runs its own bbox and banded
-    test."""
+    picks the few candidate regions; each runs its own bbox and banded test.
 
-    def __init__(self, shapes: dict[str, Shape]):
-        self.shapes = shapes
-        self._buckets: dict[tuple[int, int], list[tuple[str, Shape]]] = {}
-        for code, sh in shapes.items():
-            for la in range(math.floor(sh.south), math.floor(sh.north) + 1):
-                for lo in range(math.floor(sh.west), math.floor(sh.east) + 1):
-                    self._buckets.setdefault((la, lo), []).append((code, sh))
+    Two forms. Given `shapes` (code -> Shape) everything is already in
+    memory. Given `boxes` (code -> (south, west, north, east)) and a
+    `getter` (code -> Shape), shapes are built only for the regions a point
+    actually falls near, when first needed -- see _lazy_index().
+    """
+
+    def __init__(self, shapes: dict[str, Shape] | None = None, *, boxes=None, getter=None):
+        if shapes is not None:
+            self.shapes = shapes
+            boxes = {c: (s.south, s.west, s.north, s.east) for c, s in shapes.items()}
+            getter = shapes.__getitem__
+        self._get = getter
+        self._buckets: dict[tuple[int, int], list[str]] = {}
+        for code, (south, west, north, east) in boxes.items():
+            for la in range(math.floor(south), math.floor(north) + 1):
+                for lo in range(math.floor(west), math.floor(east) + 1):
+                    self._buckets.setdefault((la, lo), []).append(code)
 
     def codes_for(self, lat: float, lon: float) -> list[str]:
         out = []
-        for code, sh in self._buckets.get((math.floor(lat), math.floor(lon)), ()):
-            if sh.contains(lat, lon):
+        for code in self._buckets.get((math.floor(lat), math.floor(lon)), ()):
+            sh = self._get(code)
+            if sh is not None and sh.contains(lat, lon):
                 out.append(code)
         return out
 
@@ -328,7 +368,6 @@ def store_region(conn, code: str, name: str, parsed: dict, now: int | None = Non
 # opened and closed inside one helper, and run_import() calls them between
 # fetches.
 _MAP_LOCK = threading.Lock()
-_INDEX_CACHE: tuple[tuple, RegionIndex] | None = None
 # Rows/cells per write transaction, and the pause after each. Sized so one
 # transaction holds the write lock for a small fraction of a second even on
 # the slow shared-CPU hosts this runs on: 2,000 inserts into region_cell
@@ -374,6 +413,10 @@ def _codes_signature(conn, codes: list[str]) -> tuple:
 
 
 def _build_index(conn, codes: Iterable[str] | None = None) -> RegionIndex:
+    """An index with every (or the given) region's shape built up front.
+    Holds all of them in memory at once: for the whole region set that is
+    tens of MB, so the worker's jobs use _lazy_index() / one shape at a time
+    instead; this is for callers that already hold few regions."""
     sql = "SELECT code, polygon_json FROM region"
     params: tuple = ()
     if codes is not None:
@@ -388,18 +431,69 @@ def _build_index(conn, codes: Iterable[str] | None = None) -> RegionIndex:
     return RegionIndex(shapes)
 
 
-def _full_index(conn) -> tuple[tuple, RegionIndex]:
-    """(signature, index over every region). Rebuilt only when the region
-    set changed -- parsing ~550 polygons is seconds of work, which is why
-    it must never run inside a write transaction."""
+# Shapes built so far for the periodic mapping job, (db path, code) ->
+# (fetched_at, Shape), least recently used first. Built on first use and kept
+# only while the region is unchanged, so a worker that has nothing to map
+# holds none, one mapping a few busy regions holds a few, and an import that
+# changes one region costs one rebuild (not all 553 every minute, which at
+# ~320 MB each time is what pushed the worker past its memory limit). The
+# name is kept for the tests that reset it by assigning None.
+_INDEX_CACHE: "OrderedDict | None" = None
+_SHAPE_CACHE_MAX = 120
+
+
+def _shape_cache() -> OrderedDict:
     global _INDEX_CACHE
+    if not isinstance(_INDEX_CACHE, OrderedDict):
+        _INDEX_CACHE = OrderedDict()
+    return _INDEX_CACHE
+
+
+def _load_shape(code: str, fetched_at: int | None = None) -> Shape | None:
+    """One region's shape straight from the database (None if the region is
+    gone, unreadable, or -- when `fetched_at` is given -- no longer the
+    version the caller saw)."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT polygon_json, fetched_at FROM region WHERE code = ?", (code,)).fetchone()
+    finally:
+        conn.close()
+    if row is None or (fetched_at is not None and row["fetched_at"] != fetched_at):
+        return None
+    rings = normalize_polygon(row["polygon_json"])
+    return Shape(rings) if rings else None
+
+
+def _lazy_index(conn) -> tuple[tuple, RegionIndex]:
+    """(signature, index over every region) -- built from the regions' boxes
+    alone; each shape is loaded when a point first falls inside its box and
+    is then cached. Shapes of regions that changed or vanished are dropped
+    here, BEFORE anything new is loaded, so an old and a new version of a
+    region are never in memory together."""
     sig = _region_signature(conn)
-    cached = _INDEX_CACHE
-    if cached is not None and cached[0] == sig:
-        return sig, cached[1]
-    idx = _build_index(conn)
-    _INDEX_CACHE = (sig, idx)
-    return sig, idx
+    rows = conn.execute("SELECT code, fetched_at, south, west, north, east FROM region").fetchall()
+    stamps = {r["code"]: r["fetched_at"] for r in rows}
+    boxes = {r["code"]: (r["south"], r["west"], r["north"], r["east"]) for r in rows}
+    cache = _shape_cache()
+    path = settings.db_path
+    for key in [k for k in cache if k[0] == path and stamps.get(k[1]) != cache[k][0]]:
+        del cache[key]
+
+    def get(code: str) -> Shape | None:
+        key = (path, code)
+        hit = cache.get(key)
+        if hit is not None:
+            cache.move_to_end(key)
+            return hit[1]
+        shape = _load_shape(code, stamps.get(code))
+        if shape is None:
+            return None
+        while len(cache) >= _SHAPE_CACHE_MAX:
+            cache.popitem(last=False)
+        cache[key] = (stamps.get(code), shape)
+        return shape
+
+    return sig, RegionIndex(boxes=boxes, getter=get)
 
 
 def _unmapped_cells(conn, limit: int) -> list[str]:
@@ -460,12 +554,12 @@ def _map_one_batch(batch: int) -> int | None:
     try:
         if conn.execute("SELECT 1 FROM region LIMIT 1").fetchone() is None:
             return None
-        sig, index = _full_index(conn)
         cells = _unmapped_cells(conn, batch)
+        if not cells:
+            return None       # nothing to test: no index is built, no polygon parsed
+        sig, index = _lazy_index(conn)
     finally:
         conn.close()
-    if not cells:
-        return None
     rows = _membership(index, cells)
 
     def write() -> int:
@@ -555,9 +649,27 @@ def _write_chunk(code: str, sig: int, ops: list[tuple[str, str, str]]) -> float 
         wc.close()
 
 
+def _cells_in_shape(shape: Shape, lats, lons, ids) -> set[str]:
+    """The cells (sorted by latitude in the parallel arrays lats/lons/ids)
+    whose centre is inside `shape`: a bisect narrows to the shape's
+    latitude range, then a bbox and the polygon test."""
+    lo = bisect_left(lats, shape.south)
+    hi = bisect_right(lats, shape.north)
+    west, east = shape.west, shape.east
+    contains = shape.contains
+    return {ids[i] for i in range(lo, hi) if west <= lons[i] <= east and contains(lats[i], lons[i])}
+
+
 def remap_regions(codes: Iterable[str]) -> int:
     """Recompute membership of the given regions over every cell already
     mapped. Returns the number of membership rows inserted or deleted.
+
+    One region at a time: its shape is loaded, every cell inside it found
+    (the mapped cells are held once, sorted by latitude, in flat arrays),
+    its rows compared with the stored ones, and the shape and the result
+    dropped before the next region. So the memory peak is one shape plus one
+    region's cell set, however many regions are being remapped (the whole
+    set at the end of an import) -- not every region's cells at once.
 
     All the polygon testing and the comparison with the stored rows happen
     with NO transaction open. What remains is a difference (rows to add,
@@ -581,24 +693,33 @@ def remap_regions(codes: Iterable[str]) -> int:
         try:
             sigs = {r[0]: r[1] for r in conn.execute(
                 "SELECT code, fetched_at FROM region WHERE code IN (%s)" % ",".join("?" * len(codes)), codes)}
-            index = _build_index(conn, list(sigs))
-            cells = [r[0] for r in conn.execute("SELECT cell_id FROM region_cell_mapped")]
+            mapped = [r[0] for r in conn.execute("SELECT cell_id FROM region_cell_mapped")]
         finally:
             conn.close()
-        new_by_code: dict[str, set[str]] = {c: set() for c in sigs}
-        for cid, hit in _membership(index, cells):
-            for code in hit:
-                new_by_code[code].add(cid)
-        snapshot = set(cells)
+        points = []
+        for cid in mapped:
+            try:
+                lat, lon = cell_center(cid)
+            except ValueError:
+                continue
+            points.append((lat, lon, cid))
+        points.sort()
+        lats = array("d", (p[0] for p in points))
+        lons = array("d", (p[1] for p in points))
+        ids = [p[2] for p in points]
+        snapshot = set(ids)
+        del points, mapped
         for code, sig in sigs.items():
+            shape = _load_shape(code, sig)
+            new = _cells_in_shape(shape, lats, lons, ids) if shape is not None else set()
             rc = connect()
             try:
                 old = {r[0] for r in rc.execute(
                     "SELECT cell_id FROM region_cell WHERE region_code = ?", (code,))} & snapshot
             finally:
                 rc.close()
-            new = new_by_code[code]
             ops = [("i", code, c) for c in sorted(new - old)] + [("d", code, c) for c in sorted(old - new)]
+            del shape, new, old
             for i in range(0, len(ops), _TXN_ROWS):
                 chunk = ops[i:i + _TXN_ROWS]
                 held = _retry_busy(lambda: _write_chunk(code, sig, chunk))
@@ -1231,15 +1352,34 @@ async def _guarded_import(mode: str) -> None:
         log.exception("regions: import failed")
 
 
+# The periodic mapping waits for the region set to be still: while an import
+# is running, or for this long after the last region changed, it does not
+# map (the squares just wait; the import's own remap covers the cells that
+# are already mapped, and the next quiet cycle maps the rest).
+REGION_SET_STABLE_S = 120
+
+
+def region_set_is_stable() -> bool:
+    if sync_status()["running"]:
+        return False
+    conn = connect()
+    try:
+        last = conn.execute("SELECT MAX(fetched_at) FROM region").fetchone()[0]
+    finally:
+        conn.close()
+    return not last or time.time() - last >= REGION_SET_STABLE_S
+
+
 async def run_forever() -> None:
     """Worker-role loop. Every cycle: map squares that have no membership
-    yet (cheap, DB only). When regions_sync_enabled: a daily fetch of the
+    yet (cheap, DB only; deferred while regions are being imported). When regions_sync_enabled: a daily fetch of the
     list plus boundaries for codes not stored yet, and a weekly full
     re-fetch of every boundary."""
     log.info("regions loop starting (sync %s)", "on" if settings.regions_sync_enabled else "off")
     while True:
         try:
-            await asyncio.to_thread(map_new_cells)
+            if await asyncio.to_thread(region_set_is_stable):
+                await asyncio.to_thread(map_new_cells)
             if settings.regions_sync_enabled and time.time() >= _next_try_at \
                     and not sync_status()["running"] and (_task is None or _task.done()):
                 conn = await asyncio.to_thread(connect)
