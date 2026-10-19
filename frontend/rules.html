@@ -159,16 +159,17 @@
 
         <section id="claiming">
           <h2>Claiming a square</h2>
-          <p>Everything starts with a ping: your position, plus which mesh nodes that transmission reached. Each node it reached is worth a tenth of a point, and a single ping can never be worth more than one point no matter how many it reached.</p>
-          <table class="rules-table">
+          <p>Everything starts with a ping: a report from MeshMapper or FreqMapper that your radio reached the mesh from a square. The two boards score that report differently.</p>
+          <table class="rules-table rules-table-compare">
+            <thead><tr><th></th><th>MeshCore</th><th>Meshtastic</th></tr></thead>
             <tbody>
-              <tr><th>Per node reached</th><td>0.1 points</td></tr>
-              <tr><th>Most one ping can earn</th><td>1.0 points</td></tr>
-              <tr><th>A ping that reached nobody</th><td>nothing at all</td></tr>
+              <tr><th>Per ping</th><td>0.1 points per repeater you heard</td><td>0.5 points per FreqMapper report</td></tr>
+              <tr><th>Most one ping can earn</th><td>1.0 points</td><td>0.5 points</td></tr>
+              <tr><th>A ping that reached nobody</th><td>nothing at all</td><td>never reported, so nothing</td></tr>
             </tbody>
           </table>
-          <p>That last line is the rule people trip over. Being somewhere is not enough. A ping from a valley with no coverage is recorded, costs you nothing, and claims nothing.</p>
-          <p>Which nodes count differs by protocol and it is inverted between them &mdash; see <a href="#protocols">MeshCore and Meshtastic</a>.</p>
+          <p>That last line is the rule people trip over. Being somewhere is not enough. A ping from a valley with no coverage claims nothing.</p>
+          <p>How each board's report reaches MeshWars is covered under <a href="#protocols">MeshCore and Meshtastic</a>.</p>
         </section>
 
         <section id="holding">
@@ -185,7 +186,7 @@
           <table class="rules-table">
             <tbody>
               <tr><th>Protection after a capture</th><td>15 minutes</td></tr>
-              <tr><th>Same repeater, same player, same square</th><td>once per 5 minutes</td></tr>
+              <tr><th>Same repeater, same player, same square (MeshCore)</th><td>once per 5 minutes</td></tr>
               <tr><th>New painter bonus</th><td>+0.5 points, once per player per square, per team</td></tr>
               <tr><th>Decay</th><td>0.25 points per day, floor of zero</td></tr>
             </tbody>
@@ -337,16 +338,10 @@
           <h2>Fair play</h2>
           <p>A few mechanics exist to keep the game about reaching the mesh. All of them are narrow on purpose.</p>
 
-          <h3 id="fairplay-precision">How precise your position has to be</h3>
-          <p>A Meshtastic radio can be set to report its position roughly rather than exactly, and some are shipped that way. A rough position can put you anywhere inside a box a kilometre or more across, which is several squares wide &mdash; so a position that is not precise enough to say which square you were in claims nothing at all.</p>
-          <p>Squares are about 300 metres, so a position has to be good to roughly 90 metres or better to count. In the Meshtastic app that is the channel's position precision setting: leave it at full precision, or at least at the step that says within 91 metres. A packet that does not say how precise it is gets the same answer, because there is nothing to check &mdash; and the packets that omit it are the ones carrying no usable position in the first place.</p>
-          <p>This is a Meshtastic setting and it has no MeshCore equivalent. If you register a radio, drive somewhere with coverage, and nothing appears on the map, this is the first thing to look at.</p>
-          <p>This check, and the speed check below, apply to positions read from your radio's own packets through MeshView. FreqMapper reports are taken as FreqMapper sends them.</p>
-
           <h3 id="fairplay-aircraft">Aircraft and impossible jumps</h3>
-          <p>A radio at altitude reaches an absurd number of nodes, which would make the exploration awards meaningless. MeshWars works out your speed between consecutive positions &mdash; and the two boards act on that number differently, because they can afford to.</p>
+          <p>A radio at altitude reaches an absurd number of nodes, which would make the exploration awards meaningless. On MeshCore, MeshWars works out your speed between consecutive positions.</p>
           <p><strong>On MeshCore</strong>, faster than roughly 100 mph is marked as airborne. Those squares <strong>still count as territory</strong> &mdash; the radio genuinely reached those nodes, and that is what territory measures. What they do not count toward is Places Worth Going, and the awards built on reach and effort: Tourist, Park Hopper, Peak Tagger and Frontier. Nothing is taken away and nobody is penalised. Above roughly 900 mph the jump is read as a bad GPS fix rather than a flight, so a phone that briefly locates you in the next county does not disqualify a legitimate remote claim.</p>
-          <p><strong>On Meshtastic</strong>, there is no airborne marking at all. A position that would have needed more than roughly 200 mph since your last one is thrown out instead, and claims nothing. The bar is deliberately far above MeshCore's: refusing a position costs you a square where labelling one does not, and two positions a few seconds apart in neighbouring squares can read as a surprisingly high speed from the grid alone. A refused position is also not used as the starting point for the next check, so one bad fix cannot make your next honest ping look like the impossible one.</p>
+          <p><strong>On Meshtastic</strong>, there is no speed check and no airborne marking. FreqMapper's reports are taken as FreqMapper sends them.</p>
           <p>Nothing catches a hovering aircraft; that is a known gap.</p>
 
           <h3 id="fairplay-automated-checkins">Automated check-ins</h3>
@@ -364,16 +359,16 @@
           <table class="rules-table rules-table-compare">
             <thead><tr><th></th><th>MeshCore</th><th>Meshtastic</th></tr></thead>
             <tbody>
-              <tr><th>How position arrives</th><td>pushed &mdash; MeshMapper forwards a copy of your wardrive</td><td>pulled &mdash; MeshWars reads coverage from FreqMapper, or from your radio's own position packets</td></tr>
-              <tr><th>What earns points</th><td>how many repeaters <em>you heard</em></td><td>how many MQTT feeders <em>heard you</em> on MeshView; a flat 0.5 points per FreqMapper report</td></tr>
+              <tr><th>How position arrives</th><td>pushed &mdash; MeshMapper forwards a copy of your wardrive</td><td>pulled &mdash; MeshWars reads FreqMapper's coverage reports</td></tr>
+              <tr><th>What earns points</th><td>how many repeaters <em>you heard</em></td><td>a flat 0.5 points per FreqMapper report &mdash; a transmission a Watcher verified, or a packet your radio heard</td></tr>
               <tr><th>Registering</th><td>binds itself on your first wardrive</td><td>you add the node ID yourself</td></tr>
               <tr><th>Net check-in</th><td>your community's net channel</td><td>your community's net hashtag</td></tr>
-              <tr><th>Position precision</th><td>no setting to get wrong</td><td>must be good to ~90 m or the ping is refused (MeshView positions)</td></tr>
-              <tr><th>Going too fast</th><td>over ~100 mph is labelled airborne; the square still counts</td><td>over ~200 mph is refused outright (MeshView positions); nothing is labelled airborne</td></tr>
+              <tr><th>Position precision</th><td>no setting to get wrong</td><td>taken as FreqMapper reports it</td></tr>
+              <tr><th>Going too fast</th><td>over ~100 mph is labelled airborne; the square still counts</td><td>taken as FreqMapper reports it; nothing is labelled airborne</td></tr>
             </tbody>
           </table>
           <p>The inversion is not a design choice, it is what each network lets anyone observe. MeshCore tells you what your radio reached; Meshtastic tells you who logged your radio.</p>
-          <p>Everything else &mdash; teams, squares, capture, decay, seasons, the net, streaks, the honors &mdash; is identical. The two rows at the bottom of that table are the only places the boards judge a ping differently, and both are explained under <a href="#fairplay">fair play</a>.</p>
+          <p>Everything else &mdash; teams, squares, capture, decay, seasons, the net, streaks, the honors &mdash; is identical. The two rows at the bottom of that table are the only places the boards judge a ping differently; the MeshCore side is explained under <a href="#fairplay-aircraft">fair play</a>.</p>
         </section>
 
 
