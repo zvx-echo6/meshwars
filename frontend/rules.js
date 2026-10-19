@@ -58,12 +58,11 @@ if (sections.length && 'IntersectionObserver' in window) {
   for (const s of sections) io.observe(s);
 }
 
-// ---- "Where it counts": live play area and net list --------------------
+// ---- "Where it counts": net list ----------------------------------------
 //
-// GET /config (play_area) and GET /api/v1/nets fill #area. Enhancement
-// only, same contract as about.js: the static worldwide text in
-// rules.html is correct on its own, so a failed fetch or a bad shape
-// just leaves it in place; nothing here throws.
+// GET /api/v1/nets fills the configured-nets table. Enhancement only,
+// same contract as about.js: a failed fetch or a bad shape just shows
+// the error note; nothing here throws.
 //
 // SECURITY: all of it comes from the server and is untrusted. Every
 // element is built with document.createElement + .textContent, never
@@ -79,13 +78,6 @@ if (sections.length && 'IntersectionObserver' in window) {
     'America/Chicago': 'Central',
     'America/New_York': 'Eastern',
   };
-
-  function formatDeg(n) {
-    const v = Number(n);
-    if (!Number.isFinite(v)) return null;
-    const s = Math.abs(v).toFixed(2);
-    return (v < 0 && Number(s) !== 0 ? '\u2212' : '') + s + '\u00b0';
-  }
 
   function pad2(n) {
     return String(n).padStart(2, '0');
@@ -115,35 +107,6 @@ if (sections.length && 'IntersectionObserver' in window) {
     return tr;
   }
 
-  async function loadPlayArea() {
-    try {
-      const res = await fetch('/config');
-      if (!res.ok) return;
-      const data = await res.json();
-      const pa = data && data.play_area;
-      if (!pa) return;
-      const { north, south, west, east } = pa;
-      if (north === south) return;
-      if (north >= 90 && south <= -90 && west <= -180 && east >= 180) return;
-      const vals = { north, south, west, east };
-      const text = {};
-      for (const k of Object.keys(vals)) {
-        text[k] = formatDeg(vals[k]);
-        if (text[k] === null) return;
-      }
-      for (const k of Object.keys(text)) {
-        const el = document.getElementById('area-' + k);
-        if (el) el.textContent = text[k];
-      }
-      const bounds = document.getElementById('area-bounds');
-      const box = document.getElementById('area-box');
-      if (bounds) bounds.hidden = true;
-      if (box) box.hidden = false;
-    } catch {
-      // Enhancement only -- leave the worldwide text in place.
-    }
-  }
-
   async function loadNets() {
     const err = document.getElementById('area-nets-error');
     const body = document.getElementById('area-nets-body');
@@ -160,7 +123,6 @@ if (sections.length && 'IntersectionObserver' in window) {
     }
   }
 
-  loadPlayArea();
   loadNets();
 })();
 
