@@ -186,7 +186,7 @@
             <tbody>
               <tr><th>Protection after a capture</th><td>15 minutes</td></tr>
               <tr><th>Same repeater, same player, same square</th><td>once per 5 minutes</td></tr>
-              <tr><th>New painter bonus</th><td>+0.5 points, once per player per square</td></tr>
+              <tr><th>New painter bonus</th><td>+0.5 points, once per player per square, per team</td></tr>
               <tr><th>Decay</th><td>0.25 points per day, floor of zero</td></tr>
             </tbody>
           </table>
@@ -201,12 +201,12 @@
 
         <section id="net">
           <h2>The weekly net</h2>
-          <p>Each mesh community that plays MeshWars runs its own net, on its own schedule and its own channel. Checking in during your net's window earns your team points on top of any ground you hold. <strong>A net only counts once an operator has configured it</strong> &mdash; posting on a channel nobody has set up as a net earns nothing, however net-like it looks. See the <a href="/about">about page</a> for which communities currently have one configured.</p>
+          <p>Each mesh community that plays MeshWars runs its own net, on its own schedule and its own channel. Checking in during your net's window earns your team points on top of any ground you hold. <strong>A net only counts once an operator has configured it</strong> &mdash; posting on a channel nobody has set up as a net earns nothing, however net-like it looks. The nets configured right now are listed under <a href="#area-nets">Where it counts</a>.</p>
           <table class="rules-table">
             <tbody>
               <tr><th>When</th><td>set per community &mdash; check your local net's published day and hours</td></tr>
               <tr><th>Base value</th><td>25 points</td></tr>
-              <tr><th>How often</th><td>once per net, per player</td></tr>
+              <tr><th>How often</th><td>once per day, per player &mdash; two nets on the same day, on either board, pay once</td></tr>
               <tr><th>On MeshCore</th><td>post in your community's net channel</td></tr>
               <tr><th>On Meshtastic</th><td>send a message containing your community's net hashtag</td></tr>
             </tbody>
@@ -231,7 +231,7 @@
           </table>
           <p>Miss a net and you start again at 25.</p>
           <p><strong>A week where the net does not happen at all costs you nothing.</strong> Your net's day only counts as a net if somebody checked in. If everyone skips a holiday week, nobody's run breaks.</p>
-          <p><strong>Your streak survives a season boundary.</strong> The points it earned reset with everything else, but the run itself is a record of showing up, not territory. Streaks are counted per board &mdash; a MeshCore run and a Meshtastic run are separate.</p>
+          <p><strong>Your streak survives a season boundary.</strong> The points it earned reset with everything else, but the run itself is a record of showing up, not territory. Streaks are counted per net &mdash; each net you attend keeps its own run.</p>
         </section>
 
         <section id="places">
@@ -266,8 +266,9 @@
           <p><strong>Explorer is not a monthly honor.</strong> It is the name of an activity and of a ranking &mdash; the Explorer tab under Top Operators, alongside Wardrivers and NetOps. Your Explorer Score runs the length of the season and counts toward your total score, so it is never reset or scored month by month the way the honors below are. The monthly honors built on places count visits instead of points: Tourist, Park Hopper and Peak Tagger.</p>
 
           <h3 id="places-which-square">Which square scores</h3>
-          <p>A landmark or a summit scores the single square its point falls in. A park with a mapped boundary at least the size of a grid square scores every square more than half inside that boundary &mdash; skirt its edge and only the squares mostly inside it count. A park smaller than a square, or without a boundary on file at all, scores the square containing its point instead, the same as a landmark. Close to two in five parks have no boundary data on file; those still score, just by that simpler rule.</p>
-          <p>One square can carry more than one place &mdash; a landmark standing inside a large park, say. <strong>Only the most valuable one scores.</strong> Places do not stack: the lesser place is dropped rather than paid alongside the better one, because one trip to one square is one errand and it pays once. That holds even if the more valuable place gets capped by what's left of your week &mdash; the cheaper place on the square still doesn't step in. If you already collected that square's place this week, it simply pays nothing on a repeat visit. Two places of exactly equal value on one square always resolve to the same winner, every week and for every player.</p>
+          <p>A landmark scores the square its point falls in and the eight squares around it, so reaching the gate or the fence line counts as going. A park with a mapped boundary at least the size of a grid square scores every square its boundary touches, plus one ring of squares outside it. A park smaller than a square, or with no boundary on file at all, scores the block of nine squares around its point, the same as a landmark. Close to two in five parks have no boundary data on file; those still score, just by that simpler rule.</p>
+          <p>A summit gets no ring. It scores the squares within 1.5 kilometres of the peak that sit within 200 metres of its height, plus the peak's own square &mdash; you have to actually be up on top.</p>
+          <p>One ping can be in reach of more than one place &mdash; a landmark standing inside a large park, say. <strong>Only the most valuable one scores.</strong> Places do not stack: the lesser place is dropped rather than paid alongside the better one, because one trip is one errand and it pays once. That holds even if the more valuable place gets capped by what's left of your week &mdash; the cheaper place on the square still doesn't step in. If you already collected that place this week, it simply pays nothing on a repeat visit. Two places of exactly equal value on one square always resolve to the same winner, every week and for every player.</p>
 
           <h3 id="places-list">What makes the list</h3>
           <p>The list is deliberately narrow, and three things you might expect on it are not. Trailheads are left off because a trailhead is where you start going somewhere, not somewhere to go. Fire lookouts are left off because the peak a lookout stands on is already the summit you get credit for, and scoring both would pay you twice for one walk &mdash; for the same reason, a landmark sitting within about a hundred metres of a scoring summit is dropped in favour of the summit.</p>
@@ -275,7 +276,7 @@
 
           <h3 id="places-rotation">The weekly rotation</h3>
           <p>Summits and every park with a real, mapped boundary are always live. Landmarks, and the small parks whose mapped boundary doesn't fill a whole square, rotate instead: only some of them are live in any given week, chosen the same way for every player, with a minimum spacing between live picks so a dense downtown can't be farmed by visiting one block. A park with no boundary on file isn't treated as small for rotation, even though it scores like one &mdash; the game doesn't actually know its size, so it stays always active instead of guessing, the same as a summit.</p>
-          <p>The rotation turns over on the same weekly reset as the net and everything else &mdash; one clock for the whole game. A landmark that's live this week may not be next week, and that's deliberate: the point is to keep sending you somewhere new, not to hand out a fixed list once and let it go stale.</p>
+          <p>The rotation turns over once a week, at the start of Wednesday, Mountain time &mdash; one clock for the whole game, whichever net you play. A landmark that's live this week may not be next week, and that's deliberate: the point is to keep sending you somewhere new, not to hand out a fixed list once and let it go stale.</p>
         </section>
 
         <section id="months">
@@ -283,7 +284,7 @@
           <p>Each calendar month, Boise time, gets its own result on the <a href="/results">results page</a>.</p>
           <p><strong>A month is judged when it ends, not as it goes.</strong> Nothing is shown for the month in progress except when it closes. An award you can watch changing hands daily is not an award.</p>
           <p><strong>A month is scored on the month.</strong> The standings are the ground each team holds the instant the month closes, not captures made during it. Check-in points and Places Worth Going points earned that month sit alongside squares held as their own columns &mdash; the three are never added into one figure. None of it is a snapshot of the season standings: if it were, whoever led in the first month would lead in all of them, and falling behind early would put every later month out of reach.</p>
-          <p>Ties are refused rather than split. If two people share the lead for an award, nobody gets it that month.</p>
+          <p>Ties are refused rather than split. If two people share the lead for an award, nobody gets it that month. The one exception is Peak Tagger: a tie on the number of summits goes to whoever reached the tallest one, and is refused only if that ties too.</p>
         </section>
 
         <section id="honors">
@@ -298,7 +299,7 @@
             <dt>Team Builder, Team Attacker &amp; Team Defender</dt><dd>The same three awards, given within each team, so a strong team does not sweep everything.</dd>
             <dt>Tourist</dt><dd>Visited the most <a href="#places">landmarks</a> that month. Every visit counts the same regardless of how many points it earned.</dd>
             <dt>Park Hopper</dt><dd>Visited the most <a href="#places">parks</a> that month, the same way Tourist counts landmarks.</dd>
-            <dt>Peak Tagger</dt><dd>Visited the most <a href="#places">summits</a> that month, the same way Tourist counts landmarks.</dd>
+            <dt>Peak Tagger</dt><dd>Visited the most <a href="#places">summits</a> that month, the same way Tourist counts landmarks. A tie goes to the higher summit.</dd>
             <dt>Frontier</dt><dd>Claimed the most squares more than twenty miles beyond the edge of any town. Any capture out there counts, attack or retake or first claim alike, but twenty miles out is where coverage runs out, so expect months where nobody earns it.</dd>
             <dt>Quick Fingers</dt><dd>Checked in fastest after the net opened, averaged across the month.</dd>
           </dl>
@@ -315,16 +316,32 @@
 
         <section id="area">
           <h2>Where it counts</h2>
-          <p>Play is bounded to a box covering the western United States and Texas.</p>
-          <table class="rules-table">
+          <p id="area-bounds">Play is open worldwide. A ping counts wherever your radio is, as long as it carries a valid position.</p>
+          <div id="area-box" hidden>
+            <p>Play is bounded to a box. A ping from outside it is discarded before anything else happens &mdash; it claims nothing and it does not register your radio.</p>
+            <table class="rules-table">
+              <tbody>
+                <tr><th>North</th><td id="area-north"></td></tr>
+                <tr><th>South</th><td id="area-south"></td></tr>
+                <tr><th>West</th><td id="area-west"></td></tr>
+                <tr><th>East</th><td id="area-east"></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <table class="rules-table rules-table-compare">
+            <thead><tr><th></th><th>Territory</th><th>Places Worth Going</th><th>Net check-ins</th></tr></thead>
             <tbody>
-              <tr><th>North</th><td>49.29&deg; &mdash; the Canadian border</td></tr>
-              <tr><th>South</th><td>25.80&deg; &mdash; the southern tip of Texas</td></tr>
-              <tr><th>West</th><td>&minus;125.00&deg; &mdash; past the Pacific coast</td></tr>
-              <tr><th>East</th><td>&minus;93.50&deg; &mdash; eastern Texas</td></tr>
+              <tr><th>MeshCore</th><td>anywhere you can run MeshMapper</td><td>everywhere</td><td>configured nets only</td></tr>
+              <tr><th>Meshtastic</th><td>wherever FreqMapper or MeshView feeders hear you</td><td>everywhere</td><td>configured nets only</td></tr>
             </tbody>
           </table>
-          <p>A ping from outside the box is discarded before anything else happens &mdash; it claims nothing and it does not register your radio. The live outline is drawn on the <a href="/about">about page</a>.</p>
+          <h3 id="area-nets">Configured nets</h3>
+          <table class="rules-table">
+            <thead><tr><th>Net</th><th>Board</th><th>Day</th><th>Hours</th><th>Time zone</th></tr></thead>
+            <tbody id="area-nets-body"></tbody>
+          </table>
+          <p id="area-nets-error" hidden>The net list could not be loaded.</p>
+          <p>How places score: <a href="#places">Places Worth Going</a>. How check-ins score: <a href="#net">The weekly net</a>.</p>
         </section>
 
         <section id="fairplay">
@@ -335,6 +352,7 @@
           <p>A Meshtastic radio can be set to report its position roughly rather than exactly, and some are shipped that way. A rough position can put you anywhere inside a box a kilometre or more across, which is several squares wide &mdash; so a position that is not precise enough to say which square you were in claims nothing at all.</p>
           <p>Squares are about 300 metres, so a position has to be good to roughly 90 metres or better to count. In the Meshtastic app that is the channel's position precision setting: leave it at full precision, or at least at the step that says within 91 metres. A packet that does not say how precise it is gets the same answer, because there is nothing to check &mdash; and the packets that omit it are the ones carrying no usable position in the first place.</p>
           <p>This is a Meshtastic setting and it has no MeshCore equivalent. If you register a radio, drive somewhere with coverage, and nothing appears on the map, this is the first thing to look at.</p>
+          <p>This check, and the speed check below, apply to positions read from your radio's own packets through MeshView. FreqMapper reports are taken as FreqMapper sends them.</p>
 
           <h3 id="fairplay-aircraft">Aircraft and impossible jumps</h3>
           <p>A radio at altitude reaches an absurd number of nodes, which would make the exploration awards meaningless. MeshWars works out your speed between consecutive positions &mdash; and the two boards act on that number differently, because they can afford to.</p>
@@ -358,11 +376,11 @@
             <thead><tr><th></th><th>MeshCore</th><th>Meshtastic</th></tr></thead>
             <tbody>
               <tr><th>How position arrives</th><td>pushed &mdash; MeshMapper forwards a copy of your wardrive</td><td>pulled &mdash; MeshWars reads coverage from FreqMapper, or from your radio's own position packets</td></tr>
-              <tr><th>What earns points</th><td>how many repeaters <em>you heard</em></td><td>how many MQTT feeders <em>heard you</em></td></tr>
+              <tr><th>What earns points</th><td>how many repeaters <em>you heard</em></td><td>how many MQTT feeders <em>heard you</em> on MeshView; a flat 0.5 points per FreqMapper report</td></tr>
               <tr><th>Registering</th><td>binds itself on your first wardrive</td><td>you add the node ID yourself</td></tr>
               <tr><th>Net check-in</th><td>your community's net channel</td><td>your community's net hashtag</td></tr>
-              <tr><th>Position precision</th><td>no setting to get wrong</td><td>must be good to ~90 m or the ping is refused</td></tr>
-              <tr><th>Going too fast</th><td>over ~100 mph is labelled airborne; the square still counts</td><td>over ~200 mph is refused outright; nothing is labelled airborne</td></tr>
+              <tr><th>Position precision</th><td>no setting to get wrong</td><td>must be good to ~90 m or the ping is refused (MeshView positions)</td></tr>
+              <tr><th>Going too fast</th><td>over ~100 mph is labelled airborne; the square still counts</td><td>over ~200 mph is refused outright (MeshView positions); nothing is labelled airborne</td></tr>
             </tbody>
           </table>
           <p>The inversion is not a design choice, it is what each network lets anyone observe. MeshCore tells you what your radio reached; Meshtastic tells you who logged your radio.</p>
@@ -381,6 +399,6 @@
 
   <script src="/static/theme-toggle.js?v=20260824-2" type="module"></script>
   <script src="/static/nav-auth.js?v=20260904-2" type="module"></script>
-  <script src="/static/rules.js?v=20260904-1" type="module"></script>
+  <script src="/static/rules.js?v=20261019-1" type="module"></script>
 </body>
 </html>

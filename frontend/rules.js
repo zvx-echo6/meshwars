@@ -58,6 +58,112 @@ if (sections.length && 'IntersectionObserver' in window) {
   for (const s of sections) io.observe(s);
 }
 
+// ---- "Where it counts": live play area and net list --------------------
+//
+// GET /config (play_area) and GET /api/v1/nets fill #area. Enhancement
+// only, same contract as about.js: the static worldwide text in
+// rules.html is correct on its own, so a failed fetch or a bad shape
+// just leaves it in place; nothing here throws.
+//
+// SECURITY: all of it comes from the server and is untrusted. Every
+// element is built with document.createElement + .textContent, never
+// innerHTML/insertAdjacentHTML.
+(function () {
+  const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const BOARDS = { mc: 'MeshCore', mt: 'Meshtastic' };
+  // Same mapping as app/checkin.py _TZ_DISPLAY_NAMES.
+  const TZ_NAMES = {
+    'America/Boise': 'Mountain',
+    'America/Denver': 'Mountain',
+    'America/Los_Angeles': 'Pacific',
+    'America/Chicago': 'Central',
+    'America/New_York': 'Eastern',
+  };
+
+  function formatDeg(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return null;
+    const s = Math.abs(v).toFixed(2);
+    return (v < 0 && Number(s) !== 0 ? '\u2212' : '') + s + '\u00b0';
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  // end_hour is inclusive through :59 (see app/checkin.py net_window_text).
+  function formatHours(start, end) {
+    if (start === 0 && end === 23) return 'all day';
+    return pad2(start) + ':00\u2013' + pad2(end) + ':59';
+  }
+
+  function buildNetRow(net) {
+    const tr = document.createElement('tr');
+    const day = DAYS[net.weekday];
+    const cells = [
+      String(net.label),
+      Object.prototype.hasOwnProperty.call(BOARDS, net.board) ? BOARDS[net.board] : String(net.board),
+      day === undefined ? String(net.weekday) : day,
+      formatHours(net.start_hour, net.end_hour),
+      Object.prototype.hasOwnProperty.call(TZ_NAMES, net.timezone) ? TZ_NAMES[net.timezone] : String(net.timezone),
+    ];
+    for (const text of cells) {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    return tr;
+  }
+
+  async function loadPlayArea() {
+    try {
+      const res = await fetch('/config');
+      if (!res.ok) return;
+      const data = await res.json();
+      const pa = data && data.play_area;
+      if (!pa) return;
+      const { north, south, west, east } = pa;
+      if (north === south) return;
+      if (north >= 90 && south <= -90 && west <= -180 && east >= 180) return;
+      const vals = { north, south, west, east };
+      const text = {};
+      for (const k of Object.keys(vals)) {
+        text[k] = formatDeg(vals[k]);
+        if (text[k] === null) return;
+      }
+      for (const k of Object.keys(text)) {
+        const el = document.getElementById('area-' + k);
+        if (el) el.textContent = text[k];
+      }
+      const bounds = document.getElementById('area-bounds');
+      const box = document.getElementById('area-box');
+      if (bounds) bounds.hidden = true;
+      if (box) box.hidden = false;
+    } catch {
+      // Enhancement only -- leave the worldwide text in place.
+    }
+  }
+
+  async function loadNets() {
+    const err = document.getElementById('area-nets-error');
+    const body = document.getElementById('area-nets-body');
+    try {
+      const res = await fetch('/api/v1/nets');
+      if (!res.ok) throw new Error('bad status');
+      const data = await res.json();
+      const nets = data && data.nets;
+      if (!Array.isArray(nets) || !nets.length || !body) throw new Error('bad shape');
+      const rows = nets.map(buildNetRow);
+      rows.forEach((r) => body.appendChild(r));
+    } catch {
+      if (err) err.hidden = false;
+    }
+  }
+
+  loadPlayArea();
+  loadNets();
+})();
+
 // ---- search -------------------------------------------------------------
 // Built once, at load, straight from .rules-body -- this page's content
 // never changes shape after load, so there is no need to ever call the
