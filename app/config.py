@@ -1644,20 +1644,9 @@ class Settings(BaseSettings):
     announcements_cache_seconds: int = 30
 
     # ---- Regions (app/regions.py) ----------------------------------------
-    # MeshMapper-derived regions: a view and standings filter, never a
-    # scoring input. The boundary list and polygons are read from
-    # meshmapper.net, slowly and sequentially. Off by default: when
-    # false, the background loop does not fetch anything on its own (the
-    # admin panel's "Update from MeshMapper" button still works, and the
-    # square-to-region mapping of new squares still runs, which only reads
-    # this database).
-    regions_sync_enabled: bool = False
-    # Pause between two requests to meshmapper.net, seconds.
-    regions_fetch_delay_seconds: float = 2.0
-    # Per-request timeout, seconds.
-    regions_fetch_timeout_seconds: float = 20.0
-    # How often the loop wakes: maps new squares to regions and checks
-    # whether the daily/weekly fetch is due.
+    # Stored regions: a view and standings filter, never a scoring input.
+    # Nothing is fetched; boundaries are already in this database.
+    # How often the loop wakes: maps new squares to regions.
     regions_loop_seconds: int = 60
     # Host-based region preselection: a request to <region-or-slug>.<this>
     # opens the map with that region chosen. Empty (the default) turns the

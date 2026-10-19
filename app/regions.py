@@ -1,4 +1,4 @@
-"""Regions: MeshMapper-derived boundaries used as a VIEW and STANDINGS
+"""Regions: stored boundaries used as a VIEW and STANDINGS
 filter. Nothing in here changes scoring -- a region only narrows which
 squares, exploration awards and captures a read endpoint counts.
 
@@ -8,18 +8,19 @@ What lives here:
   banded edge index, because shapely is not part of the runtime for this
   feature and a 2,660-vertex boundary (SMN) tested naively against tens
   of thousands of squares is minutes of work.
-- parsing of the two MeshMapper pages the importer reads.
 - the DB side: region storage, the precomputed square -> region
   membership (region_cell), groups, and resolving "a code or a slug" to
   the set of region codes a request should filter on.
-- the importer and its background loop.
+- the background loop that maps new squares.
+
+Nothing in this module fetches anything: regions are boundaries already
+stored in the database, and no code here makes a network request.
 
 Membership is NEVER computed per request. A request only ever does an
 indexed lookup in region_cell. The table is filled by map_new_cells()
-(a periodic job, below) for new squares, and by remap_regions() after a
-boundary import for the regions that changed.
+(a periodic job, below) for new squares, and by remap_regions() for the regions whose stored boundary changed.
 
-Coordinates: MeshMapper stores [lat, lon] (LAT FIRST). Everything inside
+Coordinates: boundaries are stored [lat, lon] (LAT FIRST). Everything inside
 this module keeps that order, rings are lists of (lat, lon). The only
 place the order flips is geojson_for_region(), because GeoJSON is lon,lat.
 """
@@ -36,23 +37,15 @@ import time
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from urllib.parse import urlsplit
 from typing import Iterable, NamedTuple
 
-import httpx
-
 from .config import settings
-from .db import connect, get_cursor, set_cursor
+from .db import connect
 from .grid import cell_center
 
 log = logging.getLogger("regions")
 
-MESHMAPPER_HOME = "https://meshmapper.net/"
-USER_AGENT = "MeshWars region sync (+https://meshwars.com)"
-
-# A MeshMapper region code is a short alphanumeric. It is spliced into a
-# hostname (<code>.meshmapper.net) from data we fetched, so anything else
-# is refused rather than turned into a request.
+# A region code is a short alphanumeric.
 _CODE_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
 # What a request may pass as a code-or-slug. Anything else cannot match a
 # stored region or group, so it is "unknown" without touching the DB.
@@ -62,16 +55,12 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _CIRCLE_POINTS = 72
 
 
-def region_page_url(code: str) -> str:
-    return f"https://{code.lower()}.meshmapper.net/"
-
-
 # ---- geometry -----------------------------------------------------------
 
 
 def circle_ring(lat: float, lon: float, radius_km: float, points: int = _CIRCLE_POINTS) -> list[tuple[float, float]]:
     """A ring approximating a circle of radius_km around (lat, lon), as
-    (lat, lon) pairs. Used when MeshMapper gives a region a radius but no
+    (lat, lon) pairs. Used for a region stored with a radius but no
     polygon."""
     dlat_per_km = 1.0 / 111.32
     coslat = max(math.cos(math.radians(lat)), 0.01)
@@ -105,7 +94,7 @@ def _clean_ring(raw) -> list[tuple[float, float]] | None:
 
 
 def normalize_polygon(value) -> list[list[tuple[float, float]]] | None:
-    """MeshMapper's `polygon` as a list of rings of (lat, lon), or None
+    """A stored `polygon` as a list of rings of (lat, lon), or None
     when it is missing or unusable.
 
     The value is a JSON STRING of [[lat,lon],...] (one ring), but a list
@@ -253,84 +242,6 @@ class RegionIndex:
         return self.codes_for(lat, lon)
 
 
-# ---- parsing MeshMapper pages ------------------------------------------
-
-
-def _json_after(html: str, var_name: str):
-    """The JSON value assigned to `var <var_name> = ...;` in a page, or
-    None. raw_decode stops at the end of the value, so the trailing `;`
-    and the rest of the script are ignored."""
-    m = re.search(r"var\s+" + re.escape(var_name) + r"\s*=\s*", html)
-    if not m:
-        return None
-    try:
-        value, _ = json.JSONDecoder().raw_decode(html, m.end())
-    except ValueError:
-        return None
-    return value
-
-
-def parse_zone_list(html: str) -> list[dict]:
-    """The homepage's region list: [{code, name, lat, lon}, ...]. Entries
-    without a safe code, a name or a numeric centre are dropped."""
-    zones = _json_after(html, "zones")
-    if not isinstance(zones, list):
-        return []
-    out = []
-    for z in zones:
-        if not isinstance(z, dict):
-            continue
-        code = z.get("code")
-        name = z.get("name")
-        lat, lon = _num(z.get("lat")), _num(z.get("lon"))
-        if not isinstance(code, str) or not _CODE_RE.match(code):
-            continue
-        if not isinstance(name, str) or not name.strip() or lat is None or lon is None:
-            continue
-        out.append({"code": code.upper(), "name": name.strip(), "lat": lat, "lon": lon})
-    return out
-
-
-def parse_region_page(html: str, code: str, fallback_lat: float | None = None,
-                      fallback_lon: float | None = None) -> dict | None:
-    """The boundary of one region from its page: {rings, radius_km,
-    center_lat, center_lon, shape} where shape is 'polygon' or 'circle'.
-
-    The page's `allZones` array holds an entry for this code with `polygon`
-    (a JSON string, lat first) and `radius_km`. A missing or unusable
-    polygon falls back to a circle of radius_km around the centre. None
-    when neither exists (no entry, or no polygon and no usable radius).
-    """
-    zones = _json_after(html, "allZones")
-    if not isinstance(zones, list):
-        return None
-    entry = None
-    for z in zones:
-        if isinstance(z, dict) and str(z.get("code", "")).upper() == code.upper():
-            entry = z
-            break
-    if entry is None:
-        return None
-    lat = _num(entry.get("lat"))
-    lon = _num(entry.get("lon"))
-    if lat is None or lon is None:
-        lat, lon = fallback_lat, fallback_lon
-    radius = _num(entry.get("radius_km"))
-    rings = normalize_polygon(entry.get("polygon"))
-    shape = "polygon"
-    if rings is None:
-        if lat is None or lon is None or radius is None or radius <= 0:
-            return None
-        rings = [circle_ring(lat, lon, radius)]
-        shape = "circle"
-    if lat is None or lon is None:
-        s, w, n, e = bbox_of(rings)
-        lat, lon = (s + n) / 2.0, (w + e) / 2.0
-    name = entry.get("name")
-    return {"rings": rings, "radius_km": radius, "center_lat": lat, "center_lon": lon, "shape": shape,
-            "name": name.strip() if isinstance(name, str) and name.strip() else None}
-
-
 # ---- storage ------------------------------------------------------------
 
 
@@ -363,10 +274,8 @@ def store_region(conn, code: str, name: str, parsed: dict, now: int | None = Non
 # writers -- and then take BEGIN IMMEDIATE only to apply a precomputed
 # batch of INSERT/DELETE rows. If a region changed while the work was done
 # (its fetched_at moved), the transaction notices, rolls back and the job
-# redoes that batch from fresh data. Nothing here ever holds the write lock
-# across a network fetch either: every write below is its own transaction,
-# opened and closed inside one helper, and run_import() calls them between
-# fetches.
+# redoes that batch from fresh data. Every write below is its own
+# transaction, opened and closed inside one helper.
 _MAP_LOCK = threading.Lock()
 # Rows/cells per write transaction, and the pause after each. Sized so one
 # transaction holds the write lock for a small fraction of a second even on
@@ -381,10 +290,9 @@ _BATCH = 700
 _PAUSE_S = 0.05
 
 # app/db.py gives every connection PRAGMA busy_timeout=15000, and no other
-# background writer in the app retries beyond that. A import that runs for
-# twenty minutes should survive one unlucky stretch of write-lock
-# contention though (the preview import lost a region to "database is
-# locked" next to mc_ingest's own claim failing), so each write below is
+# background writer in the app retries beyond that. A remap that runs for
+# a long time should survive one unlucky stretch of write-lock
+# contention though (mc_ingest's own claim can fail that way), so each write below is
 # retried a few times, with a growing pause, when SQLite reports the
 # database busy or locked. Nothing else is retried.
 _BUSY_ATTEMPTS = 6
@@ -434,8 +342,8 @@ def _build_index(conn, codes: Iterable[str] | None = None) -> RegionIndex:
 # Shapes built so far for the periodic mapping job, (db path, code) ->
 # (fetched_at, Shape), least recently used first. Built on first use and kept
 # only while the region is unchanged, so a worker that has nothing to map
-# holds none, one mapping a few busy regions holds a few, and an import that
-# changes one region costs one rebuild (not all 553 every minute, which at
+# holds none, one mapping a few busy regions holds a few, and a change to
+# one region costs one rebuild (not all 553 every minute, which at
 # ~320 MB each time is what pushed the worker past its memory limit). The
 # name is kept for the tests that reset it by assigning None.
 _INDEX_CACHE: "OrderedDict | None" = None
@@ -625,7 +533,7 @@ def _apply_chunk(conn, ops: list[tuple[str, str, str]]) -> None:
 def _write_chunk(code: str, sig: int, ops: list[tuple[str, str, str]]) -> float | None:
     """One write transaction applying `ops` for one region. Returns how
     long the write lock was held (BEGIN IMMEDIATE acquired -> COMMIT), or
-    None, having written nothing, if the region was re-fetched since the
+    None, having written nothing, if the region was replaced since the
     work was computed (a newer remap owns it then)."""
     wc = connect()
     try:
@@ -669,7 +577,7 @@ def remap_regions(codes: Iterable[str]) -> int:
     its rows compared with the stored ones, and the shape and the result
     dropped before the next region. So the memory peak is one shape plus one
     region's cell set, however many regions are being remapped (the whole
-    set at the end of an import) -- not every region's cells at once.
+    set after a bulk change) -- not every region's cells at once.
 
     All the polygon testing and the comparison with the stored rows happen
     with NO transaction open. What remains is a difference (rows to add,
@@ -1009,7 +917,7 @@ def host_region_key(host: str | None) -> str | None:
 
 
 def _geo_ring(ring) -> list[list[float]]:
-    pts = [[p[1], p[0]] for p in ring]  # MeshMapper is lat,lon; GeoJSON is lon,lat
+    pts = [[p[1], p[0]] for p in ring]  # stored as lat,lon; GeoJSON is lon,lat
     if pts and pts[0] != pts[-1]:
         pts.append(list(pts[0]))
     return pts
@@ -1035,333 +943,14 @@ def geojson_for_regions(conn, codes: Iterable[str]) -> dict:
     return {"type": "FeatureCollection", "features": feats}
 
 
-# ---- importer -----------------------------------------------------------
-
-_STATE_KEY = "regions_sync_state"
-_LAST_NEW_KEY = "regions_last_new_at"
-_LAST_FULL_KEY = "regions_last_full_at"
-_RUNNING_STALE_S = 600
-_DAY = 86400
-_WEEK = 7 * _DAY
-_RETRY_AFTER_LIST_FAILURE = 3600
-
-_task: asyncio.Task | None = None
-_next_try_at = 0.0
-
-
-def _read_state() -> dict:
-    conn = connect()
-    try:
-        raw = get_cursor(conn, _STATE_KEY, "")
-    finally:
-        conn.close()
-    try:
-        state = json.loads(raw) if raw else {}
-    except ValueError:
-        state = {}
-    return state if isinstance(state, dict) else {}
-
-
-def _write_state(state: dict) -> None:
-    state = dict(state, updated_at=int(time.time()))
-
-    def write() -> None:
-        conn = connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                set_cursor(conn, _STATE_KEY, json.dumps(state))
-                conn.execute("COMMIT")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-        finally:
-            conn.close()
-
-    _retry_busy(write)
-
-
-def sync_status() -> dict:
-    """What the admin panel shows. `running` is true only while a run has
-    reported progress recently, so a process killed mid-import does not
-    leave the button stuck."""
-    st = _read_state()
-    running = st.get("state") == "running" and (time.time() - st.get("updated_at", 0)) < _RUNNING_STALE_S
-    out = {
-        "running": running,
-        "mode": st.get("mode"),
-        "started_at": st.get("started_at"),
-        "finished_at": st.get("finished_at"),
-        "total": st.get("total", 0),
-        "done": st.get("done", 0),
-        "failures": st.get("failures", 0),
-        "last_error": st.get("last_error"),
-    }
-    return out
-
-
-def _store_one(code: str, name: str, parsed: dict) -> None:
-    def write() -> None:
-        conn = connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                store_region(conn, code, name, parsed)
-                conn.execute("COMMIT")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-        finally:
-            conn.close()
-
-    _retry_busy(write)
-
-
-def _stored_codes() -> dict[str, int]:
-    conn = connect()
-    try:
-        return {r["code"]: r["fetched_at"] for r in conn.execute("SELECT code, fetched_at FROM region")}
-    finally:
-        conn.close()
-
-
-def _stamp(keys: list[str]) -> None:
-    def write() -> None:
-        conn = connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                now = str(int(time.time()))
-                for k in keys:
-                    set_cursor(conn, k, now)
-                conn.execute("COMMIT")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-        finally:
-            conn.close()
-
-    _retry_busy(write)
-
-
-async def _get(client: httpx.AsyncClient, url: str) -> str:
-    r = await client.get(url)
-    r.raise_for_status()
-    return r.text
-
-
-def make_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(settings.regions_fetch_timeout_seconds, connect=10.0),
-        headers={"User-Agent": USER_AGENT, "Accept": "text/html"},
-        follow_redirects=True,
-    )
-
-
-async def run_import(mode: str = "all", client: httpx.AsyncClient | None = None) -> dict:
-    """Fetch MeshMapper's region list, then region pages one at a time
-    (mode 'all': every listed region; 'new': only codes not stored yet),
-    store each boundary, and recompute square membership for the regions
-    that changed. A failed page is logged and counted, and the region
-    keeps its previous boundary; the run carries on. Progress is written
-    to the cursor table after every region.
-
-    Never blocks the event loop: every DB step runs in a thread and the
-    pause between requests is an asyncio sleep.
-    """
-    global _next_try_at
-    own_client = client is None
-    if own_client:
-        client = make_client()
-    delay = max(0.0, settings.regions_fetch_delay_seconds)
-    state = {"state": "running", "mode": mode, "started_at": int(time.time()), "finished_at": None,
-             "total": 0, "done": 0, "failures": 0, "last_error": None}
-    await asyncio.to_thread(_write_state, state)
-    affected: list[str] = []
-    list_ok = False
-    try:
-        try:
-            zones = parse_zone_list(await _get(client, MESHMAPPER_HOME))
-            if not zones:
-                raise ValueError("region list was empty or unreadable")
-            list_ok = True
-        except Exception as exc:
-            log.warning("regions: could not read the MeshMapper region list: %s", exc)
-            state["failures"] += 1
-            state["last_error"] = f"region list: {type(exc).__name__}"
-            _next_try_at = time.time() + _RETRY_AFTER_LIST_FAILURE
-            return state
-        stored = await asyncio.to_thread(_stored_codes)
-        targets = zones if mode == "all" else [z for z in zones if z["code"] not in stored]
-        state["total"] = len(targets)
-        await asyncio.to_thread(_write_state, state)
-        for i, z in enumerate(targets):
-            if i:
-                await asyncio.sleep(delay)
-            code = z["code"]
-            try:
-                parsed = parse_region_page(await _get(client, region_page_url(code)), code, z["lat"], z["lon"])
-                if parsed is None:
-                    raise ValueError("no boundary on the page")
-                await asyncio.to_thread(_store_one, code, z["name"], parsed)
-                affected.append(code)
-            except Exception as exc:
-                state["failures"] += 1
-                state["last_error"] = f"{code}: {type(exc).__name__}"
-                log.warning("regions: %s skipped: %s", code, exc)
-            state["done"] = i + 1
-            await asyncio.to_thread(_write_state, state)
-        if affected:
-            await asyncio.to_thread(_retry_busy, lambda: remap_regions(affected))
-        return state
-    finally:
-        state["state"] = "idle"
-        state["finished_at"] = int(time.time())
-        try:
-            await asyncio.shield(asyncio.to_thread(_write_state, state))
-            if list_ok:
-                await asyncio.shield(asyncio.to_thread(
-                    _stamp, [_LAST_NEW_KEY, _LAST_FULL_KEY] if mode == "all" else [_LAST_NEW_KEY]))
-        except Exception:
-            log.exception("regions: could not record the end of the import")
-        if own_client:
-            await client.aclose()
-
-
-_HOST_RE = re.compile(r"^([a-z0-9]{1,10})\.meshmapper\.net$")
-
-
-def normalize_region_link(text) -> str | None:
-    """A pasted MeshMapper region link or code -> the uppercase code, or
-    None when it is neither. Accepts `twf.meshmapper.net`, any http(s) URL
-    of that host (path, query and case ignored), and a bare code (`twf`).
-    The host must be exactly <code>.meshmapper.net: nothing else is ever
-    turned into a request, so a link to another host (or one that merely
-    starts with a MeshMapper name) is refused, not fetched."""
-    if not isinstance(text, str):
-        return None
-    t = text.strip()
-    if not t or len(t) > 300:
-        return None
-    if _CODE_RE.match(t):
-        return t.upper()
-    if "://" not in t:
-        t = "https://" + t
-    try:
-        parts = urlsplit(t)
-        host = parts.hostname
-        port = parts.port
-    except ValueError:
-        return None
-    if parts.scheme not in ("http", "https") or parts.username or parts.password or port not in (None, 80, 443):
-        return None
-    m = _HOST_RE.match(host or "")
-    return m.group(1).upper() if m else None
-
-
-def _page_failure(code: str, html: str) -> RegionError:
-    zones = _json_after(html, "allZones")
-    has_entry = isinstance(zones, list) and any(
-        isinstance(z, dict) and str(z.get("code", "")).upper() == code for z in zones)
-    if not has_entry:
-        return RegionError("No MeshMapper region found for that link", 404)
-    return RegionError("That region has no boundary or radius to fetch", 422)
-
-
-async def fetch_region(link: str, client: httpx.AsyncClient | None = None) -> dict:
-    """Fetch ONE region page (from a pasted link or code), store its
-    boundary, recompute that region's square membership, and report what
-    happened. Only https://<code>.meshmapper.net/ is ever requested, built
-    from the validated code. Safe alongside a running full import: both
-    are upserts of the same row and the membership jobs serialise on
-    _MAP_LOCK, so the later write simply wins. Raises RegionError with a
-    status the API layer passes on (400 not a link, 404 no such region,
-    422 no boundary, 502/504 MeshMapper trouble)."""
-    code = normalize_region_link(link)
-    if code is None:
-        raise RegionError("Not a MeshMapper region link", 400)
-    own = client is None
-    if own:
-        client = make_client()
-    try:
-        try:
-            html = await _get(client, region_page_url(code))
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                raise RegionError("No MeshMapper region found for that link", 404)
-            raise RegionError(f"MeshMapper answered {exc.response.status_code}", 502)
-        except httpx.TimeoutException:
-            raise RegionError("MeshMapper did not answer in time", 504)
-        except httpx.HTTPError:
-            raise RegionError("Could not reach MeshMapper", 502)
-    finally:
-        if own:
-            await client.aclose()
-    parsed = parse_region_page(html, code)
-    if parsed is None:
-        raise _page_failure(code, html)
-    name = parsed.get("name") or code
-    existed = code in await asyncio.to_thread(_stored_codes)
-    await asyncio.to_thread(_store_one, code, name, parsed)
-    await asyncio.to_thread(_retry_busy, lambda: remap_regions([code]))
-
-    def count() -> dict[str, int]:
-        """Squares actually claimed in the region on each board's ACTIVE
-        season (owned mc_tile rows). region_cell also holds cells that only
-        belong to a credited place, which are not squares anyone holds."""
-        conn = connect()
-        try:
-            out = {"mc": 0, "mt": 0}
-            for r in conn.execute(
-                "SELECT s.protocol AS protocol, COUNT(*) AS n FROM mc_tile t "
-                " JOIN mc_season s ON s.id = t.season_id AND s.status = 'active' "
-                " WHERE t.owner_team IS NOT NULL "
-                "   AND t.cell_id IN (SELECT cell_id FROM region_cell WHERE region_code = ?) "
-                " GROUP BY s.protocol", (code,)
-            ):
-                out[r["protocol"]] = r["n"]
-            return out
-        finally:
-            conn.close()
-
-    claimed = await asyncio.to_thread(count)
-
-    return {"code": code, "name": name, "points": sum(len(r) for r in parsed["rings"]),
-            "claimed_squares": claimed["mc"] + claimed["mt"],
-            "claimed_meshcore": claimed["mc"], "claimed_meshtastic": claimed["mt"],
-            "new_or_updated": "updated" if existed else "new"}
-
-
-def start_import(mode: str = "all") -> bool:
-    """Start an import in the background of the running event loop.
-    False when one is already running (here or, by its recent progress,
-    in another process)."""
-    global _task
-    if (_task is not None and not _task.done()) or sync_status()["running"]:
-        return False
-    _task = asyncio.get_running_loop().create_task(_guarded_import(mode), name="regions-import")
-    return True
-
-
-async def _guarded_import(mode: str) -> None:
-    try:
-        await run_import(mode)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        log.exception("regions: import failed")
-
-
-# The periodic mapping waits for the region set to be still: while an import
-# is running, or for this long after the last region changed, it does not
-# map (the squares just wait; the import's own remap covers the cells that
-# are already mapped, and the next quiet cycle maps the rest).
+# The periodic mapping waits for the region set to be still: for this long
+# after the last region changed it does not map (the squares just wait; the
+# remap covers the cells that are already mapped, and the next quiet cycle
+# maps the rest).
 REGION_SET_STABLE_S = 120
 
 
 def region_set_is_stable() -> bool:
-    if sync_status()["running"]:
-        return False
     conn = connect()
     try:
         last = conn.execute("SELECT MAX(fetched_at) FROM region").fetchone()[0]
@@ -1372,27 +961,12 @@ def region_set_is_stable() -> bool:
 
 async def run_forever() -> None:
     """Worker-role loop. Every cycle: map squares that have no membership
-    yet (cheap, DB only; deferred while regions are being imported). When regions_sync_enabled: a daily fetch of the
-    list plus boundaries for codes not stored yet, and a weekly full
-    re-fetch of every boundary."""
-    log.info("regions loop starting (sync %s)", "on" if settings.regions_sync_enabled else "off")
+    yet (cheap, DB only; deferred while the region set is still changing)."""
+    log.info("regions loop starting")
     while True:
         try:
             if await asyncio.to_thread(region_set_is_stable):
                 await asyncio.to_thread(map_new_cells)
-            if settings.regions_sync_enabled and time.time() >= _next_try_at \
-                    and not sync_status()["running"] and (_task is None or _task.done()):
-                conn = await asyncio.to_thread(connect)
-                try:
-                    last_new = int(get_cursor(conn, _LAST_NEW_KEY, "0") or 0)
-                    last_full = int(get_cursor(conn, _LAST_FULL_KEY, "0") or 0)
-                finally:
-                    conn.close()
-                now = time.time()
-                if now - last_full >= _WEEK:
-                    await run_import("all")
-                elif now - last_new >= _DAY:
-                    await run_import("new")
         except asyncio.CancelledError:
             raise
         except Exception:

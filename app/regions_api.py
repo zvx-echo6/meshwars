@@ -1,6 +1,6 @@
 """Regions routes: the public list and boundary read endpoints the map
-uses, and the admin routes for the Regions section (import from
-MeshMapper, region groups). See app/regions.py for what a region is and
+uses, and the admin routes for the Regions section (region
+groups). See app/regions.py for what a region is and
 how square membership is kept; the ?region= filter on the board, scores
 and top routes lives with those routes (app/mc_api.py, app/api.py).
 """
@@ -24,7 +24,7 @@ router = APIRouter()
 
 def _revalidated(request: Request, body: dict) -> Response:
     """JSON that browsers and proxies may keep but must revalidate (ETag
-    plus 304), so a region fetched from the admin panel shows up on the very
+    plus 304), so a changed region shows up on the very
     next map load while an unchanged list still costs no body."""
     raw = json.dumps(body, separators=(",", ":")).encode()
     etag = '"%s"' % hashlib.sha256(raw).hexdigest()[:32]
@@ -68,8 +68,7 @@ async def region_boundary(request: Request, key: str) -> Response:
 
 @router.get("/api/admin/regions")
 async def admin_regions(request: Request):
-    """Regions with when each boundary was last fetched, the groups, and
-    the import's status."""
+    """Regions with when each boundary was stored, and the groups."""
     guard = await _role_guard(request)
     if isinstance(guard, JSONResponse):
         return guard
@@ -79,65 +78,8 @@ async def admin_regions(request: Request):
         groups = regions.list_groups(conn)
     finally:
         conn.close()
-    return JSONResponse({"regions": rows, "groups": groups, "sync": regions.sync_status()})
+    return JSONResponse({"regions": rows, "groups": groups})
 
-
-@router.get("/api/admin/regions/sync")
-async def admin_regions_sync_status(request: Request):
-    guard = await _role_guard(request)
-    if isinstance(guard, JSONResponse):
-        return guard
-    return JSONResponse(regions.sync_status())
-
-
-@router.post("/api/admin/regions/sync")
-async def admin_regions_sync(request: Request):
-    """Start the full MeshMapper import in the background and return at
-    once; poll GET /api/admin/regions/sync for progress. 409 if one is
-    already running."""
-    guard = await _role_guard(request)
-    if isinstance(guard, JSONResponse):
-        return guard
-    session = guard
-    if not regions.start_import("all"):
-        return JSONResponse({"error": "an update is already running"}, status_code=409)
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        _log_admin_action(conn, actor_account_id=session.account_id, action="regions_sync", detail="mode=all")
-        conn.execute("COMMIT")
-    finally:
-        conn.close()
-    return JSONResponse({"started": True}, status_code=202)
-
-
-@router.post("/api/admin/regions/fetch")
-async def admin_region_fetch(request: Request):
-    """Body: {link}. Fetches one region from MeshMapper by pasted link or
-    code (see regions.fetch_region) and stores it; works for a new region
-    and updates an existing one in place."""
-    guard = await _role_guard(request)
-    if isinstance(guard, JSONResponse):
-        return guard
-    session = guard
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
-    link = body.get("link") if isinstance(body, dict) else None
-    try:
-        result = await regions.fetch_region(link)
-    except regions.RegionError as exc:
-        return JSONResponse({"error": exc.message}, status_code=exc.status)
-    conn = connect()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        _log_admin_action(conn, actor_account_id=session.account_id, action="region_fetch",
-                          detail=f"code={result['code']} {result['new_or_updated']}")
-        conn.execute("COMMIT")
-    finally:
-        conn.close()
-    return JSONResponse(result)
 
 
 async def _json_body(request: Request):

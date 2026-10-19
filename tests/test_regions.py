@@ -1,20 +1,17 @@
-"""Tests for app/regions.py: polygon parsing, point-in-polygon (incl. the
-SMN/IDA overlap), membership, groups, and the importer with the network
-mocked. Fixtures in tests/fixtures/meshmapper are trimmed copies of the
-real MeshMapper pages (the `var zones` / `var allZones` lines, polygons
-thinned to ~37 vertices); they keep the real structure: polygon is a JSON
-STRING of [lat, lon] pairs.
+"""Tests for app/regions.py: polygon normalisation, point-in-polygon (incl.
+the SMN/IDA overlap), membership and groups. Real region shapes come from
+tests/fixtures/regions/<CODE>.json (polygons thinned to ~37 vertices,
+rings of [lat, lon] pairs); tests seed them with regions.store_region.
+Nothing here touches the network.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import random
 import sqlite3
 import time
 from pathlib import Path
 
-import httpx
 import pytest
 
 import app.db as db
@@ -22,11 +19,14 @@ from app import regions
 from app.db import MIGRATIONS, SCHEMA
 from app.grid import cell_id as grid_cell_id
 
-FIX = Path(__file__).parent / "fixtures" / "meshmapper"
+FIX = Path(__file__).parent / "fixtures" / "regions"
 
 
-def _fx(name: str) -> str:
-    return (FIX / name).read_text(encoding="utf-8")
+def _parsed(code: str) -> dict:
+    """A stored-region fixture as the dict regions.store_region takes."""
+    d = json.loads((FIX / f"{code.upper()}.json").read_text(encoding="utf-8"))
+    d["rings"] = [[tuple(p) for p in ring] for ring in d["rings"]]
+    return d
 
 
 def _init_schema(path: str) -> None:
@@ -61,17 +61,15 @@ def _conn(path: str) -> sqlite3.Connection:
 
 def load_fixture_regions(path: str, codes=("boi", "pih", "ida", "smn")) -> None:
     c = _conn(path)
-    zones = {z["code"]: z for z in regions.parse_zone_list(_fx("index_zones.html"))}
     for code in codes:
-        z = zones[code.upper()]
-        parsed = regions.parse_region_page(_fx(f"{code}.html"), code, z["lat"], z["lon"])
+        parsed = _parsed(code)
         c.execute("BEGIN IMMEDIATE")
-        regions.store_region(c, code, z["name"], parsed, now=1000)
+        regions.store_region(c, code, parsed["name"], parsed, now=1000)
         c.execute("COMMIT")
     c.close()
 
 
-# ---- parsing ------------------------------------------------------------
+# ---- polygon normalisation ------------------------------------------------------------
 
 
 def test_normalize_polygon_single_ring_from_json_string():
@@ -103,68 +101,20 @@ def test_normalize_polygon_drops_bad_points_and_bad_rings():
     assert regions.normalize_polygon(ring) == [[(44.0, -116.0), (44.0, -115.0), (43.0, -115.0)]]
 
 
-def test_parse_zone_list_reads_homepage_fixture():
-    zones = regions.parse_zone_list(_fx("index_zones.html"))
-    assert [z["code"] for z in zones] == ["BOI", "IDA", "PIH", "SMN", "TWF"]
-    boi = zones[0]
-    assert boi["name"] == "Boise, US"
-    assert boi["lat"] == pytest.approx(43.596306)
-
-
-def test_parse_zone_list_drops_unsafe_codes_and_bad_entries():
-    html = ('<script>var zones = [{"code":"A.B","name":"x","lat":1,"lon":2},'
-            '{"code":"OK","name":"Fine","lat":1,"lon":2},{"code":"NN","name":"","lat":1,"lon":2},'
-            '{"code":"XX","name":"n","lat":"1","lon":2}];</script>')
-    assert [z["code"] for z in regions.parse_zone_list(html)] == ["OK"]
-    assert regions.parse_zone_list("<html>nothing here</html>") == []
-
-
-def test_parse_region_page_polygon_is_lat_first():
-    parsed = regions.parse_region_page(_fx("boi.html"), "BOI")
-    assert parsed["shape"] == "polygon"
-    first = parsed["rings"][0][0]
-    assert 40 < first[0] < 50 and -120 < first[1] < -110  # (lat, lon), not (lon, lat)
-    assert parsed["radius_km"] == pytest.approx(233.4)
-    assert parsed["center_lat"] == pytest.approx(43.596306)
-
-
-def test_parse_region_page_missing_polygon_falls_back_to_circle():
-    html = ('<script>var allZones = [{"code":"ZZZ","name":"Z, US","lat":43.0,"lon":-116.0,'
-            '"radius_km":50}];</script>')
-    parsed = regions.parse_region_page(html, "zzz")
-    assert parsed["shape"] == "circle"
-    shape = regions.Shape(parsed["rings"])
+def test_circle_ring_shape_contains_by_radius():
+    shape = regions.Shape([regions.circle_ring(43.0, -116.0, 50)])
     assert shape.contains(43.0, -116.0)
     assert shape.contains(43.3, -116.0)        # ~33 km north, inside 50 km
     assert not shape.contains(43.6, -116.0)    # ~67 km north, outside
     assert not shape.contains(43.0, -115.2)    # ~65 km east, outside
 
 
-def test_parse_region_page_unusable_polygon_also_falls_back():
-    html = ('<script>var allZones = [{"code":"ZZZ","lat":43.0,"lon":-116.0,"radius_km":10,'
-            '"polygon":"[[1,2]]"}];</script>')
-    assert regions.parse_region_page(html, "ZZZ")["shape"] == "circle"
-
-
-def test_parse_region_page_no_polygon_no_radius_is_none():
-    html = '<script>var allZones = [{"code":"ZZZ","lat":43.0,"lon":-116.0}];</script>'
-    assert regions.parse_region_page(html, "ZZZ") is None
-
-
-def test_parse_region_page_other_code_or_garbage_is_none():
-    assert regions.parse_region_page(_fx("boi.html"), "PIH") is None
-    assert regions.parse_region_page("<html></html>", "BOI") is None
-    assert regions.parse_region_page("var allZones = [{broken", "BOI") is None
-
-
-def test_parse_region_page_multi_ring_polygon():
+def test_multi_ring_polygon_has_a_hole():
     outer = [[44, -116], [44, -114], [42, -114], [42, -116]]
     inner = [[43.4, -115.4], [43.4, -114.6], [42.6, -114.6], [42.6, -115.4]]
-    html = ('<script>var allZones = [{"code":"ZZZ","lat":43,"lon":-115,"radius_km":5,"polygon":'
-            + json.dumps(json.dumps([outer, inner])) + '}];</script>')
-    parsed = regions.parse_region_page(html, "ZZZ")
-    assert len(parsed["rings"]) == 2
-    shape = regions.Shape(parsed["rings"])
+    rings = regions.normalize_polygon(json.dumps([outer, inner]))
+    assert len(rings) == 2
+    shape = regions.Shape(rings)
     assert shape.contains(43.8, -115.0)       # in the outer ring only
     assert not shape.contains(43.0, -115.0)   # inside the inner ring: a hole (even-odd)
 
@@ -187,7 +137,7 @@ def _naive_even_odd(rings, lat, lon):
 
 
 def test_shape_matches_naive_even_odd_on_real_boundary():
-    parsed = regions.parse_region_page(_fx("smn.html"), "SMN")
+    parsed = _parsed("SMN")
     shape = regions.Shape(parsed["rings"])
     rng = random.Random(7)
     inside_seen = outside_seen = 0
@@ -202,8 +152,8 @@ def test_shape_matches_naive_even_odd_on_real_boundary():
 
 
 def _overlap_point():
-    smn = regions.Shape(regions.parse_region_page(_fx("smn.html"), "SMN")["rings"])
-    ida = regions.Shape(regions.parse_region_page(_fx("ida.html"), "IDA")["rings"])
+    smn = regions.Shape(_parsed("SMN")["rings"])
+    ida = regions.Shape(_parsed("IDA")["rings"])
     lat0, lat1 = max(smn.south, ida.south), min(smn.north, ida.north)
     lon0, lon1 = max(smn.west, ida.west), min(smn.east, ida.east)
     for i in range(1, 40):
@@ -457,121 +407,6 @@ def test_geojson_flips_to_lon_lat_and_closes_rings(db_path):
     assert ring[0] == ring[-1]
     lon, lat = ring[0]
     assert -120 < lon < -110 and 40 < lat < 50
-    c.close()
-
-
-# ---- importer (network mocked) ------------------------------------------
-
-
-def _mock_client(handler):
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler), headers={"User-Agent": regions.USER_AGENT})
-
-
-def _site(failing=(), seen=None):
-    pages = {f"{c}.meshmapper.net": _fx(f"{c}.html") for c in ("boi", "ida", "pih", "smn", "twf")}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if seen is not None:
-            seen.append((request.url.host, request.headers.get("user-agent")))
-        host = request.url.host
-        if host == "meshmapper.net":
-            return httpx.Response(200, text=_fx("index_zones.html"))
-        if host.split(".")[0].upper() in failing:
-            return httpx.Response(500, text="boom")
-        if host in pages:
-            return httpx.Response(200, text=pages[host])
-        return httpx.Response(404)
-
-    return handler
-
-
-def test_import_stores_regions_and_maps_membership(db_path, monkeypatch):
-    monkeypatch.setattr(regions.settings, "regions_fetch_delay_seconds", 0.0)
-    c = _conn(db_path)
-    _insert_tile(c, 1, grid_cell_id(43.61, -116.20))
-    seen: list = []
-    state = asyncio.run(regions.run_import("all", client=_mock_client(_site(seen=seen))))
-    assert state["total"] == 5 and state["done"] == 5 and state["failures"] == 0
-    assert c.execute("SELECT COUNT(*) FROM region").fetchone()[0] == 5
-    assert {h for h, _ in seen} >= {"meshmapper.net", "boi.meshmapper.net", "smn.meshmapper.net"}
-    assert {ua for _, ua in seen} == {regions.USER_AGENT}
-    # square membership was recomputed for the affected regions
-    regions.map_new_cells()
-    assert c.execute("SELECT region_code FROM region_cell").fetchall()[0][0] == "BOI"
-    st = regions.sync_status()
-    assert st["running"] is False and st["done"] == 5 and st["finished_at"]
-    c.close()
-
-
-def test_import_failure_keeps_previous_boundary_and_carries_on(db_path, monkeypatch):
-    monkeypatch.setattr(regions.settings, "regions_fetch_delay_seconds", 0.0)
-    load_fixture_regions(db_path, codes=("boi", "pih"))
-    c = _conn(db_path)
-    before = c.execute("SELECT polygon_json, fetched_at FROM region WHERE code='BOI'").fetchone()
-    state = asyncio.run(regions.run_import("all", client=_mock_client(_site(failing={"BOI"}))))
-    assert state["failures"] == 1 and "BOI" in state["last_error"]
-    assert state["done"] == 5
-    after = c.execute("SELECT polygon_json, fetched_at FROM region WHERE code='BOI'").fetchone()
-    assert tuple(after) == tuple(before)                       # kept
-    assert c.execute("SELECT fetched_at FROM region WHERE code='SMN'").fetchone()[0] > 1000  # others went on
-    assert c.execute("SELECT COUNT(*) FROM region").fetchone()[0] == 5
-    c.close()
-
-
-def test_import_new_mode_fetches_only_unstored_codes(db_path, monkeypatch):
-    monkeypatch.setattr(regions.settings, "regions_fetch_delay_seconds", 0.0)
-    load_fixture_regions(db_path, codes=("boi", "pih", "ida"))
-    seen: list = []
-    state = asyncio.run(regions.run_import("new", client=_mock_client(_site(seen=seen))))
-    pages = sorted(h for h, _ in seen if h != "meshmapper.net")
-    assert pages == ["smn.meshmapper.net", "twf.meshmapper.net"]
-    assert state["total"] == 2
-
-
-def test_import_list_failure_is_reported_and_stores_nothing(db_path, monkeypatch):
-    monkeypatch.setattr(regions.settings, "regions_fetch_delay_seconds", 0.0)
-    monkeypatch.setattr(regions, "_next_try_at", 0.0)
-    client = _mock_client(lambda req: httpx.Response(503))
-    state = asyncio.run(regions.run_import("all", client=client))
-    assert state["failures"] == 1 and "region list" in state["last_error"]
-    c = _conn(db_path)
-    assert c.execute("SELECT COUNT(*) FROM region").fetchone()[0] == 0
-    assert regions.sync_status()["running"] is False
-    c.close()
-
-
-def test_import_pauses_between_requests(db_path, monkeypatch):
-    monkeypatch.setattr(regions.settings, "regions_fetch_delay_seconds", 2.0)
-    sleeps = []
-
-    async def fake_sleep(s):
-        sleeps.append(s)
-
-    monkeypatch.setattr(regions.asyncio, "sleep", fake_sleep)
-    asyncio.run(regions.run_import("all", client=_mock_client(_site())))
-    assert sleeps == [2.0] * 4      # between the 5 region pages, none before the first
-
-
-def test_make_client_identifies_meshwars():
-    async def go():
-        client = regions.make_client()
-        try:
-            return client.headers["user-agent"], client.timeout
-        finally:
-            await client.aclose()
-
-    ua, timeout = asyncio.run(go())
-    assert "MeshWars" in ua and timeout.read is not None
-
-
-def test_sync_status_running_goes_stale(db_path):
-    regions._write_state({"state": "running", "mode": "all", "started_at": int(time.time())})
-    assert regions.sync_status()["running"] is True
-    c = _conn(db_path)
-    row = json.loads(c.execute("SELECT v FROM cursor WHERE k = ?", (regions._STATE_KEY,)).fetchone()[0])
-    row["updated_at"] = int(time.time()) - 3600
-    c.execute("UPDATE cursor SET v = ? WHERE k = ?", (json.dumps(row), regions._STATE_KEY))
-    assert regions.sync_status()["running"] is False
     c.close()
 
 
@@ -868,7 +703,7 @@ def test_a_changed_region_drops_only_its_own_shape_before_loading_anything(db_pa
     regions.map_new_cells()
     assert {k[1] for k in regions._shape_cache()} >= {"BOI", "PIH"}
     c.execute("BEGIN IMMEDIATE")
-    parsed = regions.parse_region_page(_fx("boi.html"), "BOI")
+    parsed = _parsed("BOI")
     regions.store_region(c, "BOI", "Boise, US", parsed, now=5000)
     c.execute("COMMIT")
     conn = db.connect()
@@ -914,8 +749,6 @@ def test_the_periodic_mapping_waits_for_a_still_region_set(db_path, monkeypatch)
     assert not regions.region_set_is_stable()
     c.execute("UPDATE region SET fetched_at = ?", (int(time.time()) - regions.REGION_SET_STABLE_S - 5,))
     assert regions.region_set_is_stable()
-    regions._write_state({"state": "running", "mode": "all", "started_at": int(time.time())})
-    assert not regions.region_set_is_stable()               # an import is running
     c.close()
 
 

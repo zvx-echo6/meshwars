@@ -24,7 +24,14 @@ from app.regions_api import router as regions_router
 from app.sessions import SESSION_COOKIE_NAME, create_session
 
 NOW = int(time.time())
-FIX = Path(__file__).parent / "fixtures" / "meshmapper"
+FIX = Path(__file__).parent / "fixtures" / "regions"
+
+
+def _parsed(code: str) -> dict:
+    """A stored-region fixture (tests/fixtures/regions/<CODE>.json) as the dict regions.store_region takes."""
+    d = json.loads((FIX / f"{code.upper()}.json").read_text(encoding="utf-8"))
+    d["rings"] = [[tuple(p) for p in ring] for ring in d["rings"]]
+    return d
 
 
 def _init_schema(path: str) -> None:
@@ -47,11 +54,9 @@ def db_path(tmp_path, monkeypatch):
     _init_schema(path)
     monkeypatch.setattr(db.settings, "db_path", path)
     c = sqlite3.connect(path, isolation_level=None)
-    zones = {z["code"]: z for z in regions.parse_zone_list((FIX / "index_zones.html").read_text())}
     for code in ("boi", "pih", "ida", "smn"):
-        z = zones[code.upper()]
-        parsed = regions.parse_region_page((FIX / f"{code}.html").read_text(), code, z["lat"], z["lon"])
-        regions.store_region(c, code, z["name"], parsed, now=1000)
+        parsed = _parsed(code)
+        regions.store_region(c, code, parsed["name"], parsed, now=1000)
     c.close()
     return path
 

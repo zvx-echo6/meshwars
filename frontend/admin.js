@@ -2748,57 +2748,22 @@ async function saveNotice(b, overrideActive) {
 // ---- regions (app/regions.py, app/regions_api.py) -----------------------
 //
 // Regions are a view and standings filter for the map and never touch
-// scoring. This section lists what the MeshMapper import has stored,
-// starts that import, and edits groups: a group holds regions and/or other
+// scoring. This section lists the stored regions and edits groups: a group holds regions and/or other
 // groups, to any depth. The API rejects a cycle and a slug that is taken;
 // its message is shown as-is.
 
-let regionsData = { regions: [], groups: [], sync: {} };
+let regionsData = { regions: [], groups: [] };
 let regionGroupDraft = null; // null, or { id (null while new), name, slug, regions: [codes], groups: [ids] }
-let regionSyncTimer = null;
-
-function regionSyncLine(sync) {
-  if (!sync) return '';
-  if (sync.running) {
-    return 'running ' + (sync.done || 0) + ' / ' + (sync.total || 0) + ', failures ' + (sync.failures || 0);
-  }
-  if (!sync.finished_at) return 'last run: never';
-  return 'last run ' + fmtTs(sync.finished_at) + ', failures ' + (sync.failures || 0)
-    + (sync.last_error ? ' (' + sync.last_error + ')' : '');
-}
-
-function renderRegionSync(sync) {
-  regionsData.sync = sync || {};
-  document.getElementById('rg-sync-status').textContent = regionSyncLine(sync);
-  document.getElementById('rg-sync').disabled = !!(sync && sync.running);
-  if (regionSyncTimer) { clearTimeout(regionSyncTimer); regionSyncTimer = null; }
-  if (sync && sync.running) {
-    regionSyncTimer = setTimeout(pollRegionSync, 3000);
-  }
-}
-
-async function pollRegionSync() {
-  regionSyncTimer = null;
-  try {
-    const was = regionsData.sync && regionsData.sync.running;
-    const sync = await api('/api/admin/regions/sync');
-    renderRegionSync(sync);
-    if (was && !sync.running) await loadRegions(); // finished: show the new boundaries
-  } catch (e) {
-    document.getElementById('rg-sync-status').textContent = 'status failed: ' + e.message;
-  }
-}
 
 async function loadRegions() {
   try {
     regionsData = await api('/api/admin/regions');
   } catch (e) {
-    document.getElementById('rg-sync-result').textContent = 'Could not load: ' + e.message;
+    document.getElementById('rg-result').textContent = 'Could not load: ' + e.message;
     return;
   }
   renderRegionRows();
   renderRegionGroups();
-  renderRegionSync(regionsData.sync);
   await loadRegionRequests();
 }
 
@@ -3075,41 +3040,7 @@ async function deleteRegionGroup(b, g) {
     await post('/api/admin/regions/groups/delete', { id: g.id, name: g.name });
     await loadRegions();
   } catch (e) {
-    document.getElementById('rg-sync-result').textContent = 'Failed: ' + e.message;
-    b.disabled = false;
-  }
-}
-
-async function fetchRegionByLink(b) {
-  const out = document.getElementById('rg-fetch-result');
-  const input = document.getElementById('rg-fetch-link');
-  out.textContent = '';
-  if (!input.value.trim()) return;
-  b.disabled = true;
-  try {
-    const r = await post('/api/admin/regions/fetch', { link: input.value.trim() });
-    const name = (r.name || '').replace(/,\s*[A-Za-z]{2}$/, '');
-    out.textContent = r.code + ' ' + name + ': ' + r.points.toLocaleString() + ' points, '
-      + r.claimed_squares.toLocaleString() + ' claimed squares (MeshCore ' + r.claimed_meshcore.toLocaleString()
-      + ', Meshtastic ' + r.claimed_meshtastic.toLocaleString() + ')'
-      + (r.new_or_updated === 'new' ? ' (new)' : ' (updated)');
-    input.value = '';
-    await loadRegions();
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
-  }
-  b.disabled = false;
-}
-
-async function startRegionSync(b) {
-  const out = document.getElementById('rg-sync-result');
-  out.textContent = '';
-  b.disabled = true;
-  try {
-    await post('/api/admin/regions/sync', {});
-    renderRegionSync(await api('/api/admin/regions/sync'));
-  } catch (e) {
-    out.textContent = 'Failed: ' + e.message;
+    document.getElementById('rg-result').textContent = 'Failed: ' + e.message;
     b.disabled = false;
   }
 }
@@ -3837,11 +3768,6 @@ document.getElementById('conn-new').addEventListener('click', function () {
 });
 document.getElementById('mo-freeze').addEventListener('click', function () { freezeMonth(this); });
 document.getElementById('pl-preview').addEventListener('click', function () { previewPlaces(this); });
-document.getElementById('rg-fetch').addEventListener('click', function () { fetchRegionByLink(this); });
-document.getElementById('rg-fetch-link').addEventListener('keydown', function (e) {
-  if (e.key === 'Enter') document.getElementById('rg-fetch').click();
-});
-document.getElementById('rg-sync').addEventListener('click', function () { startRegionSync(this); });
 document.getElementById('rg-group-new').addEventListener('click', function () {
   if (regionGroupDraft && regionGroupDraft.id === null) return; // one blank draft at a time
   regionGroupDraft = { id: null, name: '', slug: '', regions: [], groups: [] };

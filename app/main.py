@@ -180,9 +180,8 @@ async def lifespan(app: FastAPI):
     if settings.run_background_tasks:
         board_publisher_task = asyncio.create_task(mc_api.run_forever(), name="board-cache-publisher")
 
-    # Regions (app/regions.py): maps new squares to MeshMapper regions
-    # every minute (DB only) and, only when REGIONS_SYNC_ENABLED, fetches
-    # boundaries daily/weekly. Worker role only, like every loop above.
+    # Regions (app/regions.py): maps new squares to the stored regions
+    # every minute (DB only); nothing is fetched. Worker role only, like every loop above.
     regions_task = None
     checkin_place_task = None
     if settings.run_background_tasks:
