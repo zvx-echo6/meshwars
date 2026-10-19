@@ -241,11 +241,11 @@
           <h3 id="places-scoring">Scored by effort, not by category</h3>
           <p>What a place is worth depends on how far it made you go, not what kind of place it is. Anywhere inside a town's own limits, a park or a landmark is worth five points, the same nickel whether you drove up to it or walked to the courthouse. Step outside a town and the category starts to matter. A summit is scored differently from both &mdash; see below.</p>
           <table class="rules-table rules-table-compare">
-            <thead><tr><th></th><th>MeshCore</th><th>Meshtastic</th></tr></thead>
+            <thead><tr><th></th><th>Inside a town</th><th>Outside a town</th></tr></thead>
             <tbody>
-              <tr><th>Territory</th><td>wherever MeshMapper reports you</td><td>wherever FreqMapper reports you</td></tr>
-              <tr><th>Places Worth Going</th><td>everywhere</td><td>everywhere</td></tr>
-              <tr><th>Net check-ins</th><td>configured nets only</td><td>configured nets only</td></tr>
+              <tr><th>Landmark</th><td>5</td><td>10</td></tr>
+              <tr><th>Park</th><td>5</td><td>25</td></tr>
+              <tr><th>Summit</th><td>50 to 100, by height</td><td>50 to 100, by height</td></tr>
             </tbody>
           </table>
           <p>A summit is the one place whose value is never flat and never falls back to the in-town nickel: it scores by elevation everywhere, inside a town or out. It slides evenly from 50 points at 6,000 feet and below to 100 points at 9,000 feet and above &mdash; a peak at 7,500 feet is worth 75. A peak is a peak whether or not you can park a car next to it: unlike a park or a landmark, being inside a town's limits does not flatten a summit's value, because the climb it took to reach the top doesn't change depending on where the town line was drawn around its base.</p>
@@ -318,10 +318,11 @@
           <h2>Where it counts</h2>
           <p>Play is open worldwide. Your squares are wherever MeshMapper (MeshCore) or FreqMapper (Meshtastic) reports your radio.</p>
           <table class="rules-table rules-table-compare">
-            <thead><tr><th></th><th>Territory</th><th>Places Worth Going</th><th>Net check-ins</th></tr></thead>
+            <thead><tr><th></th><th>MeshCore</th><th>Meshtastic</th></tr></thead>
             <tbody>
-              <tr><th>MeshCore</th><td>anywhere you can run MeshMapper</td><td>everywhere</td><td>configured nets only</td></tr>
-              <tr><th>Meshtastic</th><td>wherever FreqMapper or MeshView feeders hear you</td><td>everywhere</td><td>configured nets only</td></tr>
+              <tr><th>Territory</th><td>wherever MeshMapper reports you</td><td>wherever FreqMapper reports you</td></tr>
+              <tr><th>Places Worth Going</th><td>everywhere</td><td>everywhere</td></tr>
+              <tr><th>Net check-ins</th><td>configured nets only</td><td>configured nets only</td></tr>
             </tbody>
           </table>
           <h3 id="area-nets">Configured nets</h3>
