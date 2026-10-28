@@ -41,12 +41,118 @@
  * section to expand, so it has never needed one; scoped here rather
  * than added to the shared file so that page is untouched. */
 .mc-scoreboard#mc-scoreboard-position {
-  position: absolute;
-  top: calc(var(--mw-nav-h) + 10px);
-  right: 10px;
-  z-index: 20;
+  /* Positioned by the .mw-score wrapper below, not absolutely itself. */
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
   max-height: calc(100vh - var(--mw-nav-h) - 20px);
   overflow-y: auto;
+  /* Welded to the tab on its left edge. */
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+}
+
+/* The score panel and the tab that slides it away (map2.js's
+ * buildScoreboardControl / setupScoreCollapse): the mirror image of
+ * .mw-layers below. This is the positioner in the old top-right spot;
+ * .mw-score-toggle is a full-height tab on the panel's left edge.
+ * Hiding translates the pair rightwards by enough to park the tab flush
+ * against the viewport's right edge and carry the panel off screen
+ * behind it. The offscreen part would widen the page, so .mw-score-clip
+ * (fixed, overflow hidden, click-through) contains it. */
+.mw-score-clip {
+  position: fixed;
+  top: var(--mw-nav-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.mw-score {
+  --mw-score-tab-w: 24px;
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  pointer-events: auto;
+  display: flex;
+  align-items: stretch;
+  max-width: calc(100vw - 20px);
+  transition: transform 0.25s ease;
+}
+
+/* Tab's right edge lands on x=100%: the box ends 10px inside the
+   viewport and the tab occupies its leftmost --mw-score-tab-w. */
+.mw-score.mw-score-hidden {
+  transform: translateX(calc(100% - var(--mw-score-tab-w) + 10px));
+}
+
+/* Visibility goes hidden only after the slide, which also takes every
+   control in the panel out of the tab order and out of reach. */
+.mw-score .mc-scoreboard#mc-scoreboard-position {
+  visibility: visible;
+  transition: visibility 0s;
+}
+
+.mw-score.mw-score-hidden .mc-scoreboard#mc-scoreboard-position {
+  visibility: hidden;
+  transition: visibility 0s linear 0.25s;
+}
+
+.mw-score-toggle {
+  flex: 0 0 auto;
+  width: var(--mw-score-tab-w);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--mw-raised);
+  color: var(--mw-accent);
+  border: 1px solid var(--mw-line-strong);
+  border-radius: 8px 0 0 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mw-score-toggle:hover,
+.mw-score-toggle:focus-visible {
+  background: var(--mw-accent-active);
+  color: var(--mw-gold-light);
+}
+
+.mw-score-toggle-caret {
+  display: block;
+  transition: transform 0.25s ease;
+}
+
+.mw-score.mw-score-hidden .mw-score-toggle-caret {
+  transform: rotate(180deg);
+}
+
+/* Applied only while setupScoreCollapse writes the remembered state. */
+.mw-score.mw-score-no-anim,
+.mw-score.mw-score-no-anim .mc-scoreboard#mc-scoreboard-position,
+.mw-score.mw-score-no-anim .mw-score-toggle-caret {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mw-score,
+  .mw-score .mc-scoreboard#mc-scoreboard-position,
+  .mw-score .mw-score-toggle-caret {
+    transition: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .mw-score {
+    --mw-score-tab-w: 30px;
+  }
 }
 
 /* The layer switcher and the tab that slides it away (map2.html's
