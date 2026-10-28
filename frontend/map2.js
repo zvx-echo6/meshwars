@@ -1844,7 +1844,25 @@ function buildScoreboardControl(map) {
       </div>
     </div>
   `;
-  document.body.appendChild(div);
+  // The panel scrolls (overflow-y in map2.css), so a tab inside it would
+  // scroll away with the content. A positioner wraps panel and tab
+  // instead; setupScoreCollapse slides the wrapper.
+  const wrap = document.createElement('div');
+  wrap.id = 'mw-score';
+  wrap.className = 'mw-score';
+  const tab = document.createElement('button');
+  tab.type = 'button';
+  tab.id = 'mw-score-toggle';
+  tab.className = 'mw-score-toggle';
+  tab.setAttribute('aria-controls', 'mc-scoreboard-position');
+  tab.setAttribute('aria-expanded', 'true');
+  tab.setAttribute('aria-label', 'Hide the score panel');
+  tab.title = 'Hide the score panel';
+  tab.innerHTML = '<span class="mw-score-toggle-caret" aria-hidden="true">&#9656;</span>';
+  wrap.appendChild(tab);
+  wrap.appendChild(div);
+  document.body.appendChild(wrap);
+  setupScoreCollapse(wrap, tab);
 
   scoreboardBody = div.querySelector('.mc-scoreboard-body');
   scoreboardPanelEl = div;
@@ -4539,8 +4557,8 @@ let lastGeoFix = null;
 let followActive = false;
 // The fix last centered on. Reset to null on every engage so the very
 // next fix is always treated as "first" (see applyFollowCenter) --
-// that is what makes engaging apply the zoom bump and skip the
-// movement threshold on that first center.
+// that is what makes engaging skip the movement threshold on that
+// first center.
 let followLastCenter = null;
 
 // Ignore fixes that haven't moved further than this: consumer GPS
@@ -4550,14 +4568,6 @@ let followLastCenter = null;
 // above typical stationary jitter but well under a walking pace's
 // stride-to-stride distance, so real movement still recenters promptly.
 const FOLLOW_RECENTER_THRESHOLD_M = 8;
-
-// "target roughly z15-16, but do NOT zoom out if they are already
-// closer in than that" -- below z15 the viewer is too zoomed out for
-// their own dot to be useful, so engaging bumps to 16; at z15 or
-// deeper, zoom is left alone entirely, on every later fix as well as
-// the first.
-const FOLLOW_ENGAGE_MIN_ZOOM = 15;
-const FOLLOW_ENGAGE_TARGET_ZOOM = 16;
 
 // A short eased pan, not a jump -- long enough to read as motion,
 // short enough to keep up with a fix arriving every few seconds.
@@ -4585,9 +4595,9 @@ function setFollowUI(active) {
 
 // Centers on (lat, lon) if this is the first fix since follow was
 // (re-)engaged (followLastCenter === null) or the fix has moved past
-// FOLLOW_RECENTER_THRESHOLD_M since the last center. Only the first
-// call after an engage is allowed to touch zoom, and only to bump it
-// up -- see FOLLOW_ENGAGE_MIN_ZOOM/TARGET_ZOOM above.
+// FOLLOW_RECENTER_THRESHOLD_M since the last center. Never touches
+// zoom: engaging only centres, and following carries on at whatever
+// zoom the viewer is already at.
 // Two things made following look jerky at speed, and they are separate:
 //
 //  1. The camera moved for FOLLOW_EASE_MS and then sat still until the
@@ -4637,9 +4647,8 @@ function applyFollowCenter(map, lat, lon) {
   const opts = { center: [lon, lat] };
   if (isEngage) {
     // The first move after engaging is a jump to where you are, not
-    // travel -- keep the original short ease and the zoom bump.
+    // travel -- keep the original short ease, at the current zoom.
     opts.duration = FOLLOW_EASE_MS;
-    if (map.getZoom() < FOLLOW_ENGAGE_MIN_ZOOM) opts.zoom = FOLLOW_ENGAGE_TARGET_ZOOM;
   } else {
     opts.duration = followFixIntervalMs;
     opts.easing = (t) => t;
@@ -5451,6 +5460,57 @@ function setupLayersCollapse() {
 // static markup with no dependency on the map, and it should still work
 // if the map never finishes loading at all.
 setupLayersCollapse();
+
+// ===== Collapsible score panel =====
+//
+// Mirror image of the layers switcher above: a tab on the panel's left
+// edge slides the whole top-right score panel off the right edge and
+// leaves the tab behind (.mw-score rules in map2.css own the movement).
+// Separate from the phone-only header collapse (setMcCollapsed), which
+// only folds the panel's body and is left exactly as it was.
+//
+// Remembered per browser like the layers panel; storage failures are
+// swallowed, and no stored value means shown, the state that hides
+// nothing. Called from buildScoreboardControl because that is where the
+// panel is created.
+const SCORE_HIDDEN_KEY = 'mwScorePanelHidden';
+
+function setupScoreCollapse(container, toggle) {
+  function apply(hidden) {
+    container.classList.toggle('mw-score-hidden', hidden);
+    toggle.setAttribute('aria-expanded', String(!hidden));
+    const label = hidden ? 'Show the score panel' : 'Hide the score panel';
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+  }
+
+  toggle.addEventListener('click', () => {
+    const hidden = !container.classList.contains('mw-score-hidden');
+    apply(hidden);
+    try {
+      localStorage.setItem(SCORE_HIDDEN_KEY, hidden ? '1' : '0');
+    } catch {
+      // Storage unavailable -- the choice lasts for this page view only.
+    }
+  });
+
+  let stored = null;
+  try {
+    stored = localStorage.getItem(SCORE_HIDDEN_KEY);
+  } catch {
+    stored = null;
+  }
+  if (stored !== '1') return;
+
+  // Restoring a remembered state must not look like the panel closing
+  // itself: suppress transitions across this write, release two frames
+  // later (same reasoning as setupLayersCollapse).
+  container.classList.add('mw-score-no-anim');
+  apply(true);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => container.classList.remove('mw-score-no-anim'));
+  });
+}
 
 async function main() {
   // ?board= wins over the configured default. Without this an award link
