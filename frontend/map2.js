@@ -1861,7 +1861,14 @@ function buildScoreboardControl(map) {
   tab.innerHTML = '<span class="mw-score-toggle-caret" aria-hidden="true">&#9656;</span>';
   wrap.appendChild(tab);
   wrap.appendChild(div);
-  document.body.appendChild(wrap);
+  // Clip box: the hidden panel is translated past the right viewport
+  // edge, which (unlike the layers panel sliding left) would widen the
+  // page and add a horizontal scroll; a fixed overflow:hidden parent
+  // contains it.
+  const clip = document.createElement('div');
+  clip.className = 'mw-score-clip';
+  clip.appendChild(wrap);
+  document.body.appendChild(clip);
   setupScoreCollapse(wrap, tab);
 
   scoreboardBody = div.querySelector('.mc-scoreboard-body');

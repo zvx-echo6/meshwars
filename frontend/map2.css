@@ -58,14 +58,25 @@
  * .mw-score-toggle is a full-height tab on the panel's left edge.
  * Hiding translates the pair rightwards by enough to park the tab flush
  * against the viewport's right edge and carry the panel off screen
- * behind it. Hidden, this box is hidden-overflowed by the page (body is
- * not scrollable), so the offscreen part cannot add a scrollbar. */
+ * behind it. The offscreen part would widen the page, so .mw-score-clip
+ * (fixed, overflow hidden, click-through) contains it. */
+.mw-score-clip {
+  position: fixed;
+  top: var(--mw-nav-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 20;
+}
+
 .mw-score {
   --mw-score-tab-w: 24px;
   position: absolute;
-  top: calc(var(--mw-nav-h) + 10px);
+  top: 10px;
   right: 10px;
-  z-index: 20;
+  pointer-events: auto;
   display: flex;
   align-items: stretch;
   max-width: calc(100vw - 20px);
