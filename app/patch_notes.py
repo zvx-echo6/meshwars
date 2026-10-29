@@ -81,6 +81,13 @@ def render_markdown(md: str) -> str:
     return "\n".join(parts)
 
 
+def _from_first_entry(md: str) -> str:
+    """Drop the file's h1 and preamble: start at the first "## " heading
+    (the page supplies its own title and subtitle)."""
+    m = re.search(r"^## ", md, flags=re.M)
+    return md[m.start():] if m else ""
+
+
 _cache: dict[tuple, str] = {}
 
 
@@ -93,7 +100,7 @@ def rendered_changelog(path: Path = CHANGELOG_PATH) -> str:
     key = (str(path), st.st_mtime_ns, st.st_size)
     hit = _cache.get(key)
     if hit is None:
-        hit = re.sub(r"<h1>.*?</h1>\n?", "", render_markdown(path.read_text(encoding="utf-8")), count=1)
+        hit = render_markdown(_from_first_entry(path.read_text(encoding="utf-8")))
         _cache.clear()
         _cache[key] = hit
     return hit

@@ -33,6 +33,9 @@ def test_patch_notes_page_has_known_heading():
     assert "Deferred pings now claim empty squares" in resp.text
     assert "<!--PATCH_NOTES-->" not in resp.text
     assert "Patch notes</a>" in resp.text  # footer link
+    # The page has its own subtitle; the file's h1 and preamble are skipped.
+    assert "Plain language, newest first" not in resp.text
+    assert "<h1>Changelog</h1>" not in resp.text
 
 
 def test_real_app_serves_patch_notes():
