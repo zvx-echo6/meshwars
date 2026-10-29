@@ -278,7 +278,8 @@ def test_defer_with_last_score_ignores_fallback(db_path, three):
 def test_real_ping_in_a_different_cell_is_ignored(db_path, three):
     _ing_as(three, 1, [_real(5, lat=LAT + CELL_STEP, contact=P1)], NOW)
     _ing_as(three, 2, [_defer(ts=NOW + 30, contact=P2)], NOW + 30)
-    assert _tile(db_path) is None
+    # The other cell's 0.5 is not borrowed: this cell has none, so the fallback applies.
+    assert _team_score(db_path, "BLUE") == pytest.approx(0.1 + BONUS)
 
 
 def test_defer_flip_follows_the_borrowed_points(db_path, three):
