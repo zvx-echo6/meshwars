@@ -51,6 +51,7 @@ from .config import settings
 from .db import connect, WriteSession
 from .grid import cell_bounds
 from .mc_ingest import PROTOCOL as MC_PROTOCOL
+from . import mc_scoring
 from .mc_scoring import team_checkin_points, team_place_points, team_tile_counts
 from .places_api import _stable_tiebreak
 from .sessions import SessionPrincipal, optional_session, require_session
@@ -2246,11 +2247,17 @@ def cell_detail_for(protocol: str, cell_id: str) -> dict | None:
         ).fetchone()
 
         score_rows = conn.execute(
-            "SELECT team, score FROM mc_tile_score "
+            "SELECT team, score, last_update FROM mc_tile_score "
             " WHERE season_id = ? AND cell_id = ?",
             (season["id"], cell_id),
         ).fetchall()
-        scores = {r["team"]: r["score"] for r in score_rows}
+        # Decayed to now with the same function capture comparisons use,
+        # so the popup never shows stale, undecayed numbers.
+        now_ts = int(time.time())
+        scores = {
+            r["team"]: mc_scoring.decayed_score(r["score"], r["last_update"], now_ts)
+            for r in score_rows
+        }
 
         # Evidence behind each capture -- a capture is caused by a paint,
         # and that paint has a player_cell_ping row at the same

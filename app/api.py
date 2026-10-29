@@ -45,7 +45,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from . import mc_api, regions
+from . import mc_api, mc_scoring, regions
 from .account_api import router as account_router
 from .admin_api import router as admin_router
 from .admin_ops import router as admin_ops_router
@@ -208,25 +208,26 @@ def _cell_score_map(conn, season_id: int, region_codes=None) -> dict[str, dict[s
     """cell_id -> {team: score} for every scored cell in a season, in one
     batch query -- enriches /get-nodes' coverage list with the same
     per-team scores mc_api.cell_detail_for() exposes for a single cell,
-    without a query per cell. Raw stored scores, not decayed on read,
-    matching cell_detail_for's own choice for this field -- that
-    function already doesn't decay a single cell's scores, so this batch
-    version stays consistent with it rather than "fixing" it here.
+    without a query per cell. Scores are decayed to now with
+    mc_scoring.decayed_score, exactly like cell_detail_for.
     """
     if region_codes is None:
         rows = conn.execute(
-            "SELECT cell_id, team, score FROM mc_tile_score WHERE season_id = ?",
+            "SELECT cell_id, team, score, last_update FROM mc_tile_score WHERE season_id = ?",
             (season_id,),
         ).fetchall()
     else:
         cond, cparams = regions.cell_filter_sql(region_codes, "mc_tile_score.cell_id")
         rows = conn.execute(
-            f"SELECT cell_id, team, score FROM mc_tile_score WHERE season_id = ? AND {cond}",
+            f"SELECT cell_id, team, score, last_update FROM mc_tile_score WHERE season_id = ? AND {cond}",
             (season_id, *cparams),
         ).fetchall()
+    now_ts = int(time.time())
     out: dict[str, dict[str, float]] = {}
     for r in rows:
-        out.setdefault(r["cell_id"], {})[r["team"]] = r["score"]
+        out.setdefault(r["cell_id"], {})[r["team"]] = mc_scoring.decayed_score(
+            r["score"], r["last_update"], now_ts
+        )
     return out
 
 
