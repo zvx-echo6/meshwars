@@ -391,7 +391,8 @@ def apply_paint(
             _record_repeater_credit(conn, player_id, protocol, cell_id, repeater_id, ts, received_at)
         points = min(len(credit_ids) * points_per_repeater, remaining)
         # Remember what this cell's most recent scored real ping earned
-        # (a DEFER scores this -- see mc_cell_last_score in app/db.py).
+        # (a DEFER scores this, or one repeater's worth when the cell has
+        # none -- see mc_cell_last_score in app/db.py).
         # Written here, not in the caller, because `points` is only known
         # here, and only this per-repeater path is a real scored ping:
         # DEFER/FreqMapper take the flat branch below and cooldown /

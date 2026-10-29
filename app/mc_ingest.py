@@ -234,14 +234,15 @@ _DEFER_CREDIT_ID = "DEFER"
 
 def _defer_cell_points(conn, cell: str) -> float:
     """Points the most recent scored real ping in `cell` (any player)
-    earned, from mc_cell_last_score (primary-key seek, never pruned); 0.0
-    if the cell has none on record. See apply_paint() for the write.
+    earned, from mc_cell_last_score (primary-key seek, never pruned). A
+    cell with none on record is worth one repeater
+    (settings.mc_points_per_repeater). See apply_paint() for the write.
     """
     row = conn.execute(
         "SELECT points FROM mc_cell_last_score WHERE protocol = ? AND cell_id = ?",
         (PROTOCOL, cell),
     ).fetchone()
-    return float(row[0]) if row is not None else 0.0
+    return float(row[0]) if row is not None else settings.mc_points_per_repeater
 
 
 def is_unknown_ping_type(ping: dict) -> bool:
@@ -1566,10 +1567,10 @@ class McIngestor:
             # NEW territory can be claimed, not to throttle revisiting
             # ground already held.
             cap_exceeded = False
-            # A DEFER in a cell with no scored real ping earns 0, like a
-            # no_signal ping: it must not use up a cell-claim slot.
+            # A DEFER always scores (see _defer_cell_points), so it takes
+            # a cell-claim slot like any scoring ping.
             defer_points = _defer_cell_points(conn, cell) if is_defer else 0.0
-            if (repeater_ids or defer_points > 0) and settings.mc_cell_claim_cap_enabled:
+            if (repeater_ids or is_defer) and settings.mc_cell_claim_cap_enabled:
                 already_claimed = conn.execute(
                     "SELECT 1 FROM player_cell_claim"
                     " WHERE player_id = ? AND protocol = ? AND cell_id = ?",
@@ -1613,8 +1614,9 @@ class McIngestor:
                     # A DEFER scores what the most recent scored real ping
                     # in this cell earned (mc_cell_last_score, any player,
                     # never pruned), in flat mode as FreqMapper does; no
-                    # such ping on record -> 0: no paint, no cooldown
-                    # stamp, outcome no_signal. Flat mode has no
+                    # such ping on record -> one repeater's worth
+                    # (mc_points_per_repeater), so a DEFER always scores
+                    # and goes through the normal paint path. Flat mode has no
                     # cooldown, so give it the real-ping per-cell limit
                     # here: a DEFER in a cell earns nothing again until
                     # mc_cooldown_seconds after this player's last
@@ -1623,8 +1625,6 @@ class McIngestor:
                         conn, player_id, PROTOCOL, cell, now_ts, settings.mc_cooldown_seconds,
                     ):
                         paint_result = mc_scoring.PaintResult("cooldown", cell, team)
-                    elif defer_points <= 0:
-                        paint_result = mc_scoring.PaintResult("no_signal", cell, team)
                     else:
                         paint_result = mc_scoring.apply_paint(
                             conn, season_id, player_id, team, cell, now_ts, [],

@@ -4,7 +4,8 @@ A DEFER ({"type": "DEFER", lat, lon, timestamp, held, radio_freq, contact,
 iata}) carries no heard_repeats / repeater_id. It is a recognized type and
 scores what the most recent scored REAL ping in the same cell (any player)
 earned, read from mc_cell_last_score (never pruned), via apply_paint's flat
-mode; a cell with no such ping gives 0 / no paint / "no_signal". It has the
+mode; a cell with no such ping scores one repeater's worth
+(settings.mc_points_per_repeater, 0.1). It has the
 same per-cell cooldown (mc_cooldown_seconds) real pings have, the same
 cell-claim cap, and place credit. It records no repeater observation and
 bumps neither pings_no_repeaters nor pings_unknown_type.
@@ -231,24 +232,54 @@ def test_last_score_survives_housekeeping_pruning_credit_rows(db_path, three):
     assert _team_score(db_path, "BLUE") == pytest.approx(0.3 + BONUS)
 
 
-def test_defer_in_cell_with_no_scored_ping_earns_nothing(db_path, three, monkeypatch):
+def test_defer_in_cell_with_no_scored_ping_captures_at_one_repeater(db_path, three, monkeypatch):
     seen = _spy_outcomes(monkeypatch)
     _ing_as(three, 2, [_defer(contact=P2)], NOW)
-    assert _tile(db_path) is None
-    assert seen == ["no_signal"]
+    assert _tile(db_path)["owner_team"] == "BLUE"
+    assert _team_score(db_path, "BLUE") == pytest.approx(settings.mc_points_per_repeater + BONUS)
+    assert _team_score(db_path, "BLUE") == pytest.approx(0.1 + 0.5)
+    assert "no_signal" not in seen
     s = _stats(db_path, 2)
     assert s["pings_accepted"] == 1
     assert s["pings_no_repeaters"] == 0
     assert s["pings_unknown_type"] == 0
-    assert _count(db_path, "SELECT COUNT(*) FROM player_cell_repeater_credit") == 0  # no sentinel
-    assert _count(db_path, "SELECT COUNT(*) FROM player_cell_claim") == 0  # no cap slot used
-    assert _count(db_path, "SELECT COUNT(*) FROM place_activation") == 0
+    assert _count(db_path, "SELECT COUNT(*) FROM player_cell_repeater_credit WHERE repeater_id = 'DEFER'") == 1
+    assert _count(db_path, "SELECT COUNT(*) FROM player_cell_claim") == 1  # uses a cap slot
+    assert _last_score(db_path) is None  # a DEFER never writes the last score
+
+
+def test_defer_no_last_score_in_enemy_cell_uses_fallback_and_flips(db_path, three, monkeypatch):
+    # RED owns the cell with no mc_cell_last_score row (e.g. pre-existing paint).
+    _ing_as(three, 1, [_real(1, contact=P1)], NOW)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM mc_cell_last_score")
+    conn.commit()
+    conn.close()
+    t1 = NOW + 60
+    _ing_as(three, 2, [_defer(ts=t1, contact=P2)], t1)  # BLUE 0.1 + 0.5, inside defense window
+    assert _tile(db_path)["owner_team"] == "RED"
+    assert _team_score(db_path, "BLUE") == pytest.approx(0.1 + BONUS)
+    assert _last_score(db_path) is None
+    # Past the defense window a different player's first-visit DEFER (0.1 + 0.5)
+    # is compared against RED's decayed score the normal way.
+    t2 = NOW + settings.mc_defense_window_seconds + 400
+    _ing_as(three, 3, [_defer(ts=t2, contact=P3)], t2)
+    assert _team_score(db_path, "GREEN") == pytest.approx(0.1 + BONUS)
+    assert _tile(db_path)["owner_team"] == "GREEN"
+    assert _last_score(db_path) is None
+
+
+def test_defer_with_last_score_ignores_fallback(db_path, three):
+    _ing_as(three, 1, [_real(5, contact=P1)], NOW)
+    _ing_as(three, 2, [_defer(ts=NOW + 30, contact=P2)], NOW + 30)
+    assert _team_score(db_path, "BLUE") == pytest.approx(0.5 + BONUS)
 
 
 def test_real_ping_in_a_different_cell_is_ignored(db_path, three):
     _ing_as(three, 1, [_real(5, lat=LAT + CELL_STEP, contact=P1)], NOW)
     _ing_as(three, 2, [_defer(ts=NOW + 30, contact=P2)], NOW + 30)
-    assert _tile(db_path) is None
+    # The other cell's 0.5 is not borrowed: this cell has none, so the fallback applies.
+    assert _team_score(db_path, "BLUE") == pytest.approx(0.1 + BONUS)
 
 
 def test_defer_flip_follows_the_borrowed_points(db_path, three):
