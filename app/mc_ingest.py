@@ -339,6 +339,83 @@ def parse_repeaters(ping: dict) -> list[RepeaterEntry]:
     return []
 
 
+# --- Player-node exclusion -------------------------------------------------
+# A MeshCore companion (a player's own registered radio) does not repeat, so
+# an id in a ping's repeater list that is a prefix of a registered mc
+# player_node node_ref / public_key is that player's (or a teammate's) own
+# radio echoing back, never a real repeater. Such ids earn no credit and are
+# not recorded as repeater observations. Ids shorter than 4 hex (1-byte path
+# hash) are too ambiguous and are left alone.
+# Lookup uses a small in-process cache of the registered mc node_refs/keys
+# (one read of player_node per _PLAYER_NODE_TTL seconds) instead of a query
+# per ping.
+_PLAYER_NODE_MIN_LEN = 4
+_PLAYER_NODE_TTL = 60.0
+_player_node_cache: tuple[float, list[tuple[str, str | None]]] | None = None
+
+
+def _invalidate_player_node_cache() -> None:
+    global _player_node_cache
+    _player_node_cache = None
+
+
+def _player_nodes(conn) -> list[tuple[str, str | None]]:
+    global _player_node_cache
+    now = time.monotonic()
+    cached = _player_node_cache
+    if cached is not None and now - cached[0] < _PLAYER_NODE_TTL:
+        return cached[1]
+    rows = conn.execute(
+        "SELECT node_ref, public_key FROM player_node WHERE protocol = ?",
+        (PROTOCOL,),
+    ).fetchall()
+    nodes = [
+        ((r["node_ref"] or "").lower(), (r["public_key"] or "").lower() or None)
+        for r in rows
+    ]
+    _player_node_cache = (now, nodes)
+    return nodes
+
+
+def is_player_node_id(rid: str, nodes: list[tuple[str, str | None]]) -> bool:
+    """True if repeater id `rid` is a registered mc player radio, per the
+    rule documented above. Pure function over the cached node list."""
+    rid = rid.strip().lower()
+    if len(rid) < _PLAYER_NODE_MIN_LEN:
+        return False
+    for node_ref, pub in nodes:
+        if len(rid) <= 8:
+            if node_ref.startswith(rid):
+                return True
+        elif node_ref and node_ref == rid[:8] and (pub is None or pub.startswith(rid)):
+            return True
+        if pub and pub.startswith(rid):
+            return True
+    return False
+
+
+def drop_player_node_repeaters(conn, player_id: int, entries: list[RepeaterEntry]) -> list[RepeaterEntry]:
+    """Remove entries that are registered player radios; log once per ping."""
+    if not entries:
+        return entries
+    nodes = _player_nodes(conn)
+    if not nodes:
+        return entries
+    kept: list[RepeaterEntry] = []
+    dropped: list[str] = []
+    for e in entries:
+        if is_player_node_id(e.repeater_id, nodes):
+            dropped.append(e.repeater_id)
+        else:
+            kept.append(e)
+    if dropped:
+        log.info(
+            "mc ingest: player %d ping named registered player node(s) %s as repeater; excluded",
+            player_id, ",".join(dropped),
+        )
+    return kept
+
+
 def count_repeaters(ping: dict) -> int:
     """Return how many distinct repeaters this ping reached.
 
@@ -1402,6 +1479,7 @@ class McIngestor:
                 (PROTOCOL, contact, player_id, received_at),
             )
             log.info("mc ingest: bound contact %s to player %d", contact, player_id)
+            _invalidate_player_node_cache()
 
             # Ban-evasion match check (settings.mc_evasion_record_enabled
             # -- see app/db.py's mc_evasion_record SCHEMA comment for the
@@ -1491,7 +1569,7 @@ class McIngestor:
         # 7: this is coverage HISTORY (when was this repeater actually
         # audible from this cell), not a scoring decision, so it keeps
         # exactly the value MeshMapper reported.
-        entries = parse_repeaters(ping)
+        entries = drop_player_node_repeaters(conn, player_id, parse_repeaters(ping))
         record_repeater_observations(conn, PROTOCOL, cell, entries, ts)
 
         # 9. Unknown ping type -- observability only, never a rejection.
