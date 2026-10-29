@@ -49,6 +49,7 @@ from . import mc_api, regions
 from .account_api import router as account_router
 from .admin_api import router as admin_router
 from .admin_ops import router as admin_ops_router
+from .patch_notes import rendered_changelog
 from .auth import new_rate_limit_bucket, require_api_key_principal
 from .checkin_api import router as checkin_router
 from .client_ip import get_client_ip
@@ -1220,7 +1221,11 @@ def _inject_head(html: str) -> str:
 
 
 def _templated_html_page(
-    request: Request, path: Path, missing_message: str, extra_head: str = ""
+    request: Request,
+    path: Path,
+    missing_message: str,
+    extra_head: str = "",
+    substitutions: dict[str, str] | None = None,
 ) -> Response:
     """Like _html_page, for a top-level page that also needs _inject_head()
     run over it (the map, /results, /rules, /join, /about -- everywhere the verification
@@ -1241,6 +1246,8 @@ def _templated_html_page(
         return HTMLResponse(f"<h1>meshwars</h1><p>{missing_message}</p>", status_code=404)
 
     html = _inject_head(path.read_text(encoding="utf-8"))
+    for marker, fill in (substitutions or {}).items():
+        html = html.replace(marker, fill, 1)
     if extra_head:
         html = html.replace("</head>", extra_head + "</head>", 1)
     content = html.encode("utf-8")
@@ -1435,6 +1442,18 @@ def mount(app: FastAPI) -> None:
         @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
         async def privacy_page(request: Request):
             return _templated_html_page(request, frontend_dir / "privacy.html", "privacy page not bundled")
+
+        # The player-facing changelog: CHANGELOG.md (repo root) rendered
+        # by app/patch_notes.py, re-rendered only when the file changes.
+        # Footer-linked like /privacy, not in the top nav.
+        @app.get("/patch-notes", response_class=HTMLResponse, include_in_schema=False)
+        async def patch_notes_page(request: Request):
+            return _templated_html_page(
+                request,
+                frontend_dir / "patch-notes.html",
+                "patch notes page not bundled",
+                substitutions={"<!--PATCH_NOTES-->": rendered_changelog()},
+            )
 
         # Alias for / (frontend/map2.html, same handler target as index()
         # above) -- kept working for anyone who already has this URL

@@ -75,7 +75,7 @@
   <link rel="stylesheet" href="/static/landing.css?v=20260909-1" />
   <link rel="stylesheet" href="/static/rules.css?v=20260904-3" />
   <link rel="stylesheet" href="/static/search.css?v=20260904-1" />
-  <link rel="stylesheet" href="/static/docs.css?v=20260904-1" />
+  <link rel="stylesheet" href="/static/docs.css?v=20261029-1" />
 </head>
 <body>
 
@@ -475,57 +475,7 @@
 
         <section id="changelog">
           <h2>What changed recently</h2>
-          <p>Player-visible changes, newest first. The full history lives in the repository's <code>CHANGELOG.md</code>.</p>
-          <ul class="docs-changelog">
-            <li>
-              <span class="docs-changelog-date">2026-09-18</span>
-              <strong>New: Adding your community</strong> -- how a mesh group gets added to MeshWars on MeshCore and on Meshtastic. See <a href="#add-community">Adding your community</a>.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-09-05</span>
-              <strong>You can sign in now, instead of only holding an API key.</strong> Connect GitHub, Google, Discord, a magic-link email, or a password from the account page -- it becomes your whole player dashboard: radios, setup-check, stats, honors, check-ins, team and security all in one place, and joining from inside it skips the invite code. See <a href="#account-signin">Accounts and signing in</a>.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-09-05</span>
-              Joining as Meshtastic while signed in no longer issues an API key -- nothing on that side ever used one. An anonymous Meshtastic join still gets one, and you can generate one later from Security either way. See <a href="#account-join-wizard">Joining through your account</a>.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-09-05</span>
-              <strong>Confirm a specific radio is yours directly</strong>, without waiting for it to resolve on its own -- MeshCore by triggering an advert, Meshtastic by sending a one-time broadcast code. See <a href="#account-checkin-name">Confirm my node</a>.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-09-05</span>
-              Two-factor authentication is now available on the password and magic-link sign-in doors, with recovery codes issued once. See <a href="#account-2fa">Two-factor authentication</a>.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-09-05</span>
-              <strong>You can delete your own account, player, and data.</strong> Your team keeps the squares and history you earned; only your name comes off them. See <a href="#account-delete">Deleting your account</a>.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-09-05</span>
-              Looking a player up by name on the map now requires signing in, and signed-in sessions store a device label like "Chrome on Windows" rather than your IP address. A new <a href="/privacy">Privacy page</a> covers what's stored and for how long.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-09-05</span>
-              Colorado Mesh is now a configured MeshCore community alongside Mountain West Mesh -- see <a href="/about#where">Where it's played</a>.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-09-02</span>
-              <strong>The board's score figure now includes exploration points, and is labeled Score rather than Territory.</strong> Each team's number in the score panel is squares held plus check-in points plus exploration points, added together -- click it to see the breakdown. Players can also now switch teams once a month from the setup-check panel; see <a href="#switch-teams">Switching teams</a>.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-08-27</span>
-              The layers panel can now be put away. A tab on its right edge slides it off-screen and back; your choice is remembered on that device.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-08-27</span>
-              A square carrying more than one place now pays out for the single most valuable one only, not every place stacked on it. The weekly point cap pays out the remainder rather than refusing you outright once you're close to it.
-            </li>
-            <li>
-              <span class="docs-changelog-date">2026-08-25</span>
-              Places Worth Going launched: summits, parks and landmarks now earn Explorer points on top of the usual square-claiming game. See <a href="/rules#places">Places Worth Going</a> in the rules.
-            </li>
-          </ul>
+          <p>Every player-facing change, newest first, is on the <a href="/patch-notes">patch notes</a> page.</p>
         </section>
 
       </div>
@@ -533,7 +483,7 @@
   </main>
 
   <footer class="mw-footer">
-    <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="https://ko-fi.com/itsmalice" target="_blank" rel="noopener noreferrer">Support MeshWars on Ko-fi</a>. <a href="/api">API documentation</a>. <a href="/privacy">Privacy</a>.</p>
+    <p>MeshWars is free software under the GNU Affero General Public License v3. <a href="https://github.com/zvx-echo6/meshwars" target="_blank" rel="noopener noreferrer">Source on GitHub</a>. <a href="https://ko-fi.com/itsmalice" target="_blank" rel="noopener noreferrer">Support MeshWars on Ko-fi</a>. <a href="/api">API documentation</a>. <a href="/patch-notes">Patch notes</a>. <a href="/privacy">Privacy</a>.</p>
   </footer>
 
   <script src="/static/docs.js?v=20260904-1" type="module"></script>

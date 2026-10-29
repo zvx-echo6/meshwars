@@ -29,6 +29,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 COPY frontend/ ./frontend/
+# The /patch-notes page renders this file (app/patch_notes.py).
+COPY CHANGELOG.md ./CHANGELOG.md
 
 # Everything COPYed above was written as root during the build. The app
 # never writes to /app at runtime, but CPython does: it drops __pycache__
