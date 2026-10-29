@@ -1,7 +1,7 @@
 """/patch-notes renders CHANGELOG.md; the renderer escapes everything."""
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app import patch_notes
@@ -17,7 +17,7 @@ def _client() -> TestClient:
     front = Path(__file__).resolve().parent.parent / "frontend"
 
     @app.get("/patch-notes")
-    async def page(request):
+    async def page(request: Request):
         return _templated_html_page(
             request, front / "patch-notes.html", "missing",
             substitutions={"<!--PATCH_NOTES-->": patch_notes.rendered_changelog()},
