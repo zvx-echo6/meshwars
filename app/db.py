@@ -455,7 +455,8 @@ CREATE INDEX IF NOT EXISTS idx_player_cell_repeater_credit_seen ON player_cell_r
 -- (repeater count * mc_points_per_repeater, already capped), `ts` is that
 -- ping's scoring timestamp, `player_id` who scored it. A MeshMapper
 -- "DEFER" item carries no repeaters, so it scores this value for its
--- cell (app/mc_ingest.py). Written ONLY by apply_paint()'s per-repeater
+-- cell, or one repeater's worth (mc_points_per_repeater) if the cell has
+-- no row (app/mc_ingest.py). Written ONLY by apply_paint()'s per-repeater
 -- path (never DEFERs, flat-mode FreqMapper paints, or 0-point pings),
 -- only when the new ts >= the stored one. Deliberately NEVER pruned:
 -- unlike player_cell_repeater_credit above (48h retention) this must
