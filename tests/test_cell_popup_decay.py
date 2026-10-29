@@ -40,15 +40,16 @@ def test_popup_scores_are_decayed(conn, monkeypatch):
     sid = _setup(conn)
     _score(conn, sid, "RED", 1.0, 1)
     _score(conn, sid, "YELLOW", 0.2595, 4)
+    # cell_detail_for closes the connection it is given, so read the
+    # stored row first: display must not modify stored data.
+    stored_before = conn.execute(
+        "SELECT score FROM mc_tile_score WHERE team='YELLOW'").fetchone()["score"]
+    assert stored_before == 0.2595
     d = cell_detail_for("mc", CELL)
     per_day = settings.mc_score_decay_per_day
     assert d["scores"]["RED"] == pytest.approx(1.0 - per_day, abs=0.01)
     assert d["scores"]["YELLOW"] == 0.0
     assert d["owner_team"] == "RED"
-    # stored data untouched
-    stored = conn.execute(
-        "SELECT score FROM mc_tile_score WHERE team='YELLOW'").fetchone()["score"]
-    assert stored == 0.2595
 
 
 def test_score_map_is_decayed(conn):
