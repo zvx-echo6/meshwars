@@ -90,3 +90,20 @@
   margin-bottom: 4px;
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- patch notes page (/patch-notes) -------------------------------
+   The body is CHANGELOG.md rendered flat: one h2 per entry, then its
+   paragraphs. Each h2 after the first starts a new entry, so give it
+   room above; the rules-body h2 rule already draws the gold line. */
+.patch-notes-body h2 { margin-top: 40px; }
+.patch-notes-body h2:first-child { margin-top: 0; }
+.patch-notes-body ul {
+  margin: 0 0 12px;
+  padding-left: 22px;
+  color: var(--mw-text-2);
+  font-size: 0.9375rem;
+  line-height: 1.62;
+}
+.patch-notes-body li { margin-bottom: 6px; }
+.patch-notes-body a { color: var(--mw-gold-light); }
+.patch-notes-body code { font-size: 0.875em; }

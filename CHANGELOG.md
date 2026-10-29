@@ -2,6 +2,114 @@
 
 Notable, player-facing changes. Plain language, newest first.
 
+## 2026-10-29 — Deferred pings now claim empty squares
+
+**A deferred MeshMapper ping into a square nobody on MeshWars has scored
+yet now counts.** It is worth the same as a ping heard by one repeater
+(0.1 points), plus the usual +0.5 first-visit bonus. That means it can
+claim an empty square, and it can attack an enemy square that has no
+score on record. Before this, a deferred ping into such a square earned
+nothing. Squares that already have a score on record behave exactly as
+before.
+
+**There is a patch notes page now.** This list lives at `/patch-notes`
+and is linked from the footer of every page. The "What changed recently"
+section of the docs points here.
+
+## 2026-10-28 — Hide the score panel, follow keeps your zoom, Ko-fi
+
+**The score panel can be put away.** A tab on its left edge slides it
+off the right side of the map and back, the same way the layers box
+already works.
+
+**Follow no longer changes your zoom.** Turning on follow centers the
+map on you and keeps going at whatever zoom you already had, instead of
+jumping in to a fixed level.
+
+**Support MeshWars on Ko-fi.** There is a Ko-fi icon in the top bar and
+a link in the footer and on the About page.
+
+## 2026-10-19 — The rules now match the live game
+
+**Play is worldwide.** There is no play-area box any more. Your squares
+are wherever MeshMapper (MeshCore) or FreqMapper (Meshtastic) reports
+your radio.
+
+**Meshtastic scores from FreqMapper only.** A FreqMapper report is worth
+a flat 0.5 points. The old MeshView-only checks, the position-precision
+rule and the Meshtastic speed limit are gone: FreqMapper's reports are
+taken as FreqMapper sends them. MeshCore is unchanged at 0.1 points per
+repeater you heard, up to 1.0 per ping.
+
+**Places Worth Going score only where MeshMapper or FreqMapper reports
+you.** A place counts when a MeshMapper (MeshCore) or FreqMapper
+(Meshtastic) report puts your radio there. The two boards no longer
+share one scoring table, and the Rules page now shows them side by side.
+
+## 2026-10-12 — Regions
+
+**The map has a Region picker.** Choose a region, or a joined group of
+regions, from a filterable list. The board, scores and top captures
+follow your choice, and the choice is kept in the page address so you
+can share it. Joined groups are drawn with one outline around the
+outer edge, and joined regions are listed biggest first.
+
+**Ask to join neighboring regions.** A link under the picker lets a
+signed-in player send a request to group two or more regions together,
+with an optional note. You can send three requests a day. The operator
+approves or declines them.
+
+## 2026-10-03 — Deferred pings score
+
+**A deferred MeshMapper ping now scores instead of being ignored.** It
+is worth what the most recent scored ping in that square earned. It
+counts toward your per-square cooldown and the limit on how many new
+squares you can claim, and it credits Places Worth Going like any other
+ping.
+
+## 2026-09-27 — Communities
+
+**"Where it's played" on the About page now lists communities.** Each
+community is a hand-written entry with its own name, area and link, in
+place of the old fixed list. Behind it, a community can now have its
+check-in nets and connections attached to it.
+
+## 2026-09-18 — Adding your community
+
+**The docs explain how a mesh group gets added to MeshWars.** The new
+"Adding your community" section covers what to send for MeshCore (a
+CoreScope or Beacon address, your net's channel, day, time and
+timezone) and for Meshtastic (a Meshview or MQTT source, the channel key
+if it is encrypted, and your check-in hashtag), and how to ask.
+Painting works anywhere MeshMapper or FreqMapper reports you; adding a
+community is about its net check-ins. Points are paid once per player
+per day, so two nets on the same day pay once.
+
+## 2026-09-12 — Check-in streaks are per net
+
+**Each net you attend keeps its own streak**, instead of one streak per
+board. A check-in still pays once per player per day, so two nets on the
+same day pay once.
+
+## 2026-09-09 — Map controls
+
+**The map got a few new controls.** A Light/Dark switch for the basemap,
+a slider for how see-through the claimed squares are, grid lines when
+you zoom in close, and a My Location dot in your team's color. Follow
+re-centers the map on you as you move. The Privacy page now says what
+happens to your device location on the map (see [Privacy](/privacy)).
+
+## 2026-09-07 — Places Worth Going cover the world, and reach further
+
+**Places now exist worldwide**, not just in the western United States.
+A landmark scores its square and the eight around it, so reaching the
+gate or the fence line counts. A park with a mapped boundary scores
+every square the boundary touches, plus one ring outside it. A summit
+scores the squares near the peak that are within 200 meters of its
+height, so you have to actually be up on top. Only the most valuable
+place a ping reaches scores. Peak Tagger ties now go to whoever reached
+the taller summit.
+
 ## 2026-09-05 — Sign in to MeshWars
 
 **You can sign in now, instead of only holding on to an API key.** From
