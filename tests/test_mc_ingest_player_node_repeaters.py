@@ -3,6 +3,7 @@ drop_player_node_repeaters), plus the owner ruling: one player gains
 nothing from two contacts / two API keys."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 
@@ -11,7 +12,10 @@ import pytest
 from app.config import settings
 from app.db import MIGRATIONS, SCHEMA
 from app.grid import cell_id as grid_cell_id
-from app.mc_ingest import McIngestor, RepeaterEntry, _invalidate_player_node_cache, is_player_node_id
+from app.mc_ingest import (
+    McIngestor, RepeaterEntry, _invalidate_directory_cache, _invalidate_player_node_cache,
+    is_directory_repeater_id, is_player_node_id,
+)
 from app import mc_scoring
 
 NOW = int(time.time())
@@ -22,8 +26,10 @@ CELL = grid_cell_id(LAT, LON)
 @pytest.fixture(autouse=True)
 def _clear_cache():
     _invalidate_player_node_cache()
+    _invalidate_directory_cache()
     yield
     _invalidate_player_node_cache()
+    _invalidate_directory_cache()
 
 
 @pytest.fixture
@@ -158,3 +164,47 @@ def test_two_contacts_two_keys_score_once(db_path):
     assert score == pytest.approx(settings.mc_points_per_repeater + settings.mc_score_per_unique_player, abs=0.01)
     assert len(_q(db_path, "SELECT 1 FROM mc_tile_unique_painter WHERE player_id = 1")) == 1
     assert len(_q(db_path, "SELECT 1 FROM player_cell_repeater_credit WHERE player_id = 1")) == 1
+
+
+def _directory(db_path, nodes):
+    c = sqlite3.connect(db_path)
+    c.execute("INSERT OR REPLACE INTO mc_directory_cache(connector_url, nodes, fetched_at) VALUES (?,?,?)",
+              ("https://dir.example", json.dumps(nodes), NOW))
+    c.commit(); c.close()
+
+
+def test_collision_with_directory_repeater_is_credited(db_path):
+    _player(db_path, 1); _player(db_path, 2); _season(db_path)
+    _node(db_path, 2, "a1b2c3d4")
+    _directory(db_path, [{"name": "Real RPT", "role": "repeater", "public_key": "a1b2" + "f" * 60}])
+    _run(1, _ping("deadbeef", ["a1b2", "cafefeed"]))
+    assert _obs_ids(db_path) == {"a1b2", "cafefeed"}
+    assert _credits(db_path) == {"a1b2", "cafefeed"}
+
+
+def test_player_node_without_directory_repeater_is_excluded(db_path):
+    _player(db_path, 1); _player(db_path, 2); _season(db_path)
+    _node(db_path, 2, "a1b2c3d4")
+    # companion with that prefix, and a repeater with a different prefix
+    _directory(db_path, [
+        {"name": "Some Companion", "role": "companion", "public_key": "a1b2" + "f" * 60},
+        {"name": "Other", "role": "repeater", "public_key": "9999" + "f" * 60},
+        {"name": "NoRole", "public_key": "a1b2" + "e" * 60},
+    ])
+    _run(1, _ping("deadbeef", ["a1b2", "cafefeed"]))
+    assert _obs_ids(db_path) == {"cafefeed"}
+
+
+def test_empty_directory_excludes(db_path):
+    _player(db_path, 1); _player(db_path, 2); _season(db_path)
+    _node(db_path, 2, "a1b2c3d4")
+    _run(1, _ping("deadbeef", ["a1b2", "cafefeed"]))
+    assert _obs_ids(db_path) == {"cafefeed"}
+
+
+def test_is_directory_repeater_id_prefix():
+    keys = sorted(["a1b2" + "f" * 60, "c0de" + "0" * 60])
+    assert is_directory_repeater_id("a1b2", keys)
+    assert is_directory_repeater_id("A1B2FF", keys)
+    assert not is_directory_repeater_id("a1b3", keys)
+    assert not is_directory_repeater_id("a1b2", [])

@@ -29,6 +29,7 @@ rather than one process's heap.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import hashlib
 import json
 import logging
@@ -394,6 +395,62 @@ def is_player_node_id(rid: str, nodes: list[tuple[str, str | None]]) -> bool:
     return False
 
 
+# Directory exception: an id that matches a registered player node is still
+# credited when it also prefix-matches the key of a node the cached MeshCore
+# directory (mc_directory_cache, filled from live advert data) lists with
+# role == "repeater" -- that is far more likely a short-hash collision with a
+# real repeater than a player's companion. Connectors that publish no role
+# contribute nothing. The sorted key list is rebuilt at most every
+# _DIRECTORY_TTL seconds (one small table read + JSON parse); lookups are a
+# bisect. An empty/unreadable directory fails open to the plain player-node
+# rule and is logged once.
+_DIRECTORY_TTL = 300.0
+_directory_cache: tuple[float, list[str]] | None = None
+_directory_empty_logged = False
+
+
+def _invalidate_directory_cache() -> None:
+    global _directory_cache, _directory_empty_logged
+    _directory_cache = None
+    _directory_empty_logged = False
+
+
+def _directory_repeater_keys(conn) -> list[str]:
+    global _directory_cache, _directory_empty_logged
+    now = time.monotonic()
+    cached = _directory_cache
+    if cached is not None and now - cached[0] < _DIRECTORY_TTL:
+        return cached[1]
+    keys: set[str] = set()
+    try:
+        for row in conn.execute("SELECT nodes FROM mc_directory_cache"):
+            for n in json.loads(row["nodes"]):
+                if (
+                    isinstance(n, dict)
+                    and str(n.get("role") or "").lower() == "repeater"
+                    and isinstance(n.get("public_key"), str)
+                ):
+                    keys.add(n["public_key"].strip().lower())
+    except Exception:
+        log.warning("mc ingest: directory read failed; player-node rule has no directory exception", exc_info=True)
+        keys = set()
+    out = sorted(keys)
+    if not out and not _directory_empty_logged:
+        log.warning("mc ingest: no directory repeaters available; player-node rule has no directory exception")
+        _directory_empty_logged = True
+    _directory_cache = (now, out)
+    return out
+
+
+def is_directory_repeater_id(rid: str, keys: list[str]) -> bool:
+    """True if `rid` is a prefix of any key in the sorted `keys` list."""
+    rid = rid.strip().lower()
+    if not rid or not keys:
+        return False
+    i = bisect.bisect_left(keys, rid)
+    return i < len(keys) and keys[i].startswith(rid)
+
+
 def drop_player_node_repeaters(conn, player_id: int, entries: list[RepeaterEntry]) -> list[RepeaterEntry]:
     """Remove entries that are registered player radios; log once per ping."""
     if not entries:
@@ -404,7 +461,9 @@ def drop_player_node_repeaters(conn, player_id: int, entries: list[RepeaterEntry
     kept: list[RepeaterEntry] = []
     dropped: list[str] = []
     for e in entries:
-        if is_player_node_id(e.repeater_id, nodes):
+        if is_player_node_id(e.repeater_id, nodes) and not is_directory_repeater_id(
+            e.repeater_id, _directory_repeater_keys(conn)
+        ):
             dropped.append(e.repeater_id)
         else:
             kept.append(e)

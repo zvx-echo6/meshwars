@@ -203,6 +203,28 @@ def _credited_repeaters(
     return {r["repeater_id"] for r in rows}
 
 
+_TWIN_MIN_LEN = 4
+
+
+def repeaters_are_twins(a: str, b: str) -> bool:
+    """Same physical MeshCore repeater seen at two hash widths: one id is a
+    prefix of the other and the shorter is >= 4 hex. (2-hex ids are too
+    ambiguous to treat as a twin of anything.)"""
+    a, b = a.lower(), b.lower()
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= _TWIN_MIN_LEN and long_.startswith(short)
+
+
+def _dedupe_twins(ids: list[str]) -> list[str]:
+    """Drop ids that are prefix-twins of a longer id in the same list."""
+    out = []
+    for r in ids:
+        if any(o != r and len(o) > len(r) and repeaters_are_twins(r, o) for o in ids):
+            continue
+        out.append(r)
+    return out
+
+
 def _record_repeater_credit(
     conn: sqlite3.Connection,
     player_id: int,
@@ -364,7 +386,19 @@ def apply_paint(
             return PaintResult("no_signal", cell_id, team)
 
         already_credited = _credited_repeaters(conn, player_id, protocol, cell_id, ts, settings.mc_cooldown_seconds)
-        new_ids = [r for r in dict.fromkeys(repeater_ids) if r not in already_credited]
+        distinct_ids = list(dict.fromkeys(repeater_ids))
+        if protocol == "mc":
+            # Prefix-twins (same repeater at two hash widths) are one
+            # repeater for credit: dedupe within the ping (keep the longest)
+            # and treat a twin credited inside the window as already credited.
+            distinct_ids = _dedupe_twins(distinct_ids)
+            new_ids = [
+                r for r in distinct_ids
+                if r not in already_credited
+                and not any(repeaters_are_twins(r, c) for c in already_credited)
+            ]
+        else:
+            new_ids = [r for r in distinct_ids if r not in already_credited]
         if not new_ids:
             # Every repeater this ping named has already been credited to
             # this player on this cell within the window -- the spam case
