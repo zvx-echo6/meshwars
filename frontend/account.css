@@ -698,6 +698,11 @@
 .account-radios-item span:first-child {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+.account-radios-item-ref {
+  color: var(--mw-text-6);
+  font-size: 0.6875rem;
+  padding-left: 8px;
+}
 .account-radios-item-detail {
   color: var(--mw-text-6);
   font-size: 0.6875rem;
