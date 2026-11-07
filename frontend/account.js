@@ -1557,13 +1557,11 @@ function renderRadiosList(radios) {
     if (radio.name) {
       // Radio name is user-controlled text: textContent only.
       label.textContent = radio.name;
-      const ref = document.createElement('span');
-      ref.className = 'account-radios-item-ref';
-      ref.textContent = refText;
-      label.appendChild(ref);
-    } else {
-      label.textContent = refText;
     }
+    const ref = document.createElement('span');
+    ref.className = 'account-radios-item-ref';
+    ref.textContent = refText;
+    label.appendChild(ref);
     li.appendChild(label);
 
     const detail = document.createElement('span');

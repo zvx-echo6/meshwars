@@ -701,7 +701,8 @@
 .account-radios-item-ref {
   color: var(--mw-text-6);
   font-size: 0.6875rem;
-  padding-left: 8px;
+  display: block;
+  white-space: nowrap;
 }
 .account-radios-item-detail {
   color: var(--mw-text-6);
