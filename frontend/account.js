@@ -1553,7 +1553,15 @@ function renderRadiosList(radios) {
     li.className = 'account-radios-item';
 
     const label = document.createElement('span');
-    label.textContent = `${PROTOCOL_LABELS[radio.protocol] || radio.protocol} ${displayNodeRef(radio.protocol, radio.node_ref)}`;
+    const refText = `${PROTOCOL_LABELS[radio.protocol] || radio.protocol} ${displayNodeRef(radio.protocol, radio.node_ref)}`;
+    if (radio.name) {
+      // Radio name is user-controlled text: textContent only.
+      label.textContent = radio.name;
+    }
+    const ref = document.createElement('span');
+    ref.className = 'account-radios-item-ref';
+    ref.textContent = refText;
+    label.appendChild(ref);
     li.appendChild(label);
 
     const detail = document.createElement('span');

@@ -106,6 +106,31 @@ require_principal = require_api_key_principal(
 )
 
 
+def _radio_name(conn, player_id: int, protocol: str, node_ref: str) -> str | None:
+    """Best stored display name for a bound radio, or None. Reads only
+    what is already in the DB: MeshCore -> checkin_node_name (this
+    player's rows; newest by changed_at/first_seen across connectors),
+    Meshtastic -> mt_node_key.long_name (newest last_seen).
+    """
+    if protocol == "mc":
+        row = conn.execute(
+            "SELECT name FROM checkin_node_name "
+            " WHERE node_ref = ? AND player_id = ? AND name <> '' "
+            " ORDER BY COALESCE(changed_at, first_seen) DESC LIMIT 1",
+            (node_ref, player_id),
+        ).fetchone()
+        return row["name"] if row else None
+    if protocol == "mt":
+        row = conn.execute(
+            "SELECT long_name FROM mt_node_key "
+            " WHERE node_ref = ? AND long_name IS NOT NULL AND long_name <> '' "
+            " ORDER BY last_seen DESC LIMIT 1",
+            (node_ref.lstrip("!").lower(),),
+        ).fetchone()
+        return row["long_name"] if row else None
+    return None
+
+
 def _radios_out(conn, player_id: int) -> list[dict]:
     rows = conn.execute(
         "SELECT protocol, node_ref, bound_at FROM player_node "
@@ -113,7 +138,10 @@ def _radios_out(conn, player_id: int) -> list[dict]:
         (player_id,),
     ).fetchall()
     return [
-        {"protocol": r["protocol"], "node_ref": r["node_ref"], "bound_at": r["bound_at"]}
+        {
+            "protocol": r["protocol"], "node_ref": r["node_ref"], "bound_at": r["bound_at"],
+            "name": _radio_name(conn, player_id, r["protocol"], r["node_ref"]),
+        }
         for r in rows
     ]
 
