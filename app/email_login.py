@@ -367,9 +367,11 @@ def _deliver(msg: EmailMessage, from_address: str, to_address: str) -> None:
         # anything sensitive (credentials, the message itself). The
         # common shape on port 587, and the default for any
         # smtp_tls_mode value other than "implicit" -- see that
-        # setting's own comment in app/config.py.
+        # setting's own comment in app/config.py. "none" skips the
+        # upgrade (trusted internal relay only).
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=timeout) as smtp:
-            smtp.starttls(context=ssl.create_default_context())
+            if settings.smtp_tls_mode != "none":
+                smtp.starttls(context=ssl.create_default_context())
             if settings.smtp_username:
                 smtp.login(settings.smtp_username, settings.smtp_password)
             # See the SMTP_SSL branch above for why from_addr/to_addrs

@@ -1212,8 +1212,10 @@ class Settings(BaseSettings):
 
     # "starttls" (default -- connect on the plain-text port, typically
     # 587, then upgrade the connection via STARTTLS before sending
-    # anything else) or "implicit" (TLS from the very first byte,
-    # typically port 465). Anything else is treated as "starttls" -- see
+    # anything else), "implicit" (TLS from the very first byte,
+    # typically port 465) or "none" (plain SMTP with no TLS at all --
+    # only for a trusted internal relay, never an internet-facing
+    # server). Anything else is treated as "starttls" -- see
     # app/email_login.py's _send_sync() for exactly how each is dialed.
     # This deliberately does not configure or verify SPF/DKIM/DNS for
     # smtp_from_address's own domain -- that is a mail-server-side
