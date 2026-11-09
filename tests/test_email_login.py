@@ -188,6 +188,49 @@ def test_send_magic_link_email_runs_off_the_event_loop(monkeypatch):
     assert f"cid:{image_content_id}" not in html_body
 
 
+def _record_smtp(monkeypatch, tls_mode, username=""):
+    calls = []
+
+    class _FakeSMTP:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def starttls(self, **kwargs):
+            calls.append("starttls")
+
+        def login(self, *a):
+            calls.append("login")
+
+        def send_message(self, msg, from_addr=None, to_addrs=None):
+            calls.append("send_message")
+
+    monkeypatch.setattr(email_login.smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(settings, "smtp_host", "smtp.test")
+    monkeypatch.setattr(settings, "smtp_tls_mode", tls_mode)
+    monkeypatch.setattr(settings, "smtp_username", username)
+    monkeypatch.setattr(settings, "smtp_password", "")
+    monkeypatch.setattr(settings, "smtp_from_address", "admin@example.test")
+    return calls
+
+
+def test_deliver_tls_mode_none_skips_starttls_and_login(monkeypatch):
+    calls = _record_smtp(monkeypatch, "none")
+    _run(email_login.send_magic_link_email("dev@example.com", "https://mw.test/x"))
+    assert calls == ["send_message"]
+
+
+def test_deliver_tls_mode_starttls_still_upgrades(monkeypatch):
+    calls = _record_smtp(monkeypatch, "starttls")
+    _run(email_login.send_magic_link_email("dev@example.com", "https://mw.test/x"))
+    assert calls == ["starttls", "send_message"]
+
+
 def test_send_magic_link_email_wraps_smtp_failure_in_email_send_error(monkeypatch):
     def _boom(*a, **k):
         raise OSError("connection refused")
