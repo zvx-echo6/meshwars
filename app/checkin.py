@@ -2018,6 +2018,26 @@ def _build_directory_bridge(
     return bridge
 
 
+def _missing_mc_contacts(conn, directories: list[list[dict]]) -> dict[str, int]:
+    """Bound MeshCore contacts (player_node, protocol='mc', non-disabled
+    player) whose 8-hex prefix is absent from EVERY directory given:
+    contact -> player_id. These are the players the cached directory
+    cannot see -- most often because the upstream /api/nodes endpoint
+    caps at directory_limit entries while the instance holds more nodes
+    than that. See CheckinPoller._augment_primary_directory.
+    """
+    present: set[str] = set()
+    for nodes in directories:
+        by_prefix, _ = _index_mc_directory(nodes)
+        present.update(by_prefix)
+    rows = conn.execute(
+        "SELECT pn.node_ref, pn.player_id FROM player_node pn "
+        "JOIN player p ON p.player_id = pn.player_id "
+        "WHERE pn.protocol = 'mc' AND p.disabled_at IS NULL"
+    ).fetchall()
+    return {r["node_ref"]: r["player_id"] for r in rows if r["node_ref"] not in present}
+
+
 def _resolve_mc_identities(
     conn, primary_directory: list[dict], other_directories: list[tuple[str, list[dict]]],
     primary_connector: str | None = None,
@@ -2384,6 +2404,17 @@ class CheckinPoller:
         # to the single `self._directory` list this used to be.
         self._mc_directory: dict[str, list[dict]] = {}
         self._mc_directory_fetched_at: dict[str, float] = {}
+        # Direct single-node lookups for senders whose bound node fell
+        # out of the capped directory (see _augment_primary_directory):
+        # (connector_url, normalized sender name) -> (monotonic fetched
+        # time, matching nodes). Negative and failed lookups are cached
+        # too, for the same directory_refresh_seconds, so a sender that
+        # cannot be found is never re-fetched on every poll cycle.
+        self._mc_lookup_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+        # (net_id, net_date, player_id) already warned about as absent
+        # from the directory, so the warning fires once per process per
+        # net night per player rather than every poll.
+        self._missing_node_warned: set[tuple[int, str, int]] = set()
         # Wall-clock of the last completed cycle, for the admin health
         # panel (app/admin_ops.py's _poller_health) -- a whole-poller
         # heartbeat, distinct from checkin_net.last_poll_at/
@@ -2837,14 +2868,140 @@ class CheckinPoller:
         # one kept separate rather than flattened into a single list.
         other_dirs = [(u, self._mc_directory.get(u, [])) for u in all_connectors if u != connector_url]
 
+        # Network lookups happen BEFORE the write session opens, so the
+        # database write lock is never held across an HTTP call.
+        primary_dir, lookup_notes = await self._augment_primary_directory(
+            kind, connector_url, messages, primary_dir, [d for _, d in other_dirs], config,
+        )
+
         async with WriteSession() as conn:
             resolved = _resolve_mc_identities(conn, primary_dir, other_dirs, primary_connector=connector_url)
             for m in messages:
-                self._process_mc_message(conn, connector_url, feed_nets, m, season_id, resolved, config, received_at)
+                self._process_mc_message(
+                    conn, connector_url, feed_nets, m, season_id, resolved, config, received_at,
+                    lookup_notes=lookup_notes,
+                )
+
+    async def _direct_lookup(
+        self, kind: str, connector_url: str, normalized: str, raw_name: str, config: dict,
+    ) -> list[dict]:
+        """Nodes upstream reports under exactly `raw_name` (normalized
+        match), via the same single-node client method the radio-
+        confirmation flow uses (fetch_directory_search). Cached per
+        (connector, normalized name) for directory_refresh_seconds,
+        negative and failed results included.
+        """
+        key = (connector_url, normalized)
+        now = time.monotonic()
+        hit = self._mc_lookup_cache.get(key)
+        if hit is not None and now - hit[0] < config["directory_refresh_seconds"]:
+            return hit[1]
+        client = self._mc_client_for(kind, connector_url)
+        nodes: list[dict] = []
+        try:
+            raw = await client.fetch_directory_search(raw_name, _CONFIRM_SEARCH_LIMIT)
+        except Exception:
+            log.warning("checkin: direct node lookup failed on %s", connector_url)
+            raw = []
+        seen_keys: set[str] = set()
+        for node in raw:
+            if not isinstance(node, dict):
+                continue
+            node_name = node.get("name")
+            raw_key = node.get("publicKey") if kind == KIND_BEACON else node.get("public_key")
+            pubkey = normalize_public_key(raw_key)
+            if (
+                not isinstance(node_name, str)
+                or normalize_sender_name(node_name) != normalized
+                or pubkey is None
+                or pubkey in seen_keys
+            ):
+                continue
+            seen_keys.add(pubkey)
+            nodes.append({"name": node_name, "public_key": pubkey})
+        self._mc_lookup_cache[key] = (now, nodes)
+        return nodes
+
+    async def _augment_primary_directory(
+        self, kind: str, connector_url: str, messages: list[dict], primary_dir: list[dict],
+        other_dirs: list[list[dict]], config: dict,
+    ) -> tuple[list[dict], dict[str, dict]]:
+        """Cover registered players whose bound node is missing from the
+        cached directory. The upstream directory endpoint caps at
+        directory_limit entries, so on a bigger instance some bound
+        nodes are simply not in it; without this their check-ins were
+        retried every poll and only paid once the node happened to
+        re-advertise.
+
+        When at least one active player's bound contact is absent from
+        every cached directory, each unseen message sender whose name is
+        not already a directory name is looked up directly upstream
+        (_direct_lookup, rate-limited and cached). The nodes found are
+        appended to the primary directory, so the unchanged bridge
+        (_build_directory_bridge) decides resolution with its own
+        ambiguity refusals. Only nodes whose 8-hex prefix is not already
+        in the directory are added, so an existing player's resolution
+        can never be disturbed by a lookup result.
+
+        Returns (directory to resolve against, notes keyed by normalized
+        sender name for the missing-node warning in _process_mc_message).
+        """
+        notes: dict[str, dict] = {}
+        rconn = connect()
+        try:
+            missing = _missing_mc_contacts(rconn, [primary_dir, *other_dirs])
+            if not missing:
+                return primary_dir, notes
+            candidates: dict[str, str] = {}
+            for m in messages:
+                normalized = normalize_sender_name(m.get("sender_name"))
+                if normalized is None or normalized in candidates:
+                    continue
+                if _seen(rconn, connector_url, m["packet_id"]):
+                    continue
+                candidates[normalized] = m["sender_name"]
+            known_names = {
+                normalize_sender_name(n.get("name"))
+                for nodes in [primary_dir, *other_dirs] for n in nodes if isinstance(n, dict)
+            }
+            history = rconn.execute(
+                "SELECT node_ref, player_id, name FROM checkin_node_name WHERE connector = ?",
+                (connector_url,),
+            ).fetchall()
+        finally:
+            rconn.close()
+
+        by_prefix, _ = _index_mc_directory(primary_dir)
+        extras: list[dict] = []
+        for normalized, raw_name in candidates.items():
+            if normalized in known_names:
+                continue
+            nodes = await self._direct_lookup(kind, connector_url, normalized, raw_name, config)
+            note: dict = {"found": False, "player_id": None, "prefix": None}
+            for node in nodes:
+                prefix = node["public_key"][:8]
+                if prefix in by_prefix:
+                    continue
+                extras.append(node)
+                if prefix in missing:
+                    note.update(found=True, player_id=missing[prefix], prefix=prefix)
+            if not note["found"]:
+                # Not on upstream either: attribute the miss to a player
+                # only when the node-name history already ties this
+                # sender name to one of the missing contacts.
+                for h in history:
+                    if h["node_ref"] in missing and normalize_sender_name(h["name"]) == normalized:
+                        note.update(player_id=h["player_id"], prefix=h["node_ref"])
+                        break
+            notes[normalized] = note
+        if not extras:
+            return primary_dir, notes
+        return dedupe_mc_directory(primary_dir + extras), notes
 
     def _process_mc_message(
         self, conn, connector_url: str, nets: list[dict], m: dict, season_id: int,
         resolved: dict, config: dict, received_at: int,
+        lookup_notes: dict[str, dict] | None = None,
     ) -> None:
         """Evaluate one fetched, ALREADY-NORMALIZED message (see the
         client-abstraction header comment above CoreScopeClient) against
@@ -2889,6 +3046,17 @@ class CheckinPoller:
             net_date = net_date_for_net(net, ts)
             if net_date is None:
                 continue  # outside THIS net's window -- its business with the message is over
+            note = (lookup_notes or {}).get(normalized)
+            if note is not None and note.get("player_id") is not None:
+                warn_key = (net["id"], net_date, note["player_id"])
+                if warn_key not in self._missing_node_warned:
+                    self._missing_node_warned.add(warn_key)
+                    log.warning(
+                        "checkin: net %s player %s: bound MeshCore node %s is absent from "
+                        "the cached directory (upstream cap); direct lookup %s",
+                        net["id"], note["player_id"], note.get("prefix"),
+                        "found it" if note.get("found") else "did not find it",
+                    )
             if player_id is None:
                 # Deliberately NOT settled: unlike the branches above,
                 # this one can change without the message changing. The
