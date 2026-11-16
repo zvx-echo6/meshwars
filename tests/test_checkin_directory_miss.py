@@ -49,10 +49,18 @@ class _SharedConn:
 
 
 class _FakeClient:
-    def __init__(self, nodes_by_name, fail=False):
+    def __init__(self, nodes_by_name, fail=False, nodes_by_key=None):
         self.nodes_by_name = nodes_by_name
         self.fail = fail
         self.search_calls: list[str] = []
+        self.node_calls: list[str] = []
+        self.nodes_by_key = nodes_by_key or {}
+
+    async def fetch_node(self, public_key):
+        self.node_calls.append(public_key)
+        if self.fail:
+            raise RuntimeError("upstream down")
+        return self.nodes_by_key.get(public_key)
 
     async def fetch_directory_search(self, name, limit):
         self.search_calls.append(name)
@@ -84,13 +92,14 @@ def env(conn, monkeypatch):
     return conn, poller, net
 
 
-def _player(conn, node_ref) -> int:
+def _player(conn, node_ref, public_key=None) -> int:
     pid = conn.execute(
         "INSERT INTO player(display_name, team, created_at) VALUES ('P','RED',?)", (NOW,)
     ).lastrowid
     conn.execute(
-        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at) VALUES ('mc',?,?,?)",
-        (node_ref, pid, NOW),
+        "INSERT INTO player_node(protocol, node_ref, player_id, bound_at, public_key) "
+        "VALUES ('mc',?,?,?,?)",
+        (node_ref, pid, NOW, public_key),
     )
     return pid
 
@@ -237,6 +246,67 @@ def test_lookup_requires_exact_name_match(env):
     conn, poller, net = env
     _player(conn, KEY_A[:8])
     client = _FakeClient({"Sender One": [{"name": "Sender One Two", "public_key": KEY_A}]})
+    msgs = [_msg("m1")]
+    _install(poller, client, msgs)
+    _poll(poller, net, msgs)
+    assert _awards(conn) == []
+
+
+# ---- bound node with a stored full public key: lookup by key ---------------
+
+def _warnings(caplog):
+    return [r.getMessage() for r in caplog.records if "absent from the cached directory" in r.getMessage()]
+
+
+def test_keyed_node_found_by_key_is_awarded_without_name_search(env, caplog):
+    conn, poller, net = env
+    pid = _player(conn, KEY_A[:8], KEY_A)
+    client = _FakeClient({}, nodes_by_key={KEY_A: {"name": "Sender One", "public_key": KEY_A.upper()}})
+    msgs = [_msg("m1")]
+    _install(poller, client, msgs)
+    with caplog.at_level(logging.WARNING, logger="checkin"):
+        _poll(poller, net, msgs)
+        _poll(poller, net, msgs)
+    assert [r["player_id"] for r in _awards(conn)] == [pid]
+    assert client.node_calls == [KEY_A]
+    assert client.search_calls == []
+    w = _warnings(caplog)
+    assert len(w) == 1 and f"player {pid}" in w[0] and "found it" in w[0]
+
+
+def test_keyed_node_not_found_warns_once_and_lookup_is_rate_limited(env, caplog, monkeypatch):
+    conn, poller, net = env
+    pid = _player(conn, KEY_A[:8], KEY_A)
+    client = _FakeClient({})
+    msgs = [_msg("m1")]
+    _install(poller, client, msgs)
+    with caplog.at_level(logging.WARNING, logger="checkin"):
+        for _ in range(20):
+            _poll(poller, net, msgs)
+    assert _awards(conn) == []
+    assert len(client.node_calls) == 1
+    w = _warnings(caplog)
+    assert len(w) == 1 and f"player {pid}" in w[0] and "did not find it" in w[0]
+    real = time.monotonic()
+    monkeypatch.setattr(checkin.time, "monotonic", lambda: real + 901)
+    _poll(poller, net, msgs)
+    assert len(client.node_calls) == 2
+
+
+def test_keyed_lookup_still_refuses_shared_name(env):
+    conn, poller, net = env
+    _player(conn, KEY_A[:8], KEY_A)
+    client = _FakeClient({}, nodes_by_key={KEY_A: {"name": "Sender One", "public_key": KEY_A}})
+    msgs = [_msg("m1")]
+    _install(poller, client, msgs)
+    _poll(poller, net, msgs, directory=[{"name": "Sender One", "public_key": KEY_C}])
+    assert _awards(conn) == []
+
+
+def test_keyed_lookup_ignores_node_with_a_different_key(env):
+    conn, poller, net = env
+    _player(conn, KEY_A[:8], KEY_A)
+    client = _FakeClient({}, nodes_by_key={KEY_A: {"name": "Sender One", "public_key": KEY_B}})
     msgs = [_msg("m1")]
     _install(poller, client, msgs)
     _poll(poller, net, msgs)
