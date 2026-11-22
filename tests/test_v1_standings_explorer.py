@@ -116,14 +116,16 @@ def _place(conn, player_id, protocol, points, place_id=1):
     )
 
 
-def _seed(path, explorer: bool) -> None:
+def _seed(path, explorer: bool, decoy_proto: str | None = None) -> None:
     """Both boards: RED 10 squares + 5 check-in points = 15, BLUE 8
     squares + 2 check-in points = 10. With `explorer`, BLUE also has 20
-    Explorer points on that board (30 total, ahead of RED), and RED has
-    500 Explorer points on the OTHER board, which must not count."""
+    Explorer points on its own board (30 total, ahead of RED). With
+    `decoy_proto`, a RED player additionally has 500 Explorer points on
+    that one protocol only; the tested board must be the OTHER one, so
+    the decoy must not count there."""
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    for _, proto, other in BOARDS:
+    for _, proto, _other in BOARDS:
         sid = _season(conn, proto)
         red, blue = _player(conn, "RED"), _player(conn, "BLUE")
         _squares(conn, sid, "RED", red, 10)
@@ -132,7 +134,8 @@ def _seed(path, explorer: bool) -> None:
         _checkin(conn, sid, blue, proto, 2.0)
         if explorer:
             _place(conn, blue, proto, 20.0, place_id=1)
-            _place(conn, red, other, 500.0, place_id=2)
+    if decoy_proto is not None:
+        _place(conn, _player(conn, "RED"), decoy_proto, 500.0, place_id=2)
     conn.commit()
     conn.close()
 
@@ -141,9 +144,9 @@ def _site_totals(protocol: str) -> dict:
     return {t["team"]: t for t in mc_api.scores_for(protocol)["teams"]}
 
 
-@pytest.mark.parametrize("board,proto,_other", BOARDS)
-def test_explorer_points_change_the_ranking(db_path, client, board, proto, _other):
-    _seed(db_path, explorer=True)
+@pytest.mark.parametrize("board,proto,other", BOARDS)
+def test_explorer_points_change_the_ranking(db_path, client, board, proto, other):
+    _seed(db_path, explorer=True, decoy_proto=other)
     resp = client.get(f"/api/v1/teams?board={board}", headers=_api_key(db_path))
     assert resp.status_code == 200
     teams = resp.json()["teams"]
