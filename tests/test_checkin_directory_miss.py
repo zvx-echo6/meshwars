@@ -149,7 +149,7 @@ def test_missing_and_not_found_is_not_awarded_and_warns_once(env, caplog):
     client = _FakeClient({})
     msgs = [_msg("m1")]
     _install(poller, client, msgs)
-    with caplog.at_level(logging.WARNING, logger="checkin"):
+    with caplog.at_level(logging.INFO, logger="checkin"):
         for _ in range(5):
             _poll(poller, net, msgs)
     assert _awards(conn) == []
@@ -280,7 +280,7 @@ def test_keyed_node_not_found_warns_once_and_lookup_is_rate_limited(env, caplog,
     client = _FakeClient({})
     msgs = [_msg("m1")]
     _install(poller, client, msgs)
-    with caplog.at_level(logging.WARNING, logger="checkin"):
+    with caplog.at_level(logging.INFO, logger="checkin"):
         for _ in range(20):
             _poll(poller, net, msgs)
     assert _awards(conn) == []
@@ -311,3 +311,85 @@ def test_keyed_lookup_ignores_node_with_a_different_key(env):
     _install(poller, client, msgs)
     _poll(poller, net, msgs)
     assert _awards(conn) == []
+
+
+# --- 404 is a normal "not found": quiet, and cached for 6 hours ----------
+
+import httpx
+
+
+def _real_client(handler):
+    c = checkin.CoreScopeClient(CONNECTOR)
+    c._client = httpx.AsyncClient(base_url=CONNECTOR, transport=httpx.MockTransport(handler))
+    return c
+
+
+def _lookup(poller, config=CONFIG):
+    return asyncio.run(poller._direct_key_lookup(CONNECTOR, KEY_A, config))
+
+
+def test_fetch_node_404_returns_none_without_warning(caplog):
+    client = _real_client(lambda req: httpx.Response(404, json={"error": "not found"}))
+    with caplog.at_level(logging.DEBUG, logger="checkin"):
+        assert asyncio.run(client.fetch_node(KEY_A)) is None
+        assert asyncio.run(client.fetch_node_result(KEY_A)) == (None, True)
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert any(r.levelno == logging.DEBUG for r in caplog.records)
+
+
+@pytest.mark.parametrize("status", [500, 403])
+def test_fetch_node_other_errors_still_warn(caplog, status):
+    client = _real_client(lambda req: httpx.Response(status))
+    with caplog.at_level(logging.DEBUG, logger="checkin"):
+        assert asyncio.run(client.fetch_node_result(KEY_A)) == (None, False)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_fetch_node_timeout_still_warns(caplog):
+    def handler(req):
+        raise httpx.ReadTimeout("slow", request=req)
+    client = _real_client(handler)
+    with caplog.at_level(logging.DEBUG, logger="checkin"):
+        assert asyncio.run(client.fetch_node_result(KEY_A)) == (None, False)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_404_is_cached_six_hours(env, monkeypatch):
+    conn, poller, net = env
+    calls = []
+
+    def handler(req):
+        calls.append(req.url.path)
+        return httpx.Response(404)
+    poller._mc_clients[CONNECTOR] = _real_client(handler)
+    for _ in range(5):
+        assert _lookup(poller) is None
+    assert len(calls) == 1
+    real = time.monotonic()
+    # Past directory_refresh_seconds but inside 6 h: still no HTTP call.
+    monkeypatch.setattr(checkin.time, "monotonic", lambda: real + 3600)
+    assert _lookup(poller) is None
+    assert len(calls) == 1
+    # Past 6 h: asked again.
+    monkeypatch.setattr(checkin.time, "monotonic", lambda: real + checkin._NOT_FOUND_TTL_SECONDS + 1)
+    assert _lookup(poller) is None
+    assert len(calls) == 2
+
+
+def test_500_is_cached_only_for_directory_refresh_seconds(env, monkeypatch, caplog):
+    conn, poller, net = env
+    calls = []
+
+    def handler(req):
+        calls.append(req.url.path)
+        return httpx.Response(500)
+    poller._mc_clients[CONNECTOR] = _real_client(handler)
+    with caplog.at_level(logging.DEBUG, logger="checkin"):
+        for _ in range(5):
+            assert _lookup(poller) is None
+        assert len(calls) == 1
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+        real = time.monotonic()
+        monkeypatch.setattr(checkin.time, "monotonic", lambda: real + 901)
+        assert _lookup(poller) is None
+    assert len(calls) == 2
