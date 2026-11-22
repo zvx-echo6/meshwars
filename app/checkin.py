@@ -199,6 +199,14 @@ MT_PROTOCOL = "mt"
 UNRESOLVED_SENDER_RETENTION_DAYS = 60
 _UNRESOLVED_PRUNE_INTERVAL_S = 3600.0
 
+# How long a confirmed "not found" (HTTP 404) from a direct node-by-key
+# lookup is remembered. A 404 only means that CoreScope instance has
+# never heard the node, which rarely changes within hours, so re-asking
+# every directory_refresh_seconds (15 min) is pure third-party load.
+# Errors other than 404 are NOT cached this long: they keep the shorter
+# directory_refresh_seconds TTL so a transient outage is retried soon.
+_NOT_FOUND_TTL_SECONDS = 6 * 3600
+
 # Gates CheckinPoller._maybe_prune_seen_messages the same way
 # _UNRESOLVED_PRUNE_INTERVAL_S gates the unresolved-sender prune above --
 # same hourly idiom app/mqtt_subscriber.py's _HOUSEKEEPING_INTERVAL_S
@@ -1158,11 +1166,30 @@ class CoreScopeClient:
         carry; shares this client's session and timeout handling via
         _get like every other call.
         """
-        data = await self._get(f"/api/nodes/{quote(public_key, safe='')}")
+        node, _not_found = await self.fetch_node_result(public_key)
+        return node
+
+    async def fetch_node_result(self, public_key: str) -> tuple[dict | None, bool]:
+        """fetch_node, plus whether a None means upstream answered 404
+        (a normal "never heard of it", logged at DEBUG) as opposed to a
+        failure (timeout, 5xx, other 4xx, network error: WARNING, as for
+        every other call). Returns (node_or_None, not_found).
+        """
+        path = f"/api/nodes/{quote(public_key, safe='')}"
+        try:
+            r = await self._client.get(path)
+            if r.status_code == 404:
+                log.debug("checkin: corescope node %s not found (404)", path)
+                return None, True
+            r.raise_for_status()
+            data = r.json()
+        except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
+            log.warning("checkin: corescope request %s failed: %s", path, e)
+            return None, False
         if not isinstance(data, dict):
-            return None
+            return None, False
         node = data.get("node")
-        return node if isinstance(node, dict) else None
+        return (node if isinstance(node, dict) else None), False
 
     async def fetch_directory_search(self, name: str, limit: int) -> list[dict]:
         """Single on-demand, name-filtered directory fetch: GET
@@ -2436,6 +2463,9 @@ class CheckinPoller:
         # too, for the same directory_refresh_seconds, so a sender that
         # cannot be found is never re-fetched on every poll cycle.
         self._mc_lookup_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+        # (connector_url, public key) -> monotonic time until which a
+        # confirmed 404 from fetch_node is remembered (_NOT_FOUND_TTL_SECONDS).
+        self._mc_key_not_found_until: dict[tuple[str, str], float] = {}
         # (net_id, net_date, player_id) already warned about as absent
         # from the directory, so the warning fires once per process per
         # net night per player rather than every poll.
@@ -2954,20 +2984,28 @@ class CheckinPoller:
         """The node upstream holds under exactly `public_key`, as a
         directory entry {name, public_key}, or None. Cached per
         (connector, public key) for directory_refresh_seconds, negative
-        and failed results included. Only a CoreScope client has
+        and failed results included; a confirmed 404 (not found) is
+        remembered for _NOT_FOUND_TTL_SECONDS instead. Only a CoreScope client has
         fetch_node; a connector without it is a plain None.
         """
         key = (connector_url, public_key)
         now = time.monotonic()
+        if now < self._mc_key_not_found_until.get(key, 0.0):
+            return None
         hit = self._mc_lookup_cache.get(key)
         if hit is not None and now - hit[0] < config["directory_refresh_seconds"]:
             return hit[1][0] if hit[1] else None
         client = self._mc_clients.get(connector_url)
         entry: dict | None = None
+        not_found = False
+        fetch_result = getattr(client, "fetch_node_result", None)
         fetch = getattr(client, "fetch_node", None)
-        if fetch is not None:
+        if fetch_result is not None or fetch is not None:
             try:
-                node = await fetch(public_key)
+                if fetch_result is not None:
+                    node, not_found = await fetch_result(public_key)
+                else:
+                    node = await fetch(public_key)
             except Exception:
                 log.warning("checkin: direct node lookup failed on %s", connector_url)
                 node = None
@@ -2977,6 +3015,8 @@ class CheckinPoller:
                 if isinstance(name, str) and name and found_key == public_key:
                     entry = {"name": name, "public_key": found_key}
         self._mc_lookup_cache[key] = (now, [entry] if entry else [])
+        if not_found:
+            self._mc_key_not_found_until[key] = now + _NOT_FOUND_TTL_SECONDS
         return entry
 
     def _warn_missing_node(self, net_id: int, net_date: str, player_id: int, prefix, found: bool) -> None:
@@ -2984,7 +3024,10 @@ class CheckinPoller:
         if warn_key in self._missing_node_warned:
             return
         self._missing_node_warned.add(warn_key)
-        log.warning(
+        # "Did not find it" is a normal outcome (that instance has simply
+        # never heard the node), so INFO; "found it" stays a WARNING.
+        log.log(
+            logging.WARNING if found else logging.INFO,
             "checkin: net %s player %s: bound MeshCore node %s is absent from "
             "the cached directory (upstream cap); direct lookup %s",
             net_id, player_id, prefix, "found it" if found else "did not find it",
