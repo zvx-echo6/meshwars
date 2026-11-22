@@ -813,3 +813,47 @@ def test_poll_once_leaves_cursor_untouched_when_a_page_fails_mid_processing(db_p
     # than partially committing.
     seen = conn.execute("SELECT count(*) FROM freqmapper_verification").fetchone()[0]
     assert seen == 0
+
+
+# ---------------------------------------------------------------------
+# F. unregistered node ids are logged (observability only)
+# ---------------------------------------------------------------------
+
+def test_poll_once_logs_unregistered_node_ids_without_changing_counters(db_path, monkeypatch, caplog):
+    import logging
+
+    registered_ref = "0a0a0a0a"
+    unregistered_ref = "02e24222"
+    _seed_player_and_node_file(db_path, registered_ref)
+    _configure(db_path)
+
+    page = {
+        "schema_version": 1,
+        "has_more": False,
+        "next_cursor": "combined-cursor-unreg",
+        "events": [
+            _tx_event("u-1", registered_ref),
+            _tx_event("u-2", unregistered_ref),
+            _tx_event("u-3", unregistered_ref),
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=page)
+
+    _patch_freqmapper_http(monkeypatch, handler)
+
+    with caplog.at_level(logging.INFO, logger="freqmapper_ingest"):
+        _run(FreqMapperIngestor()._poll_once())
+
+    unreg_lines = [r.getMessage() for r in caplog.records if "skipped_unregistered" in r.getMessage()
+                   and r.getMessage().startswith("freqmapper: skipped_unregistered")]
+    assert len(unreg_lines) == 1
+    assert unreg_lines[0] == "freqmapper: skipped_unregistered tx: !02e24222 x2; rx: -"
+    assert registered_ref not in unreg_lines[0]
+
+    # Existing per-poll counters are unchanged by the new line.
+    summary = [r.getMessage() for r in caplog.records if r.getMessage().startswith("freqmapper poll:")]
+    assert len(summary) == 1
+    assert "tx[painted=1 duplicate=0 unregistered=2" in summary[0]
+    assert "rx[painted=0 duplicate=0 unregistered=0" in summary[0]
