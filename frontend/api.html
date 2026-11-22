@@ -195,14 +195,16 @@
           &quot;team&quot;: &quot;GREEN&quot;,
           &quot;squares&quot;: 2390,
           &quot;checkin_points&quot;: 75.0,
-          &quot;total&quot;: 2465.0,
+          &quot;explorer_points&quot;: 12.0,
+          &quot;total&quot;: 2477.0,
           &quot;rank&quot;: 1
         },
         {
           &quot;team&quot;: &quot;RED&quot;,
           &quot;squares&quot;: 1909,
           &quot;checkin_points&quot;: 50.0,
-          &quot;total&quot;: 1959.0,
+          &quot;explorer_points&quot;: 30.0,
+          &quot;total&quot;: 1989.0,
           &quot;rank&quot;: 2
         }
       ],
@@ -234,7 +236,7 @@
         <section id="teams">
           <h2>Teams</h2>
           <p class="api-route"><span class="api-verb">GET</span> /api/v1/teams?board=meshcore</p>
-          <p>Standings, ranked. <code>total</code> is what decides the season: squares held plus check-in points, which count in the same units.</p>
+          <p>Standings, ranked. <code>total</code> is squares held plus check-in points plus Explorer points (Places Worth Going), all in the same units. It is the same number the scoreboard on the site and the season winner use.</p>
           <pre class="api-pre">{
   &quot;board&quot;: &quot;meshcore&quot;,
   &quot;season&quot;: {
@@ -250,20 +252,23 @@
       &quot;team&quot;: &quot;GREEN&quot;,
       &quot;squares&quot;: 2390,
       &quot;checkin_points&quot;: 75.0,
-      &quot;total&quot;: 2465.0,
+      &quot;explorer_points&quot;: 12.0,
+      &quot;total&quot;: 2477.0,
       &quot;rank&quot;: 1
     },
     {
       &quot;team&quot;: &quot;RED&quot;,
       &quot;squares&quot;: 1909,
       &quot;checkin_points&quot;: 50.0,
-      &quot;total&quot;: 1959.0,
+      &quot;explorer_points&quot;: 30.0,
+      &quot;total&quot;: 1989.0,
       &quot;rank&quot;: 2
     },
     {
       &quot;team&quot;: &quot;BLUE&quot;,
       &quot;squares&quot;: 929,
       &quot;checkin_points&quot;: 0.0,
+      &quot;explorer_points&quot;: 0.0,
       &quot;total&quot;: 929.0,
       &quot;rank&quot;: 3
     }

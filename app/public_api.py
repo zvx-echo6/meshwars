@@ -74,7 +74,7 @@ from .client_ip import get_client_ip
 from .config import settings
 from .db import connect
 from .mc_ingest import PROTOCOL as MC_PROTOCOL, hash_secret
-from .mc_scoring import team_checkin_points, team_tile_counts
+from .mc_scoring import team_checkin_points, team_place_points, team_tile_counts
 from .mesh_render import render_mesh
 
 log = logging.getLogger("public_api")
@@ -348,15 +348,25 @@ def _season_shape(row) -> dict | None:
     }
 
 
-def _standings(conn, season_id: int) -> list[dict]:
+def _standings(conn, season_id: int, protocol: str) -> list[dict]:
+    """Ranked per-team standings for one board's season.
+
+    `total` is squares + check-in points + Explorer (Places Worth Going)
+    points: the same three terms mc_scoring.team_totals() sums and
+    mc_api.scores_for() shows on the site, built from the same three
+    mc_scoring helpers, so the API and the scoreboard cannot disagree.
+    `protocol` scopes the Explorer figure to this board.
+    """
     tiles = team_tile_counts(conn, season_id)
     points = team_checkin_points(conn, season_id)
+    places = team_place_points(conn, season_id, protocol)
     rows = [
         {"team": t,
          "squares": tiles.get(t, 0),
          "checkin_points": round(points.get(t, 0.0), 2),
-         "total": round(tiles.get(t, 0) + points.get(t, 0.0), 2)}
-        for t in set(mc_api.team_list()) | set(tiles) | set(points)
+         "explorer_points": round(places.get(t, 0.0), 2),
+         "total": round(tiles.get(t, 0) + points.get(t, 0.0) + places.get(t, 0.0), 2)}
+        for t in set(mc_api.team_list()) | set(tiles) | set(points) | set(places)
     ]
     rows.sort(key=lambda r: (-r["total"], r["team"]))
     for i, r in enumerate(rows, 1):
@@ -375,7 +385,7 @@ def _board_summary(conn, protocol: str) -> dict:
     }
     if not season:
         return out
-    out["standings"] = _standings(conn, season["id"])
+    out["standings"] = _standings(conn, season["id"], protocol)
     out["squares_owned"] = sum(r["squares"] for r in out["standings"])
     out["players"] = conn.execute(
         "SELECT count(DISTINCT pn.player_id) FROM player_node pn "
@@ -473,8 +483,9 @@ async def v1_seasons(request: Request, board: str = "meshcore") -> JSONResponse:
 
 @router.get("/api/v1/teams")
 async def v1_teams(request: Request, board: str = "meshcore") -> JSONResponse:
-    """Standings for one board: squares held, check-in points, and the
-    total that decides the season."""
+    """Standings for one board: squares held, check-in points, Explorer
+    (Places Worth Going) points, and the total of the three that decides
+    the season."""
     proto, err = _guard(request, board)
     if err:
         return err
@@ -486,7 +497,7 @@ async def v1_teams(request: Request, board: str = "meshcore") -> JSONResponse:
         return JSONResponse({
             "board": _BOARD_NAMES[proto],
             "season": _season_shape(season),
-            "teams": _standings(conn, season["id"]),
+            "teams": _standings(conn, season["id"], proto),
         })
     finally:
         conn.close()
