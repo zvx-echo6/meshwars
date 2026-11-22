@@ -61,7 +61,7 @@ from .discord_interactions import router as discord_interactions_router
 from .join_api import router as join_router
 from .mc_api import router as mc_router
 from .mc_ingest import hash_secret, log_raw_batch
-from .mc_scoring import team_checkin_points, team_tile_counts
+from .mc_scoring import team_checkin_points, team_place_points, team_tile_counts
 from .node_ref import normalize_node_ref
 from .nodes_api import router as nodes_router
 from .notice_api import router as notice_router
@@ -104,6 +104,7 @@ async def config() -> dict:
         center, zoom = _derive_map_center(conn, active["id"] if active else None)
         counts = team_tile_counts(conn, active["id"]) if active else {}
         checkin_points = team_checkin_points(conn, active["id"]) if active else {}
+        explorer_points = team_place_points(conn, active["id"], MT_PROTOCOL) if active else {}
 
         # See mc_api.winner_banner_for() -- this used to build the banner
         # dict inline here (the only caller that needed it, before /season
@@ -149,16 +150,22 @@ async def config() -> dict:
         # /api/mc/scores and /scores below use -- not the old fixed
         # red/blue/green keys, which only ever made sense for the
         # retired two-team geohash game. `total` (tiles + check-in
-        # points, app/mc_scoring.py's team_totals()) is the combined
-        # figure that actually decides a season's winner -- see that
-        # function's docstring.
+        # points + Explorer points) is the same three-term sum as
+        # app/mc_scoring.py's team_totals(), the combined figure that
+        # actually decides a season's winner -- see that function's
+        # docstring.
         "scoreboard": {
             "teams": [
                 {
                     "team": t,
                     "tiles": counts.get(t, 0),
                     "checkin_points": checkin_points.get(t, 0.0),
-                    "total": counts.get(t, 0) + checkin_points.get(t, 0.0),
+                    "explorer_points": explorer_points.get(t, 0.0),
+                    "total": (
+                        counts.get(t, 0)
+                        + checkin_points.get(t, 0.0)
+                        + explorer_points.get(t, 0.0)
+                    ),
                 }
                 for t in mc_api.team_list()
             ],
