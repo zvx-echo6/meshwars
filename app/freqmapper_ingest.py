@@ -364,6 +364,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -377,6 +378,23 @@ from .node_ref import normalize_node_ref
 from .place_scoring import credit_places
 
 log = logging.getLogger("freqmapper_ingest")
+
+# Cap on node ids listed per evidence type in the per-poll
+# skipped_unregistered line, so a flood cannot produce a giant line.
+_UNREGISTERED_LOG_CAP = 50
+
+
+def _format_unregistered(counter: Counter) -> str:
+    """Render `!<node id> x<count>` entries, highest count first (ties
+    by id), capped at _UNREGISTERED_LOG_CAP with a "+N more" tail.
+    "-" when empty."""
+    if not counter:
+        return "-"
+    ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    parts = [f"!{node} x{n}" for node, n in ranked[:_UNREGISTERED_LOG_CAP]]
+    if len(ranked) > _UNREGISTERED_LOG_CAP:
+        parts.append(f"+{len(ranked) - _UNREGISTERED_LOG_CAP} more")
+    return ", ".join(parts)
 
 PROTOCOL = "mt"
 
@@ -1281,6 +1299,12 @@ class FreqMapperIngestor:
             season_id = mc_scoring.ensure_active_season(wconn, now_ts, PROTOCOL)
             registered = _load_registered_players(wconn)
 
+            # Observability only: which normalised node ids were
+            # dropped as unregistered this poll, per evidence type.
+            # Never feeds attribution, counting or any write.
+            unreg_tx: Counter = Counter()
+            unreg_rx: Counter = Counter()
+
             for event in events:
                 outcome = self._process_one_event(
                     wconn, event, season_id, registered, now_ts,
@@ -1292,6 +1316,14 @@ class FreqMapperIngestor:
                     passive_rx_unique_painter_bonus=cfg["passive_rx_unique_painter_bonus"],
                 )
                 counts[outcome] = counts.get(outcome, 0) + 1
+                if outcome in ("skipped_unregistered", "skipped_rx_unregistered"):
+                    # An unregistered outcome is only reachable after
+                    # normalize_node_ref succeeded (a missing or invalid
+                    # radio_node_id is already "skipped_malformed"), so
+                    # this is always a bare 8-hex id, never a raw value.
+                    unreg_node = normalize_node_ref(event.get("radio_node_id"))
+                    if unreg_node is not None:
+                        (unreg_rx if outcome == "skipped_rx_unregistered" else unreg_tx)[unreg_node] += 1
 
             # The cursor advances ONLY here, after every event on this
             # page has been fully processed and written above -- never
@@ -1336,6 +1368,12 @@ class FreqMapperIngestor:
             counts["skipped_rx_disabled"], counts["error_rx"],
             counts["skipped_unknown_event_type"], has_more,
         )
+
+        if unreg_tx or unreg_rx:
+            log.info(
+                "freqmapper: skipped_unregistered tx: %s; rx: %s",
+                _format_unregistered(unreg_tx), _format_unregistered(unreg_rx),
+            )
 
         await self._maybe_housekeeping()
         await self._record_ok()
