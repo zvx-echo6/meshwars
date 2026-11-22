@@ -1837,6 +1837,39 @@ class FreqMapperIngestor:
             )
             return "error_rx" if is_rx else "error"
 
+        # Last known Meshtastic position (player_last_fix, protocol
+        # 'mt'): the account page's "Last position heard" reads this
+        # row, and with mt_paint_source='freqmapper' app/ingest.py's
+        # meshview path (the only other 'mt' writer) is gated off, so
+        # without this the row would never move. Written for BOTH event
+        # types: the coordinates of a verified_tx event are the
+        # credited player's own transmit position, and a passive_rx
+        # event's are the RECEIVING (credited) player's own position --
+        # see this module's docstring ("THE SEMANTICS THAT MATTER
+        # HERE"). Same SELECT then INSERT/UPDATE shape as
+        # app/ingest.py, forward-only on ts (the event's own
+        # occurred_at, same value the paint used), in the same write
+        # transaction as the paint so a rolled-back page leaves nothing
+        # behind. Only reached for an event that actually painted;
+        # duplicate / unregistered / backfill-skipped / gated events
+        # returned above.
+        last_fix = conn.execute(
+            "SELECT ts FROM player_last_fix WHERE player_id = ? AND protocol = ?",
+            (player_id, PROTOCOL),
+        ).fetchone()
+        if last_fix is None:
+            conn.execute(
+                "INSERT INTO player_last_fix(player_id, protocol, cell_id, ts) "
+                "VALUES (?, ?, ?, ?)",
+                (player_id, PROTOCOL, cell, ts),
+            )
+        elif ts > last_fix["ts"]:
+            conn.execute(
+                "UPDATE player_last_fix SET cell_id = ?, ts = ? "
+                " WHERE player_id = ? AND protocol = ?",
+                (cell, ts, player_id, PROTOCOL),
+            )
+
         # Places Worth Going (app/place_scoring.py). A FreqMapper event
         # carries no repeater/feeder list at all -- the API deliberately
         # does not report how many stations heard a transmission, only
